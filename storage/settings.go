@@ -427,8 +427,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 		case "PHPOpcacheMemory":
 			Settings.PHPOpcacheMemory = validatePHPSetting("PHPOpcacheMemory", a[1], 33554432, 1099511627776)
 		case "Backtrace":
-			scm.SettingsHaveGoodBacktraces = Settings.Backtrace
 			Settings.Backtrace = scm.ToBool(a[1])
+			scm.SettingsHaveGoodBacktraces = Settings.Backtrace
 		case "Trace":
 			Settings.Trace = scm.ToBool(a[1])
 			scm.SetTrace(Settings.Trace)

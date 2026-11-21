@@ -1,0 +1,66 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Valid SQL shapes pending transactional declaration and native clear/reseed owners.
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Future update DDL shapes require actual native owners
+setup:
+- sql: CREATE TABLE future_drop_index(id INT,value INT)
+- sql: INSERT future_drop_index VALUES(1,10)
+- sql: CREATE NONCLUSTERED INDEX IX_future_drop_value ON future_drop_index(value)
+- sql: CREATE TABLE future_rename_object(id INT)
+- sql: INSERT future_rename_object VALUES(1)
+- sql: CREATE TABLE future_rename_column(id INT,old_value INT)
+- sql: INSERT future_rename_column VALUES(1,10)
+- sql: CREATE TABLE future_reseed(id INT IDENTITY(1,1) PRIMARY KEY,value INT)
+- sql: INSERT future_reseed(value) VALUES(10)
+test_cases:
+- name: Named nonunique index retirement preserves existing rows
+  sql: DROP INDEX IX_future_drop_value ON future_drop_index; SELECT id,value FROM future_drop_index
+  noncritical: true
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 10
+- name: Table rename preserves actual rows under its new name
+  sql: EXEC sp_rename N'dbo.future_rename_object',N'future_renamed_object',N'OBJECT'; SELECT id FROM future_renamed_object
+  noncritical: true
+  expect:
+    rows: 1
+    data:
+    - id: 1
+- name: Column rename preserves values under the new native declaration
+  sql: EXEC sp_rename N'dbo.future_rename_column.old_value',N'new_value',N'COLUMN'; SELECT id,new_value FROM future_rename_column
+  noncritical: true
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      new_value: 10
+- name: Reseed changes the next generated identity on a populated table
+  sql: DECLARE @seed BIGINT=10; DBCC CHECKIDENT(future_reseed,RESEED,@seed); INSERT future_reseed(value) VALUES(20);
+    SELECT id,value FROM future_reseed ORDER BY id
+  noncritical: true
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 10
+    - id: 11
+      value: 20
+- name: Native truncation resets a temporary identity without leaving rows
+  sql: 'CREATE TABLE #future_clear(id INT IDENTITY(1,1)); INSERT #future_clear DEFAULT VALUES; TRUNCATE TABLE #future_clear;
+    INSERT #future_clear DEFAULT VALUES; SELECT id FROM #future_clear'
+  noncritical: true
+  expect:
+    rows: 1
+    data:
+    - id: 1
+cleanup:
+- sql: DROP TABLE IF EXISTS future_drop_index
+- sql: DROP TABLE IF EXISTS future_rename_object
+- sql: DROP TABLE IF EXISTS future_renamed_object
+- sql: DROP TABLE IF EXISTS future_rename_column
+- sql: DROP TABLE IF EXISTS future_reseed

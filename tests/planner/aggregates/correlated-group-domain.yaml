@@ -24,6 +24,11 @@ metadata:
 
 setup:
 
+  - sql: CREATE TABLE cgd_range_event (id INT PRIMARY KEY,tenant INT,boundary INT,amount INT,code VARCHAR(8))
+  - sql: CREATE TABLE cgd_range_parameter (request_id INT PRIMARY KEY,tenant INT,cut INT)
+  - sql: INSERT INTO cgd_range_event VALUES (1,1,1,10,'first'),(2,1,10,20,'later'),(3,2,2,40,'second')
+  - sql: INSERT INTO cgd_range_parameter VALUES (1,1,5),(2,1,15),(3,2,1),(4,2,5),(5,9,5),(6,1,NULL)
+
   - sql: "DROP TABLE IF EXISTS cgd_assignment"
   - sql: "DROP TABLE IF EXISTS cgd_document"
   - sql: "DROP TABLE IF EXISTS cgd_location"
@@ -171,7 +176,218 @@ test_cases:
         - "inner_select"
         - "dependent-subquery"
         - "__mat:o:"
+  - name: Grouped caller rows retain their own ordered scalar range boundaries
+    syntax: tsql
+    sql: |
+      SELECT d.request_id,(SELECT TOP 1 e.code FROM cgd_range_event e
+        WHERE e.tenant=d.tenant AND e.boundary<=d.cut ORDER BY e.boundary DESC) AS code
+      FROM (SELECT request_id,tenant,MAX(cut) AS cut FROM cgd_range_parameter
+        GROUP BY request_id,tenant) d ORDER BY d.request_id
+    expect: {rows: 6,data: [{request_id: 1,code: first},{request_id: 2,code: later},
+        {request_id: 3,code: null},{request_id: 4,code: second},{request_id: 5,code: null},{request_id: 6,code: null}]}
+
+  - name: Grouped range bindings do not depend on caller alias spelling
+    syntax: tsql
+    sql: |
+      SELECT __exists_parameters.request_id,(SELECT TOP 1 e.code FROM cgd_range_event e
+        WHERE e.tenant=__exists_parameters.tenant AND e.boundary<=__exists_parameters.cut
+        ORDER BY e.boundary DESC) AS code
+      FROM (SELECT request_id,tenant,MAX(cut) AS cut FROM cgd_range_parameter
+        GROUP BY request_id,tenant) __exists_parameters ORDER BY __exists_parameters.request_id
+    expect: {rows: 6,data: [{request_id: 1,code: first},{request_id: 2,code: later},
+        {request_id: 3,code: null},{request_id: 4,code: second},{request_id: 5,code: null},{request_id: 6,code: null}]}
+
+  - name: Grouped caller rows retain scalar aggregate range values and empty sums
+    syntax: tsql
+    sql: |
+      SELECT d.request_id,(SELECT SUM(e.amount) FROM cgd_range_event e
+        WHERE e.tenant=d.tenant AND e.boundary<=d.cut) AS total
+      FROM (SELECT request_id,tenant,MAX(cut) AS cut FROM cgd_range_parameter
+        GROUP BY request_id,tenant) d ORDER BY d.request_id
+    expect: {rows: 6,data: [{request_id: 1,total: 10},{request_id: 2,total: 30},
+        {request_id: 3,total: null},{request_id: 4,total: 40},{request_id: 5,total: null},{request_id: 6,total: null}]}
+
+  - name: Grouped caller rows retain zero counts for an empty correlated range
+    syntax: tsql
+    sql: |
+      SELECT d.request_id,(SELECT COUNT(*) FROM cgd_range_event e
+        WHERE e.tenant=d.tenant AND e.boundary<=d.cut) AS total
+      FROM (SELECT request_id,tenant,MAX(cut) AS cut FROM cgd_range_parameter
+        GROUP BY request_id,tenant) d ORDER BY d.request_id
+    expect: {rows: 6,data: [{request_id: 1,total: 1},{request_id: 2,total: 2},
+        {request_id: 3,total: 0},{request_id: 4,total: 1},{request_id: 5,total: 0},{request_id: 6,total: 0}]}
+
+  - name: Aggregate payloads retain caller columns absent from inner predicates
+    syntax: psql
+    sql: |
+      SELECT s.ID,(SELECT SUM(l.ID+s.grp) FROM cgd_location l) AS total
+      FROM cgd_state s ORDER BY s.ID
+    expect: {rows: 5,data: [{ID: 1,total: 11},{ID: 2,total: 11},
+        {ID: 3,total: 21},{ID: 4,total: 21},{ID: 5,total: 21}]}
+
+  - name: Nullable caller payloads preserve SQL aggregate null semantics
+    syntax: psql
+    sql: |
+      SELECT s.ID,(SELECT SUM(l.ID+s.parent) FROM cgd_location l) AS total
+      FROM cgd_state s ORDER BY s.ID
+    expect: {rows: 5,data: [{ID: 1,total: null},{ID: 2,total: 2},
+        {ID: 3,total: null},{ID: 4,total: 2},{ID: 5,total: 4}]}
+
+  - name: Nullable payload domains retain inner rows for nonnull aggregate expressions
+    syntax: psql
+    sql: |
+      SELECT s.ID,(SELECT SUM(l.ID+COALESCE(s.parent,10)) FROM cgd_location l) AS total
+      FROM cgd_state s ORDER BY s.ID
+    expect: {rows: 5,data: [{ID: 1,total: 11},{ID: 2,total: 2},
+        {ID: 3,total: 11},{ID: 4,total: 2},{ID: 5,total: 4}]}
+
+  - name: Aggregate counts distinguish nullable caller payloads from missing bindings
+    syntax: psql
+    sql: |
+      SELECT s.ID,(SELECT COUNT(l.ID+s.parent) FROM cgd_location l) AS total
+      FROM cgd_state s ORDER BY s.ID
+    expect: {rows: 5,data: [{ID: 1,total: 0},{ID: 2,total: 1},
+        {ID: 3,total: 0},{ID: 4,total: 1},{ID: 5,total: 1}]}
+
+  - name: sql global empty input retains count and sum identities
+    syntax: sql
+    sql: SELECT COUNT(*) AS matches,SUM(amount) AS total FROM cgd_range_event WHERE
+      tenant=9
+    expect:
+      rows: 1
+      data:
+      - matches: 0
+        total: null
+  - name: sql global nonempty input retains count and sum identities
+    syntax: sql
+    sql: SELECT COUNT(*) AS matches,SUM(amount) AS total FROM cgd_range_event WHERE
+      tenant=1
+    expect:
+      rows: 1
+      data:
+      - matches: 2
+        total: 30
+  - name: sql correlated empty inputs retain count zero and sum NULL
+    syntax: sql
+    sql: "SELECT p.request_id,\n  (SELECT COUNT(*) FROM cgd_range_event e\n    WHERE\
+      \ e.tenant=p.tenant AND e.boundary<=p.cut) AS matches,\n  (SELECT SUM(e.amount)\
+      \ FROM cgd_range_event e\n    WHERE e.tenant=p.tenant AND e.boundary<=p.cut) AS\
+      \ total\nFROM cgd_range_parameter p ORDER BY p.request_id"
+    expect:
+      rows: 6
+      data:
+      - request_id: 1
+        matches: 1
+        total: 10
+      - request_id: 2
+        matches: 2
+        total: 30
+      - request_id: 3
+        matches: 0
+        total: null
+      - request_id: 4
+        matches: 1
+        total: 40
+      - request_id: 5
+        matches: 0
+        total: null
+      - request_id: 6
+        matches: 0
+        total: null
+  - name: psql global empty input retains count and sum identities
+    syntax: psql
+    sql: SELECT COUNT(*) AS matches,SUM(amount) AS total FROM cgd_range_event WHERE
+      tenant=9
+    expect:
+      rows: 1
+      data:
+      - matches: 0
+        total: null
+  - name: psql global nonempty input retains count and sum identities
+    syntax: psql
+    sql: SELECT COUNT(*) AS matches,SUM(amount) AS total FROM cgd_range_event WHERE
+      tenant=1
+    expect:
+      rows: 1
+      data:
+      - matches: 2
+        total: 30
+  - name: psql correlated empty inputs retain count zero and sum NULL
+    syntax: psql
+    sql: "SELECT p.request_id,\n  (SELECT COUNT(*) FROM cgd_range_event e\n    WHERE\
+      \ e.tenant=p.tenant AND e.boundary<=p.cut) AS matches,\n  (SELECT SUM(e.amount)\
+      \ FROM cgd_range_event e\n    WHERE e.tenant=p.tenant AND e.boundary<=p.cut) AS\
+      \ total\nFROM cgd_range_parameter p ORDER BY p.request_id"
+    expect:
+      rows: 6
+      data:
+      - request_id: 1
+        matches: 1
+        total: 10
+      - request_id: 2
+        matches: 2
+        total: 30
+      - request_id: 3
+        matches: 0
+        total: null
+      - request_id: 4
+        matches: 1
+        total: 40
+      - request_id: 5
+        matches: 0
+        total: null
+      - request_id: 6
+        matches: 0
+        total: null
+  - name: tsql global empty input retains count and sum identities
+    syntax: tsql
+    sql: SELECT COUNT(*) AS matches,SUM(amount) AS total FROM cgd_range_event WHERE
+      tenant=9
+    expect:
+      rows: 1
+      data:
+      - matches: 0
+        total: null
+  - name: tsql global nonempty input retains count and sum identities
+    syntax: tsql
+    sql: SELECT COUNT(*) AS matches,SUM(amount) AS total FROM cgd_range_event WHERE
+      tenant=1
+    expect:
+      rows: 1
+      data:
+      - matches: 2
+        total: 30
+  - name: tsql correlated empty inputs retain count zero and sum NULL
+    syntax: tsql
+    sql: "SELECT p.request_id,\n  (SELECT COUNT(*) FROM cgd_range_event e\n    WHERE\
+      \ e.tenant=p.tenant AND e.boundary<=p.cut) AS matches,\n  (SELECT SUM(e.amount)\
+      \ FROM cgd_range_event e\n    WHERE e.tenant=p.tenant AND e.boundary<=p.cut) AS\
+      \ total\nFROM cgd_range_parameter p ORDER BY p.request_id"
+    expect:
+      rows: 6
+      data:
+      - request_id: 1
+        matches: 1
+        total: 10
+      - request_id: 2
+        matches: 2
+        total: 30
+      - request_id: 3
+        matches: 0
+        total: null
+      - request_id: 4
+        matches: 1
+        total: 40
+      - request_id: 5
+        matches: 0
+        total: null
+      - request_id: 6
+        matches: 0
+        total: null
+
 cleanup:
+  - sql: DROP TABLE IF EXISTS cgd_range_parameter
+  - sql: DROP TABLE IF EXISTS cgd_range_event
   - sql: "DROP TABLE IF EXISTS cgd_assignment"
   - sql: "DROP TABLE IF EXISTS cgd_document"
   - sql: "DROP TABLE IF EXISTS cgd_location"

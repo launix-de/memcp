@@ -33,12 +33,12 @@ test_cases:
   - name: "Create the first canonical lookup cache"
     scm: |
       (createcolumn
-        (table "memcp-tests" false "lookup_cache_file" false)
+        (table "memcp-tests" false "lookup_cache_file" false nil)
         ".lookup:folder_stamp" "INT" '() '("temp" true)
         '("folder_id")
         (lambda (folder_id)
           (scan nil
-            (table "memcp-tests" false "lookup_cache_folder" false)
+            (table "memcp-tests" false "lookup_cache_folder" false nil)
             (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list folder_id)
             '("id") (lambda (id) (equal? id (outer 1 folder_id)))
             '("stamp") (lambda (acc stamp) stamp)
@@ -47,12 +47,12 @@ test_cases:
   - name: "Create a fused lookup cache reading multiple source columns"
     scm: |
       (createcolumn
-        (table "memcp-tests" false "lookup_cache_file" false)
+        (table "memcp-tests" false "lookup_cache_file" false nil)
         ".lookup:folder_pair" "INT" '() '("temp" true)
         '("folder_id")
         (lambda (folder_id)
           (scan nil
-            (table "memcp-tests" false "lookup_cache_folder" false)
+            (table "memcp-tests" false "lookup_cache_folder" false nil)
             (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list folder_id)
             '("id") (lambda (id) (equal? id (outer 1 folder_id)))
             '("stamp" "label_code") (lambda (acc stamp label_code) (+ stamp label_code))
@@ -61,12 +61,12 @@ test_cases:
   - name: "Create a lookup cache depending on another lookup cache"
     scm: |
       (createcolumn
-        (table "memcp-tests" false "lookup_cache_document" false)
+        (table "memcp-tests" false "lookup_cache_document" false nil)
         ".lookup:file_folder_stamp" "INT" '() '("temp" true)
         '("file_id")
         (lambda (file_id)
           (scan nil
-            (table "memcp-tests" false "lookup_cache_file" false)
+            (table "memcp-tests" false "lookup_cache_file" false nil)
             (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list file_id)
             '("id") (lambda (id) (equal? id (outer 1 file_id)))
             '(".lookup:folder_stamp") (lambda (acc folder_stamp) folder_stamp)
@@ -75,12 +75,12 @@ test_cases:
   - name: "Create a nested cache from the fused lookup output"
     scm: |
       (createcolumn
-        (table "memcp-tests" false "lookup_cache_document" false)
+        (table "memcp-tests" false "lookup_cache_document" false nil)
         ".lookup:file_folder_pair" "INT" '() '("temp" true)
         '("file_id")
         (lambda (file_id)
           (scan nil
-            (table "memcp-tests" false "lookup_cache_file" false)
+            (table "memcp-tests" false "lookup_cache_file" false nil)
             (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list file_id)
             '("id") (lambda (id) (equal? id (outer 1 file_id)))
             '(".lookup:folder_pair") (lambda (acc folder_pair) folder_pair)
@@ -255,7 +255,7 @@ test_cases:
       - sql: "CREATE TABLE filtered_prepare_values(id INT PRIMARY KEY, value INT)"
       - sql: "INSERT INTO filtered_prepare_values VALUES(1,10),(2,NULL),(3,30)"
     scm: |
-      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false)
+      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false nil)
         "prepared_value" "INT" '()
         (list "temp" true "filtercols" '("id") "filter" (lambda (id) (>= id 2)))
         '("value") (lambda (value) (* value 2)))
@@ -268,7 +268,7 @@ test_cases:
 
   - name: "Another preparation filter addresses the same complete column"
     scm: |
-      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false)
+      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false nil)
         "prepared_value" "INT" '()
         (list "temp" true "filtercols" '("id") "filter" (lambda (id) (equal? id 1)))
         '("value") (lambda (value) (* value 2)))
@@ -281,7 +281,7 @@ test_cases:
 
   - name: "Filtered preparation still rejects implicit request state"
     scm: |
-      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false)
+      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false nil)
         "invalid_prepared_value" "INT" '() '("temp" true)
         '("value") (lambda (value) (session "request-only")))
     expect: {error: true}

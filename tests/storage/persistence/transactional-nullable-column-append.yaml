@@ -1,0 +1,275 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Fresh nullable append shares the original native decision without private row slots
+setup:
+- sql: DROP TABLE IF EXISTS nullable_append_rows
+- sql: DROP TABLE IF EXISTS nullable_append_other
+- sql: DROP TABLE IF EXISTS nullable_append_rollback
+- sql: DROP TABLE IF EXISTS nullable_append_savepoint
+- sql: DROP TABLE IF EXISTS nullable_append_guard
+- sql: DROP TABLE IF EXISTS nullable_append_retired
+- sql: DROP TABLE IF EXISTS nullable_append_pg
+- sql: CREATE TABLE nullable_append_rows(id INT PRIMARY KEY,value INT)
+- sql: INSERT nullable_append_rows VALUES(1,11),(2,22)
+- sql: CREATE TABLE nullable_append_other(id INT PRIMARY KEY,value INT)
+- sql: INSERT nullable_append_other VALUES(1,7)
+- sql: CREATE TABLE nullable_append_rollback(id INT PRIMARY KEY)
+- sql: INSERT nullable_append_rollback VALUES(3)
+- sql: CREATE TABLE nullable_append_savepoint(id INT PRIMARY KEY)
+- sql: INSERT nullable_append_savepoint VALUES(4)
+- sql: CREATE TABLE nullable_append_guard(id INT PRIMARY KEY,value INT)
+- sql: INSERT nullable_append_guard VALUES(5,55)
+- sql: CREATE TABLE nullable_append_retired(id INT PRIMARY KEY,retired INT)
+- sql: INSERT nullable_append_retired VALUES(6,66)
+- sql: ALTER TABLE nullable_append_retired DROP COLUMN retired
+- sql: CREATE TABLE nullable_append_pg(id INT PRIMARY KEY)
+- sql: INSERT nullable_append_pg VALUES(8)
+- scm: (rebuild (table "memcp-tests" false "nullable_append_rows" false nil) true false)
+cleanup:
+- sql: DROP TABLE IF EXISTS nullable_append_rows
+- sql: DROP TABLE IF EXISTS nullable_append_other
+- sql: DROP TABLE IF EXISTS nullable_append_rollback
+- sql: DROP TABLE IF EXISTS nullable_append_savepoint
+- sql: DROP TABLE IF EXISTS nullable_append_guard
+- sql: DROP TABLE IF EXISTS nullable_append_retired
+- sql: DROP TABLE IF EXISTS nullable_append_pg
+test_cases:
+- name: Original T reads the private nullable declaration while observers retain the predecessor
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE nullable_append_rows ADD extra VARCHAR(15) NULL
+    - connection: owner
+      sql: SELECT id,value,extra FROM nullable_append_rows WHERE extra IS NULL ORDER BY extra,id
+      expect: {rows: 2,data: [{id: 1,value: 11,extra: null},{id: 2,value: 22,extra: null}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'nullable_append_rows') AND name=N'extra'
+      expect: {rows: 1,data: [{n: 0}]}
+    - connection: owner
+      sql: SELECT max_length,CAST(is_nullable AS INT) AS nullable_flag FROM sys.columns WHERE object_id=OBJECT_ID(N'nullable_append_rows') AND name=N'extra'
+      expect: {rows: 1,data: [{max_length: 15,nullable_flag: 1}]}
+    - connection: owner
+      sql: UPDATE nullable_append_other SET value=9 WHERE id=1
+    - connection: observer
+      sql: SELECT value FROM nullable_append_other
+      expect: {rows: 1,data: [{value: 7}]}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value,extra FROM nullable_append_rows ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 11,extra: null},{id: 2,value: 22,extra: null}]}
+    - connection: observer
+      sql: SELECT value FROM nullable_append_other
+      expect: {rows: 1,data: [{value: 9}]}
+- name: Published append accepts normal later writes through its real descriptor
+  sql: UPDATE nullable_append_rows SET extra='stored' WHERE id=2
+  expect: {affected_rows: 1}
+- name: Main sparse and later delta values have the complete declared row shape
+  sql: SELECT id,value,extra FROM nullable_append_rows ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 11,extra: null},{id: 2,value: 22,extra: stored}]}
+- name: Rolling back append and unrelated rows preserves both committed predecessors
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE nullable_append_rollback ADD private_value INT NULL
+    - connection: owner
+      sql: UPDATE nullable_append_other SET value=99 WHERE id=1
+    - connection: owner
+      sql: SELECT id,private_value FROM nullable_append_rollback
+      expect: {rows: 1,data: [{id: 3,private_value: null}]}
+    - connection: observer
+      sql: SELECT id FROM nullable_append_rollback
+      expect: {rows: 1,data: [{id: 3}]}
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'nullable_append_rollback') AND name=N'private_value'
+      expect: {rows: 1,data: [{n: 0}]}
+    - connection: observer
+      sql: SELECT value FROM nullable_append_other
+      expect: {rows: 1,data: [{value: 9}]}
+- name: Savepoint rewinds only the appended suffix and commits the retained prefix
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE nullable_append_savepoint ADD retained_value INT NULL
+    - connection: owner
+      sql: SAVE TRANSACTION append_prefix
+    - connection: owner
+      sql: ALTER TABLE nullable_append_savepoint ADD suffix_value VARCHAR(15) NULL
+    - connection: owner
+      sql: SELECT id,retained_value,suffix_value FROM nullable_append_savepoint
+      expect: {rows: 1,data: [{id: 4,retained_value: null,suffix_value: null}]}
+    - connection: owner
+      sql: ROLLBACK TRANSACTION append_prefix
+    - connection: owner
+      sql: SELECT id,retained_value FROM nullable_append_savepoint
+      expect: {rows: 1,data: [{id: 4,retained_value: null}]}
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'nullable_append_savepoint') AND name=N'suffix_value'
+      expect: {rows: 1,data: [{n: 0}]}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,retained_value FROM nullable_append_savepoint
+      expect: {rows: 1,data: [{id: 4,retained_value: null}]}
+- name: PostgreSQL ADD uses the executing original transaction and rollback
+  session_id: nullable-append-pg
+  steps:
+  - syntax: postgresql
+    session_id: nullable-append-pg
+    sql: BEGIN
+  - syntax: postgresql
+    session_id: nullable-append-pg
+    sql: ALTER TABLE nullable_append_pg ADD COLUMN private_value INTEGER NULL
+  - syntax: postgresql
+    session_id: nullable-append-pg
+    sql: SELECT id,private_value FROM nullable_append_pg
+    expect: {rows: 1,data: [{id: 8,private_value: null}]}
+  - syntax: postgresql
+    session_id: nullable-append-pg
+    sql: ROLLBACK
+  - syntax: tsql
+    session_id: nullable-append-pg
+    sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'nullable_append_pg') AND name=N'private_value'
+    expect: {rows: 1,data: [{n: 0}]}
+- name: Native append vetoes earlier endpoint effects without losing the original row transaction
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define target (table "memcp-tests" false "nullable_append_guard" false tx))
+      (insert target '("id" "value") (list (list 7 77)) '() nil false nil tx)
+      (define rejected (try (lambda () (begin
+        (createcolumn target "forbidden" "VARCHAR" '(15) '("null" true) nil nil tx) false))
+        (lambda (_failure) true)))
+      (define own (scan tx target '() '() '() (lambda () true) '("value") + 0 +))
+      (define hidden (nil? (show target "column" "forbidden" false tx)))
+      (tx_rollback s)
+      (list rejected hidden own (scan nil target '() '() '() (lambda () true) '("value") + 0 +)))
+  expect: {result: [true,true,132,55]}
+- name: Native append retains its write veto before any later endpoint effect
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define target (table "memcp-tests" false "nullable_append_guard" false tx))
+      (createcolumn target "pending" "VARCHAR" '(15) '("null" true) nil nil tx)
+      (define rejected (try (lambda () (begin
+        (insert target '("id" "value") (list (list 7 77)) '() nil false nil tx) false))
+        (lambda (_failure) true)))
+      (define own (scan tx target '() '() '() (lambda () true) '("value") + 0 +))
+      (tx_rollback s)
+      (list rejected own (nil? (show target "column" "pending" false nil))
+        (scan nil target '() '() '() (lambda () true) '("value") + 0 +)))
+  expect: {result: [true,55,true,55]}
+# Keep this historical case ID. The valid literal-default constructor moved to
+# the positive complete-value case below; it is no longer a rejection oracle.
+- name: Native constructor rejects defaults NOT NULL and retired names before effects
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define target (table "memcp-tests" false "nullable_append_guard" false tx))
+      (define missing_default (try (lambda () (begin
+        (createcolumn target "rejected" "INT" '() '("null" false) nil nil tx) false))
+        (lambda (_failure) true)))
+      (tx_rollback s)
+      (define absent (nil? (show target "column" "rejected" false nil)))
+      (define retired_owner (newsession)) (retired_owner "username" "root") (tx_begin retired_owner)
+      (define retired_tx (retired_owner "__memcp_tx"))
+      (define retired_target (table "memcp-tests" false "nullable_append_retired" false retired_tx))
+      (define retired (try (lambda () (begin
+        (createcolumn retired_target "retired" "INT" '() '("null" true) nil nil retired_tx) false))
+        (lambda (_failure) true)))
+      (tx_rollback retired_owner)
+      (list (and missing_default absent) retired
+        (scan nil retired_target '() '() '() (lambda () true) '("id") + 0 +)))
+  expect: {result: [true,true,6]}
+- name: A native literal default appends historical values privately and rollback removes the declaration
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "nullable_append_guard" false tx))
+      (define public_rows (lambda ()
+        (scan nil target '() '() '() (lambda () true) '("id" "value")
+          (lambda (rows id value) (cons (list id value) rows)) '() merge)))
+      (try (lambda () (begin
+        (createcolumn target "literal_default" "INT" '() '("null" true "default" 3) nil nil tx)
+        (define own (scan tx target '() '() '() (lambda () true) '("id" "value" "literal_default")
+          (lambda (rows id value initial) (cons (list id value initial) rows)) '() merge))
+        (define hidden (nil? (show target "column" "literal_default" false nil)))
+        (define observed (public_rows))
+        (tx_rollback owner)
+        (list own hidden observed (nil? (show target "column" "literal_default" false nil)) (public_rows))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [[[5,55,3]],true,[[5,55]],true,[[5,55]]]}
+- name: A callable default is rejected as executable data before append publication
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "nullable_append_guard" false tx))
+      (define state (newsession)) (state "called" false)
+      (define rejected (try (lambda () (begin
+        (createcolumn target "callable_default" "INT" '()
+          (list "null" true "default" (lambda () (begin (state "called" true) 3))) nil nil tx)
+        false)) (lambda (failure)
+        (regexp_test (string (failure_value failure)) "column property values must be scalars"))))
+      (define own_hidden (nil? (show target "column" "callable_default" false tx)))
+      (tx_rollback owner)
+      (list rejected (state "called") own_hidden
+        (nil? (show target "column" "callable_default" false nil))
+        (scan nil target '() '() '() (lambda () true) '("id" "value")
+          (lambda (rows id value) (cons (list id value) rows)) '() merge)))
+  expect: {result: [true,false,true,true,[[5,55]]]}
+- name: A checked key-drop grant cannot bypass the pending append write veto
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "nullable_append_guard" false tx))
+      (try (lambda () (begin
+        (dropkey target "PRIMARY" tx)
+        (createcolumn target "pending_checked" "VARCHAR" '(15) '("null" true) nil nil tx)
+        (define rejected (try (lambda () (begin
+          (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+            (scan bound target '() '() '() (lambda () true) '("$update")
+              (lambda (n update) (begin (update '("value" 99)) (+ n 1))) 0 +)))
+          false)) (lambda (_failure) true)))
+        (define state (tx_state tx))
+        (define own (scan tx target '() '() '() (lambda () true) '("value") + 0 +))
+        (define observed (scan nil target '() '() '() (lambda () true) '("value") + 0 +))
+        (tx_rollback owner)
+        (list rejected state own observed (nil? (show target "column" "pending_checked" false nil))
+          (count ((show target "constraints" nil) "Unique")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [true,active,55,55,true,1]}
+- name: An accepted append and its later row values survive abrupt process loss
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart the accepted native append decision
+  action: restart
+- name: Recovery restores native metadata before exposing old sparse and later stored rows
+  sql: SELECT id,value,extra FROM nullable_append_rows ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 11,extra: null},{id: 2,value: 22,extra: stored}]}
+- name: Recovery preserves accepted unrelated effects and savepoint prefix only
+  sql: SELECT id,retained_value FROM nullable_append_savepoint
+  expect: {rows: 1,data: [{id: 4,retained_value: null}]}
+- name: A recovered append accepts ordinary future values with the declared width
+  sql: INSERT nullable_append_rows(id,value,extra) VALUES(9,99,'after-restart')
+  expect: {affected_rows: 1}
+- name: Future and historical values retain distinct native slots after restart
+  sql: SELECT id,value,extra FROM nullable_append_rows ORDER BY id
+  expect: {rows: 3,data: [{id: 1,value: 11,extra: null},{id: 2,value: 22,extra: stored},{id: 9,value: 99,extra: after-restart}]}

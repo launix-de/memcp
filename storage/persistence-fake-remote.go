@@ -56,13 +56,16 @@ func init() {
 			panic(err)
 		}
 		prefix := cfg.Prefix
-		if prefix == "" {
-			prefix = dbName
-		}
-		if !filepath.IsAbs(prefix) {
+		if prefix == "" || prefix == dbName {
+			prefix = databaseFilesystemDirectory(Basepath, dbName)
+		} else if !filepath.IsAbs(prefix) {
 			prefix = filepath.Join(Basepath, prefix)
 		}
-		return &FakeRemote{FileStorage: &FileStorage{path: filepath.Clean(prefix) + string(os.PathSeparator)}, simulation: profile}
+		prefix, err = filepath.Abs(prefix)
+		if err != nil {
+			raisePersistenceFailure("FakeRemote", dbName, "database.path", err)
+		}
+		return &FakeRemote{FileStorage: &FileStorage{path: prefix + string(os.PathSeparator)}, simulation: profile}
 	}
 }
 

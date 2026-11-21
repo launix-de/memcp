@@ -153,7 +153,7 @@ func TestHashPartitionMixedRangePruning(t *testing.T) {
 
 func TestRepartitionChoosesMethodPerColumn(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "thashchoice", 64)
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
 	id, payload := tbl.Columns[0], tbl.Columns[1]

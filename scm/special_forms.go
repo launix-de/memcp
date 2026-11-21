@@ -284,9 +284,11 @@ func specialLambda(code []Scmer, en *Env) Scmer {
 	}
 	numberedOnly := false
 	proofValid := false
+	var syntaxSize *procSyntaxSize
 	if len(code) > 3 && code[3].GetTag() == tagAny {
-		if proof, ok := code[3].Any().(lambdaBindingProof); ok && proof.params == params && proof.body == code[1] && proof.numVars == numVars {
+		if proof, ok := matchingLambdaBindingProof(params, code[1], numVars, code[3]); ok {
 			numberedOnly, proofValid = proof.numberedOnly, true
+			syntaxSize = proof.syntaxSize
 		}
 	}
 	if !proofValid {
@@ -298,6 +300,7 @@ func specialLambda(code []Scmer, en *Env) Scmer {
 		En:           en,
 		NumVars:      numVars,
 		NumberedOnly: numberedOnly,
+		syntaxSize:   syntaxSize,
 	})
 }
 

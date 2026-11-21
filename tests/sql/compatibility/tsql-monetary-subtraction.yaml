@@ -1,0 +1,171 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server 2022 reference: https://dbfiddle.uk/3F4hXMZK
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Numeric scalar compilation binds correlated aggregate declarations
+  requires_tds: true
+setup:
+- sql: CREATE TABLE numeric_source(id INT,amount REAL)
+- sql: CREATE TABLE numeric_adjustment(id INT,amount MONEY)
+- sql: INSERT numeric_source VALUES(1,-100),(1,-150),(2,-200),(3,-300)
+- sql: INSERT numeric_adjustment VALUES(1,-2.5),(2,-1)
+- sql: CREATE VIEW dbo.numeric_totals AS SELECT id,SUM(amount/100) AS total FROM numeric_source GROUP BY id HAVING
+    SUM(amount/100)<0
+test_cases:
+- name: ABS on a native monetary and correlated grouped real difference
+  sql: SELECT n.id FROM numeric_totals n WHERE NOT EXISTS(SELECT * FROM numeric_adjustment a WHERE a.id=n.id AND
+    ABS(amount-n.total)>0.001) ORDER BY n.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 3
+- name: Qualified inner operands retain the same correlated numeric domain
+  sql: SELECT n.id FROM numeric_totals n WHERE NOT EXISTS(SELECT 1 FROM numeric_adjustment a WHERE a.id=n.id AND
+    ABS(a.amount-n.total)>0.001) ORDER BY n.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 3
+- name: Monetary subtraction preserves money values
+  sql: SELECT CAST(3.5 AS MONEY)-CAST(1.25 AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2.25
+- name: Monetary subtraction preserves smallmoney values
+  sql: SELECT CAST(3.5 AS SMALLMONEY)-CAST(1.25 AS SMALLMONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2.25
+- name: Monetary subtraction preserves float values
+  sql: SELECT CAST(3.5 AS MONEY)-CAST(1.25 AS FLOAT) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2.25
+- name: Monetary subtraction preserves reversed float values
+  sql: SELECT CAST(3.5 AS FLOAT)-CAST(1.25 AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2.25
+- name: Monetary subtraction preserves real values
+  sql: SELECT CAST(3.5 AS MONEY)-CAST(1.25 AS REAL) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2.25
+- name: Monetary subtraction preserves reversed real values
+  sql: SELECT CAST(3.5 AS REAL)-CAST(1.25 AS MONEY) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2.25
+- name: Monetary subtraction preserves numeric text values
+  sql: SELECT CAST(3.5 AS MONEY)-'1.25' AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2.25
+- name: Integer and BIT operands convert by monetary precedence
+  sql: SELECT CAST(3.5 AS MONEY)-CAST(1 AS INT) AS integral,CAST(2.5 AS MONEY)-CAST(1 AS BIT) AS logical
+  expect:
+    rows: 1
+    data:
+    - integral: 2.5
+      logical: 1.5
+- name: Division preserves an adjacent quoted numeric operand in the batch envelope
+  sql: SELECT 10/'2' AS value
+  expect:
+    rows: 1
+    data:
+    - value: 5
+- name: NULL operands remain NULL before ABS and FLOOR
+  sql: SELECT ABS(CAST(NULL AS MONEY)-CAST(1 AS FLOAT)) AS left_null,ABS(CAST(1 AS MONEY)-CAST(NULL AS REAL)) AS
+    right_null,FLOOR(CAST(NULL AS MONEY)-1) AS whole_null
+  expect:
+    rows: 1
+    data:
+    - left_null: null
+      right_null: null
+      whole_null: null
+- name: Empty output retains monetary and floating wire contracts
+  tds:
+    statements:
+    - sql: SELECT CAST(NULL AS MONEY)-CAST(NULL AS MONEY) AS monetary,CAST(NULL AS SMALLMONEY)-CAST(NULL AS SMALLMONEY)
+        AS small,CAST(NULL AS MONEY)-CAST(NULL AS FLOAT) AS approximate,CAST(NULL AS MONEY)-CAST(NULL AS REAL) AS
+        single WHERE 1=0
+      expect:
+        rows: 0
+        column_types:
+        - name: monetary
+          type: MONEY
+        - name: small
+          type: SMALLMONEY
+        - name: approximate
+          type: FLOAT
+        - name: single
+          type: REAL
+- name: A decimal operand owns result precision and scale
+  tds:
+    statements:
+    - sql: SELECT CAST(2.5 AS MONEY)-CAST(1.25 AS DECIMAL(7,2)) AS value
+      expect:
+        rows: 1
+        data:
+        - value: '1.2500'
+        column_types:
+        - name: value
+          type: DECIMAL
+          precision: 20
+          scale: 4
+- name: A monetary result retains its declared overflow boundary
+  sql: SELECT CAST('214748.3647' AS SMALLMONEY)-CAST('-0.0001' AS SMALLMONEY) AS value
+  expect:
+    error: true
+    contains: overflow
+- name: Persist the correlated scalar expression through an ordinary view
+  sql: CREATE VIEW dbo.numeric_adjusted AS SELECT n.id FROM numeric_totals n WHERE NOT EXISTS(SELECT 1 FROM numeric_adjustment
+    a WHERE a.id=n.id AND ABS(a.amount-n.total)>0.001)
+- name: mysql consumes the declared stored subtraction
+  syntax: mysql
+  sql: SELECT id FROM numeric_adjusted ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 3
+- name: psql consumes the declared stored subtraction
+  syntax: psql
+  sql: SELECT id FROM numeric_adjusted ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 3
+- name: Change a source value behind the correlated grouped projection
+  sql: UPDATE numeric_source SET amount=-200 WHERE id=1
+- name: The warm stored expression reads the current aggregate
+  sql: SELECT id FROM numeric_adjusted ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 3
+- name: Reload stored monetary scalar declarations
+  action: restart
+- name: Recovered views preserve numeric types and current rows
+  sql: SELECT id FROM numeric_adjusted ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 3
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.numeric_adjusted
+- sql: DROP VIEW IF EXISTS dbo.numeric_totals
+- sql: DROP TABLE IF EXISTS numeric_adjustment
+- sql: DROP TABLE IF EXISTS numeric_source

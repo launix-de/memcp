@@ -1,0 +1,396 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  version: '1.0'
+  description: Default declaration deltas join an existing local ACID row transaction without changing earlier effects
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+setup:
+- sql: CREATE TABLE catalog_entry_metadata_first(id INT PRIMARY KEY,value INT CONSTRAINT DF_catalog_entry_metadata_first_old
+    DEFAULT 3)
+- sql: INSERT catalog_entry_metadata_first(id) VALUES(1)
+- sql: CREATE TABLE catalog_entry_read_first(id INT PRIMARY KEY,value INT CONSTRAINT DF_catalog_entry_read_first_old
+    DEFAULT 3)
+- sql: INSERT catalog_entry_read_first(id) VALUES(1)
+- sql: CREATE TABLE catalog_entry_empty_delete(id INT PRIMARY KEY,value INT CONSTRAINT DF_catalog_entry_empty_delete_old
+    DEFAULT 3)
+- sql: INSERT catalog_entry_empty_delete(id) VALUES(1)
+- sql: CREATE TABLE catalog_entry_delete_first(id INT PRIMARY KEY,value INT CONSTRAINT DF_catalog_entry_delete_first_old
+    DEFAULT 3)
+- sql: INSERT catalog_entry_delete_first(id) VALUES(1)
+- sql: CREATE TABLE catalog_entry_update_first(id INT PRIMARY KEY,value INT CONSTRAINT DF_catalog_entry_update_first_old
+    DEFAULT 3)
+- sql: INSERT catalog_entry_update_first(id) VALUES(1)
+- sql: CREATE TABLE catalog_entry_temp_first(id INT PRIMARY KEY,value INT CONSTRAINT DF_catalog_entry_temp_first_old
+    DEFAULT 3)
+- sql: INSERT catalog_entry_temp_first(id) VALUES(1)
+- sql: CREATE TABLE catalog_entry_commit(id INT PRIMARY KEY,value INT CONSTRAINT DF_catalog_entry_commit_old DEFAULT
+    3)
+- sql: INSERT catalog_entry_commit(id) VALUES(1)
+- sql: CREATE TABLE catalog_entry_unamended(id INT PRIMARY KEY,value INT CONSTRAINT DF_catalog_entry_unamended_old DEFAULT
+    3)
+- sql: INSERT catalog_entry_unamended(id) VALUES(1)
+- sql: CREATE TABLE catalog_entry_savepoint_plain(id INT PRIMARY KEY,value INT CONSTRAINT DF_catalog_entry_savepoint_plain_old
+    DEFAULT 3)
+- sql: INSERT catalog_entry_savepoint_plain(id) VALUES(1)
+- sql: CREATE TABLE catalog_entry_savepoint_reentry(id INT PRIMARY KEY,value INT CONSTRAINT DF_catalog_entry_savepoint_reentry_old
+    DEFAULT 3)
+- sql: INSERT catalog_entry_savepoint_reentry(id) VALUES(1)
+- sql: CREATE TABLE catalog_entry_crash(id INT PRIMARY KEY,value INT CONSTRAINT DF_catalog_entry_crash_old DEFAULT 3)
+- sql: INSERT catalog_entry_crash(id) VALUES(1)
+cleanup:
+- sql: DROP TABLE IF EXISTS catalog_entry_metadata_first
+- sql: DROP TABLE IF EXISTS catalog_entry_read_first
+- sql: DROP TABLE IF EXISTS catalog_entry_empty_delete
+- sql: DROP TABLE IF EXISTS catalog_entry_delete_first
+- sql: DROP TABLE IF EXISTS catalog_entry_update_first
+- sql: DROP TABLE IF EXISTS catalog_entry_temp_first
+- sql: DROP TABLE IF EXISTS catalog_entry_commit
+- sql: DROP TABLE IF EXISTS catalog_entry_unamended
+- sql: DROP TABLE IF EXISTS catalog_entry_savepoint_plain
+- sql: DROP TABLE IF EXISTS catalog_entry_savepoint_reentry
+- sql: DROP TABLE IF EXISTS catalog_entry_crash
+test_cases:
+- name: A DEFAULT delta can start the existing declaration phase
+  timeout: 10
+  sql: |
+    BEGIN TRANSACTION;
+
+      ALTER TABLE catalog_entry_metadata_first DROP CONSTRAINT DF_catalog_entry_metadata_first_old;
+      ALTER TABLE catalog_entry_metadata_first ADD CONSTRAINT DF_catalog_entry_metadata_first_new DEFAULT 7 FOR value;
+      INSERT catalog_entry_metadata_first(id) VALUES(2);
+      SELECT id,value FROM catalog_entry_metadata_first ORDER BY id;
+      ROLLBACK TRANSACTION;
+    SELECT id,value FROM catalog_entry_metadata_first ORDER BY id;
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 3
+    - id: 2
+      value: 7
+    - id: 1
+      value: 3
+- name: A public SELECT can precede a DEFAULT delta in one transaction
+  timeout: 10
+  sql: |
+    BEGIN TRANSACTION;
+      SELECT id,value FROM catalog_entry_read_first ORDER BY id;
+      ALTER TABLE catalog_entry_read_first DROP CONSTRAINT DF_catalog_entry_read_first_old;
+      ALTER TABLE catalog_entry_read_first ADD CONSTRAINT DF_catalog_entry_read_first_new DEFAULT 7 FOR value;
+      INSERT catalog_entry_read_first(id) VALUES(2);
+      SELECT id,value FROM catalog_entry_read_first ORDER BY id;
+      ROLLBACK TRANSACTION;
+    SELECT id,value FROM catalog_entry_read_first ORDER BY id;
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      value: 3
+    - id: 1
+      value: 3
+    - id: 2
+      value: 7
+    - id: 1
+      value: 3
+- name: A zero-row DELETE can precede a DEFAULT delta on the same table
+  timeout: 10
+  sql: |
+    BEGIN TRANSACTION;
+      DELETE FROM catalog_entry_empty_delete WHERE id=-1;
+      ALTER TABLE catalog_entry_empty_delete DROP CONSTRAINT DF_catalog_entry_empty_delete_old;
+      ALTER TABLE catalog_entry_empty_delete ADD CONSTRAINT DF_catalog_entry_empty_delete_new DEFAULT 7 FOR value;
+      INSERT catalog_entry_empty_delete(id) VALUES(2);
+      SELECT id,value FROM catalog_entry_empty_delete ORDER BY id;
+      ROLLBACK TRANSACTION;
+    SELECT id,value FROM catalog_entry_empty_delete ORDER BY id;
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 3
+    - id: 2
+      value: 7
+    - id: 1
+      value: 3
+- name: An earlier real DELETE shares rollback with a later DEFAULT delta
+  timeout: 10
+  sql: |
+    BEGIN TRANSACTION;
+      DELETE FROM catalog_entry_delete_first WHERE id=1;
+      ALTER TABLE catalog_entry_delete_first DROP CONSTRAINT DF_catalog_entry_delete_first_old;
+      ALTER TABLE catalog_entry_delete_first ADD CONSTRAINT DF_catalog_entry_delete_first_new DEFAULT 7 FOR value;
+      INSERT catalog_entry_delete_first(id) VALUES(2);
+      SELECT id,value FROM catalog_entry_delete_first ORDER BY id;
+      ROLLBACK TRANSACTION;
+    SELECT id,value FROM catalog_entry_delete_first ORDER BY id;
+  expect:
+    rows: 2
+    data:
+    - id: 2
+      value: 7
+    - id: 1
+      value: 3
+- name: An earlier real UPDATE shares rollback with a later DEFAULT delta
+  timeout: 10
+  sql: |
+    BEGIN TRANSACTION;
+      UPDATE catalog_entry_update_first SET value=19 WHERE id=1;
+      ALTER TABLE catalog_entry_update_first DROP CONSTRAINT DF_catalog_entry_update_first_old;
+      ALTER TABLE catalog_entry_update_first ADD CONSTRAINT DF_catalog_entry_update_first_new DEFAULT 7 FOR value;
+      INSERT catalog_entry_update_first(id) VALUES(2);
+      SELECT id,value FROM catalog_entry_update_first ORDER BY id;
+      ROLLBACK TRANSACTION;
+    SELECT id,value FROM catalog_entry_update_first ORDER BY id;
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 19
+    - id: 2
+      value: 7
+    - id: 1
+      value: 3
+- name: Transaction-owned temporary rows can precede a public DEFAULT delta
+  timeout: 10
+  sql: |
+    BEGIN TRANSACTION;
+      CREATE TABLE #catalog_scratch(id INT); INSERT #catalog_scratch VALUES(1);
+      ALTER TABLE catalog_entry_temp_first DROP CONSTRAINT DF_catalog_entry_temp_first_old;
+      ALTER TABLE catalog_entry_temp_first ADD CONSTRAINT DF_catalog_entry_temp_first_new DEFAULT 7 FOR value;
+      INSERT catalog_entry_temp_first(id) VALUES(2);
+      SELECT id,value FROM catalog_entry_temp_first ORDER BY id;
+      ROLLBACK TRANSACTION;
+    SELECT id,value FROM catalog_entry_temp_first ORDER BY id;
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 3
+    - id: 2
+      value: 7
+    - id: 1
+      value: 3
+- name: One ambient transaction publishes earlier data and later defaults together
+  tds:
+    timeout: 30
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; UPDATE catalog_entry_commit SET value=19 WHERE id=1; DELETE FROM catalog_entry_unamended
+        WHERE id=1;
+    - connection: owner
+      sql: ALTER TABLE catalog_entry_commit DROP CONSTRAINT DF_catalog_entry_commit_old; ALTER TABLE catalog_entry_commit
+        ADD CONSTRAINT DF_catalog_entry_commit_new DEFAULT 7 FOR value;
+    - connection: owner
+      sql: INSERT catalog_entry_commit(id) VALUES(2); INSERT catalog_entry_unamended(id) VALUES(2);
+    - connection: owner
+      sql: SELECT id,value FROM catalog_entry_commit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 19
+        - id: 2
+          value: 7
+    - connection: observer
+      sql: SELECT id,value FROM catalog_entry_commit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 3
+    - connection: observer
+      sql: SELECT id,value FROM catalog_entry_unamended ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 3
+    - connection: observer
+      sql: SELECT CASE WHEN OBJECT_ID(N'DF_catalog_entry_commit_new',N'D') IS NULL THEN 0 ELSE 1 END AS present
+      expect:
+        rows: 1
+        data:
+        - present: 0
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM catalog_entry_commit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 19
+        - id: 2
+          value: 7
+    - connection: observer
+      sql: SELECT id,value FROM catalog_entry_unamended ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          value: 3
+    - connection: observer
+      sql: SELECT CASE WHEN OBJECT_ID(N'DF_catalog_entry_commit_new',N'D') IS NULL THEN 0 ELSE 1 END AS present
+      expect:
+        rows: 1
+        data:
+        - present: 1
+- name: Savepoint retirement restores ordinary data authority and commits the original data decision
+  timeout: 10
+  sql: |
+    BEGIN TRANSACTION;
+    UPDATE catalog_entry_savepoint_plain SET value=19 WHERE id=1;
+    SAVE TRANSACTION before_defaults;
+    ALTER TABLE catalog_entry_savepoint_plain DROP CONSTRAINT DF_catalog_entry_savepoint_plain_old;
+    ALTER TABLE catalog_entry_savepoint_plain ADD CONSTRAINT DF_catalog_entry_savepoint_plain_new DEFAULT 7 FOR value;
+    INSERT catalog_entry_savepoint_plain(id) VALUES(2);
+    ROLLBACK TRANSACTION before_defaults;
+    INSERT catalog_entry_savepoint_plain(id) VALUES(2);
+    COMMIT TRANSACTION; SELECT id,value FROM catalog_entry_savepoint_plain ORDER BY id;
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 19
+    - id: 2
+      value: 3
+- name: Savepoint retirement restores ordinary data authority and permits a fresh default phase
+  timeout: 10
+  sql: |
+    BEGIN TRANSACTION;
+    UPDATE catalog_entry_savepoint_reentry SET value=19 WHERE id=1;
+    SAVE TRANSACTION before_defaults;
+    ALTER TABLE catalog_entry_savepoint_reentry DROP CONSTRAINT DF_catalog_entry_savepoint_reentry_old;
+    ALTER TABLE catalog_entry_savepoint_reentry ADD CONSTRAINT DF_catalog_entry_savepoint_reentry_new DEFAULT 7 FOR value;
+    INSERT catalog_entry_savepoint_reentry(id) VALUES(2);
+    ROLLBACK TRANSACTION before_defaults;
+    INSERT catalog_entry_savepoint_reentry(id) VALUES(2);
+    ALTER TABLE catalog_entry_savepoint_reentry DROP CONSTRAINT DF_catalog_entry_savepoint_reentry_old;
+    ALTER TABLE catalog_entry_savepoint_reentry ADD CONSTRAINT DF_catalog_entry_savepoint_reentry_new DEFAULT 11 FOR value;
+    INSERT catalog_entry_savepoint_reentry(id) VALUES(3);
+    COMMIT TRANSACTION; SELECT id,value FROM catalog_entry_savepoint_reentry ORDER BY id;
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 19
+    - id: 2
+      value: 3
+    - id: 3
+      value: 11
+- name: A foreign writer blocks default admission without taking the original row decision
+  timeout: 10
+  scm: |
+    (begin
+      (define a (newsession)) (a "username" "root")
+      (define b (newsession)) (b "username" "root")
+      (tx_begin_acid a) (tx_begin_acid b)
+      (define ta (a "__memcp_tx")) (define tb (b "__memcp_tx"))
+      (define source (table "memcp-tests" false "catalog_entry_temp_first" false ta))
+      (define target (table "memcp-tests" false "catalog_entry_empty_delete" false tb))
+      (insert source (list "id" "value") (list (list 11 21)) (list) nil false nil ta)
+      (insert target (list "id" "value") (list (list 12 22)) (list) nil false nil tb)
+      (define denied (try (lambda () (begin (altercolumn target "value" "default" 99 ta) false))
+        (lambda (failure) (strlike (concat failure) "%active table writer%"))))
+      (insert source (list "id" "value") (list (list 13 23)) (list) nil false nil ta)
+      (tx_rollback b) (tx_commit a)
+      (define actual (scan nil source (list) (list) (list "id") (lambda (id) (> id 1))
+        (list "id" "value") (lambda (acc id value) (append acc (list id value)))
+        (list) (lambda (left right) (merge (list left right))) false))
+      (and denied (equal? (sort actual (lambda (left right) (< (car left) (car right))))
+        (list (list 11 21) (list 13 23)))
+        (equal? ((show target "column" "value" false) "Default") 3)))
+  expect:
+    result: true
+- name: A missing default drop preserves the original row decision
+  timeout: 10
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "catalog_entry_temp_first" false tx))
+      (insert target (list "id" "value") (list (list 14 24)) (list) nil false nil tx)
+      (define unchanged (not (altercolumn target "DF_absent_column" "drop_default" nil tx)))
+      (insert target (list "id") (list (list 15)) (list) nil false nil tx)
+      (tx_commit owner)
+      (define actual (scan nil target (list) (list) (list "id") (lambda (id) (>= id 14))
+        (list "id" "value") (lambda (acc id value) (append acc (list id value)))
+        (list) (lambda (left right) (merge (list left right))) false))
+      (and unchanged (equal? (sort actual (lambda (left right) (< (car left) (car right))))
+        (list (list 14 24) (list 15 3)))
+        (equal? ((show target "column" "value" false) "Default") 3)))
+  expect:
+    result: true
+- name: Crash after accepted data and default decisions
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Recover accepted data and default decisions
+  action: restart
+- name: Accepted earlier row effects and new defaults recover together
+  sql: INSERT catalog_entry_commit(id) VALUES(3); SELECT id,value FROM catalog_entry_commit ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 19
+    - id: 2
+      value: 7
+    - id: 3
+      value: 7
+- name: A retired late phase recovers under the original data decision
+  sql: INSERT catalog_entry_savepoint_plain(id) VALUES(3); SELECT id,value FROM catalog_entry_savepoint_plain ORDER BY
+    id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 19
+    - id: 2
+      value: 3
+    - id: 3
+      value: 3
+- name: A reentered default phase recovers its own accepted declaration
+  sql: INSERT catalog_entry_savepoint_reentry(id) VALUES(4); SELECT id,value FROM catalog_entry_savepoint_reentry ORDER
+    BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      value: 19
+    - id: 2
+      value: 3
+    - id: 3
+      value: 11
+    - id: 4
+      value: 11
+- name: Stage earlier row effects and a later default without accepting either decision
+  session_id: catalog-entry-crash-owner
+  sql: BEGIN TRANSACTION; UPDATE catalog_entry_crash SET value=19 WHERE id=1; ALTER TABLE catalog_entry_crash DROP CONSTRAINT
+    DF_catalog_entry_crash_old; ALTER TABLE catalog_entry_crash ADD CONSTRAINT DF_catalog_entry_crash_new DEFAULT 7 FOR
+    value; INSERT catalog_entry_crash(id) VALUES(2); SELECT id,value FROM catalog_entry_crash ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 19
+    - id: 2
+      value: 7
+- name: Crash before the mixed data and default decision
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Recover the predecessor of the unaccepted mixed decision
+  action: restart
+- name: An unaccepted late default never publishes earlier rows or metadata
+  sql: INSERT catalog_entry_crash(id) VALUES(2); SELECT id,value FROM catalog_entry_crash ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 3
+    - id: 2
+      value: 3

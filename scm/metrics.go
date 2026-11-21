@@ -20,6 +20,7 @@ package scm
 // Incremented/decremented via ConnState callback — single atomic, no mutex.
 var ActiveHTTPConnections int64
 
-// TotalHTTPRequests counts HTTP requests and SQL commands from MySQL and PHP.
+// TotalHTTPRequests counts HTTP requests and SQL/data executions from MySQL, PHP and TDS.
+// Admission is counted once; an active or stalled execution adds no periodic counts.
 // The background sampler reads this to compute requests/sec without any hot-path mutex.
 var TotalHTTPRequests int64

@@ -1,0 +1,50 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Database selection validates authority and preserves connection and lexical scope
+  requires_tds: true
+  isolated: true
+setup:
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS selection_reader" nil (newsession) nil))
+  - scm: (eval (parse_sql "memcp-tests" "CREATE USER selection_reader IDENTIFIED BY 'pw'" nil (newsession) nil))
+cleanup:
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS selection_reader" nil (newsession) nil))
+test_cases:
+  - name: Selection normalizes an existing database before execution
+    sql: USE [MEMCP-TESTS]; SELECT DB_NAME() AS current_database
+    expect: {rows: 1, data: [{current_database: memcp-tests}]}
+  - name: Unknown database selection fails before publishing a context
+    sql: USE [selection_missing_database]
+    expect: {error: true, contains: 'database does not exist'}
+  - name: Administrator cannot invent a database through USE
+    scm: (nil? (database_name "selection_missing_database" true))
+    expect: {result: true}
+  - name: Selection cannot bypass native database grants
+    username: selection_reader
+    password: pw
+    sql: USE [system]
+    expect: {error: true, contains: 'access denied'}
+  - name: Selection survives GO within the submitted script
+    sql: |
+      USE [SYSTEM];
+      GO
+      SELECT DB_NAME() AS current_database;
+      USE [memcp-tests];
+    expect: {rows: 1, data: [{current_database: system}]}
+  - name: Dynamic selection ends with its lexical module
+    sql: EXEC(N'USE [system]; SELECT DB_NAME() AS selected_database'); SELECT DB_NAME() AS current_database
+    expect: {rows: 2, data: [{selected_database: system}, {current_database: memcp-tests}]}
+  - name: Real TDS selection survives requests and resets to login database
+    tds:
+      statements:
+        - sql: USE [SYSTEM]
+        - sql: SELECT DB_NAME() AS current_database
+          expect: {rows: 1, data: [{current_database: system}]}
+        - sql: USE [selection_missing_database]
+          expect: {error: true, contains: ['database does not exist']}
+        - sql: SELECT DB_NAME() AS current_database
+          expect: {rows: 1, data: [{current_database: system}]}
+        - reset: true
+        - sql: SELECT DB_NAME() AS current_database
+          expect: {rows: 1, data: [{current_database: memcp-tests}]}

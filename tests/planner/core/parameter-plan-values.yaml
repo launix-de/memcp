@@ -121,7 +121,7 @@ test_cases:
         (session "needle" (car input)) (session "take" (cadr input)) (session "skip" (nth input 2))
         (define answer (newsession)) (answer "rows" '())
         (sql_execute_formula session nil
-          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" session false nil)
+          (cached_parse cache "parameter-values-window" (list parse_sql) "memcp-tests" query nil "root" session false nil)
           (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
         (answer "rows")))))
   expect:
@@ -129,7 +129,7 @@ test_cases:
 - name: Computed source work remains opaque across row count publication
   scm: |
     (begin
-      (define target (table "memcp-tests" false "parameter_values_base" false))
+      (define target (table "memcp-tests" false "parameter_values_base" false nil))
       (define original (table_planner_statistics target))
       (createcolumn target "incremented" "INT" '() '() '("value")
         (lambda (value) (if (nil? value) nil (+ value 1))))
@@ -151,9 +151,9 @@ test_cases:
       (createtable "memcp-tests" "parameter_values_initialized"
         (list (list "column" "id" "INT" '() '()))
         (list "oninit" (lambda (_tx)
-          (insert (table "memcp-tests" false "parameter_values_initialized" false)
+          (insert (table "memcp-tests" false "parameter_values_initialized" false nil)
             '("id") (list (list 7))))) false)
-      (define target (table "memcp-tests" false "parameter_values_initialized" false))
+      (define target (table "memcp-tests" false "parameter_values_initialized" false nil))
       (define session (newsession)) (define answer (newsession))
       (sql_execute_formula session nil (sql_queryplan_compile_formula nil
         (parse_sql "memcp-tests" "SELECT id FROM parameter_values_initialized" nil session nil))

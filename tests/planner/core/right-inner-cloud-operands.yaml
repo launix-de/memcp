@@ -1,0 +1,162 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: RIGHT joins preserve complete INNER clouds and original declaration order
+setup:
+- sql: CREATE TABLE cloud_a(aid INT,join_key INT,left_label NVARCHAR(12))
+- sql: CREATE TABLE cloud_b(bid INT,b_owner INT)
+- sql: CREATE TABLE cloud_c(cid INT,c_owner INT)
+- sql: CREATE TABLE cloud_d(did INT,right_key INT)
+- sql: CREATE TABLE cloud_e(eid INT,e_owner INT)
+- sql: CREATE TABLE cloud_f(fid INT,f_owner INT)
+- sql: CREATE TABLE cloud_g(gid INT,g_owner INT)
+- sql: CREATE TABLE cloud_h(hid INT,h_owner INT)
+- sql: INSERT cloud_a VALUES(1,7,N'left'),(2,8,N'incomplete'),(NULL,9,N'nullable')
+- sql: INSERT cloud_b VALUES(10,1),(11,1),(20,2),(30,NULL)
+- sql: INSERT cloud_c VALUES(100,1),(NULL,1)
+- sql: INSERT cloud_d VALUES(5,7),(6,8),(7,9),(8,NULL),(9,10),(10,11)
+- sql: INSERT cloud_e VALUES(50,5),(60,6),(70,7),(80,8),(90,9),(100,10)
+- sql: INSERT cloud_f VALUES(500,50),(600,60),(700,70),(800,80),(900,90),(1000,100)
+- sql: INSERT cloud_g VALUES(5000,500),(6000,600),(7000,700),(8000,800),(9000,900)
+- sql: INSERT cloud_h VALUES(50000,5000),(50001,5000),(60000,6000),(70000,7000),(80000,8000)
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.cloud_right_view
+- sql: DROP TABLE IF EXISTS cloud_h
+- sql: DROP TABLE IF EXISTS cloud_g
+- sql: DROP TABLE IF EXISTS cloud_f
+- sql: DROP TABLE IF EXISTS cloud_e
+- sql: DROP TABLE IF EXISTS cloud_d
+- sql: DROP TABLE IF EXISTS cloud_c
+- sql: DROP TABLE IF EXISTS cloud_b
+- sql: DROP TABLE IF EXISTS cloud_a
+test_cases:
+- name: Whole INNER operands preserve duplicate right tuples and incomplete left extension
+  sql: |
+    SELECT a.aid,b.bid,c.cid,d.did,h.hid FROM cloud_a a
+    INNER JOIN cloud_b b ON a.aid=b.b_owner INNER JOIN cloud_c c ON a.aid=c.c_owner
+    RIGHT OUTER JOIN cloud_d d INNER JOIN cloud_e e ON d.did=e.e_owner
+      INNER JOIN cloud_f f ON e.eid=f.f_owner INNER JOIN cloud_g g ON f.fid=g.g_owner
+      INNER JOIN cloud_h h ON g.gid=h.h_owner ON a.join_key=d.right_key
+    ORDER BY d.did,h.hid,b.bid,c.cid
+  expect:
+    rows: 11
+    data: [{aid: 1,bid: 10,cid: null,did: 5,hid: 50000},{aid: 1,bid: 10,cid: 100,did: 5,hid: 50000},
+      {aid: 1,bid: 11,cid: null,did: 5,hid: 50000},{aid: 1,bid: 11,cid: 100,did: 5,hid: 50000},
+      {aid: 1,bid: 10,cid: null,did: 5,hid: 50001},{aid: 1,bid: 10,cid: 100,did: 5,hid: 50001},
+      {aid: 1,bid: 11,cid: null,did: 5,hid: 50001},{aid: 1,bid: 11,cid: 100,did: 5,hid: 50001},
+      {aid: null,bid: null,cid: null,did: 6,hid: 60000},
+      {aid: null,bid: null,cid: null,did: 7,hid: 70000},{aid: null,bid: null,cid: null,did: 8,hid: 80000}]
+- name: The enclosing RIGHT ON can inspect the final child of both clouds
+  sql: |
+    SELECT a.aid,b.bid,c.cid,d.did,h.hid FROM cloud_a a
+    INNER JOIN cloud_b b ON a.aid=b.b_owner INNER JOIN cloud_c c ON a.aid=c.c_owner
+    RIGHT JOIN cloud_d d INNER JOIN cloud_e e ON d.did=e.e_owner
+      INNER JOIN cloud_f f ON e.eid=f.f_owner INNER JOIN cloud_g g ON f.fid=g.g_owner
+      INNER JOIN cloud_h h ON g.gid=h.h_owner
+      ON a.join_key=d.right_key AND c.cid=100 AND h.hid=50001
+    ORDER BY d.did,h.hid,b.bid
+  expect:
+    rows: 6
+    data: [{aid: null,bid: null,cid: null,did: 5,hid: 50000},
+      {aid: 1,bid: 10,cid: 100,did: 5,hid: 50001},{aid: 1,bid: 11,cid: 100,did: 5,hid: 50001},
+      {aid: null,bid: null,cid: null,did: 6,hid: 60000},
+      {aid: null,bid: null,cid: null,did: 7,hid: 70000},{aid: null,bid: null,cid: null,did: 8,hid: 80000}]
+- name: Incomplete preserved INNER tuples cannot turn into RIGHT output rows
+  sql: |
+    SELECT d.did FROM cloud_a a INNER JOIN cloud_b b ON a.aid=b.b_owner
+    INNER JOIN cloud_c c ON a.aid=c.c_owner RIGHT JOIN cloud_d d
+      INNER JOIN cloud_e e ON d.did=e.e_owner INNER JOIN cloud_f f ON e.eid=f.f_owner
+      INNER JOIN cloud_g g ON f.fid=g.g_owner INNER JOIN cloud_h h ON g.gid=h.h_owner
+      ON a.join_key=d.right_key WHERE d.did IN(9,10)
+  expect: {rows: 0}
+- name: WHERE rejection of real cloud matches cannot manufacture a missing tuple
+  sql: |
+    SELECT d.did FROM cloud_a a INNER JOIN cloud_b b ON a.aid=b.b_owner
+    INNER JOIN cloud_c c ON a.aid=c.c_owner RIGHT JOIN cloud_d d
+      INNER JOIN cloud_e e ON d.did=e.e_owner INNER JOIN cloud_f f ON e.eid=f.f_owner
+      INNER JOIN cloud_g g ON f.fid=g.g_owner INNER JOIN cloud_h h ON g.gid=h.h_owner
+      ON a.join_key=d.right_key WHERE d.did=5 AND a.aid IS NULL
+  expect: {rows: 0}
+- name: Aggregate reducers count complete clouds and real nullable leaf values
+  sql: |
+    SELECT COUNT(*) AS total,COUNT(a.aid) AS left_heads,COUNT(c.cid) AS left_children,COUNT(h.hid) AS right_children
+    FROM cloud_a a INNER JOIN cloud_b b ON a.aid=b.b_owner INNER JOIN cloud_c c ON a.aid=c.c_owner
+    RIGHT JOIN cloud_d d INNER JOIN cloud_e e ON d.did=e.e_owner
+      INNER JOIN cloud_f f ON e.eid=f.f_owner INNER JOIN cloud_g g ON f.fid=g.g_owner
+      INNER JOIN cloud_h h ON g.gid=h.h_owner ON a.join_key=d.right_key
+  expect: {rows: 1,data: [{total: 11,left_heads: 8,left_children: 4,right_children: 11}]}
+- name: A preserved local INNER ON cannot see the nullable left operand
+  sql: |
+    SELECT d.did FROM cloud_a a INNER JOIN cloud_b b ON a.aid=b.b_owner
+    INNER JOIN cloud_c c ON a.aid=c.c_owner RIGHT JOIN cloud_d d
+    INNER JOIN cloud_e e ON a.aid=e.e_owner ON a.join_key=d.right_key
+  expect: {error: true,contains: unknown relation alias}
+- name: A left local INNER ON cannot see the later preserved operand
+  sql: |
+    SELECT d.did FROM cloud_a a INNER JOIN cloud_b b ON d.did=b.b_owner
+    INNER JOIN cloud_c c ON a.aid=c.c_owner RIGHT JOIN cloud_d d
+    INNER JOIN cloud_e e ON d.did=e.e_owner ON a.join_key=d.right_key
+  expect: {error: true,contains: unknown relation alias}
+- name: A preserved INNER ON cannot see a future right alias
+  sql: |
+    SELECT d.did FROM cloud_a a INNER JOIN cloud_b b ON a.aid=b.b_owner
+    INNER JOIN cloud_c c ON a.aid=c.c_owner RIGHT JOIN cloud_d d
+    INNER JOIN cloud_e e ON h.hid=e.e_owner
+    INNER JOIN cloud_h h ON e.eid=h.h_owner ON a.join_key=d.right_key
+  expect: {error: true,contains: unknown relation alias}
+- name: Typed wildcard headers retain original left then preserved cloud declaration order
+  tds:
+    statements:
+    - sql: |
+        SELECT * FROM cloud_a a INNER JOIN cloud_b b ON a.aid=b.b_owner
+        INNER JOIN cloud_c c ON a.aid=c.c_owner RIGHT JOIN cloud_d d
+          INNER JOIN cloud_e e ON d.did=e.e_owner INNER JOIN cloud_f f ON e.eid=f.f_owner
+          INNER JOIN cloud_g g ON f.fid=g.g_owner INNER JOIN cloud_h h ON g.gid=h.h_owner
+          ON a.join_key=d.right_key WHERE d.did=6
+      expect:
+        rows: 1
+        data: [{aid: null,join_key: null,left_label: null,bid: null,b_owner: null,cid: null,c_owner: null,
+          did: 6,right_key: 8,eid: 60,e_owner: 6,fid: 600,f_owner: 60,gid: 6000,g_owner: 600,hid: 60000,h_owner: 6000}]
+        column_types: [{name: aid,type: INT},{name: join_key,type: INT},{name: left_label,type: NVARCHAR,length: 12},
+          {name: bid,type: INT},{name: b_owner,type: INT},{name: cid,type: INT},{name: c_owner,type: INT},
+          {name: did,type: INT},{name: right_key,type: INT},{name: eid,type: INT},{name: e_owner,type: INT},
+          {name: fid,type: INT},{name: f_owner,type: INT},{name: gid,type: INT},{name: g_owner,type: INT},
+          {name: hid,type: INT},{name: h_owner,type: INT}]
+- name: A UNION keeps the same joined cloud shape and wildcard type positions in both branches
+  sql: |
+    SELECT * FROM cloud_a a INNER JOIN cloud_b b ON a.aid=b.b_owner
+    INNER JOIN cloud_c c ON a.aid=c.c_owner RIGHT JOIN cloud_d d
+      INNER JOIN cloud_e e ON d.did=e.e_owner INNER JOIN cloud_f f ON e.eid=f.f_owner
+      INNER JOIN cloud_g g ON f.fid=g.g_owner INNER JOIN cloud_h h ON g.gid=h.h_owner
+      ON a.join_key=d.right_key WHERE d.did=6
+    UNION ALL
+    SELECT * FROM cloud_a a INNER JOIN cloud_b b ON a.aid=b.b_owner
+    INNER JOIN cloud_c c ON a.aid=c.c_owner RIGHT JOIN cloud_d d
+      INNER JOIN cloud_e e ON d.did=e.e_owner INNER JOIN cloud_f f ON e.eid=f.f_owner
+      INNER JOIN cloud_g g ON f.fid=g.g_owner INNER JOIN cloud_h h ON g.gid=h.h_owner
+      ON a.join_key=d.right_key WHERE d.did=7 ORDER BY did
+  expect:
+    rows: 2
+    data: [{aid: null,join_key: null,left_label: null,bid: null,b_owner: null,cid: null,c_owner: null,
+      did: 6,right_key: 8,eid: 60,e_owner: 6,fid: 600,f_owner: 60,gid: 6000,g_owner: 600,hid: 60000,h_owner: 6000},
+      {aid: null,join_key: null,left_label: null,bid: null,b_owner: null,cid: null,c_owner: null,
+      did: 7,right_key: 9,eid: 70,e_owner: 7,fid: 700,f_owner: 70,gid: 7000,g_owner: 700,hid: 70000,h_owner: 7000}]
+- name: A stored RIGHT cloud view preserves its nullable typed export scope
+  sql: |
+    CREATE VIEW dbo.cloud_right_view AS
+    SELECT a.left_label,c.cid,d.did,h.hid FROM cloud_a a
+    INNER JOIN cloud_b b ON a.aid=b.b_owner INNER JOIN cloud_c c ON a.aid=c.c_owner
+    RIGHT JOIN cloud_d d INNER JOIN cloud_e e ON d.did=e.e_owner
+      INNER JOIN cloud_f f ON e.eid=f.f_owner INNER JOIN cloud_g g ON f.fid=g.g_owner
+      INNER JOIN cloud_h h ON g.gid=h.h_owner ON a.join_key=d.right_key
+- name: Reading the stored cloud view retains national text metadata above complete null extension
+  tds:
+    statements:
+    - sql: SELECT left_label,cid,did,hid FROM dbo.cloud_right_view WHERE did=6
+      expect:
+        rows: 1
+        data: [{left_label: null,cid: null,did: 6,hid: 60000}]
+        column_types: [{name: left_label,type: NVARCHAR,length: 12},{name: cid,type: INT},
+          {name: did,type: INT},{name: hid,type: INT}]

@@ -1,0 +1,68 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Frozen before the identity fix: one cold and four repeated executions, no warmup.
+metadata:
+  syntax: tsql
+  isolated: true
+  perf_ci: true
+  performance_shard_weight: 2
+  max_regression_pct: 20
+  description: Cold compilation plus four executions of nested outer operand membership
+    identities
+setup:
+- sql: CREATE TABLE full_left(id INT,k INT,keep_row INT)
+- sql: CREATE TABLE full_right(id INT,k INT,keep_row INT)
+- sql: INSERT full_left VALUES(1,10,1),(1,10,1),(2,NULL,1),(3,30,0)
+- sql: INSERT full_right VALUES(4,10,1),(4,10,1),(5,NULL,1),(6,60,1)
+test_cases:
+- name: Nested outer operands terminate compilation and retain complete row bags
+  sql: 'SELECT l.id AS left_id,r.id AS right_id,t.id AS third_id
+
+    FROM (full_left l FULL JOIN full_right r ON l.k=r.k)
+
+    FULL JOIN (VALUES(7,10),(8,30),(9,90)) t(id,k) ON COALESCE(l.k,r.k)=t.k
+
+    ORDER BY l.id,r.id,t.id
+
+    '
+  expect:
+    rows: 9
+    data:
+    - left_id: null
+      right_id: null
+      third_id: 9
+    - left_id: null
+      right_id: 5
+      third_id: null
+    - left_id: null
+      right_id: 6
+      third_id: null
+    - left_id: 1
+      right_id: 4
+      third_id: 7
+    - left_id: 1
+      right_id: 4
+      third_id: 7
+    - left_id: 1
+      right_id: 4
+      third_id: 7
+    - left_id: 1
+      right_id: 4
+      third_id: 7
+    - left_id: 2
+      right_id: null
+      third_id: null
+    - left_id: 3
+      right_id: null
+      third_id: 8
+  threshold_ms: 5000
+  timeout: 15
+  performance_rows: 9
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+cleanup:
+- sql: DROP TABLE IF EXISTS full_left
+- sql: DROP TABLE IF EXISTS full_right
+- sql: DROP TABLE IF EXISTS full_empty
+- sql: DROP TABLE IF EXISTS full_prototype_output

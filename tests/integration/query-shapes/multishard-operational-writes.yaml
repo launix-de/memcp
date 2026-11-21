@@ -61,12 +61,12 @@ setup:
       ) ENGINE=safe
   - scm: |
       (begin
-        (insert (table "memcp-tests" false "mow_file" false) '("id" "uploaded_at")
+        (insert (table "memcp-tests" false "mow_file" false nil) '("id" "uploaded_at")
           (map (produceN 35) (lambda (i) (list (+ i 1) (* (+ i 1) 10)))))
-        (insert (table "memcp-tests" false "mow_document" false) '("id" "file_id" "tenant_id" "state")
+        (insert (table "memcp-tests" false "mow_document" false nil) '("id" "file_id" "tenant_id" "state")
           (map (produceN 35) (lambda (i)
             (list (+ i 1) (+ i 1) (+ (mod i 4) 1) "ready"))))
-        (insert (table "memcp-tests" false "mow_path" false) '("id" "pathname")
+        (insert (table "memcp-tests" false "mow_path" false nil) '("id" "pathname")
           (map (produceN 35) (lambda (i)
             (list (+ i 1) (concat (if (< i 18) "queue/a/" "queue/b/") i)))))
         (rebuild)

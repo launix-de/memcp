@@ -128,7 +128,7 @@ type SerializationContext struct {
 	root          *SerializationContext
 	mu            sync.Mutex
 	views         map[ClusterObject]*clusterViewCapture
-	demands       map[ClusterObject]map[Scmer]struct{}
+	demands       map[ClusterObject]map[ClusterCallDemand]struct{}
 	valueSnapshot *serializationValueSnapshot
 }
 
@@ -155,9 +155,9 @@ func (bindings *SerializationContext) Reference(object ClusterObject) (ClusterRe
 		capture = &clusterViewCapture{done: make(chan struct{})}
 		bindings.views[object] = capture
 	}
-	keys := make([]Scmer, 0, len(bindings.demands[object]))
-	for key := range bindings.demands[object] {
-		keys = append(keys, key)
+	demands := make([]ClusterCallDemand, 0, len(bindings.demands[object]))
+	for demand := range bindings.demands[object] {
+		demands = append(demands, demand)
 	}
 	_, project := bindings.demands[object]
 	bindings.mu.Unlock()
@@ -183,7 +183,7 @@ func (bindings *SerializationContext) Reference(object ClusterObject) (ClusterRe
 	view := capture.view
 	if projection, ok := object.(ClusterReadProjection); ok && project {
 		var err error
-		view, err = projection.ProjectClusterView(view, keys)
+		view, err = projection.ProjectClusterView(view, demands)
 		if err != nil {
 			return ClusterReference{}, err
 		}
@@ -221,8 +221,16 @@ type ProcedureDecode struct {
 
 // ClusterReadProjection lets the object restrict its prepared read view to
 // demanded arguments without teaching serialization about sessions/cachemaps.
+// ClusterCallDemand describes a direct callable access. Arity -1 denotes an
+// escaped callable or unknown apply; owners must retain its complete read view.
+// The owner decides which operations read the prepared view and which use RPC.
+type ClusterCallDemand struct {
+	Arity int
+	Key   Scmer // nil is a dynamically chosen key, not proof of an absent value
+}
+
 type ClusterReadProjection interface {
-	ProjectClusterView(Scmer, []Scmer) (Scmer, error)
+	ProjectClusterView(Scmer, []ClusterCallDemand) (Scmer, error)
 }
 
 func (bindings *SerializationContext) WithExport(export func(ClusterObject, Scmer) (ClusterReference, error)) *SerializationContext {
@@ -246,6 +254,7 @@ func (bindings *SerializationContext) prepare(value Scmer, literal bool, visitin
 				}
 			}
 			visiting = append(visiting, snapshot)
+			seen := make(map[int]bool)
 			for _, demand := range snapshot.plan.demands {
 				if object, ok := ClusterObjectOf(snapshot.values[demand.object]); ok {
 					key := demand.key
@@ -254,10 +263,16 @@ func (bindings *SerializationContext) prepare(value Scmer, literal bool, visitin
 							key = bound
 						}
 					}
-					bindings.demand(object, key)
+					bindings.demand(object, ClusterCallDemand{Arity: demand.arity, Key: key})
+					seen[demand.object] = true
 				}
 			}
-			for _, capture := range snapshot.values {
+			for index, capture := range snapshot.values {
+				// Direct access demands already include conservative escape uses.
+				// Revisiting the object as a literal would erase every projection.
+				if _, direct := ClusterObjectOf(capture); direct && seen[index] {
+					continue
+				}
 				bindings.prepare(capture, true, visiting)
 			}
 			return
@@ -275,7 +290,7 @@ func (bindings *SerializationContext) prepare(value Scmer, literal bool, visitin
 		return
 	}
 	if object, ok := ClusterObjectOf(value); ok {
-		bindings.demand(object, NewNil())
+		bindings.demand(object, ClusterCallDemand{Arity: -1})
 		return
 	}
 	if !value.IsSlice() {
@@ -292,7 +307,7 @@ func (bindings *SerializationContext) prepare(value Scmer, literal bool, visitin
 			if len(items) == 2 && items[1].WithoutSourceInfo().IsString() {
 				key = items[1].WithoutSourceInfo()
 			}
-			bindings.demand(object, key)
+			bindings.demand(object, ClusterCallDemand{Arity: len(items) - 1, Key: key})
 			items = items[1:]
 		}
 	}
@@ -301,19 +316,19 @@ func (bindings *SerializationContext) prepare(value Scmer, literal bool, visitin
 	}
 }
 
-func (bindings *SerializationContext) demand(object ClusterObject, key Scmer) {
+func (bindings *SerializationContext) demand(object ClusterObject, demand ClusterCallDemand) {
 	if bindings.root != nil {
 		bindings = bindings.root
 	}
 	bindings.mu.Lock()
 	defer bindings.mu.Unlock()
 	if bindings.demands == nil {
-		bindings.demands = make(map[ClusterObject]map[Scmer]struct{})
+		bindings.demands = make(map[ClusterObject]map[ClusterCallDemand]struct{})
 	}
 	if bindings.demands[object] == nil {
-		bindings.demands[object] = make(map[Scmer]struct{})
+		bindings.demands[object] = make(map[ClusterCallDemand]struct{})
 	}
-	bindings.demands[object][key] = struct{}{}
+	bindings.demands[object][demand] = struct{}{}
 }
 
 func ResolveSerializedObjects(value Scmer, resolve func(ClusterReference) (Scmer, error), resolveHandle func(uint64) (Handle, error)) (Scmer, error) {

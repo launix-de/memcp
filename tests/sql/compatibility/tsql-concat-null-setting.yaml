@@ -1,0 +1,243 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/set-concat-null-yields-null-transact-sql
+# SQL Server 2022 (16.0.4265.3): https://dbfiddle.uk/sj0Xd6rX
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Declared text addition retains its execution option independently of CONCAT and numeric addition
+setup:
+- sql: CREATE TABLE concat_setting_values(id INT PRIMARY KEY,a VARCHAR(8),n NVARCHAR(8))
+- sql: INSERT concat_setting_values VALUES(1,NULL,NULL),(2,'',N''),(3,'x',N'x')
+- sql: |
+    CREATE PROCEDURE dbo.concat_setting_off AS BEGIN
+      SET CONCAT_NULL_YIELDS_NULL OFF;
+      SELECT SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS setting,@@OPTIONS&4096 AS option_bit,
+        N'a'+CAST(NULL AS NVARCHAR(2)) AS value;
+    END;
+- sql: |
+    SET CONCAT_NULL_YIELDS_NULL ON;
+    GO
+    CREATE PROCEDURE dbo.concat_setting_reader AS BEGIN
+      SELECT SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS setting,@@OPTIONS&4096 AS option_bit,
+        N'a'+CAST(NULL AS NVARCHAR(2)) AS value;
+    END;
+- sql: |
+    CREATE FUNCTION dbo.concat_setting_function(@value NVARCHAR(8)) RETURNS NVARCHAR(20) AS BEGIN
+      RETURN @value+N'!'+CAST(NULL AS NVARCHAR(2));
+    END;
+cleanup:
+- sql: DROP FUNCTION IF EXISTS dbo.concat_setting_function
+- sql: DROP TABLE IF EXISTS concat_setting_defaults
+- sql: DROP TABLE IF EXISTS concat_setting_constant
+- sql: DROP TABLE IF EXISTS concat_setting_computed
+- sql: DROP PROCEDURE IF EXISTS dbo.concat_setting_reader
+- sql: DROP PROCEDURE IF EXISTS dbo.concat_setting_off
+- sql: DROP TABLE IF EXISTS concat_setting_values
+test_cases:
+- name: A fresh connection propagates NULL for text addition but not CONCAT
+  session_id: concat-default
+  sql: |
+    SELECT SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS setting,@@OPTIONS&4096 AS option_bit,
+      CAST('a' AS VARCHAR(4))+CAST(NULL AS VARCHAR(4)) AS ansi_value,
+      N'a'+CAST(NULL AS NVARCHAR(4)) AS national_value,CONCAT(N'a',NULL) AS concat_value;
+  expect: {rows: 1,data: [{setting: 1,option_bit: 4096,ansi_value: null,national_value: null,concat_value: a}]}
+- name: OFF retains both typed NULL operand orientations and an empty result
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL OFF;
+    SELECT CAST('a' AS VARCHAR(4))+CAST(NULL AS VARCHAR(4)) AS left_value,
+      CAST(NULL AS VARCHAR(4))+CAST('b' AS VARCHAR(4)) AS right_value,
+      CAST(NULL AS NVARCHAR(4))+CAST(NULL AS NVARCHAR(4)) AS all_null,
+      N''+CAST(NULL AS NVARCHAR(4)) AS empty_value,
+      SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS setting,@@OPTIONS&4096 AS option_bit;
+  expect: {rows: 1,data: [{left_value: a,right_value: b,all_null: '',empty_value: '',setting: 0,option_bit: 0}]}
+- name: ON retains NULL for either side and for two typed NULL operands
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL ON;
+    SELECT CAST('a' AS VARCHAR(4))+CAST(NULL AS VARCHAR(4)) AS left_value,
+      CAST(NULL AS VARCHAR(4))+CAST('b' AS VARCHAR(4)) AS right_value,
+      CAST(NULL AS NVARCHAR(4))+CAST(NULL AS NVARCHAR(4)) AS all_null,
+      N''+CAST(NULL AS NVARCHAR(4)) AS empty_value;
+  expect: {rows: 1,data: [{left_value: null,right_value: null,all_null: null,empty_value: null}]}
+- name: Several text operands preserve their actual concatenation order under OFF
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL OFF;
+    SELECT N'a'+NULL+N'!'+CAST(NULL AS NVARCHAR(4))+N'b' AS value,
+      N''+N'x'+N'' AS empty_neighbors;
+  expect: {rows: 1,data: [{value: a!b,empty_neighbors: x}]}
+- name: OFF applies to actual nullable and empty native text columns
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL OFF;
+    SELECT id,a+'!'+a AS ansi_value,n+N'!'+n AS national_value FROM concat_setting_values ORDER BY id;
+  expect:
+    rows: 3
+    data: [{id: 1,ansi_value: '!',national_value: '!'},{id: 2,ansi_value: '!',national_value: '!'},{id: 3,ansi_value: x!x,national_value: x!x}]
+- name: ON keeps empty text distinct from actual NULL column values
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL ON;
+    SELECT id,a+'!'+a AS ansi_value,n+N'!'+n AS national_value FROM concat_setting_values ORDER BY id;
+  expect:
+    rows: 3
+    data: [{id: 1,ansi_value: null,national_value: null},{id: 2,ansi_value: '!',national_value: '!'},{id: 3,ansi_value: x!x,national_value: x!x}]
+- name: OFF does not change numeric precedence or numeric NULL arithmetic
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL OFF;
+    SELECT 2+3 AS total,2+NULL AS missing,CAST('2' AS VARCHAR(4))+3 AS converted;
+  expect: {rows: 1,data: [{total: 5,missing: null,converted: 5}]}
+- name: CONCAT retains its independent empty NULL contract in both modes
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL ON;
+    SELECT CONCAT(N'a',NULL,N'b') AS value,CONCAT(CAST(NULL AS NVARCHAR(2)),NULL) AS all_null;
+    SET CONCAT_NULL_YIELDS_NULL OFF;
+    SELECT CONCAT(N'a',NULL,N'b') AS value,CONCAT(CAST(NULL AS NVARCHAR(2)),NULL) AS all_null;
+  expect: {rows: 2,data: [{value: ab,all_null: ''},{value: ab,all_null: ''}]}
+- name: A stored procedure restores the actual caller option after its OFF body
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL ON;
+    EXEC dbo.concat_setting_off;
+    SELECT SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS setting,@@OPTIONS&4096 AS option_bit,
+      N'a'+CAST(NULL AS NVARCHAR(2)) AS value;
+  expect: {rows: 2,data: [{setting: 0,option_bit: 0,value: a},{setting: 1,option_bit: 4096,value: null}]}
+- name: A procedure inherits its caller runtime option instead of its creation mode
+  sql: SET CONCAT_NULL_YIELDS_NULL OFF; EXEC dbo.concat_setting_reader
+  expect: {rows: 1,data: [{setting: 0,option_bit: 0,value: a}]}
+- name: A dynamic batch restores ON after executing its own OFF setting
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL ON;
+    EXEC(N'SET CONCAT_NULL_YIELDS_NULL OFF; SELECT SESSIONPROPERTY(''CONCAT_NULL_YIELDS_NULL'') AS setting,@@OPTIONS&4096 AS option_bit,N''a''+CAST(NULL AS NVARCHAR(2)) AS value;');
+    SELECT SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS setting,@@OPTIONS&4096 AS option_bit,
+      N'a'+CAST(NULL AS NVARCHAR(2)) AS value;
+  expect: {rows: 2,data: [{setting: 0,option_bit: 0,value: a},{setting: 1,option_bit: 4096,value: null}]}
+- name: Error unwinding restores the caller option after a dynamic OFF setting
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL ON;
+    BEGIN TRY EXEC(N'SET CONCAT_NULL_YIELDS_NULL OFF; THROW 50163,N''mode failure'',1;'); END TRY
+    BEGIN CATCH SELECT ERROR_NUMBER() AS number,SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS setting,
+      @@OPTIONS&4096 AS option_bit,N'a'+CAST(NULL AS NVARCHAR(2)) AS value; END CATCH;
+  expect: {rows: 1,data: [{number: 50163,setting: 1,option_bit: 4096,value: null}]}
+- name: A false runtime branch cannot change the concatenation option
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL ON;
+    IF 1=0 SET CONCAT_NULL_YIELDS_NULL OFF;
+    SELECT SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS setting,N'a'+CAST(NULL AS NVARCHAR(2)) AS value;
+  expect: {rows: 1,data: [{setting: 1,value: null}]}
+- name: An OFF option list remains on the same actual connection across GO
+  session_id: concat-owner
+  sql: |
+    SET NOCOUNT,CONCAT_NULL_YIELDS_NULL OFF;
+    GO
+    SELECT SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS setting,@@OPTIONS&4096 AS option_bit,
+      N'a'+CAST(NULL AS NVARCHAR(2)) AS value;
+  expect: {rows: 1,data: [{setting: 0,option_bit: 0,value: a}]}
+- name: A subsequent request uses the same connection OFF value
+  session_id: concat-owner
+  sql: SELECT SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS setting,N'a'+CAST(NULL AS NVARCHAR(2)) AS value
+  expect: {rows: 1,data: [{setting: 0,value: a}]}
+- name: Another actual connection retains its independent default
+  session_id: concat-observer
+  sql: SELECT SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS setting,N'a'+CAST(NULL AS NVARCHAR(2)) AS value
+  expect: {rows: 1,data: [{setting: 1,value: null}]}
+- name: A reused query retains values and declared output types across option changes
+  tds:
+    statements:
+    - sql: SET CONCAT_NULL_YIELDS_NULL ON
+    - sql: SELECT a+CAST(NULL AS VARCHAR(8)) AS ansi_value,n+CAST(NULL AS NVARCHAR(8)) AS national_value,SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS setting,@@OPTIONS&4096 AS option_bit FROM concat_setting_values WHERE id=3
+      expect:
+        rows: 1
+        column_types: [{name: ansi_value,type: VARCHAR},{name: national_value,type: NVARCHAR},{name: setting,type: SQL_VARIANT},{name: option_bit,type: INT}]
+        data: [{ansi_value: null,national_value: null,setting: 1,option_bit: 4096}]
+    - sql: SET CONCAT_NULL_YIELDS_NULL OFF
+    - sql: SELECT a+CAST(NULL AS VARCHAR(8)) AS ansi_value,n+CAST(NULL AS NVARCHAR(8)) AS national_value,SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS setting,@@OPTIONS&4096 AS option_bit FROM concat_setting_values WHERE id=3
+      expect:
+        rows: 1
+        column_types: [{name: ansi_value,type: VARCHAR},{name: national_value,type: NVARCHAR},{name: setting,type: SQL_VARIANT},{name: option_bit,type: INT}]
+        data: [{ansi_value: x,national_value: x,setting: 0,option_bit: 0}]
+- name: Empty output retains real text and diagnostic metadata under OFF
+  tds:
+    statements:
+    - sql: SET CONCAT_NULL_YIELDS_NULL OFF
+    - sql: SELECT a+CAST(NULL AS VARCHAR(8)) AS ansi_value,n+CAST(NULL AS NVARCHAR(8)) AS national_value,SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL') AS setting,@@OPTIONS&4096 AS option_bit FROM concat_setting_values WHERE id<0
+      expect:
+        rows: 0
+        column_types: [{name: ansi_value,type: VARCHAR},{name: national_value,type: NVARCHAR},{name: setting,type: SQL_VARIANT},{name: option_bit,type: INT}]
+- name: Aggregate consumers retain the actual concatenation option domain
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL OFF;
+    SELECT COUNT(*) AS total,SUM(CASE WHEN n+N'!' IS NULL THEN 1 ELSE 0 END) AS missing FROM concat_setting_values;
+    SET CONCAT_NULL_YIELDS_NULL ON;
+    SELECT COUNT(*) AS total,SUM(CASE WHEN n+N'!' IS NULL THEN 1 ELSE 0 END) AS missing FROM concat_setting_values;
+  expect: {rows: 2,data: [{total: 3,missing: 0},{total: 3,missing: 1}]}
+- name: Scalar function context carries the actual concatenation setting as a plain input
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL ON;
+    SELECT dbo.concat_setting_function(N'x') AS value;
+    SET CONCAT_NULL_YIELDS_NULL OFF;
+    SELECT dbo.concat_setting_function(N'x') AS value;
+  expect: {rows: 2,data: [{value: null},{value: x!}]}
+- name: A deferred DEFAULT uses the actual insertion mode rather than its declaration mode
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL ON;
+    CREATE TABLE concat_setting_defaults(id INT PRIMARY KEY,value VARCHAR(8) DEFAULT('a'+CAST(NULL AS VARCHAR(2))));
+    INSERT concat_setting_defaults(id) VALUES(1);
+    SET CONCAT_NULL_YIELDS_NULL OFF;
+    INSERT concat_setting_defaults(id) VALUES(2);
+    SELECT id,value FROM concat_setting_defaults ORDER BY id;
+    DROP TABLE concat_setting_defaults;
+  expect: {rows: 2,data: [{id: 1,value: null},{id: 2,value: a}]}
+- name: A proven nonnull constant computed expression stays context free
+  sql: |
+    CREATE TABLE concat_setting_constant(id INT PRIMARY KEY,value AS ('a'+'b'));
+    INSERT concat_setting_constant(id) VALUES(1);
+    SET CONCAT_NULL_YIELDS_NULL ON;
+    SELECT id,value FROM concat_setting_constant;
+    SET CONCAT_NULL_YIELDS_NULL OFF;
+    SELECT id,value FROM concat_setting_constant;
+    DROP TABLE concat_setting_constant;
+  expect: {rows: 2,data: [{id: 1,value: ab},{id: 1,value: ab}]}
+- name: A nonpersisted nullable text computation follows its reading invocation option
+  # The native pure stored-computation interface currently has no execution-option
+  # operand. This complete SQL Server result is a separate positive feature goal.
+  noncritical: true
+  sql: |
+    SET CONCAT_NULL_YIELDS_NULL ON;
+    CREATE TABLE concat_setting_computed(id INT PRIMARY KEY,a VARCHAR(8),value AS (a+CAST(NULL AS VARCHAR(2))));
+    INSERT concat_setting_computed(id,a) VALUES(1,'x');
+    SELECT id,value FROM concat_setting_computed;
+    SET CONCAT_NULL_YIELDS_NULL OFF;
+    SELECT id,value FROM concat_setting_computed;
+    DROP TABLE concat_setting_computed;
+  expect: {rows: 2,data: [{id: 1,value: null},{id: 1,value: x}]}
+- name: Long text chains retain operand order and the current NULL profile
+  sql: |
+    DECLARE @a NVARCHAR(8)=N'a',@missing NVARCHAR(8)=NULL;
+    SET CONCAT_NULL_YIELDS_NULL OFF;
+    SELECT @a+@missing+N'b'+@a+@missing+N'c' AS value;
+    SET CONCAT_NULL_YIELDS_NULL ON;
+    SELECT @a+@missing+N'b'+@a+@missing+N'c' AS value;
+  expect: {rows: 2,data: [{value: abac},{value: null}]}
+- name: Typed text addition reads its profile before evaluating each operand once
+  scm: |
+    (begin
+      (define input (newsession))
+      (input "__tsql_concat_null_yields_null" false)
+      (define state (newsession)) (state "calls" 0) (state "order" "")
+      (define operand (lambda (label value) (begin
+        (state "calls" (+ (state "calls") 1))
+        (state "order" (concat (state "order") label))
+        (if (equal? label "L")
+          (input "__tsql_concat_null_yields_null"
+            (not (input "__tsql_concat_null_yields_null"))) true)
+        value)))
+      (define info (tsql_compile_addition (list
+        (sql_info (list operand "L" "a") "NVARCHAR" nil)
+        (sql_info (list operand "R" nil) "NVARCHAR" nil))))
+      (define run (close_procedure (eval (optimize
+        (list (quote lambda) (list (quote session)) (sql_info_formula info))))))
+      (define compiled_without_effect (equal? (state "calls") 0))
+      (define off (run input))
+      (define on (run input))
+      (and compiled_without_effect (equal? (sql_info_type info) "NVARCHAR")
+        (equal? off "a") (nil? on) (equal? (state "calls") 4)
+        (equal? (state "order") "LRLR")))
+  expect: {result: true}

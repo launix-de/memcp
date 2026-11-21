@@ -1,0 +1,57 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: A rebuilt SAFE generation preserves recovery authority for cursor-stability changes whose transaction remains open
+setup:
+- scm: |
+    (begin
+      (createtable "memcp-tests" "cs_pending_rows"
+        (list
+          (list "column" "id" "INT" (list) (list "null" false))
+          (list "column" "value" "INT" (list) (list))
+          (list "unique" "PRIMARY" (list "id")))
+        (list "engine" "safe") false nil)
+      (define target (table "memcp-tests" false "cs_pending_rows" false nil))
+      (insert target '("id" "value") (list (list 1 10) (list 2 20)))
+      (rebuild target true false)
+      true)
+cleanup:
+- sql: DROP TABLE IF EXISTS cs_pending_rows
+test_cases:
+- name: The committed seed is exact before staging an open transaction
+  sql: SELECT id,value FROM cs_pending_rows ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 10},{id: 2,value: 20}]}
+- name: Rebuild then crash while pre-snapshot UPDATE DELETE and INSERT remain uncommitted
+  scm: |
+    (begin
+      (define owner (newsession))
+      (owner "username" "root")
+      (tx_begin owner)
+      (try (lambda () (begin
+        (define tx (owner "__memcp_tx"))
+        (define target (table "memcp-tests" false "cs_pending_rows" false tx))
+        (define changed (scan tx target '() '() '("id") (lambda (id) (<= id 2)) '("id" "$update")
+          (lambda (acc id update) (begin
+            (if (equal? id 1) (update '("value" 11)) (update))
+            (+ acc 1))) 0 +))
+        (insert target '("id" "value") (list (list 3 30)) '() nil false nil tx)
+        (rebuild target true false)
+        (define count_rows (lambda (condition)
+          (scan tx target '() '() '("id" "value") condition '()
+            (lambda (acc) (+ acc 1)) 0 +)))
+        (if (and (equal? changed 2) (owner "transaction")
+            (equal? (count_rows (lambda (id value) true)) 2)
+            (equal? (count_rows (lambda (id value) (and (equal? id 1) (equal? value 11)))) 1)
+            (equal? (count_rows (lambda (id value) (and (equal? id 3) (equal? value 30)))) 1))
+          /* Keep the actual connection/transaction owner live through the crash.
+          There is deliberately no COMMIT, ROLLBACK or graceful shutdown. */
+          (begin (owner "__memcp_tx") (crash))
+          (error "the open transaction did not retain its exact live mutations"))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {interrupted_ok: true}
+- name: Restart without completing the abandoned cursor-stability transaction
+  action: restart
+- name: Recovery restores both committed seed rows and discards the open inserted version
+  sql: SELECT id,value FROM cs_pending_rows ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 10},{id: 2,value: 20}]}

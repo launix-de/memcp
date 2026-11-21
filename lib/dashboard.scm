@@ -23,21 +23,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* check admin credentials against system.user table */
 (define dashboard_check_admin (lambda (req) (begin
-	(set pw (scan_lookup nil (table "system" false "user" false)
-		(list 373834222010370 (scan_boundary "equal" "username" 0 0 true true "" false) "password" "admin")
-		(list (req "username") (lambda (password admin) (list password admin)))))
-	(if (not (dashboard_auth_row_present? pw)) false
-		(and (equal? (car pw) (password (req "password"))) (car (cdr pw))))
-)))
+	(define account (sql_authenticate_account (req "username") (req "password")))
+	(if account (begin
+		(sql_bind_http_session req account)
+		(if (account "admin") true false)) false))))
 
-/* check any authenticated user (returns admin flag or false) */
+/* NULL is unauthenticated; FALSE is an authenticated nonadministrator. */
 (define dashboard_check_user (lambda (req) (begin
-	(set pw (scan_lookup nil (table "system" false "user" false)
-		(list 373834222010370 (scan_boundary "equal" "username" 0 0 true true "" false) "password" "admin")
-		(list (req "username") (lambda (password admin) (list password admin)))))
-	(if (not (dashboard_auth_row_present? pw)) nil
-		(if (equal? (car pw) (password (req "password"))) (equal? (car (cdr pw)) 1) nil))
-)))
+	(define account (sql_authenticate_account (req "username") (req "password")))
+	(if account (begin
+		(sql_bind_http_session req account)
+		(if (account "admin") true false)) nil))))
 
 /* send 401 with WWW-Authenticate header */
 (define dashboard_send_401 (lambda (res) (begin
@@ -52,7 +48,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(if is_admin (show)
 		(begin
 			/* build list of db names the user has access to; nil neutral avoids pre-call quirk */
-			(define allowed (scan nil (table "system" false "access" false)
+			(define allowed (scan nil (table "system" false "access" false nil)
 				(list 369436175368192 (scan_boundary "equal" "username" 0 0 true true "" false)) (list username)
 				'() (lambda () true)
 				'("database") (lambda (acc db) (if (nil? db) acc (cons db (if (nil? acc) (list) acc))))
@@ -101,7 +97,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* check if user has access to a specific database */
 (define dashboard_has_db_access (lambda (username is_admin dbname)
 	(if is_admin true
-		(scan_lookup nil (table "system" false "access" false)
+		(scan_lookup nil (table "system" false "access" false nil)
 			(list 371635467059200
 				(scan_boundary "equal" "username" 0 0 true true "" false)
 				(scan_boundary "equal" "database" 1 1 true true "" false)) (list username dbname))
@@ -139,10 +135,10 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 
 /* helper: build JSON for a single user entry (takes username string) */
 (define dashboard_build_user_json (lambda (uname) (begin
-	(set is_adm (scan_lookup nil (table "system" false "user" false) (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "admin") (list uname)))
+	(set is_adm (scan_lookup nil (table "system" false "user" false nil) (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "admin") (list uname)))
 	/* get database access for non-admins */
 	(set dbs_csv (if is_adm ""
-		(scan nil (table "system" false "access" false)
+		(scan nil (table "system" false "access" false nil)
 			(list 369436175368192 (scan_boundary "equal" "username" 0 0 true true "" false)) (list uname)
 			'() (lambda () true)
 			'("database") (lambda (acc db) (if (equal? acc "") (json_encode db) (concat acc "," (json_encode db))))
@@ -160,13 +156,12 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 		(service_registry "Dashboard" (list (arg "api-port" (env "PORT" "4321")) "/dashboard" "GET, WebSocket"))
 	))
 	(lambda (req res) (begin
-		(define session (req "__session"))
 		(match (req "path")
 			/* API: user/access overview shared by the Users and Databases views. */
 			"/dashboard/api/users" (begin
 				(if (dashboard_check_admin req)
 					(dashboard_send_json res (dashboard_json_array
-						(scan nil (table "system" false "user" false) '(369435906932736) '()
+						(scan nil (table "system" false "user" false nil) '(369435906932736) '()
 							'() (lambda () true) '("username")
 							(lambda (acc username) (cons (dashboard_build_user_json username) acc))
 							'() (lambda (a b) (merge (list a b))))))
@@ -397,7 +392,7 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 			/* API: print log — list latest entries (admin only) */
 			"/dashboard/api/logs" (begin
 				(if (dashboard_check_admin req) (begin
-					(define items (scan_order (session "__memcp_tx") (table "system_statistic" false "logs" false)
+					(define items (scan_order ((req "__session") "__memcp_tx") (table "system_statistic" false "logs" false nil)
 						'(369435906932736) '()
 						'() (lambda () true)
 						'("datetime") '(>) 0 0 100
@@ -412,7 +407,7 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 			/* API: error query log — list entries (admin only) */
 			"/dashboard/api/errors" (begin
 				(if (dashboard_check_admin req) (begin
-					(define items (scan (session "__memcp_tx") (table "system_statistic" false "errors" false)
+					(define items (scan ((req "__session") "__memcp_tx") (table "system_statistic" false "errors" false nil)
 						'(369435906932736) '()
 						'() (lambda () true)
 						'("datetime" "database" "user" "query" "error")
@@ -430,7 +425,7 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 					(dashboard_send_401 res)
 					(begin
 						(define default_pw (if is_admin
-							(equal? (scan_lookup nil (table "system" false "user" false) (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") '("root"))
+							(equal? (scan_lookup nil (table "system" false "user" false nil) (list 372734710317056 (scan_boundary "equal" "username" 0 0 true true "" false) "password") '("root"))
 								(password "admin"))
 							false))
 						(dashboard_send_json res (concat
@@ -494,14 +489,14 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 /* Upgrade persisted metrics tables without dropping their history. */
 (define dashboard_migrate_perf_metrics (lambda (schema)
 	(if (not (has? (map (show schema "perf_metrics") (lambda (col) (get_assoc col "Field"))) "eps"))
-		(createcolumn (table schema false "perf_metrics" false) "eps" "float" '() '()))))
+		(createcolumn (table schema false "perf_metrics" false nil) "eps" "float" '() '()))))
 (dashboard_migrate_perf_metrics "system_statistic")
 
 /* self-scheduling tracing loop via setTimeout */
 (define metrics_trace_tick (lambda () (begin
 	(if (settings "MetricsTracing") (begin
 		(define s (stat))
-		(insert (table "system_statistic" false "perf_metrics" false)
+		(insert (table "system_statistic" false "perf_metrics" false nil)
 			'("time" "cpu" "mem_available" "mem_total" "shard_memory" "shard_budget" "connections" "max_connections" "rps" "eps")
 			(list (list
 				(now)
@@ -532,9 +527,9 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 	(define max_print (settings "MaxPrintLog"))
 	(if (> max_print 0) (begin
 		(try (lambda () (begin
-			(define cnt (scan nil (table "system_statistic" false "logs" false) '(369435906932736) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
+			(define cnt (scan nil (table "system_statistic" false "logs" false nil) '(369435906932736) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
 			(if (> cnt max_print)
-				(scan_order nil (table "system_statistic" false "logs" false) '(369435906932736) '() '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_print) '("$update") (lambda (acc $update) (begin ($update) acc)) nil)
+				(scan_order nil (table "system_statistic" false "logs" false nil) '(369435906932736) '() '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_print) '("$update") (lambda (acc $update) (begin ($update) acc)) nil)
 			)
 		)) (lambda (e) true))
 	))
@@ -542,9 +537,9 @@ eviction registrations or planner snapshots as a substitute for resident RAM. */
 	(define max_err (settings "MaxErrorQueryLog"))
 	(if (> max_err 0) (begin
 		(try (lambda () (begin
-			(define cnt (scan nil (table "system_statistic" false "errors" false) '(369435906932736) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
+			(define cnt (scan nil (table "system_statistic" false "errors" false nil) '(369435906932736) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
 			(if (> cnt max_err)
-				(scan_order nil (table "system_statistic" false "errors" false) '(369435906932736) '() '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_err) '("$update") (lambda (acc $update) (begin ($update) acc)) nil)
+				(scan_order nil (table "system_statistic" false "errors" false nil) '(369435906932736) '() '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_err) '("$update") (lambda (acc $update) (begin ($update) acc)) nil)
 			)
 		)) (lambda (e) true))
 	))

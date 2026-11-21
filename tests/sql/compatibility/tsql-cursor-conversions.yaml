@@ -1,0 +1,206 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Documented implicit cursor conversions preserve OPEN snapshots and FETCH movement
+# https://learn.microsoft.com/sql/t-sql/language-elements/set-local-variable-transact-sql
+# Each case owns its source so conversions cannot borrow a previous cursor's state.
+test_cases:
+- name: DISTINCT converts a default cursor and preserves NULL and its OPEN snapshot
+  sql: |
+    CREATE TABLE #distinct_values(value INT);
+    INSERT #distinct_values VALUES(10),(10),(20),(NULL);
+    DECLARE distinct_values CURSOR LOCAL FOR SELECT DISTINCT value FROM #distinct_values ORDER BY value;
+    DECLARE @first INT=99,@second INT,@third INT;
+    OPEN distinct_values;
+    UPDATE #distinct_values SET value=90 WHERE value=10;
+    FETCH NEXT FROM distinct_values INTO @first;
+    FETCH NEXT FROM distinct_values INTO @second;
+    FETCH NEXT FROM distinct_values INTO @third;
+    DEALLOCATE distinct_values;
+    SELECT @first AS first_value,@second AS second_value,@third AS third_value;
+  expect: {rows: 1, data: [{first_value: null, second_value: 10, third_value: 20}]}
+- name: Explicit DYNAMIC DISTINCT uses the documented static conversion
+  sql: |
+    CREATE TABLE #dynamic_distinct(value INT);
+    INSERT #dynamic_distinct VALUES(7),(7),(9);
+    DECLARE converted CURSOR LOCAL SCROLL DYNAMIC READ_ONLY FOR SELECT DISTINCT value FROM #dynamic_distinct ORDER BY value;
+    DECLARE @last INT,@first INT;
+    OPEN converted;
+    INSERT #dynamic_distinct VALUES(11);
+    FETCH ABSOLUTE -1 FROM converted INTO @last;
+    FETCH FIRST FROM converted INTO @first;
+    DEALLOCATE converted;
+    SELECT @last AS last_value,@first AS first_value;
+  expect: {rows: 1, data: [{last_value: 9, first_value: 7}]}
+- name: GROUP BY and HAVING retain aggregate values after source mutation
+  sql: |
+    CREATE TABLE #group_values(group_id INT,value INT);
+    INSERT #group_values VALUES(1,3),(1,5),(2,9),(3,1);
+    DECLARE grouped CURSOR LOCAL SCROLL FOR
+      SELECT group_id,SUM(value) AS total FROM #group_values GROUP BY group_id HAVING SUM(value)>1 ORDER BY group_id;
+    DECLARE @group INT,@total INT,@other_group INT,@other_total INT;
+    OPEN grouped;
+    UPDATE #group_values SET value=value+100;
+    FETCH FIRST FROM grouped INTO @group,@total;
+    FETCH LAST FROM grouped INTO @other_group,@other_total;
+    DEALLOCATE grouped;
+    SELECT @group AS first_group,@total AS first_total,@other_group AS last_group,@other_total AS last_total;
+  expect: {rows: 1, data: [{first_group: 1, first_total: 8, last_group: 2, last_total: 9}]}
+- name: An aggregate without GROUP BY converts to one snapshot row
+  sql: |
+    CREATE TABLE #aggregate_values(value INT);
+    INSERT #aggregate_values VALUES(3),(8),(NULL);
+    DECLARE aggregated CURSOR LOCAL FOR SELECT MAX(value) AS maximum FROM #aggregate_values;
+    DECLARE @maximum INT;
+    OPEN aggregated;
+    UPDATE #aggregate_values SET value=100;
+    FETCH NEXT FROM aggregated INTO @maximum;
+    DEALLOCATE aggregated;
+    SELECT @maximum AS maximum;
+  expect: {rows: 1, data: [{maximum: 8}]}
+- name: An empty aggregate cursor still contains the COUNT row
+  sql: |
+    CREATE TABLE #empty_values(value INT);
+    DECLARE empty_aggregate CURSOR LOCAL FOR SELECT COUNT(*) AS total FROM #empty_values;
+    DECLARE @total INT=77;
+    OPEN empty_aggregate;
+    DECLARE @status INT=CURSOR_STATUS('local','empty_aggregate');
+    FETCH NEXT FROM empty_aggregate INTO @total;
+    DECLARE @fetch INT=@@FETCH_STATUS;
+    DEALLOCATE empty_aggregate;
+    SELECT @total AS total,@status AS cursor_status,@fetch AS fetch_status;
+  expect: {rows: 1, data: [{total: 0, cursor_status: 1, fetch_status: 0}]}
+- name: UNION ALL conversion preserves duplicate rows and complete scrolling
+  sql: |
+    DECLARE combined CURSOR LOCAL SCROLL FOR
+      SELECT 1 AS value UNION ALL SELECT 1 AS value UNION ALL SELECT 2 AS value ORDER BY value;
+    DECLARE @first INT,@second INT,@third INT;
+    OPEN combined;
+    FETCH FIRST FROM combined INTO @first;
+    FETCH NEXT FROM combined INTO @second;
+    FETCH NEXT FROM combined INTO @third;
+    DEALLOCATE combined;
+    SELECT @first AS first_value,@second AS second_value,@third AS third_value;
+  expect: {rows: 1, data: [{first_value: 1, second_value: 1, third_value: 2}]}
+- name: ISO SCROLL converts a source without a unique index to a static cursor
+  sql: |
+    CREATE TABLE #scroll_values(value INT);
+    INSERT #scroll_values VALUES(4),(8),(12);
+    DECLARE scrolling SCROLL CURSOR FOR SELECT value FROM #scroll_values ORDER BY value;
+    DECLARE @middle INT,@last INT,@first INT;
+    OPEN scrolling;
+    DELETE FROM #scroll_values WHERE value=8;
+    INSERT #scroll_values VALUES(99);
+    FETCH ABSOLUTE 2 FROM scrolling INTO @middle;
+    FETCH ABSOLUTE -1 FROM scrolling INTO @last;
+    FETCH FIRST FROM scrolling INTO @first;
+    DEALLOCATE scrolling;
+    SELECT @middle AS middle_value,@last AS last_value,@first AS first_value;
+  expect: {rows: 1, data: [{middle_value: 8, last_value: 12, first_value: 4}]}
+- name: KEYSET converts when a source has no unique index
+  sql: |
+    CREATE TABLE #keyset_values(value INT);
+    INSERT #keyset_values VALUES(2),(2),(5);
+    DECLARE heap_keyset CURSOR LOCAL KEYSET READ_ONLY FOR SELECT value FROM #keyset_values ORDER BY value;
+    DECLARE @second INT,@last INT;
+    OPEN heap_keyset;
+    UPDATE #keyset_values SET value=99;
+    FETCH ABSOLUTE 2 FROM heap_keyset INTO @second;
+    FETCH LAST FROM heap_keyset INTO @last;
+    DEALLOCATE heap_keyset;
+    SELECT @second AS second_value,@last AS last_value;
+  expect: {rows: 1, data: [{second_value: 2, last_value: 5}]}
+- name: ISO joined cursor converts when one input lacks a unique index
+  sql: |
+    CREATE TABLE #join_keys(id INT PRIMARY KEY);
+    CREATE TABLE #join_values(id INT,value INT);
+    INSERT #join_keys VALUES(1),(2);
+    INSERT #join_values VALUES(1,3),(1,5),(2,8);
+    DECLARE joined SCROLL CURSOR FOR
+      SELECT v.value FROM #join_keys AS k INNER JOIN #join_values AS v ON v.id=k.id ORDER BY v.value;
+    DECLARE @second INT,@third INT;
+    OPEN joined;
+    UPDATE #join_values SET value=value+100;
+    FETCH ABSOLUTE 2 FROM joined INTO @second;
+    FETCH ABSOLUTE 3 FROM joined INTO @third;
+    DEALLOCATE joined;
+    SELECT @second AS second_value,@third AS third_value;
+  expect: {rows: 1, data: [{second_value: 5, third_value: 8}]}
+- name: Cursor variable assignment uses the same DISTINCT conversion
+  sql: |
+    CREATE TABLE #variable_values(value INT);
+    INSERT #variable_values VALUES(6),(6);
+    DECLARE @cursor CURSOR,@value INT;
+    SET @cursor=CURSOR LOCAL FOR SELECT DISTINCT value FROM #variable_values;
+    OPEN @cursor;
+    FETCH NEXT FROM @cursor INTO @value;
+    DECLARE @first_status INT=@@FETCH_STATUS;
+    FETCH NEXT FROM @cursor INTO @value;
+    DECLARE @end_status INT=@@FETCH_STATUS;
+    DEALLOCATE @cursor;
+    SELECT @value AS value,@first_status AS first_status,@end_status AS end_status;
+  expect: {rows: 1, data: [{value: 6, first_status: 0, end_status: -1}]}
+- name: Ordered default cursor over an unkeyed source converts without becoming scrollable
+  sql: |
+    CREATE TABLE #ordered_values(value INT);
+    INSERT #ordered_values VALUES(8),(3),(3);
+    DECLARE ordered_values CURSOR LOCAL FOR SELECT value FROM #ordered_values ORDER BY value;
+    DECLARE @first INT,@second INT,@third INT;
+    OPEN ordered_values;
+    DELETE FROM #ordered_values;
+    FETCH NEXT FROM ordered_values INTO @first;
+    FETCH NEXT FROM ordered_values INTO @second;
+    FETCH NEXT FROM ordered_values INTO @third;
+    DEALLOCATE ordered_values;
+    SELECT @first AS first_value,@second AS second_value,@third AS third_value;
+  expect: {rows: 1, data: [{first_value: 3, second_value: 3, third_value: 8}]}
+- name: A derived grouped source uses static cursor semantics
+  sql: |
+    CREATE TABLE #derived_values(group_id INT,value INT);
+    INSERT #derived_values VALUES(1,3),(1,5),(2,9);
+    DECLARE derived_values CURSOR LOCAL SCROLL FOR
+      SELECT d.group_id,d.total FROM (SELECT group_id,SUM(value) AS total FROM #derived_values GROUP BY group_id) AS d ORDER BY d.group_id;
+    DECLARE @group INT,@total INT;
+    OPEN derived_values;
+    UPDATE #derived_values SET value=100;
+    FETCH LAST FROM derived_values INTO @group,@total;
+    DEALLOCATE derived_values;
+    SELECT @group AS group_id,@total AS total;
+  expect: {rows: 1, data: [{group_id: 2, total: 9}]}
+- name: UNION duplicate elimination retains the static rowset contract
+  sql: |
+    DECLARE distinct_union CURSOR LOCAL SCROLL FOR
+      SELECT CAST(NULL AS INT) AS value UNION SELECT 1 AS value UNION SELECT 1 AS value ORDER BY value;
+    DECLARE @first INT=99,@second INT;
+    OPEN distinct_union;
+    FETCH FIRST FROM distinct_union INTO @first;
+    FETCH NEXT FROM distinct_union INTO @second;
+    FETCH NEXT FROM distinct_union INTO @second;
+    DECLARE @end_status INT=@@FETCH_STATUS;
+    DEALLOCATE distinct_union;
+    SELECT @first AS first_value,@second AS second_value,@end_status AS end_status;
+  expect: {rows: 1, data: [{first_value: null, second_value: 1, end_status: -1}]}
+- name: Converted forward only cursor still rejects backward movement
+  sql: |
+    DECLARE forward_values CURSOR LOCAL FORWARD_ONLY DYNAMIC FOR SELECT DISTINCT 4 AS value;
+    DECLARE @value INT=77,@rejected INT=0;
+    OPEN forward_values;
+    BEGIN TRY FETCH PRIOR FROM forward_values INTO @value; END TRY BEGIN CATCH SET @rejected=1; END CATCH;
+    FETCH NEXT FROM forward_values INTO @value;
+    DEALLOCATE forward_values;
+    SELECT @value AS value,@rejected AS backward_rejected;
+  expect: {rows: 1, data: [{value: 4, backward_rejected: 1}]}
+- name: Empty DISTINCT cursor reports no rows rather than a dynamic unknown count
+  sql: |
+    CREATE TABLE #empty_distinct(value INT);
+    DECLARE empty_distinct CURSOR LOCAL FOR SELECT DISTINCT value FROM #empty_distinct;
+    DECLARE @value INT=77;
+    OPEN empty_distinct;
+    DECLARE @status INT=CURSOR_STATUS('local','empty_distinct');
+    FETCH NEXT FROM empty_distinct INTO @value;
+    DECLARE @fetch INT=@@FETCH_STATUS;
+    DEALLOCATE empty_distinct;
+    SELECT @value AS value,@status AS cursor_status,@fetch AS fetch_status;
+  expect: {rows: 1, data: [{value: 77, cursor_status: 0, fetch_status: -1}]}

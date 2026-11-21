@@ -1,0 +1,74 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Large-value filegroup syntax preserves ordinary native columns, keys and defaults
+setup: []
+cleanup:
+- sql: DROP TABLE IF EXISTS lob_layout
+- sql: DROP TABLE IF EXISTS lob_default_layout
+- sql: DROP TABLE IF EXISTS lob_bounded
+- sql: DROP TABLE IF EXISTS lob_partitioned
+- sql: DROP TABLE IF EXISTS lob_unknown
+- sql: DROP TABLE IF EXISTS lob_missing
+- sql: DROP TABLE IF EXISTS lob_module_layout
+- sql: DROP FUNCTION IF EXISTS ddl_user_name
+test_cases:
+- name: Image placement retains a nonclustered composite key and its actual values
+  sql: |
+    CREATE TABLE lob_layout(
+      server_name VARCHAR(150) NOT NULL, database_name VARCHAR(150) NOT NULL,
+      payload IMAGE NULL, status_id INT NOT NULL,
+      CONSTRAINT lob_layout_pk PRIMARY KEY NONCLUSTERED(server_name ASC,database_name ASC)
+      WITH(PAD_INDEX=OFF,STATISTICS_NORECOMPUTE=OFF,IGNORE_DUP_KEY=OFF,
+        ALLOW_ROW_LOCKS=ON,ALLOW_PAGE_LOCKS=ON) ON [PRIMARY]
+    ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+- name: Later default declarations use the normal column owner
+  sql: ALTER TABLE lob_layout ADD CONSTRAINT lob_status_default DEFAULT((0)) FOR status_id
+- name: Insert uses the declared default and preserves image bytes
+  sql: INSERT lob_layout(server_name,database_name,payload) VALUES('node','sample',0x00ff)
+- name: Read back every original column after placement and default assignment
+  sql: SELECT server_name,database_name,CONVERT(VARCHAR(10),payload,2) AS payload,status_id FROM lob_layout
+  expect: {rows: 1, data: [{server_name: node, database_name: sample, payload: '00FF', status_id: 0}]}
+- name: The composite primary key remains enforced
+  sql: INSERT lob_layout(server_name,database_name,payload) VALUES('node','sample',0x10)
+  expect: {error: true}
+- name: Default filegroup accepts max text and binary declarations
+  sql: CREATE TABLE lob_default_layout(id INT,payload VARCHAR(MAX),wide_payload NVARCHAR(MAX),binary_payload VARBINARY(MAX)) TEXTIMAGE_ON [default]
+- name: Large-value insertion preserves complete text and binary values
+  sql: INSERT lob_default_layout VALUES(1,'complete',N'Grüße',0x001122)
+- name: Max declarations keep their values through ordinary storage
+  sql: SELECT id,payload,wide_payload,CONVERT(VARCHAR(10),binary_payload,2) AS binary_payload FROM lob_default_layout
+  expect: {rows: 1, data: [{id: 1, payload: complete, wide_payload: Grüße, binary_payload: '001122'}]}
+- name: Bounded text alone cannot declare large-value placement
+  sql: CREATE TABLE lob_bounded(id INT,payload VARCHAR(200)) TEXTIMAGE_ON [PRIMARY]
+  expect: {error: true, contains: large-value column}
+- name: An invalid large-value declaration leaves no table
+  sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name=N'lob_bounded' AND type=N'U'
+  expect: {rows: 1, data: [{n: 0}]}
+- name: A partition scheme cannot also declare textimage placement
+  sql: CREATE TABLE lob_partitioned(id INT,payload IMAGE) ON partition_group(id) TEXTIMAGE_ON [PRIMARY]
+  expect: {error: true, contains: partition scheme}
+- name: An undeclared filegroup cannot receive large values
+  sql: CREATE TABLE lob_unknown(id INT,payload IMAGE) TEXTIMAGE_ON [absent_group]
+  expect: {error: true, contains: filegroup does not exist}
+- name: The default filegroup identifier requires delimiters
+  sql: CREATE TABLE lob_missing(id INT,payload IMAGE) TEXTIMAGE_ON default
+  expect: {error: true}
+- name: A source function used by the following default has an ordinary declaration
+  sql: CREATE FUNCTION dbo.ddl_user_name() RETURNS VARCHAR(150) AS BEGIN RETURN 'bootstrap'; END
+- name: A conditional deployment batch retains its following ALTER DEFAULT statements
+  sql: |
+    IF NOT EXISTS(SELECT * FROM sysobjects WHERE name='lob_module_layout' AND xtype='u')
+    BEGIN
+      CREATE TABLE dbo.lob_module_layout(id INT PRIMARY KEY,payload IMAGE,created_at DATETIME,created_by VARCHAR(150))
+        ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+      ALTER TABLE dbo.lob_module_layout ADD CONSTRAINT lob_date_default DEFAULT(GETDATE()) FOR created_at
+      ALTER TABLE dbo.lob_module_layout ADD CONSTRAINT lob_user_default DEFAULT(dbo.ddl_user_name()) FOR created_by
+    END
+- name: The conditional schema and function defaults execute normally
+  sql: INSERT lob_module_layout(id) VALUES(7)
+- name: Complete values include a runtime timestamp and declared source default
+  sql: SELECT id,payload,CASE WHEN created_at IS NOT NULL THEN 1 ELSE 0 END AS dated,created_by FROM lob_module_layout
+  expect: {rows: 1, data: [{id: 7, payload: null, dated: 1, created_by: bootstrap}]}

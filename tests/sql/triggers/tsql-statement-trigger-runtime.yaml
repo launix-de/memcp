@@ -1,0 +1,151 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Native statement transition relations execute real T-SQL bodies once, with drained transaction abort
+setup:
+- sql: CREATE TABLE statement_tail_input(id INT PRIMARY KEY)
+- sql: INSERT INTO statement_tail_input VALUES(1)
+- sql: |
+    CREATE TRIGGER statement_tail_guard ON statement_tail_input FOR DELETE AS
+    BEGIN
+      SET NOCOUNT ON;
+      IF EXISTS(SELECT id FROM deleted WHERE id=1)
+      BEGIN RAISERROR(N'tail deletion rejected',16,1); ROLLBACK; END;
+      SET NOCOUNT OFF;
+    END
+- sql: CREATE TABLE statement_guard_input(id INT PRIMARY KEY, value INT)
+- sql: INSERT INTO statement_guard_input VALUES(1,10),(2,1)
+- sql: CREATE TABLE statement_audit_input(id INT PRIMARY KEY, value INT)
+- sql: CREATE TABLE statement_audit_log(old_count INT, new_count INT, touched BIT)
+- sql: |
+    CREATE TRIGGER dbo.statement_delete_guard ON dbo.statement_guard_input FOR DELETE AS
+    BEGIN
+      IF EXISTS(SELECT value FROM deleted WHERE value>5)
+      BEGIN
+        RAISERROR(N'deletion rejected',16,1);
+        ROLLBACK;
+      END
+    END
+- sql: |
+    CREATE TRIGGER dbo.statement_audit ON dbo.statement_audit_input AFTER INSERT,UPDATE,DELETE AS
+    BEGIN
+      INSERT INTO dbo.statement_audit_log(old_count,new_count,touched)
+      SELECT (SELECT COUNT(*) FROM deleted),(SELECT COUNT(*) FROM inserted),
+             CASE WHEN UPDATE(value) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END;
+    END
+cleanup:
+- sql: DROP TRIGGER IF EXISTS statement_tail_guard
+- sql: DROP TABLE IF EXISTS statement_tail_input
+- sql: DROP TRIGGER IF EXISTS dbo.statement_delete_guard
+- sql: DROP TRIGGER IF EXISTS dbo.statement_audit
+- sql: DROP TRIGGER IF EXISTS dbo.statement_readonly_guard
+- sql: DROP TABLE IF EXISTS statement_guard_input
+- sql: DROP TABLE IF EXISTS statement_audit_input
+- sql: DROP TABLE IF EXISTS statement_audit_log
+test_cases:
+- name: Empty DELETE executes the conditional statement body without inventing deleted rows
+  sql: DELETE FROM statement_guard_input WHERE id=99
+  expect: {rows: 1, data: [{affected_rows: 0}]}
+- name: Ordinary allowed DELETE keeps its exact affected count
+  sql: DELETE FROM statement_guard_input WHERE id=2
+  expect: {rows: 1, data: [{affected_rows: 1}]}
+- name: Terminal trigger rollback removes prior transaction work and stops the outer batch
+  session_id: statement_guard_owner
+  sql: |
+    BEGIN TRANSACTION;
+    INSERT INTO statement_guard_input VALUES(3,2);
+    DELETE FROM statement_guard_input WHERE id=1;
+    INSERT INTO statement_guard_input VALUES(4,2);
+  expect: {error: true, contains: '3609'}
+- name: Trigger abort leaves no user transaction and preserves the original deleted row
+  session_id: statement_guard_owner
+  sql: SELECT id,value,@@TRANCOUNT AS open_transactions FROM statement_guard_input ORDER BY id
+  expect:
+    rows: 1
+    data: [{id: 1, value: 10, open_transactions: 0}]
+- name: A separate observer sees neither prior transaction work nor the skipped suffix
+  session_id: statement_guard_observer
+  sql: SELECT id,value FROM statement_guard_input ORDER BY id
+  expect: {rows: 1, data: [{id: 1, value: 10}]}
+- name: One multirow INSERT supplies the complete inserted transition relation
+  sql: INSERT INTO statement_audit_input VALUES(1,5),(2,NULL),(3,7)
+  expect: {rows: 1, data: [{affected_rows: 3}]}
+- name: Same value UPDATE remains a real statement event with its declared assignment
+  sql: UPDATE statement_audit_input SET value=value
+  expect: {rows: 1, data: [{affected_rows: 3}]}
+- name: Zero row UPDATE still completes once with an empty transition relation
+  sql: UPDATE statement_audit_input SET value=9 WHERE id=99
+  expect: {rows: 1, data: [{affected_rows: 0}]}
+- name: Multirow DELETE supplies all deleted values to one completion
+  sql: DELETE FROM statement_audit_input WHERE id<3
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: Four actual statements produce four complete native transition summaries
+  sql: |
+    SELECT old_count,new_count,touched,
+           (SELECT COUNT(*) FROM statement_audit_input) AS remaining
+    FROM statement_audit_log ORDER BY old_count,new_count,touched
+  expect:
+    rows: 4
+    data:
+    - {old_count: 0, new_count: 0, touched: 1, remaining: 1}
+    - {old_count: 0, new_count: 3, touched: 1, remaining: 1}
+    - {old_count: 2, new_count: 0, touched: 0, remaining: 1}
+    - {old_count: 3, new_count: 3, touched: 1, remaining: 1}
+- name: A transition write is rejected and the outer UPDATE is undone
+  setup:
+  - sql: |
+      CREATE TRIGGER dbo.statement_readonly_guard ON dbo.statement_guard_input AFTER UPDATE AS
+      BEGIN INSERT INTO inserted(id,value) VALUES(9,9); END
+  sql: UPDATE statement_guard_input SET value=1 WHERE id=1
+  expect: {error: true, contains: native result relation is read-only}
+- name: Rejected transition writes leave both the public relation and native values unchanged
+  sql: SELECT id,value FROM statement_guard_input ORDER BY id
+  expect: {rows: 1, data: [{id: 1, value: 10}]}
+- name: Conditional abort with a static NOCOUNT tail preserves full rollback and restores disabled caller options
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root")
+      (define rejected (try (lambda () (begin
+        (tsql_execute_request "memcp-tests"
+          "SET NOCOUNT OFF; BEGIN TRANSACTION; INSERT INTO statement_tail_input VALUES(2); DELETE FROM statement_tail_input WHERE id=1; INSERT INTO statement_tail_input VALUES(3);"
+          session nil 0 (lambda (_row) true) (lambda args true)) false))
+        (lambda (failure) (strlike (string failure) "%3609%"))))
+      (and rejected (equal? (session "__tsql_nocount") false) (nil? (session "transaction"))))
+  expect: {result: true}
+- name: The abort restores the deleted row removes prior transaction work and skips the outer batch suffix
+  sql: SELECT id FROM statement_tail_input ORDER BY id
+  expect: {rows: 1, data: [{id: 1}]}
+- name: The ordinary path executes its retained NOCOUNT setter and restores an enabled caller
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root")
+      (tsql_execute_request "memcp-tests" "SET NOCOUNT ON; DELETE FROM statement_tail_input WHERE id=99;"
+        session nil 0 (lambda (_row) true) (lambda args true))
+      (equal? (session "__tsql_nocount") true))
+  expect: {result: true}
+- name: Adjacent decorative trigger headers preserve and execute the actual deleted query
+  setup:
+  - sql: CREATE TABLE statement_comment_input(id INT PRIMARY KEY)
+  - sql: CREATE TABLE statement_comment_log(id INT)
+  - sql: INSERT INTO statement_comment_input VALUES(1),(2)
+  - sql: |
+      /****** first header******/
+      /** second header**//*** third header***/
+      /**** fourth header****//***** fifth header*****/
+      CREATE TRIGGER statement_comment_guard ON statement_comment_input FOR DELETE AS
+      /* ordinary multiline
+         body header */
+      BEGIN
+        INSERT INTO statement_comment_log(id) SELECT id FROM deleted;
+      END
+  sql: DELETE FROM statement_comment_input
+  expect: {rows: 1, data: [{affected_rows: 2}]}
+- name: Commented trigger declaration retained every deleted row effect
+  sql: SELECT id FROM statement_comment_log ORDER BY id
+  cleanup:
+  - sql: DROP TRIGGER IF EXISTS statement_comment_guard
+  - sql: DROP TABLE IF EXISTS statement_comment_input
+  - sql: DROP TABLE IF EXISTS statement_comment_log
+  expect: {rows: 2, data: [{id: 1}, {id: 2}]}

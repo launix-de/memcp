@@ -1,0 +1,156 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  syntax: tsql
+  description: Native private unique declarations share catalog owner and decision lifetime
+setup:
+- sql: CREATE TABLE native_key_public(id INT)
+cleanup:
+- sql: DROP TABLE IF EXISTS native_key_public
+- sql: DROP TABLE IF EXISTS native_key_composite
+- sql: DROP TABLE IF EXISTS native_key_nullable
+- sql: DROP TABLE IF EXISTS native_key_retained
+- sql: DROP TABLE IF EXISTS native_key_aborted
+test_cases:
+- name: A separately named key preserves every composite primary key column
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define cols '("a" "b" "c" "d" "e" "f"))
+      (createtable "memcp-tests" "native_key_composite"
+        (append (map cols (lambda (name) (list "column" name "INT" (list) (list "null" false))))
+          (list "unique" "PRIMARY" cols)) (list "engine" "safe") false tx)
+      (define target (table "memcp-tests" false "native_key_composite" false tx))
+      (define added (createkey target "ix_six_coordinates" true cols tx (list "nulls_not_distinct" true)))
+      (define keys (get_assoc (show target "constraints") "Unique"))
+      (define independent (and added (equal? (count keys) 2)
+        (equal? (get_assoc (nth keys 1) "Id") "ix_six_coordinates")
+        (equal? (get_assoc (nth keys 1) "Cols") cols)
+        (nil? (table "memcp-tests" false "native_key_composite" false nil))))
+      (tx_commit s) independent)
+  expect: {result: true}
+- name: Private nullable uniqueness rejects a repeated NULL under its declared policy
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "native_key_nullable"
+        (list (list "column" "id" "INT" (list) (list)) (list "column" "value" "INT" (list) (list)))
+        (list "engine" "safe") false tx)
+      (define target (table "memcp-tests" false "native_key_nullable" false tx))
+      (createkey target "ix_nullable_coordinate" true '("value") tx (list "nulls_not_distinct" true))
+      (insert target '("id" "value") (list (list 1 nil)) '() nil false nil tx)
+      (define rejected (try (lambda () (begin (insert target '("id" "value") (list (list 2 nil)) '() nil false nil tx) false))
+        (lambda (failure) (strlike (concat failure) "%Duplicate%"))))
+      (tx_commit s) rejected)
+  expect: {result: true}
+- name: Savepoint rollback restores prior immutable keys on a retained private table
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "native_key_retained" (list (list "column" "id" "INT" (list) (list)))
+        (list "engine" "safe") false tx)
+      (define target (table "memcp-tests" false "native_key_retained" false tx))
+      (createkey target "ix_retained" true '("id") tx)
+      (define boundary (tx_savepoint tx))
+      (define before (show target "constraints"))
+      (createkey target "ix_retired" true '("id") tx)
+      (define has_two (equal? (count (get_assoc (show target "constraints") "Unique")) 2))
+      (tx_rollback_to_savepoint tx boundary)
+      (define restored (equal? (show target "constraints") before))
+      (tx_commit s) (and has_two restored))
+  expect: {result: true}
+- name: Invalid and foreign private key requests have no declaration effects
+  scm: |
+    (begin
+      (define s (newsession)) (define foreign (newsession)) (s "username" "root") (foreign "username" "root")
+      (tx_begin s) (tx_begin foreign)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "native_key_aborted" (list (list "column" "id" "INT" (list) (list)))
+        (list "engine" "safe") false tx)
+      (define target (table "memcp-tests" false "native_key_aborted" false tx))
+      (define before (show target "constraints"))
+      (define unknown (try (lambda () (begin (createkey target "ix_unknown" true '("absent") tx) false))
+        (lambda (failure) (strlike (concat failure) "%unknown unique declaration column%"))))
+      (define duplicate (try (lambda () (begin (createkey target "ix_duplicate" true '("id" "id") tx) false))
+        (lambda (failure) (strlike (concat failure) "%duplicate unique declaration column%"))))
+      (define denied (try (lambda () (begin (createkey target "ix_foreign" true '("id") (foreign "__memcp_tx")) false))
+        (lambda (failure) (strlike (concat failure) "%native catalog owner%"))))
+      (define unchanged (equal? before (show target "constraints")))
+      (tx_rollback s) (tx_rollback foreign)
+      (and unknown duplicate denied unchanged (nil? (table "memcp-tests" false "native_key_aborted" false nil))))
+  expect: {result: true}
+- name: Adding a private key after row access is explicitly rejected before metadata changes
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "native_key_aborted" (list (list "column" "id" "INT" (list) (list)))
+        (list "engine" "safe") false tx)
+      (define target (table "memcp-tests" false "native_key_aborted" false tx))
+      (insert target '("id") (list (list 1)) '() nil false nil tx)
+      (define before (show target "constraints"))
+      (define denied (try (lambda () (begin (createkey target "ix_late" true '("id") tx) false))
+        (lambda (failure) (strlike (concat failure) "%must precede native row access%"))))
+      (define unchanged (equal? before (show target "constraints")))
+      (tx_rollback s) (and denied unchanged))
+  expect: {result: true}
+- name: An owned private catalog cannot amend a public table
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "native_key_aborted" (list (list "column" "id" "INT" (list) (list)))
+        (list "engine" "safe") false tx)
+      (define target (table "memcp-tests" false "native_key_public" false nil))
+      (define before (show target "constraints"))
+      (define denied (try (lambda () (begin (createkey target "ix_public" true '("id") tx) false))
+        (lambda (failure) (strlike (concat failure) "%owned unpublished table%"))))
+      (define unchanged (equal? before (show target "constraints")))
+      (tx_rollback s) (and denied unchanged))
+  expect: {result: true}
+- name: A resource constructor cannot retire private declaration history before publishing
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "native_key_aborted" (list (list "column" "id" "INT" (list) (list)))
+        (list "engine" "safe") false tx)
+      (define target (table "memcp-tests" false "native_key_aborted" false tx))
+      (define boundary (tx_savepoint tx))
+      (createkey target "ix_before_constructor" true '("id") tx)
+      (define before (show target "constraints"))
+      (define denied (try (lambda () (begin
+        (tx_get_or_compute_resource tx "savepoint-constructor" (lambda () (begin
+          (tx_rollback_to_savepoint tx boundary) 1))) false))
+        (lambda (failure) (strlike (concat failure) "%initialization is still active%"))))
+      (define unchanged (equal? before (show target "constraints")))
+      (tx_rollback s) (and denied unchanged))
+  expect: {result: true}
+- name: Restart freezes only committed key declarations
+  syntax: mysql
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect: {rows: 0}
+- name: Composite and nullable key identities survive restart exactly
+  scm: |
+    (begin
+      (define composite (get_assoc (show (table "memcp-tests" false "native_key_composite" false nil) "constraints") "Unique"))
+      (define nullable (get_assoc (show (table "memcp-tests" false "native_key_nullable" false nil) "constraints") "Unique"))
+      (and (equal? (count composite) 2) (equal? (get_assoc (nth composite 1) "Id") "ix_six_coordinates")
+        (equal? (get_assoc (nth composite 1) "Cols") '("a" "b" "c" "d" "e" "f"))
+        (get_assoc (nth nullable 0) "nulls_not_distinct")))
+  expect: {result: true}
+- name: Savepoint-retired keys and rolled-back tables stay absent after restart
+  scm: |
+    (begin
+      (define keys (get_assoc (show (table "memcp-tests" false "native_key_retained" false nil) "constraints") "Unique"))
+      (and (equal? (count keys) 1) (equal? (get_assoc (nth keys 0) "Id") "ix_retained")
+        (nil? (table "memcp-tests" false "native_key_aborted" false nil))))
+  expect: {result: true}
+- name: Committed nullable key continues enforcing uniqueness after restart
+  sql: INSERT INTO native_key_nullable(id,value) VALUES(3,NULL)
+  expect: {error: true}

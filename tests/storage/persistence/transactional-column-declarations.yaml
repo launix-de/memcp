@@ -1,0 +1,454 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/en-us/sql/t-sql/statements/alter-table-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Same-slot public column contracts share original transaction visibility, validation, callbacks and
+    restart
+setup:
+- sql: DROP TABLE IF EXISTS column_decl_restart
+- sql: DROP TABLE IF EXISTS column_decl_computed
+- sql: DROP TABLE IF EXISTS column_decl_check
+- sql: DROP TABLE IF EXISTS column_decl_raw
+- sql: DROP TABLE IF EXISTS column_decl_text
+- sql: DROP TABLE IF EXISTS column_decl_values
+- sql: CREATE TABLE column_decl_values(id INT PRIMARY KEY,value FLOAT NULL)
+- sql: INSERT column_decl_values VALUES(1,NULL),(2,2.5)
+- sql: CREATE TABLE column_decl_text(id INT PRIMARY KEY,value VARCHAR(3) NOT NULL)
+- sql: INSERT column_decl_text VALUES(1,'ab')
+- sql: CREATE TABLE column_decl_raw(id INT PRIMARY KEY,value INT NULL)
+- sql: INSERT column_decl_raw VALUES(1,7)
+- sql: CREATE TABLE column_decl_check(id INT PRIMARY KEY,value INT NULL)
+- sql: INSERT column_decl_check VALUES(1,7)
+- sql: ALTER TABLE column_decl_check ADD CONSTRAINT CK_column_decl CHECK(value>=0)
+- sql: CREATE TABLE column_decl_computed(id INT PRIMARY KEY,value INT NULL,doubled AS(value*2))
+- sql: INSERT column_decl_computed(id,value) VALUES(1,7)
+- sql: CREATE TABLE column_decl_restart(id INT PRIMARY KEY,value FLOAT NULL)
+- sql: INSERT column_decl_restart VALUES(1,NULL)
+test_cases:
+- name: The original row transaction privately validates NULL after its own UPDATE
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE column_decl_values SET value=0 WHERE value IS NULL
+    - connection: owner
+      sql: ALTER TABLE column_decl_values ALTER COLUMN value FLOAT NOT NULL
+    - connection: owner
+      sql: INSERT column_decl_values VALUES(3,3.5)
+    - connection: owner
+      sql: UPDATE column_decl_values SET value=4.5 WHERE id=2
+    - connection: owner
+      sql: SELECT id,value FROM column_decl_values ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 0.0
+        - id: 2
+          value: 4.5
+        - id: 3
+          value: 3.5
+    - connection: owner
+      sql: SELECT CAST(is_nullable AS INT) AS nullable_flag,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'column_decl_values')
+        AND name=N'value'
+      expect:
+        rows: 1
+        data:
+        - nullable_flag: 0
+          max_length: 8
+    - connection: observer
+      sql: SELECT id,value FROM column_decl_values ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: null
+        - id: 2
+          value: 2.5
+    - connection: observer
+      sql: SELECT CAST(is_nullable AS INT) AS nullable_flag,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'column_decl_values')
+        AND name=N'value'
+      expect:
+        rows: 1
+        data:
+        - nullable_flag: 1
+          max_length: 8
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM column_decl_values ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: null
+        - id: 2
+          value: 2.5
+- name: A private relaxation changes actual native INSERT and UPDATE contracts
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE column_decl_text ALTER COLUMN value VARCHAR(3) NULL
+    - connection: owner
+      sql: UPDATE column_decl_text SET value=NULL WHERE id=1
+    - connection: owner
+      sql: INSERT column_decl_text VALUES(2,NULL)
+    - connection: owner
+      sql: SELECT id,value FROM column_decl_text ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: null
+        - id: 2
+          value: null
+    - connection: observer
+      sql: SELECT id,value FROM column_decl_text ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: ab
+    - connection: observer
+      sql: SELECT CAST(is_nullable AS INT) AS nullable_flag,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'column_decl_text')
+        AND name=N'value'
+      expect:
+        rows: 1
+        data:
+        - nullable_flag: 0
+          max_length: 3
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM column_decl_text ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: ab
+- name: Private width and exact string payloads roll back with their original rows
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE column_decl_text ALTER COLUMN value VARCHAR(15) NOT NULL
+    - connection: owner
+      sql: UPDATE column_decl_text SET value='Mixed Case  ' WHERE id=1
+    - connection: owner
+      sql: INSERT column_decl_text VALUES(2,'twelve chars')
+    - connection: owner
+      sql: SELECT id,value FROM column_decl_text ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 'Mixed Case  '
+        - id: 2
+          value: twelve chars
+    - connection: owner
+      sql: SELECT CAST(is_nullable AS INT) AS nullable_flag,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'column_decl_text')
+        AND name=N'value'
+      expect:
+        rows: 1
+        data:
+        - nullable_flag: 0
+          max_length: 15
+    - connection: observer
+      sql: SELECT CAST(is_nullable AS INT) AS nullable_flag,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'column_decl_text')
+        AND name=N'value'
+      expect:
+        rows: 1
+        data:
+        - nullable_flag: 0
+          max_length: 3
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM column_decl_text ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: ab
+- name: Savepoint restores the prior private descriptor and only its row suffix
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE column_decl_values SET value=11 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE column_decl_values ALTER COLUMN value FLOAT NOT NULL
+    - connection: owner
+      sql: SAVE TRANSACTION column_boundary
+    - connection: owner
+      sql: ALTER TABLE column_decl_values ALTER COLUMN value FLOAT NULL
+    - connection: owner
+      sql: INSERT column_decl_values VALUES(3,NULL)
+    - connection: owner
+      sql: ROLLBACK TRANSACTION column_boundary
+    - connection: owner
+      sql: SELECT CAST(is_nullable AS INT) AS nullable_flag,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'column_decl_values')
+        AND name=N'value'
+      expect:
+        rows: 1
+        data:
+        - nullable_flag: 0
+          max_length: 8
+    - connection: owner
+      sql: SELECT id,value FROM column_decl_values ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 11.0
+        - id: 2
+          value: 2.5
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT CAST(is_nullable AS INT) AS nullable_flag,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'column_decl_values')
+        AND name=N'value'
+      expect:
+        rows: 1
+        data:
+        - nullable_flag: 1
+          max_length: 8
+- name: Default changes and descriptor changes retain one ordered savepoint history
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE column_decl_values ADD CONSTRAINT DF_column_decl DEFAULT(13) FOR value
+    - connection: owner
+      sql: UPDATE column_decl_values SET value=DEFAULT WHERE value IS NULL
+    - connection: owner
+      sql: ALTER TABLE column_decl_values ALTER COLUMN value FLOAT NOT NULL
+    - connection: owner
+      sql: SAVE TRANSACTION kept_default
+    - connection: owner
+      sql: ALTER TABLE column_decl_values DROP CONSTRAINT DF_column_decl
+    - connection: owner
+      sql: ALTER TABLE column_decl_values ALTER COLUMN value FLOAT NULL
+    - connection: owner
+      sql: ROLLBACK TRANSACTION kept_default
+    - connection: owner
+      sql: INSERT column_decl_values(id) VALUES(3)
+    - connection: owner
+      sql: SELECT id,value FROM column_decl_values ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 13.0
+        - id: 2
+          value: 2.5
+        - id: 3
+          value: 13.0
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+- name: The current private NOT NULL descriptor rejects native NULL before any row effects
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "column_decl_raw" false tx))
+      (define c (show target "column" "value" false tx))
+      (define declaration (list (list (c "RawType") (coalesceNil (c "Dimensions") '()) false (c "Collation"))
+        (list (c "RawType") (coalesceNil (c "Dimensions") '()) (c "Null") (c "Collation"))))
+      (try (lambda () (begin
+        (altercolumn target "value" "declaration" declaration tx)
+        (define rejected (try (lambda () (begin (insert target '("id" "value") (list (list 2 nil)) '() nil false nil tx) false)) (lambda (failure) true)))
+        (insert target '("id" "value") (list (list 3 19)) '() nil false nil tx)
+        (define correct (scan tx target '() '() '() (lambda () true) '("id" "value")
+          (lambda (acc id value) (and acc (or (and (equal? id 1) (equal? value 7)) (and (equal? id 3) (equal? value 19))))) true (lambda (left right) (and left right))))
+        (define count_rows (scan tx target '() '() '() (lambda () true) '() (lambda (n) (+ n 1)) 0 +))
+        (tx_rollback owner)
+        (list rejected correct count_rows ((show target "column" "value" false) "Null"))))
+      (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - true
+    - true
+    - 2
+    - true
+- name: Historical NULL validation fails without publishing a private declaration
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "column_decl_raw" false tx))
+      (define c (show target "column" "value" false tx))
+      (define declaration (list (list (c "RawType") (coalesceNil (c "Dimensions") '()) false (c "Collation"))
+        (list (c "RawType") (coalesceNil (c "Dimensions") '()) (c "Null") (c "Collation"))))
+      (try (lambda () (begin
+        (insert target '("id" "value") (list (list 2 nil)) '() nil false nil tx)
+        (define rejected (try (lambda () (begin (altercolumn target "value" "declaration" declaration tx) false)) (lambda (failure) true)))
+        (define nullable ((show target "column" "value" false tx) "Null"))
+        (tx_rollback owner)
+        (list rejected nullable (scan nil target '() '() '() (lambda () true) '("value") + 0 +))))
+      (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - true
+    - true
+    - 7
+- name: A retained raw callback cannot lend its old nullable descriptor to a new contract
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "column_decl_raw" false tx))
+      (define c (show target "column" "value" false tx))
+      (define declaration (list (list (c "RawType") (coalesceNil (c "Dimensions") '()) false (c "Collation"))
+        (list (c "RawType") (coalesceNil (c "Dimensions") '()) (c "Null") (c "Collation"))))
+      (define receipt (newsession))
+      (try (lambda () (begin
+        (scan tx target '() '() '() (lambda () true) '("$update")
+          (lambda (n update) (begin
+            (receipt "rejected" (try (lambda () (begin (altercolumn target "value" "declaration" declaration tx) false)) (lambda (failure) true)))
+            (update '("value" 23)) (+ n 1))) 0 +)
+        (define own (scan tx target '() '() '() (lambda () true) '("value") + 0 +))
+        (define nullable ((show target "column" "value" false tx) "Null"))
+        (tx_rollback owner)
+        (list (receipt "rejected") nullable own (scan nil target '() '() '() (lambda () true) '("value") + 0 +))))
+      (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - true
+    - true
+    - 23
+    - 7
+- name: The existing CHECK declaration retains its actual native dependency
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "column_decl_check" false tx))
+      (define c (show target "column" "value" false tx))
+      (define declaration (list (list (c "RawType") (coalesceNil (c "Dimensions") '()) false (c "Collation"))
+        (list (c "RawType") (coalesceNil (c "Dimensions") '()) (c "Null") (c "Collation"))))
+      (try (lambda () (begin
+        (define rejected (try (lambda () (begin (altercolumn target "value" "declaration" declaration tx) false)) (lambda (failure) true)))
+        (define nullable ((show target "column" "value" false tx) "Null"))
+        (tx_rollback owner)
+        (list rejected nullable (scan nil target '() '() '() (lambda () true) '("value") + 0 +))))
+      (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - true
+    - true
+    - 7
+- name: The existing computed input declaration retains its actual native dependency
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "column_decl_computed" false tx))
+      (define c (show target "column" "value" false tx))
+      (define declaration (list (list (c "RawType") (coalesceNil (c "Dimensions") '()) false (c "Collation"))
+        (list (c "RawType") (coalesceNil (c "Dimensions") '()) (c "Null") (c "Collation"))))
+      (try (lambda () (begin
+        (define rejected (try (lambda () (begin (altercolumn target "value" "declaration" declaration tx) false)) (lambda (failure) true)))
+        (define nullable ((show target "column" "value" false tx) "Null"))
+        (tx_rollback owner)
+        (list rejected nullable (scan nil target '() '() '() (lambda () true) '("value") + 0 +))))
+      (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - true
+    - true
+    - 7
+- name: Committed descriptor and rows become visible at the same decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE column_decl_restart SET value=41 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE column_decl_restart ALTER COLUMN value FLOAT NOT NULL
+    - connection: owner
+      sql: INSERT column_decl_restart VALUES(2,13)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM column_decl_restart ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 41.0
+        - id: 2
+          value: 13.0
+    - connection: observer
+      sql: SELECT CAST(is_nullable AS INT) AS nullable_flag,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'column_decl_restart')
+        AND name=N'value'
+      expect:
+        rows: 1
+        data:
+        - nullable_flag: 0
+          max_length: 8
+- name: An accepted same-slot column decision survives abrupt process loss
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart recovers the accepted declaration before row consumers
+  action: restart
+- name: Recovered rows preserve the accepted values
+  sql: SELECT id,value FROM column_decl_restart ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 41.0
+    - id: 2
+      value: 13.0
+- name: Recovered metadata preserves actual native nullability
+  sql: SELECT CAST(is_nullable AS INT) AS nullable_flag,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'column_decl_restart')
+    AND name=N'value'
+  expect:
+    rows: 1
+    data:
+    - nullable_flag: 0
+      max_length: 8
+- name: An unaccepted descriptor and row suffix retain their original transaction until crash
+  session_id: column-declaration-abandoned
+  sql: BEGIN TRANSACTION; ALTER TABLE column_decl_restart ALTER COLUMN value FLOAT NULL; UPDATE column_decl_restart
+    SET value=NULL WHERE id=1; INSERT column_decl_restart VALUES(3,NULL)
+- name: Abrupt loss abandons the same original transaction
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart resolves the unaccepted metadata and row suffix together
+  action: restart
+- name: Unaccepted row suffix remains absent and original values survive
+  sql: SELECT id,value FROM column_decl_restart ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 41.0
+    - id: 2
+      value: 13.0
+- name: Unaccepted metadata relaxation remains absent
+  sql: SELECT CAST(is_nullable AS INT) AS nullable_flag,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'column_decl_restart')
+    AND name=N'value'
+  expect:
+    rows: 1
+    data:
+    - nullable_flag: 0
+      max_length: 8
+cleanup:
+- sql: DROP TABLE IF EXISTS column_decl_restart
+- sql: DROP TABLE IF EXISTS column_decl_computed
+- sql: DROP TABLE IF EXISTS column_decl_check
+- sql: DROP TABLE IF EXISTS column_decl_raw
+- sql: DROP TABLE IF EXISTS column_decl_text
+- sql: DROP TABLE IF EXISTS column_decl_values

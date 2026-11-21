@@ -128,7 +128,7 @@ test_cases:
       (define cache (newcachemap))
       (define sess (newsession))
       (reduce (produceN 40) (lambda (_ i)
-        (cached_parse cache (list parse_sql) "memcp-tests" "SELECT id FROM ilt_perf_rows WHERE id = 1" nil "root" sess true)) nil)
+        (cached_parse cache "sql" (list parse_sql) "memcp-tests" "SELECT id FROM ilt_perf_rows WHERE id = 1" nil "root" sess true nil)) nil)
       (if (and (> (count (cache)) 0) (<= (count (cache)) 40)) "ok" (error "invalid cache")))
   expect:
     data:
@@ -143,7 +143,7 @@ test_cases:
       (define cache (newcachemap))
       (define sess (newsession))
       (reduce (produceN 40) (lambda (_ i)
-        (cached_parse cache (list parse_sql) "memcp-tests" "SELECT id FROM ilt_perf_rows WHERE id IN (1,2,3)" nil "root" sess true)) nil)
+        (cached_parse cache "sql" (list parse_sql) "memcp-tests" "SELECT id FROM ilt_perf_rows WHERE id IN (1,2,3)" nil "root" sess true nil)) nil)
       (if (and (> (count (cache)) 0) (<= (count (cache)) 40)) "ok" (error "invalid cache")))
   expect:
     data:
@@ -158,7 +158,7 @@ test_cases:
       (define cache (newcachemap))
       (define sess (newsession))
       (reduce (produceN 40) (lambda (_ i)
-        (cached_parse cache (list parse_sql) "memcp-tests" (concat "SELECT id FROM ilt_perf_rows WHERE id IN (0" (reduce (produceN i) (lambda (s n) (concat s "," (+ n 1))) "") ")") nil "root" sess true)) nil)
+        (cached_parse cache "sql" (list parse_sql) "memcp-tests" (concat "SELECT id FROM ilt_perf_rows WHERE id IN (0" (reduce (produceN i) (lambda (s n) (concat s "," (+ n 1))) "") ")") nil "root" sess true nil)) nil)
       (if (and (> (count (cache)) 0) (<= (count (cache)) 40)) "ok" (error "invalid cache")))
   expect:
     data:
@@ -172,14 +172,14 @@ test_cases:
     (begin
       (define sess (newsession))
       (reduce (produceN 40) (lambda (_ i)
-        (cached_parse (newcachemap) (list parse_sql) "memcp-tests"
-          "SELECT id FROM ilt_perf_rows WHERE id IN (1,2,3)" nil "root" sess true)) nil)
+        (cached_parse (newcachemap) "sql" (list parse_sql) "memcp-tests"
+          "SELECT id FROM ilt_perf_rows WHERE id IN (1,2,3)" nil "root" sess true nil)) nil)
       "ok")
   expect:
     data: ["ok"]
 setup:
 - sql: DROP TABLE IF EXISTS ilt_perf_rows
 - sql: CREATE TABLE ilt_perf_rows (id INT PRIMARY KEY, label TEXT) ENGINE=sloppy
-- scm: (begin (insert (table "memcp-tests" false "ilt_perf_rows" false) '("id" "label") (map (produceN 128) (lambda (i) (list i "item")))) (rebuild (table "memcp-tests" false "ilt_perf_rows" false) true false))
+- scm: (begin (insert (table "memcp-tests" false "ilt_perf_rows" false nil) '("id" "label") (map (produceN 128) (lambda (i) (list i "item")))) (rebuild (table "memcp-tests" false "ilt_perf_rows" false nil) true false))
 cleanup:
 - sql: DROP TABLE IF EXISTS ilt_perf_rows

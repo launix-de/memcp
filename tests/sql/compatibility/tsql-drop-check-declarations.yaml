@@ -1,0 +1,206 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Native CHECK removal follows public declaration visibility, rollback, savepoints and durable restart
+setup:
+- sql: CREATE TABLE drop_check_values(id INT PRIMARY KEY,value INT)
+- sql: ALTER TABLE drop_check_values ADD CONSTRAINT CK_drop_lower CHECK(value>=0)
+- sql: ALTER TABLE drop_check_values ADD CONSTRAINT CK_drop_upper CHECK(value<100)
+- sql: INSERT drop_check_values VALUES(1,4)
+- sql: CREATE TABLE drop_check_rollback(id INT PRIMARY KEY,value INT)
+- sql: ALTER TABLE drop_check_rollback ADD CONSTRAINT CK_drop_rollback CHECK(value>=0)
+- sql: CREATE TABLE drop_check_savepoint(id INT PRIMARY KEY,value INT)
+- sql: ALTER TABLE drop_check_savepoint ADD CONSTRAINT CK_drop_savepoint CHECK(value>=0)
+- sql: CREATE TABLE drop_check_atomic(id INT PRIMARY KEY,value INT)
+- sql: ALTER TABLE drop_check_atomic ADD CONSTRAINT CK_drop_atomic CHECK(value>=0)
+- sql: CREATE TABLE drop_check_restart(id INT PRIMARY KEY,value INT)
+- sql: ALTER TABLE drop_check_restart ADD CONSTRAINT CK_drop_restart CHECK(value>=0)
+cleanup:
+- sql: DROP TABLE IF EXISTS drop_check_restart
+- sql: DROP TABLE IF EXISTS drop_check_atomic
+- sql: DROP TABLE IF EXISTS drop_check_savepoint
+- sql: DROP TABLE IF EXISTS drop_check_rollback
+- sql: DROP TABLE IF EXISTS drop_check_values
+test_cases:
+- name: CHECK removal retires actual insert and update validators after autocommit
+  sql: 'ALTER TABLE drop_check_values DROP CONSTRAINT CK_drop_lower;
+
+    INSERT drop_check_values VALUES(2,-5);
+
+    UPDATE drop_check_values SET value=-7 WHERE id=1;
+
+    SELECT id,value FROM drop_check_values ORDER BY id;
+
+    '
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: -7
+    - id: 2
+      value: -5
+- name: Removing one CHECK retains the independent existing validator
+  sql: INSERT drop_check_values VALUES(3,200)
+  expect:
+    error: true
+    contains: CK_drop_upper failed
+- name: A failed retained CHECK does not publish a row
+  sql: SELECT id,value FROM drop_check_values ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: -7
+    - id: 2
+      value: -5
+- name: Dropped metadata is absent while the other native declaration survives
+  sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name IN(N'CK_drop_lower',N'CK_drop_upper')
+    ORDER BY constraint_name
+  expect:
+    rows: 1
+    data:
+    - constraint_name: CK_drop_upper
+- name: Missing CHECK removal retains the ordinary missing constraint error
+  sql: ALTER TABLE drop_check_values DROP CONSTRAINT CK_drop_missing
+  expect:
+    error: true
+    contains: 'constraint does not exist: CK_drop_missing'
+- name: IF EXISTS on a missing constraint leaves native declarations unchanged
+  sql: ALTER TABLE drop_check_values DROP CONSTRAINT IF EXISTS CK_drop_missing; SELECT constraint_name FROM information_schema.check_constraints
+    WHERE constraint_name IN(N'CK_drop_lower',N'CK_drop_upper')
+  expect:
+    rows: 1
+    data:
+    - constraint_name: CK_drop_upper
+- name: An uncommitted removal is private and full rollback restores the actual declaration
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE drop_check_rollback DROP CONSTRAINT CK_drop_rollback
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM information_schema.check_constraints WHERE constraint_name=N'CK_drop_rollback'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM information_schema.check_constraints WHERE constraint_name=N'CK_drop_rollback'
+      expect:
+        rows: 1
+        data:
+        - n: 1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM information_schema.check_constraints WHERE constraint_name=N'CK_drop_rollback'
+      expect:
+        rows: 1
+        data:
+        - n: 1
+    - connection: owner
+      sql: INSERT drop_check_rollback VALUES(1,-1)
+      expect:
+        error: true
+        contains:
+        - CK_drop_rollback failed
+- name: Savepoint rewind restores the exact CHECK and permits a later committed removal
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: SAVE TRANSACTION before_drop
+    - connection: owner
+      sql: ALTER TABLE drop_check_savepoint DROP CONSTRAINT CK_drop_savepoint
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM information_schema.check_constraints WHERE constraint_name=N'CK_drop_savepoint'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_drop
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM information_schema.check_constraints WHERE constraint_name=N'CK_drop_savepoint'
+      expect:
+        rows: 1
+        data:
+        - n: 1
+    - connection: owner
+      sql: ALTER TABLE drop_check_savepoint DROP CONSTRAINT CK_drop_savepoint
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM information_schema.check_constraints WHERE constraint_name=N'CK_drop_savepoint'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: observer
+      sql: INSERT drop_check_savepoint VALUES(1,-9); SELECT value FROM drop_check_savepoint
+      expect:
+        rows: 1
+        data:
+        - value: -9
+- name: A missing second target rolls back the first removal in the same ALTER
+  sql: ALTER TABLE drop_check_atomic DROP CONSTRAINT CK_drop_atomic,CK_drop_absent
+  expect:
+    error: true
+    contains: 'constraint does not exist: CK_drop_absent'
+- name: The first CHECK remains present and enforced after failed multiple removal
+  sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name=N'CK_drop_atomic'
+  expect:
+    rows: 1
+    data:
+    - constraint_name: CK_drop_atomic
+- name: The restored validator still rejects invalid rows
+  sql: INSERT drop_check_atomic VALUES(1,-1)
+  expect:
+    error: true
+    contains: CK_drop_atomic failed
+- name: Native constraint name matching retains its case insensitive declaration spelling
+  sql: ALTER TABLE drop_check_atomic DROP CONSTRAINT ck_DROP_atomic; INSERT drop_check_atomic VALUES(1,-2); SELECT
+    value FROM drop_check_atomic
+  expect:
+    rows: 1
+    data:
+    - value: -2
+- name: A committed removal has no stale metadata identity after restart preparation
+  sql: ALTER TABLE drop_check_restart DROP CONSTRAINT CK_drop_restart; SELECT COUNT(*) AS n FROM information_schema.check_constraints
+    WHERE constraint_name=N'CK_drop_restart'
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: CHECK removal uses the ordinary durable server lifecycle
+  syntax: mysql
+  sql: SHUTDOWN
+- name: Restart keeps removed CHECK metadata absent
+  sql: SELECT COUNT(*) AS n FROM information_schema.check_constraints WHERE constraint_name IN(N'CK_drop_restart',N'CK_drop_lower',N'CK_drop_savepoint',N'CK_drop_atomic')
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: Restart does not resurrect the removed insert or update validator
+  sql: INSERT drop_check_restart VALUES(1,-1); UPDATE drop_check_restart SET value=-2 WHERE id=1; SELECT value FROM
+    drop_check_restart
+  expect:
+    rows: 1
+    data:
+    - value: -2
+- name: Restart retains an unrelated native CHECK validator
+  sql: INSERT drop_check_values VALUES(3,200)
+  expect:
+    error: true
+    contains: CK_drop_upper failed
+- name: Restart retains the independent CHECK metadata and original rows
+  sql: SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_name IN(N'CK_drop_lower',N'CK_drop_upper')
+  expect:
+    rows: 1
+    data:
+    - constraint_name: CK_drop_upper

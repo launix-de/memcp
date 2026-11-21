@@ -1,0 +1,52 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/data-types/sql-variant-transact-sql
+# https://learn.microsoft.com/sql/t-sql/functions/isnull-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Variant fallback and common values preserve declared intrinsic subtypes and SQL NULLs
+setup: []
+cleanup: []
+test_cases:
+- name: Nested property fallback converts the final variant explicitly
+  sql: SELECT CONVERT(VARCHAR,ISNULL(ISNULL(ISNULL(SERVERPROPERTY('UnknownOne'),SERVERPROPERTY('UnknownTwo')),SERVERPROPERTY('UnknownThree')),'')) AS server_name
+  expect: {rows: 1, data: [{server_name: ''}]}
+- name: ISNULL retains an existing variant value
+  sql: SELECT ISNULL(SERVERPROPERTY('Edition'),'fallback') AS edition
+  expect: {rows: 1, data: [{edition: MemCP}]}
+- name: ANSI and national fallback values use their declared intrinsic contracts
+  sql: SELECT ISNULL(SERVERPROPERTY('Unknown'),CAST('later' AS VARCHAR(5))) AS ansi_value,ISNULL(SERVERPROPERTY('Unknown'),CAST(N'Grüße' AS NVARCHAR(5))) AS national_value
+  expect: {rows: 1, data: [{ansi_value: later, national_value: Grüße}]}
+- name: Integral and Boolean fallback values retain their values
+  sql: SELECT ISNULL(SERVERPROPERTY('Unknown'),CAST(7 AS INT)) AS number_value,ISNULL(SERVERPROPERTY('Unknown'),CAST(1 AS BIT)) AS bit_value
+  expect: {rows: 1, data: [{number_value: 7, bit_value: true}]}
+- name: Literal NULL and an already intrinsic replacement retain SQL variant
+  sql: SELECT ISNULL(NULL,SERVERPROPERTY('Edition')) AS edition,ISNULL(SERVERPROPERTY('Unknown'),SERVERPROPERTY('Edition')) AS fallback
+  expect: {rows: 1, data: [{edition: MemCP, fallback: MemCP}]}
+- name: COALESCE uses variant precedence without discarding the selected payload
+  sql: SELECT COALESCE(SERVERPROPERTY('Edition'),N'other') AS present,COALESCE(SERVERPROPERTY('Unknown'),CAST(7 AS INT)) AS fallback
+  expect: {rows: 1, data: [{present: MemCP, fallback: 7}]}
+- name: CASE converts its selected branch through the common variant contract
+  sql: SELECT CASE WHEN 1=1 THEN CAST(7 AS INT) ELSE SERVERPROPERTY('Edition') END AS number_value,CASE WHEN 1=0 THEN SERVERPROPERTY('Edition') ELSE N'kept' END AS text_value
+  expect: {rows: 1, data: [{number_value: 7, text_value: kept}]}
+- name: Variant ISNULL does not evaluate an unselected replacement value
+  sql: SELECT ISNULL(SERVERPROPERTY('Edition'),1/0) AS edition
+  expect: {rows: 1, data: [{edition: MemCP}]}
+- name: A selected erroneous replacement retains its SQL error
+  sql: SELECT ISNULL(SERVERPROPERTY('Unknown'),1/0) AS invalid
+  expect: {error: true}
+- name: MAX declarations cannot be implicitly stored in a variant
+  sql: SELECT ISNULL(SERVERPROPERTY('Edition'),CAST(N'other' AS NVARCHAR(MAX))) AS invalid
+  expect: {error: true}
+- name: XML cannot be implicitly stored in a variant
+  sql: SELECT ISNULL(SERVERPROPERTY('Edition'),CAST(N'<item/>' AS XML)) AS invalid
+  expect: {error: true}
+- name: Variant results retain wire metadata for fallback payloads and empty results
+  tds:
+    statements:
+    - sql: SELECT ISNULL(SERVERPROPERTY('Unknown'),CAST(N'kept' AS NVARCHAR(4))) AS value
+      expect: {rows: 1, data: [{value: kept}], column_types: [{name: value, type: SQL_VARIANT}]}
+    - sql: SELECT ISNULL(SERVERPROPERTY('Unknown'),CAST(7 AS INT)) AS value WHERE 1=0
+      expect: {rows: 0, column_types: [{name: value, type: SQL_VARIANT}]}

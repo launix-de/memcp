@@ -1,0 +1,64 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Table-variable mutation targets reuse their actual joined source rather than introducing another row domain
+cleanup:
+  - sql: DROP PROCEDURE IF EXISTS local_target_compile
+test_cases:
+  - name: A joined DELETE binds the sole direct local source and preserves duplicate target identities
+    sql: |
+      DECLARE @items TABLE(id INT,flag INT);
+      INSERT @items VALUES(1,0),(1,0),(1,1),(1,1),(2,1),(3,NULL),(4,0);
+      DELETE FROM @items FROM (SELECT id FROM @items WHERE flag=0) selected
+        INNER JOIN @items matched ON selected.id=matched.id AND flag=1;
+      SELECT id,flag FROM @items ORDER BY id,flag;
+    expect: {rows: 5,data: [{id: 1,flag: 0},{id: 1,flag: 0},{id: 2,flag: 1},{id: 3,flag: null},{id: 4,flag: 0}]}
+  - name: A derived self-source UPDATE retains its selection before mutating a local target
+    noncritical: true
+    sql: |
+      DECLARE @items TABLE(id INT,flag INT,amount INT);
+      INSERT @items VALUES(1,0,2),(1,1,5),(2,1,7),(3,NULL,9);
+      UPDATE @items SET amount=amount+3
+        FROM (SELECT id FROM @items WHERE flag=0) selected
+        INNER JOIN @items matched ON selected.id=matched.id AND flag=1;
+      SELECT id,flag,amount FROM @items ORDER BY id,flag;
+    expect: {rows: 4,data: [{id: 1,flag: 0,amount: 2},{id: 1,flag: 1,amount: 8},{id: 2,flag: 1,amount: 7},{id: 3,flag: null,amount: 9}]}
+  - name: A local UPDATE reuses the existing FROM alias for assignments and predicates
+    sql: |
+      DECLARE @items TABLE(id INT,flag INT,amount INT);
+      INSERT @items VALUES(1,0,2),(1,1,5),(2,1,7),(3,NULL,9);
+      UPDATE @items SET amount=amount+3 FROM @items matched WHERE flag=1 AND id=1;
+      SELECT id,flag,amount FROM @items ORDER BY id,flag;
+    expect: {rows: 4,data: [{id: 1,flag: 0,amount: 2},{id: 1,flag: 1,amount: 8},{id: 2,flag: 1,amount: 7},{id: 3,flag: null,amount: 9}]}
+  - name: NOEXEC binds the same DELETE source inside a stored module without installing it
+    tds:
+      statements:
+        - sql: SET NOEXEC ON
+        - sql: |
+            CREATE PROCEDURE local_target_compile AS BEGIN
+              DECLARE @items TABLE(id INT,flag INT);
+              DELETE FROM @items FROM (SELECT id FROM @items WHERE flag=0) selected
+                INNER JOIN @items matched ON selected.id=matched.id AND flag=1;
+            END
+        - sql: SET NOEXEC OFF; SELECT OBJECT_ID(N'local_target_compile',N'P') AS module_id
+          expect: {rows: 1,data: [{module_id: null}]}
+  - name: A target outside FROM remains an independent mutation domain
+    sql: |
+      DECLARE @items TABLE(id INT);
+      DECLARE @selection TABLE(enabled INT);
+      INSERT @items VALUES(1),(2);
+      INSERT @selection VALUES(0),(1);
+      DELETE FROM @items FROM @selection s WHERE s.enabled=1;
+      SELECT COUNT(*) AS remaining FROM @items;
+    expect: {rows: 1,data: [{remaining: 0}]}
+  - name: NULL join keys never make unrelated local targets eligible for deletion
+    sql: |
+      DECLARE @items TABLE(id INT,flag INT);
+      INSERT @items VALUES(NULL,0),(NULL,1),(1,0),(2,1);
+      DELETE FROM @items FROM (SELECT id FROM @items WHERE flag=0) selected
+        INNER JOIN @items matched ON selected.id=matched.id AND flag=1;
+      SELECT id,flag FROM @items ORDER BY id,flag;
+    expect: {rows: 4,data: [{id: null,flag: 0},{id: null,flag: 1},{id: 1,flag: 0},{id: 2,flag: 1}]}

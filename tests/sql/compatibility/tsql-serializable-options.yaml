@@ -1,0 +1,67 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/set-transaction-isolation-level-transact-sql
+# https://learn.microsoft.com/sql/relational-databases/errors-events/mssqlserver-41325-database-engine-error
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: SQL isolation options use native optimistic validation without intermediate commits
+setup:
+  - sql: CREATE TABLE serializable_option_rows(id INT PRIMARY KEY,value INT)
+cleanup:
+  - sql: DROP TABLE IF EXISTS serializable_option_rows
+  - sql: DROP TABLE IF EXISTS serializable_option_created
+test_cases:
+  - name: Serializable transactions publish their own declaration and keyed rows together
+    sql: |
+      SET XACT_ABORT ON;
+      SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+      BEGIN TRANSACTION;
+      CREATE TABLE serializable_option_created(id INT NOT NULL,value INT DEFAULT 7);
+      ALTER TABLE serializable_option_created ADD CONSTRAINT serializable_option_pk PRIMARY KEY(id);
+      INSERT serializable_option_created(id) VALUES(1);
+      SELECT id,value FROM serializable_option_created;
+      COMMIT TRANSACTION;
+      SELECT id,value FROM serializable_option_created;
+    expect: {rows: 2, data: [{id: 1, value: 7}, {id: 1, value: 7}]}
+  - name: Arming isolation after a private write retains its transaction and rollback journal
+    sql: |
+      BEGIN TRANSACTION;
+      INSERT serializable_option_rows VALUES(1,11);
+      SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+      SELECT id,value FROM serializable_option_rows WHERE id=1;
+      ROLLBACK TRANSACTION;
+      SELECT COUNT(*) AS remaining FROM serializable_option_rows WHERE id=1;
+    expect: {rows: 2, data: [{id: 1, value: 11}, {remaining: 0}]}
+  - name: A concurrent phantom produces the documented optimistic validation error
+    tds:
+      statements:
+        - connection: reader
+          sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION; SELECT id FROM serializable_option_rows WHERE id=2
+          expect: {rows: 0}
+        - connection: writer
+          sql: INSERT serializable_option_rows VALUES(2,22)
+        - connection: reader
+          sql: COMMIT TRANSACTION
+          expect: {error: true, contains: ['41325', serializable validation failure]}
+        - connection: reader
+          sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+          expect: {rows: 1, data: [{state: -1, depth: 1}]}
+        - connection: reader
+          sql: ROLLBACK TRANSACTION; SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+          expect: {rows: 1, data: [{state: 0, depth: 0}]}
+        - connection: writer
+          sql: SELECT id,value FROM serializable_option_rows WHERE id=2
+          expect: {rows: 1, data: [{id: 2, value: 22}]}
+  - name: The existing read committed mode still permits a later committed row
+    tds:
+      statements:
+        - connection: reader
+          sql: SET TRANSACTION ISOLATION LEVEL READ COMMITTED; BEGIN TRANSACTION; SELECT id FROM serializable_option_rows WHERE id=3
+          expect: {rows: 0}
+        - connection: writer
+          sql: INSERT serializable_option_rows VALUES(3,33)
+        - connection: reader
+          sql: SELECT id,value FROM serializable_option_rows WHERE id=3; COMMIT TRANSACTION
+          expect: {rows: 1, data: [{id: 3, value: 33}]}

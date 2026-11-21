@@ -1,0 +1,166 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: DECLARE and SET scalar queries retain declared assignment contracts and current source ownership
+setup:
+- sql: CREATE TABLE initializer_query_values(id INT PRIMARY KEY,value INT,amount DECIMAL(10,2))
+- sql: INSERT initializer_query_values VALUES(1,10,12.34),(2,20,23.45)
+- sql: CREATE TABLE initializer_query_guard(id INT PRIMARY KEY,label VARCHAR(3))
+- sql: INSERT initializer_query_guard VALUES(1,'abc')
+- sql: CREATE TYPE dbo.initializer_amount FROM DECIMAL(8,2) NULL
+- sql: CREATE TYPE dbo.initializer_label FROM VARCHAR(3) NULL
+cleanup:
+- sql: DROP TABLE IF EXISTS initializer_query_guard
+- sql: DROP TABLE IF EXISTS initializer_query_values
+- sql: DROP TYPE IF EXISTS dbo.initializer_amount
+- sql: DROP TYPE IF EXISTS dbo.initializer_label
+test_cases:
+- name: DECLARE initializers bind scalar queries alongside connection scalar inputs
+  sql: |
+    DECLARE @depth INT=@@TRANCOUNT,
+      @visible INT=(SELECT COUNT(*) FROM initializer_query_values),
+      @total BIGINT=(SELECT SUM(value) FROM initializer_query_values);
+    SELECT @depth AS depth,@visible AS visible,@total AS total;
+  expect: {rows: 1,data: [{depth: 0,visible: 2,total: 30}]}
+- name: Empty scalar and aggregate queries preserve their distinct SQL identities
+  sql: |
+    DECLARE @missing INT=(SELECT value FROM initializer_query_values WHERE id=99),
+      @empty_count INT=(SELECT COUNT(*) FROM initializer_query_values WHERE id=99);
+    SELECT @missing AS missing,@empty_count AS empty_count;
+  expect: {rows: 1,data: [{missing: null,empty_count: 0}]}
+- name: SET and compound SET consume scalar queries through the declared destination
+  sql: |
+    DECLARE @value BIGINT=3;
+    SET @value=(SELECT SUM(value) FROM initializer_query_values);
+    SET @value+=(SELECT value FROM initializer_query_values WHERE id=1);
+    SELECT @value AS value;
+  expect: {rows: 1,data: [{value: 40}]}
+- name: A scalar cardinality failure does not publish a partial variable value
+  sql: |
+    DECLARE @value INT=77,@failure INT=0;
+    BEGIN TRY SET @value=(SELECT value FROM initializer_query_values); END TRY
+    BEGIN CATCH SET @failure=ERROR_NUMBER(); END CATCH;
+    SELECT @value AS value,@failure AS failure;
+  expect: {rows: 1,data: [{value: 77,failure: 512}]}
+- name: A local table variable remains in the initializer source scope
+  sql: |
+    DECLARE @rows TABLE(id INT PRIMARY KEY,value INT);
+    INSERT @rows VALUES(1,7),(2,8);
+    DECLARE @value BIGINT=(SELECT SUM(value) FROM @rows);
+    SELECT @value AS value;
+  expect: {rows: 1,data: [{value: 15}]}
+- name: A local temporary source retains its real declaration and transaction owner
+  sql: |
+    CREATE TABLE #initializer_query_temp(id INT PRIMARY KEY,value INT);
+    INSERT #initializer_query_temp VALUES(1,7),(2,8);
+    DECLARE @value BIGINT=(SELECT SUM(value) FROM #initializer_query_temp);
+    DROP TABLE #initializer_query_temp;
+    SELECT @value AS value;
+  expect: {rows: 1,data: [{value: 15}]}
+- name: Initializers read the current explicit transaction before its rollback
+  sql: |
+    BEGIN TRANSACTION InitializerOwner;
+    INSERT initializer_query_values VALUES(3,30,34.56);
+    DECLARE @visible INT=(SELECT COUNT(*) FROM initializer_query_values);
+    ROLLBACK TRANSACTION InitializerOwner;
+    SELECT @visible AS visible_before_rollback,
+      (SELECT COUNT(*) FROM initializer_query_values) AS visible_after_rollback,
+      @@TRANCOUNT AS active_count;
+  expect: {rows: 1,data: [{visible_before_rollback: 3,visible_after_rollback: 2,active_count: 0}]}
+- name: Scalar-query conversion preserves declared decimal scale and text width
+  tds:
+    statements:
+    - sql: |
+        DECLARE @amount DECIMAL(8,2)=(SELECT CAST(12.345 AS DECIMAL(10,3))),
+          @label VARCHAR(3)=(SELECT CAST('abcdef' AS VARCHAR(6)));
+        SELECT @amount AS amount,@label AS label;
+      expect:
+        rows: 1
+        data: [{amount: '12.35',label: abc}]
+        column_types: [{name: amount,type: DECIMAL,precision: 8,scale: 2},{name: label,type: VARCHAR,length: 3}]
+- name: A nullable alias destination retains its declared decimal metadata
+  tds:
+    statements:
+    - sql: |
+        DECLARE @amount dbo.initializer_amount=(SELECT amount FROM initializer_query_values WHERE id=99);
+        SELECT @amount AS amount;
+      expect:
+        rows: 1
+        data: [{amount: null}]
+        column_types: [{name: amount,type: DECIMAL,precision: 8,scale: 2}]
+- name: Scalar-query initializers use the actual ANSI warnings invocation profile
+  sql: |
+    DECLARE @failure INT=0,@off_value INT=7;
+    SET ANSI_WARNINGS ON;
+    BEGIN TRY DECLARE @strict INT=(SELECT 1/0); END TRY
+    BEGIN CATCH SET @failure=ERROR_NUMBER(); END CATCH;
+    SET ANSI_WARNINGS OFF;
+    SET @off_value=(SELECT 1/0);
+    SET ANSI_WARNINGS ON;
+    SELECT @failure AS strict_error,@off_value AS off_value;
+  expect: {rows: 1,data: [{strict_error: 8134,off_value: null}]}
+- name: A typed NULL source does not bypass the implicit date conversion contract
+  sql: DECLARE @value INT=(SELECT CAST(NULL AS DATE));
+  expect: {error: true,contains: ['206']}
+- name: A cached initializer starts from the current source declaration
+  session_id: initializer_query_guard_owner
+  sql: |
+    DECLARE @label VARCHAR(8)=(SELECT label FROM initializer_query_guard WHERE id=1);
+    SELECT @label AS label;
+  expect: {rows: 1,data: [{label: abc}]}
+- name: The identical initializer rebinds after its source width changes
+  session_id: initializer_query_guard_owner
+  setup:
+  - sql: ALTER TABLE initializer_query_guard ALTER COLUMN label VARCHAR(8)
+  - sql: UPDATE initializer_query_guard SET label='abcdef' WHERE id=1
+  sql: |
+    DECLARE @label VARCHAR(8)=(SELECT label FROM initializer_query_guard WHERE id=1);
+    SELECT @label AS label;
+  expect: {rows: 1,data: [{label: abcdef}]}
+- name: All eight compound SET operators use ordinary expression and assignment rules
+  sql: |
+    DECLARE @value INT=10;
+    SET @value+=5;
+    SET @value-=2;
+    SET @value*=3;
+    SET @value/=2;
+    SET @value%=7;
+    SET @value&=3;
+    SET @value|=8;
+    SET @value^=1;
+    SELECT @value AS value;
+  expect: {rows: 1,data: [{value: 8}]}
+- name: Text compound addition uses its declared concatenation and destination width
+  sql: |
+    DECLARE @value VARCHAR(5)='abc';
+    SET @value+=(SELECT CAST('def' AS VARCHAR(3)));
+    SELECT @value AS value;
+  expect: {rows: 1,data: [{value: abcde}]}
+- name: An unqualified local alias uses the current declared base precision and scale
+  tds:
+    statements:
+    - sql: |
+        DECLARE @amount initializer_amount=(SELECT SUM(amount) FROM initializer_query_values);
+        SELECT @amount AS amount;
+      expect:
+        rows: 1
+        data: [{amount: '35.79'}]
+        column_types: [{name: amount,type: DECIMAL,precision: 8,scale: 2}]
+- name: A local alias destination starts from its current catalog width
+  session_id: initializer_query_alias_owner
+  sql: |
+    DECLARE @label dbo.initializer_label=(SELECT CAST('abcdef' AS VARCHAR(6)));
+    SELECT @label AS label;
+  expect: {rows: 1,data: [{label: abc}]}
+- name: An identical DECLARE binds a recreated alias before guarded query reuse
+  session_id: initializer_query_alias_owner
+  setup:
+  - sql: DROP TYPE dbo.initializer_label
+  - sql: CREATE TYPE dbo.initializer_label FROM VARCHAR(8) NULL
+  sql: |
+    DECLARE @label dbo.initializer_label=(SELECT CAST('abcdef' AS VARCHAR(6)));
+    SELECT @label AS label;
+  expect: {rows: 1,data: [{label: abcdef}]}

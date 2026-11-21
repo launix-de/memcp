@@ -269,7 +269,18 @@ test_cases:
     contains: drop the foreign key constraint
   noncritical: true
 - name: Native candidate-key removal protects strict references
-  scm: (dropkey (table "memcp-tests" false "tsql_fk_parent" false) "PRIMARY")
+  # Earlier noncritical DROP probes are destructive when supported. Build the
+  # exact native reference independently; keep the original query/error oracle.
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.tsql_fk_child
+  - sql: DROP TABLE IF EXISTS dbo.tsql_fk_parent
+  - sql: CREATE TABLE dbo.tsql_fk_parent ([First] INT,[Second] INT,PRIMARY KEY([First],[Second]))
+  - sql: INSERT dbo.tsql_fk_parent VALUES(1,10),(2,20),(3,30),(4,40)
+  - sql: CREATE TABLE dbo.tsql_fk_child(id INT PRIMARY KEY,a INT,b INT)
+  - scm: |
+      (createforeignkey (table "memcp-tests" false "tsql_fk_child" false nil) "FK child]parent" '("a" "b")
+        (table "memcp-tests" false "tsql_fk_parent" false nil) '("First" "Second") "restrict" "restrict")
+  scm: (dropkey (table "memcp-tests" false "tsql_fk_parent" false nil) "PRIMARY")
   expect:
     error: true
     contains: drop the foreign key constraint
@@ -320,7 +331,7 @@ test_cases:
     error: true
     contains: foreign key constraint
   cleanup:
-  - scm: (dropforeignkey (table "memcp-tests" false "tsql_fk_checked_insert" false) "FK_checked_insert")
+  - scm: (dropforeignkey (table "memcp-tests" false "tsql_fk_checked_insert" false nil) "FK_checked_insert")
   - sql: DROP TABLE IF EXISTS dbo.tsql_fk_checked_insert
   - sql: DROP TABLE IF EXISTS dbo.tsql_fk_checked_parent
   noncritical: true
@@ -331,15 +342,47 @@ test_cases:
   setup:
   - sql: CREATE TABLE dbo.tsql_fk_enforcement_parent ([First] INT,[Second] INT,PRIMARY KEY([First],[Second]))
   - scm: |
-      (if (find ((show (table "memcp-tests" false "tsql_fk_alter" false) "constraints") "ForeignKeys")
+      (if (find ((show (table "memcp-tests" false "tsql_fk_alter" false nil) "constraints") "ForeignKeys")
             (lambda (key) (equal? (key "Id") "FK_alter_parent")))
         true
-        (createforeignkey (table "memcp-tests" false "tsql_fk_alter" false) "FK_alter_parent" '("a" "b")
-          (table "memcp-tests" false "tsql_fk_enforcement_parent" false) '("First" "Second") "restrict" "restrict"))
+        (createforeignkey (table "memcp-tests" false "tsql_fk_alter" false nil) "FK_alter_parent" '("a" "b")
+          (table "memcp-tests" false "tsql_fk_enforcement_parent" false nil) '("First" "Second") "restrict" "restrict"))
   sql: INSERT dbo.tsql_fk_alter VALUES (1,7,70)
   expect:
     error: true
     contains: foreign key constraint
+- name: Rolled back constraint removal preserves its committed foreign key
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.fk_rollback_child
+  - sql: DROP TABLE IF EXISTS dbo.fk_rollback_parent
+  - sql: CREATE TABLE dbo.fk_rollback_parent(id INT PRIMARY KEY)
+  - sql: CREATE TABLE dbo.fk_rollback_child(id INT PRIMARY KEY,p INT,CONSTRAINT FK_rollback_reference FOREIGN KEY(p) REFERENCES dbo.fk_rollback_parent(id))
+  steps:
+  - sql: |
+      BEGIN TRANSACTION;
+      BEGIN TRY
+        ALTER TABLE dbo.fk_rollback_child DROP CONSTRAINT FK_rollback_reference;
+        ROLLBACK TRANSACTION;
+      END TRY
+      BEGIN CATCH
+        IF @@TRANCOUNT>0 ROLLBACK TRANSACTION;
+      END CATCH;
+      SELECT COUNT(*) AS retained FROM sys.foreign_keys WHERE name=N'FK_rollback_reference';
+    expect:
+      rows: 1
+      data: [{retained: 1}]
+  - sql: INSERT dbo.fk_rollback_child VALUES(1,999)
+    expect:
+      error: true
+      contains: foreign key constraint
+  - sql: SELECT COUNT(*) AS rows_retained FROM dbo.fk_rollback_child
+    expect:
+      rows: 1
+      data: [{rows_retained: 0}]
+  cleanup:
+  - scm: (dropforeignkey (table "memcp-tests" false "fk_rollback_child" false nil) "FK_rollback_reference")
+  - sql: DROP TABLE IF EXISTS dbo.fk_rollback_child
+  - sql: DROP TABLE IF EXISTS dbo.fk_rollback_parent
 - name: DROP CONSTRAINT resolves constraint casing and removes enforcement
   sql: ALTER TABLE dbo.tsql_fk_alter DROP CONSTRAINT fk_ALTER_parent
 - name: Release independent native enforcement fixture
@@ -827,4 +870,188 @@ test_cases:
 - name: Zero parent independent cleanup 6
   sql: DROP TABLE IF EXISTS fk_zero_only_no_action
 
+- name: Inline CREATE binds canonical native endpoints and preserves actual reference enforcement
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.InlineFkChild
+  - sql: DROP TABLE IF EXISTS dbo.InlineFkParent
+  - sql: CREATE TABLE dbo.InlineFkParent([First] INT,[Second] INT,payload INT,PRIMARY KEY([First],[Second]))
+  - sql: INSERT dbo.InlineFkParent VALUES(1,10,7),(2,20,11)
+  steps:
+  - sql: CREATE TABLE dbo.InlineFkChild(id INT PRIMARY KEY,aRef INT,bRef INT,CONSTRAINT FK_inline_mixed FOREIGN KEY([AREF],[Bref]) REFERENCES dbo.[INLINEFKPARENT]([FIRST],[second]))
+  - scm: |
+      (begin
+        (define child (table "memcp-tests" false "InlineFkChild" false nil))
+        (define parent (table "memcp-tests" false "InlineFkParent" false nil))
+        (define outgoing (car ((show child "constraints") "ForeignKeys")))
+        (define incoming (car ((show parent "constraints") "ForeignKeys")))
+        (list (show child "name") (show parent "name")
+          (outgoing "OtherTable") (outgoing "LocalColumns") (outgoing "OtherColumns")
+          (incoming "OtherTable") (incoming "LocalColumns") (incoming "OtherColumns")))
+    expect: {result: [InlineFkChild, InlineFkParent, InlineFkParent, [aRef, bRef], [First, Second], InlineFkChild, [First, Second], [aRef, bRef]]}
+  - sql: INSERT dbo.InlineFkChild VALUES(100,1,10),(102,NULL,999)
+    expect: {affected_rows: 2}
+  - sql: INSERT dbo.InlineFkChild VALUES(101,1,20)
+    expect: {error: true, contains: foreign key constraint}
+  - sql: DELETE FROM dbo.InlineFkParent WHERE [First]=1
+    expect: {error: true, contains: foreign key constraint}
+  - sql: UPDATE dbo.InlineFkParent SET [Second]=11 WHERE [First]=1
+    expect: {error: true, contains: foreign key constraint}
+  - sql: DROP TABLE dbo.InlineFkParent
+    expect: {error: true, contains: foreign key}
+  - sql: ALTER TABLE dbo.InlineFkChild DROP COLUMN [AREF]
+    expect: {error: true, contains: foreign key}
+  - sql: ALTER TABLE dbo.InlineFkParent DROP COLUMN [FIRST]
+    expect: {error: true, contains: foreign key}
+  - scm: (dropkey (table "memcp-tests" false "InlineFkParent" false nil) "PRIMARY")
+    expect: {error: true, contains: foreign key}
+  - sql: SELECT id,aRef,bRef FROM dbo.InlineFkChild ORDER BY id
+    expect: {rows: 2, data: [{id: 100, aRef: 1, bRef: 10}, {id: 102, aRef: null, bRef: 999}]}
+  - sql: SELECT [First],[Second],payload FROM dbo.InlineFkParent ORDER BY [First]
+    expect: {rows: 2, data: [{First: 1, Second: 10, payload: 7}, {First: 2, Second: 20, payload: 11}]}
+  - sql: DROP TABLE dbo.InlineFkChild
+  - scm: (count ((show (table "memcp-tests" false "InlineFkParent" false nil) "constraints") "ForeignKeys"))
+    expect: {result: 0}
+  - scm: (dropkey (table "memcp-tests" false "InlineFkParent" false nil) "PRIMARY")
+    expect: {result: true}
+  - sql: DELETE FROM dbo.InlineFkParent WHERE [First]=1
+    expect: {affected_rows: 1}
+  - sql: SELECT [First],[Second],payload FROM dbo.InlineFkParent ORDER BY [First]
+    expect: {rows: 1, data: [{First: 2, Second: 20, payload: 11}]}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS dbo.InlineFkChild
+  - sql: DROP TABLE IF EXISTS dbo.InlineFkParent
+- name: Invalid inline reference declarations fail before publishing any child
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.inline_fk_type_parent
+  - sql: DROP TABLE IF EXISTS dbo.inline_fk_nonunique_parent
+  - sql: CREATE TABLE dbo.inline_fk_type_parent(id INT PRIMARY KEY)
+  - sql: CREATE TABLE dbo.inline_fk_nonunique_parent(id INT)
+  steps:
+  - sql: CREATE TABLE dbo.inline_fk_bad_type(p BIGINT,CONSTRAINT FK_inline_bad_type FOREIGN KEY(p) REFERENCES dbo.inline_fk_type_parent(id))
+    expect: {error: true, contains: declarations do not match}
+  - sql: CREATE TABLE dbo.inline_fk_bad_column(p INT,CONSTRAINT FK_inline_bad_column FOREIGN KEY(missing) REFERENCES dbo.inline_fk_type_parent(id))
+    expect: {error: true, contains: unknown foreign key column}
+  - sql: CREATE TABLE dbo.inline_fk_bad_parent(p INT,CONSTRAINT FK_inline_bad_parent FOREIGN KEY(p) REFERENCES dbo.inline_fk_missing_parent(id))
+    expect: {error: true, contains: foreign key endpoint does not exist}
+  - sql: CREATE TABLE dbo.inline_fk_bad_key(p INT,CONSTRAINT FK_inline_bad_key FOREIGN KEY(p) REFERENCES dbo.inline_fk_nonunique_parent(id))
+    expect: {error: true, contains: existing native unique target}
+  - sql: CREATE TABLE dbo.inline_fk_bad_computed(p AS CAST(1 AS INT),CONSTRAINT FK_inline_bad_computed FOREIGN KEY(p) REFERENCES dbo.inline_fk_type_parent(id))
+    expect: {error: true, contains: computed columns}
+  - sql: CREATE TABLE dbo.inline_fk_bad_self(id INT PRIMARY KEY,p INT,CONSTRAINT FK_inline_bad_self FOREIGN KEY(p) REFERENCES dbo.[INLINE_FK_BAD_SELF](id))
+    expect: {error: true, contains: inline self foreign declarations}
+  - sql: SELECT OBJECT_ID(N'inline_fk_bad_type',N'U') AS wrong_type,OBJECT_ID(N'inline_fk_bad_column',N'U') AS missing_column,OBJECT_ID(N'inline_fk_bad_parent',N'U') AS missing_parent,OBJECT_ID(N'inline_fk_bad_key',N'U') AS missing_key,OBJECT_ID(N'inline_fk_bad_computed',N'U') AS computed_column,OBJECT_ID(N'inline_fk_bad_self',N'U') AS self_reference
+    expect: {rows: 1, data: [{wrong_type: null, missing_column: null, missing_parent: null, missing_key: null, computed_column: null, self_reference: null}]}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS dbo.inline_fk_bad_type
+  - sql: DROP TABLE IF EXISTS dbo.inline_fk_bad_column
+  - sql: DROP TABLE IF EXISTS dbo.inline_fk_bad_parent
+  - sql: DROP TABLE IF EXISTS dbo.inline_fk_bad_key
+  - sql: DROP TABLE IF EXISTS dbo.inline_fk_bad_computed
+  - sql: DROP TABLE IF EXISTS dbo.inline_fk_bad_self
+  - sql: DROP TABLE IF EXISTS dbo.inline_fk_nonunique_parent
+  - sql: DROP TABLE IF EXISTS dbo.inline_fk_type_parent
+- name: Native CREATE reserves folded constraint names across declaration families
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.fk_namespace_child
+  - sql: DROP TABLE IF EXISTS dbo.fk_namespace_parent
+  - sql: CREATE TABLE dbo.fk_namespace_parent(id INT CONSTRAINT FK_NS_Primary PRIMARY KEY,other INT CONSTRAINT FK_NS_Unique UNIQUE,spare INT CONSTRAINT FK_NS_Default DEFAULT 7)
+  - sql: ALTER TABLE dbo.fk_namespace_parent ADD CONSTRAINT FK_NS_Check CHECK(spare>=0)
+  - sql: INSERT dbo.fk_namespace_parent(id,other) VALUES(1,11)
+  steps:
+  - sql: CREATE TABLE dbo.fk_namespace_child(pid INT,CONSTRAINT fk_ns_primary FOREIGN KEY(pid) REFERENCES dbo.fk_namespace_parent(id))
+    expect: {error: true}
+  - sql: SELECT OBJECT_ID(N'fk_namespace_child',N'U') AS absent
+    expect: {rows: 1, data: [{absent: null}]}
+  - sql: CREATE TABLE dbo.fk_namespace_child(pid INT,CONSTRAINT fk_ns_unique FOREIGN KEY(pid) REFERENCES dbo.fk_namespace_parent(id))
+    expect: {error: true}
+  - sql: SELECT OBJECT_ID(N'fk_namespace_child',N'U') AS absent
+    expect: {rows: 1, data: [{absent: null}]}
+  - sql: CREATE TABLE dbo.fk_namespace_child(pid INT,CONSTRAINT fk_ns_default FOREIGN KEY(pid) REFERENCES dbo.fk_namespace_parent(id))
+    expect: {error: true}
+  - sql: SELECT OBJECT_ID(N'fk_namespace_child',N'U') AS absent
+    expect: {rows: 1, data: [{absent: null}]}
+  - sql: CREATE TABLE dbo.fk_namespace_child(pid INT,CONSTRAINT fk_ns_check FOREIGN KEY(pid) REFERENCES dbo.fk_namespace_parent(id))
+    expect: {error: true}
+  - sql: SELECT OBJECT_ID(N'fk_namespace_child',N'U') AS absent
+    expect: {rows: 1, data: [{absent: null}]}
+  - sql: CREATE TABLE dbo.fk_namespace_child(pid INT CONSTRAINT fk_ns_default PRIMARY KEY)
+    expect: {error: true}
+  - sql: SELECT OBJECT_ID(N'fk_namespace_child',N'U') AS absent
+    expect: {rows: 1, data: [{absent: null}]}
+  - sql: CREATE TABLE dbo.fk_namespace_child(pid INT,CONSTRAINT FK_NS_Fresh FOREIGN KEY(pid) REFERENCES dbo.fk_namespace_parent(id))
+  - sql: INSERT dbo.fk_namespace_child VALUES(1)
+  - sql: INSERT dbo.fk_namespace_child VALUES(2)
+    expect: {error: true}
+  - sql: UPDATE dbo.fk_namespace_parent SET spare=-1 WHERE id=1
+    expect: {error: true}
+  - sql: DELETE FROM dbo.fk_namespace_parent WHERE id=1
+    expect: {error: true}
+  - sql: SELECT p.id,p.other,p.spare,c.pid FROM dbo.fk_namespace_parent p JOIN dbo.fk_namespace_child c ON c.pid=p.id
+    expect: {rows: 1, data: [{id: 1, other: 11, spare: 7, pid: 1}]}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS dbo.fk_namespace_child
+  - sql: DROP TABLE IF EXISTS dbo.fk_namespace_parent
+- name: Folded sibling declarations reject before any native child or program is published
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.fk_namespace_duplicates
+  - sql: DROP TABLE IF EXISTS dbo.fk_namespace_dup_parent
+  - sql: CREATE TABLE dbo.fk_namespace_dup_parent(id INT PRIMARY KEY)
+  - sql: INSERT dbo.fk_namespace_dup_parent VALUES(1)
+  steps:
+  - sql: CREATE TABLE dbo.fk_namespace_duplicates(a INT,b INT,CONSTRAINT FK_NS_Local FOREIGN KEY(a) REFERENCES dbo.fk_namespace_dup_parent(id),CONSTRAINT fk_ns_LOCAL FOREIGN KEY(b) REFERENCES dbo.fk_namespace_dup_parent(id))
+    expect: {error: true}
+  - sql: SELECT OBJECT_ID(N'fk_namespace_duplicates',N'U') AS absent
+    expect: {rows: 1, data: [{absent: null}]}
+  - sql: CREATE TABLE dbo.fk_namespace_duplicates(a INT,b INT,CONSTRAINT FK_NS_Local FOREIGN KEY(a) REFERENCES dbo.fk_namespace_dup_parent(id))
+  - sql: INSERT dbo.fk_namespace_duplicates VALUES(1,2)
+  - sql: INSERT dbo.fk_namespace_duplicates VALUES(2,1)
+    expect: {error: true}
+  - sql: SELECT a,b FROM dbo.fk_namespace_duplicates
+    expect: {rows: 1, data: [{a: 1, b: 2}]}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS dbo.fk_namespace_duplicates
+  - sql: DROP TABLE IF EXISTS dbo.fk_namespace_dup_parent
+- name: A pending sibling reserves its declaration name until its actual owner rolls back
+  setup:
+  - sql: DROP TABLE IF EXISTS dbo.fk_namespace_pending_child
+  - sql: DROP TABLE IF EXISTS dbo.fk_namespace_pending
+  - sql: DROP TABLE IF EXISTS dbo.fk_namespace_pending_parent
+  - sql: CREATE TABLE dbo.fk_namespace_pending_parent(id INT PRIMARY KEY)
+  - sql: INSERT dbo.fk_namespace_pending_parent VALUES(1)
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define definitions (list (list "column" "pid" "INT" '() '())
+        (list "foreign" "fk_ns_pending" '("pid") "fk_namespace_pending_parent" '("id") "restrict" "restrict")))
+      (try (lambda () (begin
+        (createtable "memcp-tests" "fk_namespace_pending"
+          (list (list "column" "id" "INT" '() '())
+            (list "unique" "pending_key" '("id") '("constraint_name" "FK_NS_Pending")))
+          '("engine" "safe") false tx)
+        (define denied (try (lambda () (begin
+          (createtable "memcp-tests" "fk_namespace_pending_child" definitions '("engine" "safe") false nil) false))
+          (lambda (failure) true)))
+        (define private (and
+          (not (nil? (table "memcp-tests" false "fk_namespace_pending" false tx)))
+          (nil? (table "memcp-tests" false "fk_namespace_pending" false nil))
+          (nil? (table "memcp-tests" false "fk_namespace_pending_child" false nil))))
+        (tx_rollback owner)
+        (createtable "memcp-tests" "fk_namespace_pending_child" definitions '("engine" "safe") false nil)
+        (define child (table "memcp-tests" false "fk_namespace_pending_child" false nil))
+        (insert child '("pid") (list (list 1)))
+        (define orphan_denied (try (lambda () (begin (insert child '("pid") (list (list 2))) false))
+          (lambda (failure) true)))
+        (list denied private orphan_denied
+          (nil? (table "memcp-tests" false "fk_namespace_pending" false nil))
+          (count ((show child "constraints" nil) "ForeignKeys"))
+          (scan nil child '() '() '() (lambda () true) '("pid") (lambda (sum pid) (+ sum pid)) 0 +))))
+        (lambda (failure) (begin
+          (if (equal? (tx_state tx) "active") (tx_rollback owner) true)
+          (error failure)))))
+  expect: {result: [true, true, true, true, 1, 1]}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS dbo.fk_namespace_pending_child
+  - sql: DROP TABLE IF EXISTS dbo.fk_namespace_pending
+  - sql: DROP TABLE IF EXISTS dbo.fk_namespace_pending_parent
 cleanup: []

@@ -47,7 +47,10 @@ test_cases:
         payload TEXT
       )
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert short strings"
     sql: |
@@ -259,7 +262,10 @@ test_cases:
         payload TEXT
       )
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Refcount: insert long string into rc1"
     sql: "INSERT INTO blob_rc1 (id, payload) VALUES (1, REPEAT('R', 1000))"
@@ -281,9 +287,18 @@ test_cases:
   - name: "Refcount: drop table releases blob"
     sql: "DROP TABLE blob_rc1"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   # --- Blob refcount: shared blob across two tables ---
+
+  - name: "MySQL declaration state after completion: Refcount: drop table releases blob"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE blob_rc1"
+    expect: {error: true}
+
   - name: "Shared blob: create first table"
     sql: |
       CREATE TABLE blob_shared1 (
@@ -291,7 +306,10 @@ test_cases:
         payload TEXT
       )
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Shared blob: create second table"
     sql: |
@@ -300,7 +318,10 @@ test_cases:
         payload TEXT
       )
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Shared blob: insert long string in first"
     sql: "INSERT INTO blob_shared1 (id, payload) VALUES (1, REPEAT('S', 4096)), (2, REPEAT('T', 4096)), (3, REPEAT('V', 4096))"
@@ -331,7 +352,15 @@ test_cases:
   - name: "Shared blob: drop first table"
     sql: "DROP TABLE blob_shared1"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
+
+  - name: "MySQL declaration state after completion: Shared blob: drop first table"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE blob_shared1"
+    expect: {error: true}
 
   - name: "Shared blob: second table still has blob"
     sql: "SELECT payload = REPEAT('S', 4096) AS ok FROM blob_shared2 WHERE id = 1"
@@ -343,9 +372,18 @@ test_cases:
   - name: "Shared blob: drop second table"
     sql: "DROP TABLE blob_shared2"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   # --- Blob refcount persistence across restart ---
+
+  - name: "MySQL declaration state after completion: Shared blob: drop second table"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE blob_shared2"
+    expect: {error: true}
+
   - name: "RC persist: create table"
     sql: |
       CREATE TABLE blob_rcpersist (
@@ -353,7 +391,10 @@ test_cases:
         payload TEXT
       )
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "RC persist: insert long blob"
     sql: "INSERT INTO blob_rcpersist (id, payload) VALUES (1, REPEAT('P', 1000))"
@@ -375,9 +416,18 @@ test_cases:
   - name: "RC persist: drop table after restart"
     sql: "DROP TABLE blob_rcpersist"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   # --- External blobs above the 2 KiB inline boundary ---
+
+  - name: "MySQL declaration state after completion: RC persist: drop table after restart"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE blob_rcpersist"
+    expect: {error: true}
+
   - name: "Create external blob boundary table"
     sql: |
       CREATE TABLE blob_external (
@@ -385,7 +435,10 @@ test_cases:
         payload TEXT
       )
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert text and binary above 2 KiB"
     sql: |
@@ -480,11 +533,19 @@ test_cases:
   - name: "Drop external blob boundary table"
     sql: "DROP TABLE blob_external"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
+
+  - name: "MySQL declaration state after completion: Drop external blob boundary table"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE blob_external"
+    expect: {error: true}
 
   - name: "Create bang hash regression table"
     sql: "CREATE TABLE blob_bang (id INT PRIMARY KEY, payload TEXT)"
-    expect: {rows: 0}
+    expect: {affected_rows: 0, result_contains: '"affected_rows"', rows: 1, data: [{affected_rows: 0}]}
   - name: "Insert bang hash and genuine escape literals"
     sql: |
       INSERT INTO blob_bang VALUES
@@ -510,14 +571,14 @@ test_cases:
 
   - name: "Create anonymous repeated blob scan fixture"
     sql: "CREATE TABLE blob_ram_scan (id INT PRIMARY KEY, payload TEXT)"
-    expect: {rows: 0}
+    expect: {affected_rows: 0, result_contains: '"affected_rows"', rows: 1, data: [{affected_rows: 0}]}
   - name: "Populate anonymous repeated blob scan fixture"
     scm: |
       (begin
         (set text (reduce (produceN 1024) (lambda (acc i) (concat acc "payload-")) ""))
-        (insert (table "memcp-tests" false "blob_ram_scan" false) '("id" "payload")
+        (insert (table "memcp-tests" false "blob_ram_scan" false nil) '("id" "payload")
           (map (produceN 256) (lambda (i) (list i (concat i ":" text)))))
-        (rebuild (table "memcp-tests" false "blob_ram_scan" false) true false))
+        (rebuild (table "memcp-tests" false "blob_ram_scan" false nil) true false))
     expect: {}
   # Per-row projections require reading payloads on every execution. Aggregates
   # would reuse a group keytable and stop exercising blob decoding after warmup.

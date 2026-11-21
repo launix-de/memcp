@@ -44,8 +44,8 @@ def query(sql, include_headers=False):
     # Numeric values travel directly through RowWriter.Float64 ->
     # strconv.AppendFloat(value, 'g', -1, 64): shortest exact float64 roundtrip,
     # including signed zero. Never CAST/ROUND, parse to float, or use tolerance.
-    # Every selected string is Base64 and numeric output is ASCII. Raw mode
-    # therefore cannot turn embedded tabs/newlines/NULs into record boundaries.
+    # Arbitrary strings are Base64; numeric and canonical calendar output is
+    # ASCII without tabs/newlines/NULs, preserving raw record boundaries.
     return [line.split(b"\t") for line in result.stdout.splitlines()]
 
 
@@ -61,6 +61,10 @@ def encoding(sql_type):
         return "integer"
     if kind in {"float", "double", "real", "decimal", "numeric"}:
         return "number"
+    if kind == "date":
+        return "date-text"
+    if kind in {"datetime", "timestamp"}:
+        return "datetime-text"
     if kind in {"json", "bson"}:
         return "json-base64"
     if kind in {"varchar", "char", "text", "longtext", "mediumtext", "tinytext",
@@ -109,6 +113,12 @@ def capture():
                 value = "TO_BASE64(VECTOR_TO_STRING(" + value + "))"
             elif codec == "bytes-base64":
                 value = "TO_BASE64(" + value + ")"
+            elif codec in {"date-text", "datetime-text"}:
+                # Canonical public SQL values, not the wire representation of
+                # historical integer/text calendar carriers. All pins support
+                # these formats; the fixture deliberately has whole seconds.
+                calendar_format = "%Y-%m-%d" if codec == "date-text" else "%Y-%m-%d %H:%i:%s"
+                value = "DATE_FORMAT(" + value + ", '" + calendar_format + "')"
             expressions.append(value)
         if not columns:
             raise ValueError("fixture table has no columns: " + name)

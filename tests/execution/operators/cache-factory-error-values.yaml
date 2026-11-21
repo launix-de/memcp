@@ -1,0 +1,48 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Asynchronous cache factories preserve native failure diagnostics and original language values
+setup: []
+cleanup: []
+test_cases:
+- name: A cache factory preserves its original text failure
+  scm: |
+    (begin
+      (define cache (newcachemap))
+      (define caught (try (lambda () (cache "value" nil (lambda () (error "cache fixture failure"))))
+        (lambda (value) value)))
+      (list (failure_value caught) (string caught)))
+  expect: {result: ["cache fixture failure", "cache fixture failure"]}
+- name: A cache factory preserves a structured datum through catch and rethrow
+  scm: |
+    (begin
+      (define cache (newcachemap))
+      (define datum (list (quote neutral-error) 7))
+      (define caught (try (lambda () (cache "value" nil (lambda () (error datum)))) (lambda (value) value)))
+      (define rethrown (try (lambda () (error caught)) (lambda (value) value)))
+      (and (expression_equal? datum (failure_value caught))
+        (expression_equal? datum (failure_value rethrown))))
+  expect: {result: true}
+- name: A cache factory preserves an opaque native diagnostic
+  scm: |
+    (begin
+      (define failure (tds_diagnostic_error (list "number" 71 "state" 3 "severity" 11
+        "text" "opaque cache failure" "server" "node" "procedure" "routine" "line" 70001)))
+      (define cache (newcachemap))
+      (define caught (try (lambda () (cache "value" nil (lambda () (error failure)))) (lambda (value) value)))
+      (and (not (string? (failure_value caught)))
+        (equal? failure (failure_value caught))
+        (strlike (string caught) "%opaque cache failure%")))
+  expect: {result: true}
+- name: A failed cache factory can be retried and the successful value remains cached
+  scm: |
+    (begin
+      (define cache (newcachemap))
+      (define caught (try (lambda () (cache "value" nil (lambda () (error "first attempt"))))
+        (lambda (value) (failure_value value))))
+      (define success (cache "value" nil (lambda () 77)))
+      (list caught success (cache "value" nil (lambda () (error "successful value was not cached"))))))
+  expect: {result: ["first attempt", 77, 77]}
+- name: An unhandled cache factory failure retains its normal list-validation diagnostic
+  scm: (begin (define cache (newcachemap)) (cache "value" nil (lambda () (car true))))
+  expect: {error: true, contains: "car expects a list, got true"}

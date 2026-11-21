@@ -22,7 +22,7 @@ test_cases:
     setup:
       - sql: "DROP TABLE IF EXISTS dlc_bench"
       - sql: "CREATE TABLE dlc_bench (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
-      - scm: '(rebuild (table "memcp-tests" false "dlc_bench" false) true false)'
+      - scm: '(rebuild (table "memcp-tests" false "dlc_bench" false nil) true false)'
     scm: |
       (begin
         (define sess (newsession))
@@ -30,13 +30,13 @@ test_cases:
         (sess "schema" "memcp-tests")
         (define cache (newcachemap))
         (define exec (lambda (q) (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true nil)
           (lambda (row) nil) (lambda (_fields) nil))))
         (map (produceN 500) (lambda (i)
           (exec (concat "INSERT INTO dlc_bench VALUES (" (string i) ", " (string (* i 2)) ")"))))
         (define acc (newsession)) (acc "n" 0)
         (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" "SELECT COUNT(*) AS n FROM dlc_bench" nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" "SELECT COUNT(*) AS n FROM dlc_bench" nil "root" sess true nil)
           (lambda (row) (acc "n" (get_assoc row "n"))) (lambda (_fields) nil))
         (if (equal? (acc "n") 500)
           true
@@ -54,9 +54,9 @@ test_cases:
       - sql: "CREATE TABLE dlc_bench (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
       - scm: |
           (begin
-            (insert (table "memcp-tests" false "dlc_bench" false) '("id" "col")
+            (insert (table "memcp-tests" false "dlc_bench" false nil) '("id" "col")
               (map (produceN 500) (lambda (i) (list i (* i 2)))))
-            (rebuild (table "memcp-tests" false "dlc_bench" false) true false)
+            (rebuild (table "memcp-tests" false "dlc_bench" false nil) true false)
             true)
     scm: |
       (begin
@@ -66,13 +66,13 @@ test_cases:
         (define cache (newcachemap))
         (map (produceN 500) (lambda (i)
           (sql_execute_formula sess nil
-            (cached_parse cache (list parse_sql) "memcp-tests"
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests"
               (concat "UPDATE dlc_bench SET col = col + 1 WHERE id = " (string i))
-              nil "root" sess true)
+              nil "root" sess true nil)
             (lambda (row) nil) (lambda (_fields) nil))))
         (define acc (newsession)) (acc "s" 0)
         (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" "SELECT SUM(col) AS s FROM dlc_bench" nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" "SELECT SUM(col) AS s FROM dlc_bench" nil "root" sess true nil)
           (lambda (row) (acc "s" (get_assoc row "s"))) (lambda (_fields) nil))
         /* every row's col was 2*id, then incremented by exactly 1 once each:
         sum(2*id for id in [0,500)) + 500 = 2*124750 + 500 = 250000 */
@@ -96,9 +96,9 @@ test_cases:
       - sql: "CREATE TABLE dlc_bench (id INT PRIMARY KEY, col INT) ENGINE=sloppy"
       - scm: |
           (begin
-            (insert (table "memcp-tests" false "dlc_bench" false) '("id" "col")
+            (insert (table "memcp-tests" false "dlc_bench" false nil) '("id" "col")
               (map (produceN 250) (lambda (i) (list i i))))
-            (rebuild (table "memcp-tests" false "dlc_bench" false) true false)
+            (rebuild (table "memcp-tests" false "dlc_bench" false nil) true false)
             true)
     scm: |
       (begin
@@ -109,11 +109,11 @@ test_cases:
         (define q "DELETE FROM dlc_bench WHERE TRUE LIMIT 1")
         (map (produceN 250) (lambda (i)
           (sql_execute_formula sess nil
-            (cached_parse cache (list parse_sql) "memcp-tests" q nil "root" sess true)
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests" q nil "root" sess true nil)
             (lambda (row) nil) (lambda (_fields) nil))))
         (define acc (newsession)) (acc "n" 0)
         (sql_execute_formula sess nil
-          (cached_parse cache (list parse_sql) "memcp-tests" "SELECT COUNT(*) AS n FROM dlc_bench" nil "root" sess true)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" "SELECT COUNT(*) AS n FROM dlc_bench" nil "root" sess true nil)
           (lambda (row) (acc "n" (get_assoc row "n"))) (lambda (_fields) nil))
         (if (equal? (acc "n") 0)
           true

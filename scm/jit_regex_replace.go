@@ -51,8 +51,8 @@ func jitRegexpReplaceHelperFor(pattern *regexp.Regexp, replacement Scmer) *JITEn
 	body := NewSlice([]Scmer{
 		NewSymbol(jitConstantRegexpReplaceInlineName),
 		NewRegex(pattern),
-		replacement,
 		NewNthLocalVar(0),
+		replacement,
 	})
 	compiled := jitCompileModeDeferred(true, NewProcStruct(Proc{
 		Params:       NewSlice([]Scmer{NewSymbol("s")}),
@@ -86,16 +86,16 @@ func jitRegexpReplaceHelperCall(entryValue, s Scmer) Scmer {
 func jitEmitConstantRegexpReplaceViaHelper(ctx *JITContext, pattern *regexp.Regexp, replacement Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 	replacement = replacement.WithoutSourceInfo()
 	if !scmerCallable(replacement) {
-		return jitConstRegexpReplaceCall(ctx, pattern, args[1], args[2], result)
+		return jitConstRegexpReplaceCall(ctx, pattern, replacement, args[2], args[1], result)
 	}
 	entry := jitRegexpReplaceHelperFor(pattern, replacement)
 	if entry == nil {
-		return jitConstRegexpReplaceCall(ctx, pattern, args[1], args[2], result)
+		return jitConstRegexpReplaceCall(ctx, pattern, replacement, args[2], args[1], result)
 	}
 	entryValue := NewAny(entry)
 	ctx.TrackImm(entryValue)
 	entryArg := jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagAny, Imm: entryValue})
-	value := args[2]
+	value := args[1]
 	ctx.EnsureDesc(&value)
 	out := ctx.EmitGoCallScalar(GoFuncAddr(jitRegexpReplaceHelperCall), []JITValueDesc{entryArg, value}, 2)
 	out.Type = JITTypeUnknown
@@ -155,11 +155,11 @@ func jitApply1(procedure, arg Scmer) Scmer {
 func jitEmitConstantRegexpReplaceFunc(ctx *JITContext, pattern *regexp.Regexp, replacement Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 	replacement = replacement.WithoutSourceInfo()
 	if !scmerCallable(replacement) {
-		return jitConstRegexpReplaceCall(ctx, pattern, args[1], args[2], result)
+		return jitConstRegexpReplaceCall(ctx, pattern, replacement, args[2], args[1], result)
 	}
 	program := jitCompileRegexProgram(pattern)
 
-	input := ctx.StabilizeForNested(args[2])
+	input := ctx.StabilizeForNested(args[1])
 
 	// A dedicated frame slot for the input string pair - the callbacks run
 	// inside PreserveOuterRegs windows where the stabilized `input` desc's
@@ -312,7 +312,13 @@ func jitEmitConstantRegexpReplaceFunc(ctx *JITContext, pattern *regexp.Regexp, r
 
 // jitConstRegexpReplaceCall is the whole-operation fallback: one native call
 // running the precompiled regex with the replacement over src.
-func jitConstRegexpReplaceCall(ctx *JITContext, pattern *regexp.Regexp, replacement, srcDesc, result JITValueDesc) JITValueDesc {
+func jitConstRegexpReplaceCall(ctx *JITContext, pattern *regexp.Regexp, replacementSource Scmer, replacement, srcDesc, result JITValueDesc) JITValueDesc {
+	// A declared callback may still be a compiler-only lambda template. As at
+	// the generated native-call boundary, materialize its actual lexical closure
+	// once before passing a Scmer to Go; its captured frame is invocation-local.
+	if replacement.Loc == LocLambdaTemplate {
+		replacement = jitCompileExpr(ctx, replacementSource, ctx.SliceBase, JITValueDesc{Loc: LocAny})
+	}
 	reArg := jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagRegex, Imm: NewRegex(pattern)})
 	ctx.TrackImm(NewRegex(pattern))
 	// sourceArgs can contain a lambda AST rather than its runtime closure.

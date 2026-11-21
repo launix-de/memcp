@@ -101,7 +101,7 @@ test_cases:
     data:
     - affected_rows: 0
 - name: Dropping a generated column removes its metadata
-  scm: "(begin\n  (define columns (get_schema \"memcp-tests\" \"tsql_frontend_drop_versions\"))\n  (if (and (equal?\
+  scm: "(begin\n  (define columns (get_schema \"memcp-tests\" \"tsql_frontend_drop_versions\" nil))\n  (if (and (equal?\
     \ (count columns) 2)\n      (nil? (find columns (lambda (column) (equal? (column \"Field\") \"rv\")) nil)))\n\
     \    true (error \"dropped generated column remains in metadata\"))))\n"
   noncritical: true

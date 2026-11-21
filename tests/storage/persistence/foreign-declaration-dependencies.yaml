@@ -1,0 +1,92 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Published native foreign keys retain supporting keys and endpoint declarations through later DDL
+setup:
+- sql: CREATE TABLE ddl_fk_parent(id INT PRIMARY KEY,code INT,category VARCHAR(8),other_value INT)
+- sql: CREATE TABLE ddl_fk_child(id INT PRIMARY KEY,code INT,category VARCHAR(8),other_value INT)
+- scm: (createkey (table "memcp-tests" false "ddl_fk_parent" false nil) "ddl_fk_support" true '("code" "category"))
+- scm: (createkey (table "memcp-tests" false "ddl_fk_parent" false nil) "ddl_fk_spare" true '("code" "category"))
+- sql: INSERT INTO ddl_fk_parent VALUES(1,7,'seed',11)
+- sql: INSERT INTO ddl_fk_child VALUES(1,7,'seed',12)
+- scm: (createforeignkey (table "memcp-tests" false "ddl_fk_child" false nil) "FK_ddl_dependencies" '("code" "category") (table "memcp-tests" false "ddl_fk_parent" false nil) '("code" "category") "cascade" "set null")
+cleanup:
+- sql: DROP TABLE IF EXISTS ddl_fk_child
+- sql: DROP TABLE IF EXISTS ddl_fk_parent
+test_cases:
+- name: A redundant parent UNIQUE can be removed while another exact declaration supports the FK
+  scm: (dropkey (table "memcp-tests" false "ddl_fk_parent" false nil) "ddl_fk_spare")
+  expect: {result: true}
+- name: The final supporting parent UNIQUE cannot be removed
+  scm: (dropkey (table "memcp-tests" false "ddl_fk_parent" false nil) "ddl_fk_support")
+  expect: {error: true, contains: "unique declaration is required by foreign key FK_ddl_dependencies"}
+- name: A parent endpoint column cannot be removed
+  scm: (dropcolumn (table "memcp-tests" false "ddl_fk_parent" false nil) "code")
+  expect: {error: true, contains: "column declaration is required by foreign key FK_ddl_dependencies"}
+- name: A child endpoint column cannot be removed through ALTER
+  scm: (altercolumn (table "memcp-tests" false "ddl_fk_child" false nil) "category" "drop" nil)
+  expect: {error: true, contains: "column declaration is required by foreign key FK_ddl_dependencies"}
+- name: A parent endpoint type cannot change behind its native FK program
+  scm: (altercolumn (table "memcp-tests" false "ddl_fk_parent" false nil) "code" "type" "VARCHAR")
+  expect: {error: true, contains: "column declaration is required by foreign key FK_ddl_dependencies"}
+- name: A child endpoint width cannot change behind its native FK program
+  scm: (altercolumn (table "memcp-tests" false "ddl_fk_child" false nil) "category" "dimensions" (list 16))
+  expect: {error: true, contains: "column declaration is required by foreign key FK_ddl_dependencies"}
+- name: A parent endpoint collation cannot change behind its native FK program
+  scm: (altercolumn (table "memcp-tests" false "ddl_fk_parent" false nil) "category" "collation" "utf8mb4_general_ci")
+  expect: {error: true, contains: "column declaration is required by foreign key FK_ddl_dependencies"}
+- name: A SET NULL endpoint cannot be made nonnullable
+  scm: (altercolumn (table "memcp-tests" false "ddl_fk_child" false nil) "code" "null" false)
+  expect: {error: true, contains: "column declaration is required by foreign key FK_ddl_dependencies"}
+- name: A stored endpoint cannot become temporary
+  scm: (altercolumn (table "memcp-tests" false "ddl_fk_child" false nil) "code" "temp" true)
+  expect: {error: true, contains: "column declaration is required by foreign key FK_ddl_dependencies"}
+- name: Complete endpoint declaration replacement rejects a semantic change
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "ddl_fk_child" false nil))
+      (define c (show child "column" "category" false))
+      (define before (list (c "RawType") (c "Dimensions") (c "Null") (c "Collation")))
+      (define after (list (c "RawType") (list 16) (c "Null") (c "Collation")))
+      (altercolumn child "category" "declaration" (list after before)))
+  expect: {error: true, contains: "column declaration is required by foreign key FK_ddl_dependencies"}
+- name: Idempotent complete endpoint declaration replay remains valid
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "ddl_fk_child" false nil))
+      (define c (show child "column" "category" false))
+      (define declaration (list (c "RawType") (c "Dimensions") (c "Null") (c "Collation")))
+      (altercolumn child "category" "declaration" (list declaration declaration)))
+  expect: {result: true}
+- name: An endpoint default and unrelated declaration remain independently mutable
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "ddl_fk_child" false nil))
+      (altercolumn child "code" "default" 7)
+      (altercolumn child "other_value" "type" "BIGINT")
+      (dropcolumn child "other_value"))
+  expect: {result: true}
+- name: Failed DDL leaves the actual parent and child rows unchanged
+  sql: SELECT id,code,category FROM ddl_fk_child ORDER BY id
+  expect: {data: [{id: 1, code: 7, category: seed}]}
+- name: The native FK still rejects an orphan after all failed DDL operations
+  sql: INSERT INTO ddl_fk_child(id,code,category) VALUES(2,999,'absent')
+  expect: {error: true, contains: "foreign key constraint"}
+- name: Real parent updates still cascade through the preserved declarations
+  sql: UPDATE ddl_fk_parent SET code=8 WHERE id=1
+  expect: {affected_rows: 1}
+- name: Cascaded values preserve the original child key
+  sql: SELECT id,code,category FROM ddl_fk_child ORDER BY id
+  expect: {data: [{id: 1, code: 8, category: seed}]}
+- name: Restart loads the same supporting declarations and actual row values
+  action: restart
+- name: Recovered FK endpoints still reject removal of the supporting key
+  scm: (dropkey (table "memcp-tests" false "ddl_fk_parent" false nil) "ddl_fk_support")
+  expect: {error: true, contains: "unique declaration is required by foreign key FK_ddl_dependencies"}
+- name: Real parent deletion still performs SET NULL after recovery
+  sql: DELETE FROM ddl_fk_parent WHERE id=1
+  expect: {affected_rows: 1}
+- name: Recovered native SET NULL preserves the child row
+  sql: SELECT id,code,category FROM ddl_fk_child ORDER BY id
+  expect: {data: [{id: 1, code: null, category: null}]}

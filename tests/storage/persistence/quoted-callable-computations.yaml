@@ -1,0 +1,41 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  restart_after_setup: true
+  description: Native computed callbacks retain quoted procedure and declared native values through persistence
+setup:
+- scm: |
+    (begin
+      (define operation (close_procedure (lambda (value) (+ value 1))))
+      (define computation (close_procedure ((lambda (operations)
+        (lambda (value) (if (nil? value) nil ((nth operations 1) ((nth operations 0) value) 2))))
+        (list operation +))))
+      (createtable "memcp-tests" "quoted_callable_compute"
+        (list (list "column" "id" "INT" '() '("null" false))
+          (list "column" "base" "INT" '() '())
+          (list "unique" "PRIMARY" '("id"))) '("engine" "safe") false nil)
+      (define target (table "memcp-tests" false "quoted_callable_compute" false nil))
+      (insert target '("id" "base") (list (list 1 10) (list 2 nil) (list 3 -1)))
+      (rebuild target true false)
+      (createcolumn target "derived" "INT" '() '() '("base") computation)
+      (define total (scan nil target '() '() '() (lambda () true) '("derived")
+        (lambda (acc derived) (+ acc (coalesceNil derived 0))) 0 +))
+      (if (equal? total 15) true (error "original quoted computation produced incorrect values"))
+      (rebuild target true false))
+cleanup:
+- sql: DROP TABLE quoted_callable_compute
+test_cases:
+- name: Restart retains complete native computation values including NULL
+  sql: SELECT id,base,derived FROM quoted_callable_compute ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 1, base: 10, derived: 13}, {id: 2, base: null, derived: null}, {id: 3, base: -1, derived: 2}]
+- name: A restored callback computes a new value rather than reusing its persisted payload
+  sql: UPDATE quoted_callable_compute SET base=5 WHERE id=1
+  expect: {affected_rows: 1}
+- name: Restored callable identity survives dependency invalidation
+  sql: SELECT id,base,derived FROM quoted_callable_compute ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 1, base: 5, derived: 8}, {id: 2, base: null, derived: null}, {id: 3, base: -1, derived: 2}]

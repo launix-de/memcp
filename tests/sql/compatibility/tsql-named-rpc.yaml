@@ -1,0 +1,266 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Ordinary named procedure RPC input binding and output use the shared TSQL module owners; nonzero
+    transport RETURNSTATUS remains a positive known gap
+setup:
+- sql: CREATE TABLE rpc_seen(value INT)
+- sql: CREATE TABLE rpc_guard_effects(value INT)
+- sql: CREATE PROCEDURE rpc_typed @n BIGINT,@stamp DATETIME,@label NVARCHAR(40),@blob VARBINARY(4) AS SELECT @n
+    AS number,CONVERT(VARCHAR(23),@stamp,121) AS stamp,@label AS label,@blob AS bytes
+- sql: CREATE PROCEDURE rpc_repeat @n INT,@delta INT=3 AS BEGIN INSERT rpc_seen VALUES(@n+@delta); SELECT @n+@delta
+    AS value; END
+- sql: CREATE PROCEDURE rpc_empty AS SELECT value FROM rpc_seen WHERE 1=0
+- sql: CREATE PROCEDURE rpc_multi AS BEGIN SELECT 1 AS same,2 AS same; SELECT CAST(NULL AS INT) AS missing; END
+- sql: CREATE PROCEDURE rpc_status AS BEGIN SELECT 7 AS value; RETURN 17; END
+- sql: CREATE PROCEDURE rpc_guard @n TINYINT AS INSERT rpc_guard_effects VALUES(@n)
+- sql: CREATE PROCEDURE sp_tables_custom @token NVARCHAR(80) AS SELECT @token AS token
+- sql: CREATE PROCEDURE [rpc;odd] @label NVARCHAR(80) AS SELECT @label AS label
+test_cases:
+- name: Named RPC uses formal declarations for permuted temporal binary Unicode and exact integer inputs
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define out (newsession))
+      (define completion (tds_frontend "metadata" s
+        (list "is_rpc" true "database" "memcp-tests" "procedure" "dbo.rpc_typed" "parameters" (list
+          (list "name" "@label" "flags" 0 "type" (list "kind" 231 "size" 80) "value" "Grüße 🐘")
+          (list "name" "@blob" "flags" 0 "type" (list "kind" 165 "size" 4) "value" (hex2bin "0080ff"))
+          (list "name" "@stamp" "flags" 0 "type" (list "kind" 111 "size" 8) "value" (list "days" 45349 "ticks" 14859037 "offset" 0))
+          (list "name" "@n" "flags" 0 "type" (list "kind" 38 "size" 8) "value" (tsql_parse_integer "9007199254740993"))))
+        (lambda (values) (out "row" values)) (lambda (descriptors) (out "fields" descriptors)) nil nil nil))
+      (and (equal? (completion "return_status") 0)
+        (equal? (map (out "fields") (lambda (field) (field "name"))) '("number" "stamp" "label" "bytes"))
+        (equal? (nth (out "row") 0) (tsql_parse_integer "9007199254740993"))
+        (equal? (nth (out "row") 1) "2024-02-29 13:45:30.123")
+        (equal? (nth (out "row") 2) "Grüße 🐘")
+        (equal? (bin2hex ((nth (out "row") 3) "bytes")) "0080ff")))
+  expect:
+    result: true
+- name: Prepared wire narrowing retains the actual invocation option scope
+  scm: |
+    (begin
+      (define s (newsession))
+      (s "__tsql_ansi_warnings" true)
+      (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v INT")
+        (list (list "name" "@v" "flags" 0 "type" (list "kind" 38 "size" 8) "value" 8)))
+      (define first (s "__tsql_parameter:v"))
+      (s "__tsql_ansi_warnings" false)
+      (tds_bind_parameters s (tds_bind_declarations "memcp-tests" "@v INT")
+        (list (list "name" "@v" "flags" 0 "type" (list "kind" 38 "size" 8) "value" 9)))
+      (and (equal? first 8) (equal? (s "__tsql_parameter:v") 9)
+        (expression_equal? (s "__tsql_ansi_warnings") false)))
+  expect: {result: true}
+- name: Named RPC preserves typed NULL values without parsing them as SQL text
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define out (newsession))
+      (tds_frontend "metadata" s
+        (list "is_rpc" true "database" "memcp-tests" "procedure" "rpc_typed" "parameters" (list
+          (list "name" "@n" "flags" 0 "type" (list "kind" 38 "size" 8) "value" nil)
+          (list "name" "@stamp" "flags" 0 "type" (list "kind" 111 "size" 8) "value" nil)
+          (list "name" "@label" "flags" 0 "type" (list "kind" 231 "size" 80) "value" nil)
+          (list "name" "@blob" "flags" 0 "type" (list "kind" 165 "size" 4) "value" nil)))
+        (lambda (values) (out "row" values)) (lambda (descriptors) (out "fields" descriptors)) nil nil nil)
+      (and (expression_equal? (out "row") (list nil nil nil nil))
+        (equal? (map (out "fields") (lambda (field) (field "sql_type"))) '("BIGINT" "VARCHAR" "NVARCHAR" "VARBINARY"))))
+  expect:
+    result: true
+- name: Repeated named RPC invokes current inputs and omitted formal defaults
+  tds:
+    statements:
+    - sql: dbo.rpc_repeat
+      parameters:
+      - name: n
+        value: 8
+      expect:
+        rows: 1
+        data:
+        - value: 11
+    - sql: dbo.rpc_repeat
+      parameters:
+      - name: delta
+        value: 3
+      - name: n
+        value: 20
+      expect:
+        rows: 1
+        data:
+        - value: 23
+    - sql: SELECT value FROM rpc_seen ORDER BY value
+      expect:
+        rows: 2
+        data:
+        - value: 11
+        - value: 23
+- name: Empty named RPC publishes its declared resultset
+  tds:
+    statements:
+    - sql: dbo.rpc_empty
+      expect:
+        rows: 0
+        data: []
+        columns:
+        - value
+        column_types:
+        - name: value
+          type: INT
+          nullable: true
+- name: Named RPC preserves multiple resultsets duplicate names and NULL
+  tds:
+    statements:
+    - sql: dbo.rpc_multi
+      expect:
+        result_sets:
+        - rows: 1
+          columns:
+          - same
+          - same
+          row_values:
+          - - 1
+            - 2
+        - rows: 1
+          columns:
+          - missing
+          data:
+          - missing: null
+- name: Named RPC exposes the actual SQL return status independently of its rows
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define out (newsession))
+      (define completion (tds_frontend "metadata" s
+        (list "is_rpc" true "database" "memcp-tests" "procedure" "dbo.rpc_status" "parameters" '())
+        (lambda (values) (out "row" values)) (lambda (descriptors) (out "fields" descriptors)) nil nil nil))
+      (and (equal? (completion "return_status") 17) (expression_equal? (out "row") '(7))))
+  expect:
+    result: true
+- name: A quoted procedure identifier and hostile-looking argument stay identifier and value data
+  scm: |-
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define out (newsession))
+      (tds_frontend "metadata" s
+        (list "is_rpc" true "database" "memcp-tests" "procedure" "[dbo].[rpc;odd]" "parameters" (list
+          (list "name" "@label" "flags" 0 "type" (list "kind" 231 "size" 160) "value" "x'; DROP TABLE rpc_guard_effects; --")))
+        (lambda (values) (out "row" values)) (lambda (descriptors) true) nil nil nil)
+      (expression_equal? (out "row") (list "x'; DROP TABLE rpc_guard_effects; --")))
+  expect:
+    result: true
+- name: A metadata-like user procedure name does not enter the metadata adapter
+  tds:
+    statements:
+    - sql: dbo.sp_tables_custom
+      parameters:
+      - name: token
+        value: x'; SELECT 99; --
+      expect:
+        rows: 1
+        data:
+        - token: x'; SELECT 99; --
+- name: Unknown named RPC argument fails before procedure effects
+  tds:
+    statements:
+    - sql: dbo.rpc_guard
+      parameters:
+      - name: wrong
+        value: 7
+      expect:
+        error: true
+        contains:
+        - unknown procedure argument
+    - sql: SELECT COUNT(*) AS count FROM rpc_guard_effects
+      expect:
+        rows: 1
+        data:
+        - count: 0
+- name: Duplicate named RPC argument fails before procedure effects
+  tds:
+    statements:
+    - sql: dbo.rpc_guard
+      parameters:
+      - name: n
+        value: 7
+      - name: n
+        value: 8
+      expect:
+        error: true
+        contains:
+        - duplicate procedure argument
+    - sql: SELECT COUNT(*) AS count FROM rpc_guard_effects
+      expect:
+        rows: 1
+        data:
+        - count: 0
+- name: RPC input overflow retains the declared formal type and prevents effects
+  tds:
+    statements:
+    - sql: dbo.rpc_guard
+      parameters:
+      - name: n
+        value: 300
+      expect:
+        error: true
+    - sql: SELECT COUNT(*) AS count FROM rpc_guard_effects
+      expect:
+        rows: 1
+        data:
+        - count: 0
+- name: NOEXEC suppresses named RPC effects through the existing compile owner
+  tds:
+    statements:
+    - sql: SET NOEXEC ON
+      expect:
+        rows: 0
+    - sql: dbo.rpc_guard
+      parameters:
+      - name: n
+        value: 7
+      expect:
+        rows: 0
+    - sql: SET NOEXEC OFF
+      expect:
+        rows: 0
+    - sql: SELECT COUNT(*) AS count FROM rpc_guard_effects
+      expect:
+        rows: 1
+        data:
+        - count: 0
+- name: Known metadata RPC retains its original declared catalog output
+  tds:
+    statements:
+    - sql: sp_columns
+      parameters:
+      - name: table_name
+        value: rpc_seen
+      - name: column_name
+        value: value
+      expect:
+        rows: 1
+        data:
+        - TABLE_NAME: rpc_seen
+          COLUMN_NAME: value
+- name: Named RPC transmits a nonzero SQL RETURN status after its actual result row
+  noncritical: true
+  tds:
+    rpc_packets:
+    - packet_type: 3
+      payload_hex: 160000001200000002000000000000000000010000000e00640062006f002e007200700063005f007300740061007400750073000000
+      contains_hex:
+      - d10407000000
+      - '7911000000'
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS [rpc;odd]
+- sql: DROP PROCEDURE IF EXISTS sp_tables_custom
+- sql: DROP PROCEDURE IF EXISTS rpc_guard
+- sql: DROP PROCEDURE IF EXISTS rpc_status
+- sql: DROP PROCEDURE IF EXISTS rpc_multi
+- sql: DROP PROCEDURE IF EXISTS rpc_empty
+- sql: DROP PROCEDURE IF EXISTS rpc_repeat
+- sql: DROP PROCEDURE IF EXISTS rpc_typed
+- sql: DROP TABLE IF EXISTS rpc_guard_effects
+- sql: DROP TABLE IF EXISTS rpc_seen

@@ -1,0 +1,510 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Exact full-suite result/error controls: https://dbfiddle.uk/nSxTB-rd
+# Skipped DEFAULT/capture controls: https://dbfiddle.uk/NiiVlE1u
+# Earlier declaration controls: https://dbfiddle.uk/Bb60YqUT
+# Microsoft SET NOEXEC; SQL Server 2022 reference controls:
+# https://dbfiddle.uk/5db6xYD9 https://dbfiddle.uk/PEB2oT4l https://dbfiddle.uk/vBlMoboV
+# https://dbfiddle.uk/xOhsfkPU https://dbfiddle.uk/rJmoKt9d https://dbfiddle.uk/2JNQbBCL
+metadata:
+  syntax: tsql
+  isolated: true
+  description: NOEXEC compile-only binding, deferred objects, lexical locals and execution transitions
+  requires_tds: true
+setup:
+- sql: CREATE TABLE noexec_probe(id INT PRIMARY KEY,value INT)
+- sql: INSERT noexec_probe VALUES(1,10)
+- sql: CREATE PROCEDURE noexec_child AS BEGIN SET NOEXEC ON; INSERT noexec_probe VALUES(3,30); END
+- sql: CREATE PROCEDURE noexec_option_child AS BEGIN SET CONCAT_NULL_YIELDS_NULL OFF; SET NOEXEC ON; SET NUMERIC_ROUNDABORT
+    ON; END
+- sql: CREATE FUNCTION dbo.noexec_inner_table() RETURNS INT AS BEGIN DECLARE @t TABLE(x INT); INSERT @t SELECT 7;
+    DECLARE @total INT; SELECT @total=SUM(x) FROM @t; RETURN @total; END
+cleanup:
+- sql: SET NOEXEC OFF
+- sql: DROP FUNCTION IF EXISTS dbo.noexec_inner_table
+- sql: DROP PROCEDURE IF EXISTS noexec_option_child
+- sql: DROP PROCEDURE IF EXISTS noexec_child
+- sql: DROP PROCEDURE IF EXISTS noexec_suppressed
+- sql: DROP TABLE IF EXISTS noexec_forbidden
+- sql: DROP TABLE IF EXISTS noexec_probe
+test_cases:
+- name: Suppressed writes leave ordinary rows unchanged
+  sql: SET NOEXEC ON; INSERT noexec_probe VALUES(2,20); UPDATE noexec_probe SET value=99; DELETE noexec_probe;
+    SET NOEXEC OFF; SELECT id,value FROM noexec_probe
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 10
+- name: Suppressed DDL does not publish a relation
+  sql: SET NOEXEC ON; CREATE TABLE noexec_forbidden(id INT); SET NOEXEC OFF; SELECT OBJECT_ID(N'dbo.noexec_forbidden')
+    AS object_id
+  expect:
+    rows: 1
+    data:
+    - object_id: null
+- name: A skipped initializer does not execute conversion
+  sql: SET NOEXEC ON; DECLARE @value INT='not-an-integer'; SET NOEXEC OFF; SELECT @value AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: A suppressed assignment preserves its prior scalar value
+  sql: DECLARE @value INT=7; SET NOEXEC ON; SET @value=9; SET NOEXEC OFF; SELECT @value AS value
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: OFF in an unevaluated false IF is reached
+  sql: SET NOEXEC ON; IF 1=0 SET NOEXEC OFF; SELECT 11 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 11
+- name: OFF does not evaluate its enclosing predicate
+  sql: SET NOEXEC ON; IF 1/0=1 SET NOEXEC OFF; SELECT 18 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 18
+- name: OFF resumes its own IF body without running ELSE
+  sql: DECLARE @value INT=0; SET NOEXEC ON; IF 1=0 BEGIN SET NOEXEC OFF; SET @value=1; END ELSE SET @value=2;
+    SELECT @value AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: RETURN cannot conceal OFF during compilation
+  sql: SET NOEXEC ON; RETURN; SET NOEXEC OFF; SELECT 3 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 3
+- name: OFF in a loop resumes its existing BREAK continuation
+  sql: DECLARE @value INT=0; SET NOEXEC ON; WHILE 1=1 BEGIN SET NOEXEC OFF; SET @value=4; BREAK; END; SELECT
+    @value AS value
+  expect:
+    rows: 1
+    data:
+    - value: 4
+- name: Missing objects have deferred column binding
+  sql: SET NOEXEC ON; SELECT missing_column FROM noexec_missing; SET NOEXEC OFF; SELECT 16 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 16
+- name: A missing source defers the entire statement column binding
+  sql: SET NOEXEC ON; SELECT p.bad_column FROM noexec_probe p JOIN noexec_missing m ON p.id=m.id; SET NOEXEC
+    OFF; SELECT 1 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Declared table variables remain empty when their INSERT is not executed
+  sql: SET NOEXEC ON; DECLARE @rows TABLE(id INT PRIMARY KEY); INSERT @rows VALUES(1); SET NOEXEC OFF; SELECT
+    COUNT(*) AS count_value FROM @rows
+  expect:
+    rows: 1
+    data:
+    - count_value: 0
+- name: Dynamic source text is not compiled or executed
+  sql: SET NOEXEC ON; EXEC(N'SELECT badsyntax FROM'); EXEC(N'SET NOEXEC OFF; INSERT noexec_probe VALUES(2,20)');
+    SET NOEXEC OFF; SELECT COUNT(*) AS count_value FROM noexec_probe
+  expect:
+    rows: 1
+    data:
+    - count_value: 1
+- name: A called procedure restores its caller NOEXEC setting
+  sql: EXEC noexec_child; SELECT COUNT(*) AS count_value FROM noexec_probe
+  expect:
+    rows: 1
+    data:
+    - count_value: 1
+- name: Known source columns are checked
+  sql: BEGIN TRY EXEC(N'SET NOEXEC ON; SELECT bad_column FROM noexec_probe; SET NOEXEC OFF;'); END TRY BEGIN
+    CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH
+  expect:
+    rows: 1
+    data:
+    - error_number: 207
+- name: Scalar names are checked even when a source is deferred
+  sql: BEGIN TRY EXEC(N'SET NOEXEC ON; SELECT @missing FROM noexec_missing; SET NOEXEC OFF;'); END TRY BEGIN
+    CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH
+  expect:
+    rows: 1
+    data:
+    - error_number: 137
+- name: Declared table variable columns are checked
+  sql: BEGIN TRY EXEC(N'SET NOEXEC ON; DECLARE @rows TABLE(id INT); SELECT bad_column FROM @rows; SET NOEXEC
+    OFF;'); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH
+  expect:
+    rows: 1
+    data:
+    - error_number: 207
+- name: A missing scalar function remains a deferred object
+  sql: SET NOEXEC ON; SELECT dbo.noexec_missing_function(1) AS hidden; SET NOEXEC OFF; SELECT 6 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 6
+- name: Cursor operation existence checks stay at execution
+  sql: SET NOEXEC ON; OPEN noexec_absent_cursor; FETCH NEXT FROM noexec_absent_cursor; CLOSE noexec_absent_cursor;
+    DEALLOCATE noexec_absent_cursor; SET NOEXEC OFF; SELECT 4 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 4
+- name: A suppressed FETCH does not enforce runtime target cardinality
+  sql: SET NOEXEC ON; DECLARE @value INT; DECLARE noexec_width CURSOR LOCAL STATIC FOR SELECT id,value FROM
+    noexec_probe; FETCH NEXT FROM noexec_width INTO @value; SET NOEXEC OFF; SELECT 5 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 5
+- name: Cursor query declarations check known columns
+  sql: BEGIN TRY EXEC(N'SET NOEXEC ON; DECLARE noexec_bad CURSOR LOCAL STATIC FOR SELECT bad_column FROM noexec_probe;
+    SET NOEXEC OFF;'); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH
+  expect:
+    rows: 1
+    data:
+    - error_number: 207
+- name: Index column existence remains a runtime DDL contract
+  sql: SET NOEXEC ON; CREATE INDEX noexec_index ON noexec_probe(bad_column); ALTER TABLE noexec_probe DROP
+    COLUMN bad_column; SET NOEXEC OFF; SELECT 1 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: A missing ALTER target does not execute a native capability check
+  sql: SET NOEXEC ON; ALTER TABLE noexec_missing ALTER COLUMN bad_column INT; SET NOEXEC OFF; SELECT 5 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 5
+- name: A missing TRUNCATE target is not executed
+  sql: SET NOEXEC ON; TRUNCATE TABLE noexec_missing; SET NOEXEC OFF; SELECT 2 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2
+- name: Unknown table variable types are compilation errors
+  sql: BEGIN TRY EXEC(N'SET NOEXEC ON; DECLARE @rows TABLE(id noexec_missing_type); SET NOEXEC OFF;'); END
+    TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH
+  expect:
+    rows: 1
+    data:
+    - error_number: 2715
+- name: Unknown scalar variable types are compilation errors
+  sql: BEGIN TRY EXEC(N'SET NOEXEC ON; DECLARE @value noexec_missing_type; SET NOEXEC OFF;'); END TRY BEGIN
+    CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH
+  expect:
+    rows: 1
+    data:
+    - error_number: 2715
+- name: A skipped DEFAULT does not run a NOT NULL insertion check
+  sql: SET NOEXEC ON; DECLARE @rows TABLE(id INT NOT NULL); INSERT @rows VALUES(DEFAULT); SET NOEXEC OFF; SELECT
+    COUNT(*) AS count_value FROM @rows
+  expect:
+    rows: 1
+    data:
+    - count_value: 0
+- name: A temporary CREATE under NOEXEC remains an unresolved source
+  sql: 'SET NOEXEC ON; CREATE TABLE #noexec_temporary(id INT); SELECT bad_column FROM #noexec_temporary; SET
+    NOEXEC OFF; SELECT 2 AS value'
+  expect:
+    rows: 1
+    data:
+    - value: 2
+- name: Ordinary conditional execution does not activate an unselected NOEXEC
+  sql: DECLARE @value INT=0; IF 1=0 SET NOEXEC ON; SET @value=5; SELECT @value AS value
+  expect:
+    rows: 1
+    data:
+    - value: 5
+- name: Compilation traverses both IF arms until OFF in ELSE
+  sql: DECLARE @value INT=0; SET NOEXEC ON; IF 1=1 SET @value=99; ELSE BEGIN SET NOEXEC OFF; SET @value=2;
+    END; SELECT @value AS value
+  expect:
+    rows: 1
+    data:
+    - value: 2
+- name: A compiled infinite loop has one finite lexical traversal
+  sql: SET NOEXEC ON; WHILE 1=1 BEGIN CONTINUE; END; SET NOEXEC OFF; SELECT 7 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: A compiled GOTO cannot conceal the OFF continuation
+  sql: 'SET NOEXEC ON; GOTO noexec_end; SET NOEXEC OFF; SELECT 8 AS value; noexec_end:'
+  expect:
+    rows: 1
+    data:
+    - value: 8
+- name: A wholly compiled TRY and CATCH produce no runtime messages
+  sql: SET NOEXEC ON; BEGIN TRY SELECT 1/0 AS hidden; END TRY BEGIN CATCH THROW 50001,'hidden',1; END CATCH;
+    SET NOEXEC OFF; SELECT 13 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 13
+- name: An actual TRY retains its handler across ON and OFF in its body
+  sql: BEGIN TRY SET NOEXEC ON; SELECT 1/0 AS hidden; SET NOEXEC OFF; SELECT 8 AS value; END TRY BEGIN CATCH
+    SELECT 9 AS value; END CATCH
+  expect:
+    rows: 1
+    data:
+    - value: 8
+- name: A compiled TRY reports its documented OFF transition error
+  sql: BEGIN TRY EXEC(N'SET NOEXEC ON; BEGIN TRY SET NOEXEC OFF; END TRY BEGIN CATCH SELECT 99 AS hidden; END
+    CATCH;'); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH
+  expect:
+    rows: 1
+    data:
+    - error_number: 35101
+- name: Module declarations compile without publishing their bodies
+  sql: 'SET NOEXEC ON
+
+    GO
+
+    CREATE PROCEDURE noexec_suppressed AS BEGIN SELECT missing_column FROM noexec_missing; END
+
+    GO
+
+    SET NOEXEC OFF
+
+    GO
+
+    SELECT OBJECT_ID(N''dbo.noexec_suppressed'') AS object_id'
+  expect:
+    rows: 1
+    data:
+    - object_id: null
+- name: GO retains the connection NOEXEC mode until OFF
+  sql: 'SET NOEXEC ON
+
+    GO
+
+    INSERT noexec_probe VALUES(9,90)
+
+    GO
+
+    SET NOEXEC OFF
+
+    GO
+
+    SELECT COUNT(*) AS count_value FROM noexec_probe'
+  expect:
+    rows: 1
+    data:
+    - count_value: 1
+- name: Suppressed session and transaction statements do not execute
+  sql: DECLARE @before SYSNAME=DB_NAME(); SET NOEXEC ON; USE master; BEGIN TRANSACTION; SET LANGUAGE German;
+    COMMIT; SET NOEXEC OFF; SELECT CASE WHEN DB_NAME()=@before THEN 1 ELSE 0 END AS same_database,@@TRANCOUNT
+    AS transaction_count
+  expect:
+    rows: 1
+    data:
+    - same_database: 1
+      transaction_count: 0
+- name: Explicit transaction declarations retain the actual uncommitted catalog
+  sql: BEGIN TRANSACTION; CREATE TABLE noexec_transaction_source(id INT); SET NOEXEC ON; SELECT id FROM noexec_transaction_source;
+    SET NOEXEC OFF; ROLLBACK; SELECT OBJECT_ID(N'dbo.noexec_transaction_source') AS object_id
+  expect:
+    rows: 1
+    data:
+    - object_id: null
+- name: Compile failure preserves earlier explicit transaction writes
+  sql: BEGIN TRANSACTION; INSERT noexec_probe VALUES(10,100); BEGIN TRY EXEC(N'SET NOEXEC ON; SELECT bad_column
+    FROM noexec_probe; SET NOEXEC OFF;'); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number,COUNT(*)
+    AS count_value FROM noexec_probe; END CATCH; ROLLBACK
+  expect:
+    rows: 1
+    data:
+    - error_number: 207
+      count_value: 2
+- name: Invalid SELECT syntax is rejected while compiling
+  sql: SET NOEXEC ON; SELECT FROM; SET NOEXEC OFF
+  expect:
+    error: true
+- name: A known source column cannot be silently deferred
+  sql: SET NOEXEC ON; SELECT bad_column FROM noexec_probe; SET NOEXEC OFF
+  expect:
+    error: true
+- name: A known table variable column cannot be silently deferred
+  sql: SET NOEXEC ON; DECLARE @rows TABLE(id INT); SELECT bad_column FROM @rows; SET NOEXEC OFF
+  expect:
+    error: true
+- name: Suppressed CREATE still validates a computed column name
+  sql: SET NOEXEC ON; CREATE TABLE noexec_forbidden(id INT,value AS bad_column+1); SET NOEXEC OFF
+  expect:
+    error: true
+- name: Wire batches retain NOEXEC and resume ordinary typed result metadata
+  tds:
+    statements:
+    - connection: compile_wire
+      sql: SET NOEXEC ON
+      expect:
+        rows: 0
+    - connection: compile_wire
+      sql: SELECT bad_column FROM noexec_missing
+      expect:
+        rows: 0
+    - connection: compile_wire
+      sql: SET NOEXEC OFF; SELECT CAST(17 AS INT) AS value
+      expect:
+        rows: 1
+        data:
+        - value: 17
+        column_types:
+        - name: value
+          type: INT
+- name: A view declaration cannot defer a missing source
+  sql: 'SET NOEXEC ON
+
+    GO
+
+    CREATE VIEW noexec_missing_view AS SELECT bad_column FROM noexec_missing
+
+    GO
+
+    SET NOEXEC OFF'
+  expect:
+    error: true
+- name: A trigger declaration must resolve its target
+  sql: 'SET NOEXEC ON
+
+    GO
+
+    CREATE TRIGGER noexec_missing_trigger ON noexec_missing AFTER INSERT AS SELECT 1 AS hidden
+
+    GO
+
+    SET NOEXEC OFF'
+  expect:
+    error: true
+- name: A module declaration checks known body columns
+  sql: 'SET NOEXEC ON
+
+    GO
+
+    CREATE PROCEDURE noexec_bad_module AS SELECT bad_column FROM noexec_probe
+
+    GO
+
+    SET NOEXEC OFF'
+  expect:
+    error: true
+- name: Suppressed CONCAT options do not change the current profile
+  sql: SET CONCAT_NULL_YIELDS_NULL ON; SET NOEXEC ON; SET CONCAT_NULL_YIELDS_NULL OFF; SET NOEXEC OFF; SELECT
+    'a'+CAST(NULL AS VARCHAR(1)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Mixed OFF resumes the declared CONCAT profile
+  sql: SET CONCAT_NULL_YIELDS_NULL ON; SET NOEXEC ON; SET NOEXEC,CONCAT_NULL_YIELDS_NULL OFF; SELECT 'a'+CAST(NULL
+    AS VARCHAR(1)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: a
+- name: An initial mixed ON setter executes all admitted members
+  sql: SET CONCAT_NULL_YIELDS_NULL OFF; SET NOEXEC,CONCAT_NULL_YIELDS_NULL ON; SET NOEXEC OFF; SELECT 'a'+CAST(NULL
+    AS VARCHAR(1)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Suppressed NUMERIC ROUNDABORT ON needs no runtime capability
+  sql: SET NOEXEC ON; SET NUMERIC_ROUNDABORT ON; SET NOEXEC,NUMERIC_ROUNDABORT ON; SET NOEXEC OFF; SELECT CAST(1.4
+    AS DECIMAL(2,0)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Mixed OFF retains numeric rounding and SET completion
+  sql: SET NOEXEC ON; SET NOEXEC,NUMERIC_ROUNDABORT OFF; SELECT CAST(1.4 AS DECIMAL(2,0)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: Module exit restores CONCAT and NOEXEC profiles together
+  sql: SET CONCAT_NULL_YIELDS_NULL ON; EXEC noexec_option_child; SELECT 'a'+CAST(NULL AS VARCHAR(1)) AS value
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Suppressed ordinary OFF setters preserve NOCOUNT and warnings
+  sql: SET ANSI_WARNINGS,NOCOUNT ON; SET NOEXEC ON; SET NOCOUNT,ANSI_WARNINGS OFF; SET NOEXEC OFF; SELECT SESSIONPROPERTY('ANSI_WARNINGS')
+    AS warnings,@@OPTIONS&512 AS nocount
+  expect:
+    rows: 1
+    data:
+    - warnings: 1
+      nocount: 512
+- name: Suppressed ordinary ON setters preserve NOCOUNT and warnings
+  sql: SET ANSI_WARNINGS,NOCOUNT OFF; SET NOEXEC ON; SET NOCOUNT,ANSI_WARNINGS ON; SET NOEXEC OFF; SELECT SESSIONPROPERTY('ANSI_WARNINGS')
+    AS warnings,@@OPTIONS&512 AS nocount
+  expect:
+    rows: 1
+    data:
+    - warnings: 0
+      nocount: 0
+- name: A mixed OFF setter executes its ordinary flag members
+  sql: SET ANSI_WARNINGS,NOCOUNT ON; SET NOEXEC ON; SET NOEXEC,ANSI_WARNINGS,NOCOUNT OFF; SELECT SESSIONPROPERTY('ANSI_WARNINGS')
+    AS warnings,@@OPTIONS&512 AS nocount
+  expect:
+    rows: 1
+    data:
+    - warnings: 0
+      nocount: 0
+- name: A mixed ON setter remains compiled while already in NOEXEC
+  sql: SET ANSI_WARNINGS,NOCOUNT OFF; SET NOEXEC ON; SET NOEXEC,ANSI_WARNINGS,NOCOUNT ON; SET NOEXEC OFF; SELECT
+    SESSIONPROPERTY('ANSI_WARNINGS') AS warnings,@@OPTIONS&512 AS nocount
+  expect:
+    rows: 1
+    data:
+    - warnings: 0
+      nocount: 0
+- name: An unrelated SELECT does not prepare a skipped unused DEFAULT
+  sql: SET NOEXEC ON; DECLARE @t TABLE(x INT DEFAULT('bad')); SET NOEXEC OFF; SELECT 1 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+- name: A referenced local table does not prepare an unrelated skipped DEFAULT
+  sql: DECLARE @used TABLE(x INT); INSERT @used VALUES(37); SET NOEXEC ON; DECLARE @t TABLE(x INT DEFAULT('bad'));
+    SET NOEXEC OFF; SELECT x AS value FROM @used
+  expect:
+    rows: 1
+    data:
+    - value: 37
+- name: A quoted generated binding name is ordinary scalar text
+  sql: SET NOEXEC ON; DECLARE @t TABLE(x INT DEFAULT('bad')); SET NOEXEC OFF; SELECT N'__fn_local_table_t'
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: __fn_local_table_t
+- name: An inner function table keeps its own lexical declaration
+  sql: SET NOEXEC ON; DECLARE @t TABLE(x INT DEFAULT('bad')); SET NOEXEC OFF; SELECT dbo.noexec_inner_table()
+    AS value
+  expect:
+    rows: 1
+    data:
+    - value: 7
+- name: Reading a skipped table does not evaluate its deferred DEFAULT
+  sql: SET NOEXEC ON; DECLARE @t TABLE(x INT DEFAULT('bad')); SET NOEXEC OFF; SELECT COUNT(*) AS value FROM
+    @t
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: Recursive CTE compile binding awaits the common recursive relation owner
+  noncritical: true
+  sql: SET NOEXEC ON; WITH numbers AS (SELECT 1 AS id UNION ALL SELECT id+1 FROM numbers WHERE id<3) SELECT
+    id FROM numbers; SET NOEXEC OFF; SELECT 3 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 3

@@ -1,0 +1,54 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server 2017 and later always use ANSI_PADDING ON, including after OFF.
+# https://learn.microsoft.com/sql/t-sql/statements/set-ansi-padding-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Modern ANSI_PADDING settings preserve existing padded storage contracts
+setup:
+- sql: CREATE TABLE padding_before(id INT PRIMARY KEY,fixed_text CHAR(4),variable_text VARCHAR(4),variable_bytes VARBINARY(4))
+- sql: |
+    CREATE PROCEDURE dbo.padding_module AS
+    BEGIN
+      SET ANSI_PADDING OFF;
+      IF 1=1 SET ANSI_PADDING ON;
+      SELECT @@OPTIONS&16 AS padding_option;
+    END;
+test_cases:
+- name: Modern connections expose the permanent padding option
+  sql: SELECT @@OPTIONS&16 AS padding_option
+  expect: {rows: 1,data: [{padding_option: 16}]}
+- name: OFF is accepted while retaining the documented modern effective value
+  sql: SET ANSI_PADDING OFF; SELECT @@OPTIONS&16 AS padding_option;
+  expect: {rows: 1,data: [{padding_option: 16}]}
+- name: Existing declarations keep their trailing spaces and zero bytes after OFF
+  sql: INSERT INTO padding_before VALUES(1,'x','x ',0x0100)
+  expect: {affected_rows: 1}
+- name: Native input retains fixed padding and variable length payloads
+  sql: SELECT DATALENGTH(fixed_text) AS fixed_size,DATALENGTH(variable_text) AS text_size,DATALENGTH(variable_bytes) AS binary_size FROM padding_before
+  expect: {rows: 1,data: [{fixed_size: 4,text_size: 2,binary_size: 2}]}
+- name: New declarations after OFF use the same modern contract
+  sql: SET ANSI_PADDING OFF; CREATE TABLE padding_after(id INT PRIMARY KEY,fixed_text CHAR(4),variable_text VARCHAR(4),variable_bytes VARBINARY(4));
+- name: New column writes preserve their trailing bytes too
+  sql: INSERT INTO padding_after VALUES(1,'y','y ',0x0200)
+  expect: {affected_rows: 1}
+- name: Newly declared storage retains padding and variable trailing bytes
+  sql: SELECT DATALENGTH(fixed_text) AS fixed_size,DATALENGTH(variable_text) AS text_size,DATALENGTH(variable_bytes) AS binary_size FROM padding_after
+  expect: {rows: 1,data: [{fixed_size: 4,text_size: 2,binary_size: 2}]}
+- name: ON also exposes the permanent padding option
+  sql: SET ANSI_PADDING ON; SELECT @@OPTIONS&16 AS padding_option;
+  expect: {rows: 1,data: [{padding_option: 16}]}
+- name: Procedure admission and control flow share the setting grammar
+  sql: EXEC dbo.padding_module
+  expect: {rows: 1,data: [{padding_option: 16}]}
+- name: Mixed options retain lexical quoted identifier transitions
+  sql: SET ANSI_PADDING,QUOTED_IDENTIFIER OFF; SELECT "literal" AS result,@@OPTIONS&16 AS padding_option;
+  expect: {rows: 1,data: [{result: literal,padding_option: 16}]}
+- name: Invalid option values remain invalid SQL
+  sql: SET ANSI_PADDING MAYBE
+  expect: {error: true}
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS dbo.padding_module
+- sql: DROP TABLE IF EXISTS padding_after
+- sql: DROP TABLE IF EXISTS padding_before

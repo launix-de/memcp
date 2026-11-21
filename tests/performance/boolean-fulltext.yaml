@@ -9,14 +9,14 @@ setup:
 - sql: CREATE TABLE search_documents (id INT PRIMARY KEY, body TEXT) ENGINE=sloppy
 - scm: |
     (begin
-      (insert (table "memcp-tests" false "search_documents" false) '("id" "body")
+      (insert (table "memcp-tests" false "search_documents" false nil) '("id" "body")
         (map (produceN 32768) (lambda (i)
           (list i (concat "alpha manual reference ordinary text "
             (if (equal? (mod i 64) 0) "needle " "other ")
             (if (equal? (mod i 128) 0) "obsolete" "current"))))))
-      (partitiontable (table "memcp-tests" false "search_documents" false)
+      (partitiontable (table "memcp-tests" false "search_documents" false nil)
         (list (list "id" (list 4096 8192 12288 16384 20480 24576 28672))))
-      (rebuild (table "memcp-tests" false "search_documents" false) true false))
+      (rebuild (table "memcp-tests" false "search_documents" false nil) true false))
 cleanup:
 - sql: DROP TABLE search_documents
 test_cases:

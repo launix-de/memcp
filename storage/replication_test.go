@@ -54,12 +54,12 @@ func TestReplicationUniqueAcquisitionAllowsCollidingConfigWrite(t *testing.T) {
 		t.Fatal("fixture did not request M")
 	}
 	rows := [][]scm.Scmer{{scm.NewInt(7)}}
-	mask := source.guardUniqueWrites([]string{"id"}, rows, false, 0, nil).mask
+	mask := source.guardUniqueWrites([]string{"id"}, rows, false, 0, nil, nil).mask
 	var entry replicaConfigEntry
 	var configGuard uniqueWriteGuard
 	for key := 0; ; key++ {
 		entry = replicaConfigEntry{Kind: "backup", Name: fmt.Sprint(key)}
-		configGuard = config.guardUniqueWrites([]string{"node", "key"}, [][]scm.Scmer{{scm.NewString(r.id), scm.NewString(entry.Kind + "/" + entry.Name)}}, false, 0, nil)
+		configGuard = config.guardUniqueWrites([]string{"node", "key"}, [][]scm.Scmer{{scm.NewString(r.id), scm.NewString(entry.Kind + "/" + entry.Name)}}, false, 0, nil, nil)
 		if configGuard.mask.intersects(mask) {
 			break
 		}
@@ -108,7 +108,7 @@ func TestReplicationOrderedScanRetainsColdPayloadThroughCallback(t *testing.T) {
 			path := strings.TrimSuffix(name, "-panic")
 			failCallback := path != name
 			tbl, _ := createDurabilityTestTable(t, "torderedcold", 4)
-			RebuildTable(tbl, true, false)
+			RebuildTable(tbl, true, false, nil)
 			shard := tbl.ActiveShards()[0]
 			part := newRecSetShardFromSortedIDs(shard, 4, []uint32{0, 1, 2, 3})
 			source := &recSet{table: tbl, shards: []recSetShard{part}, count: 4}
@@ -139,7 +139,7 @@ func TestReplicationOrderedScanRetainsColdPayloadThroughCallback(t *testing.T) {
 				case "multi":
 					got = scanOrderMulti(nil, []scanOrderTableSpec{spec}, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 4, scm.NewInt(0), false, scm.NewNil())
 				case "recset":
-					got = source.scan_order(nil, schema, nil, nil, condition, spec.sortcols, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 4, spec.callbackCols, callback, scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil())
+					got = source.scan_order(nil, schema, nil, nil, condition, spec.sortcols, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 4, spec.callbackCols, callback, scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil(), nil)
 				case "batch":
 					got = scanOrderBatchAccept(nil, spec, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[0] }), spec.sortcols, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 4, spec.callbackCols, callback, scm.NewInt(0), false, scm.NewNil())
 				default:
@@ -152,7 +152,7 @@ func TestReplicationOrderedScanRetainsColdPayloadThroughCallback(t *testing.T) {
 					if len(spec.sortcols) != 0 {
 						dirs = []func(...scm.Scmer) scm.Scmer{order}
 					}
-					got = tbl.scan_order(nil, schema, nil, nil, condition, spec.sortcols, dirs, 0, 0, limit, spec.callbackCols, callback, scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil())
+					got = tbl.scan_order(nil, schema, nil, nil, condition, spec.sortcols, dirs, 0, 0, limit, spec.callbackCols, callback, scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil(), nil)
 				}
 			}()
 			if failCallback {
@@ -211,7 +211,7 @@ func TestReplicationOrderedMutationRequiresWritePermission(t *testing.T) {
 				case "batch":
 					scanOrderBatchAccept(nil, spec, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[0] }), sorts, dirs, 0, 0, 1, spec.callbackCols, callback, scm.NewInt(0), false, scm.NewNil())
 				default:
-					tbl.scan_order(nil, spec.accessSchema, nil, nil, spec.condition, sorts, dirs, 0, 0, 1, spec.callbackCols, callback, scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil())
+					tbl.scan_order(nil, spec.accessSchema, nil, nil, spec.condition, sorts, dirs, 0, 0, 1, spec.callbackCols, callback, scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil(), nil)
 				}
 			}()
 			if failure == nil || !strings.Contains(fmt.Sprint(failure), mosi.NetworkError) {
@@ -248,7 +248,7 @@ func TestReplicationOrderedMutationDrainsNativeTransactionBeforeHandover(t *test
 					}
 					scm.Apply(args[1])
 					return args[0]
-				}), scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil())
+				}), scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil(), nil)
 			if tx.IsVisible(shard, 0) {
 				t.Fatal("transaction did not delete the first row")
 			}
@@ -272,7 +272,7 @@ func TestReplicationOrderedMutationDrainsNativeTransactionBeforeHandover(t *test
 
 func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "torderedhistory", 3)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	original := tbl.ActiveShards()[0]
 	part := newRecSetShardFromSortedIDs(original, 3, []uint32{0, 1, 2})
 	source := &recSet{table: tbl, shards: []recSetShard{part}, count: 3}
@@ -294,7 +294,7 @@ func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 	got := source.scan_order(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueCondition(),
 		[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 3,
 		[]string{"id"}, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return scm.NewInt(args[0].Int() + args[1].Int()) }),
-		scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil())
+		scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil(), nil)
 	if got.Int() != 6 || cell.ownstate.Phase() != mosi.IO {
 		t.Fatalf("historical sum = %v, current rights = %v", got, cell.ownstate.Phase())
 	}
@@ -313,7 +313,7 @@ func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 				called = true
 				return args[0]
 			}),
-			scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil())
+			scm.NewInt(0), false, scm.NewNil(), nil, scm.NewNil(), nil)
 	}()
 	if called || !strings.Contains(fmt.Sprint(failure), "generation changed; retry statement") {
 		t.Fatalf("historical mutation called = %v, failure = %v", called, failure)
@@ -1308,7 +1308,7 @@ func TestReplicationActiveWriterPreventsPayloadEviction(t *testing.T) {
 
 func TestReplicationRebuildForwardsUUIDAndRights(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "t_uuid_forwarding", 4)
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	original := table.ActiveShards()[0]
 	r := replicaRecoveryFixture()
 	previous := replication.Swap(r)
@@ -1319,7 +1319,7 @@ func TestReplicationRebuildForwardsUUIDAndRights(t *testing.T) {
 	resource := *cell.resource.Load()
 	for i := 0; i < 3; i++ {
 		before := table.ActiveShards()[0]
-		RebuildTable(table, true, false)
+		RebuildTable(table, true, false, nil)
 		after := table.ActiveShards()[0]
 		if after.uuid == before.uuid || before.loadNext() != after {
 			t.Fatal("rebuild did not publish a distinct UUID through native forwarding")
@@ -1408,7 +1408,7 @@ func TestReplicationLateTransferCannotReplaceSuccessor(t *testing.T) {
 		t.Fatal(err)
 	}
 	held := cell.current.Load()
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	latest := cell.current.Load()
 	transfer, err := r.startImport(mosiPacket{Resource: resource, Content: first})
 	if err != nil {
@@ -1526,7 +1526,7 @@ func TestReplicationRequestLearnsOnlyOwnerForwarding(t *testing.T) {
 
 func TestReplicationSharedSchemaKeepsNewerShard(t *testing.T) {
 	tbl, engine := createDurabilityTestTable(t, "replica_shared_schema_successor", 3)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	older := append([]byte(nil), engine.ReadSchema()...)
 	r := replicaRecoveryFixture()
 	r.cluster = &nodeCluster{manager: r, self: clusterMember{ID: r.id}}
@@ -2121,7 +2121,7 @@ func TestReplicationDeclarationIgnoresMaterializedColumnAddExtents(t *testing.T)
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
 	r.declareShard(tbl.ActiveShards()[0], r.id, true)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	current := tbl.ActiveShards()[0]
 	if !r.sameReplicaDeclaration(tbl, &incoming) {
 		t.Error("materializing ADD recovery extents changed logical declaration identity")

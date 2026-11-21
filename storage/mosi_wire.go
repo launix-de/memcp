@@ -26,7 +26,7 @@ import "github.com/launix-de/memcp/scm"
 const mosiPacketBytes = 64 * 1024
 
 const mosiHTTPPath = "/cluster"
-const mosiSubprotocol = "memcp.channels.v9"
+const mosiSubprotocol = "memcp.channels.v10"
 const mosiMaxMessageBytes = 256 * 1024
 const maxNodeRecordBytes = 32 * 1024 * 1024
 
@@ -226,6 +226,9 @@ func encodeMosiPacket(p mosiPacket) (data []byte, err error) {
 		w.text(p.User)
 		w.text(p.Hash)
 		w.routes(p.Forwards)
+		w.text(p.State)
+		w.text(p.Owner)
+		w.readers(p.Readers)
 	case "object":
 		w.number(p.Epoch)
 		w.text(p.Content)
@@ -327,6 +330,9 @@ func decodeMosiPacket(data []byte) (packet *mosiPacket, err error) {
 		p.User = string(r.blob())
 		p.Hash = string(r.blob())
 		p.Forwards = r.routes()
+		p.State = string(r.blob())
+		p.Owner = string(r.blob())
+		p.Readers = r.readers()
 	case "object":
 		p.Epoch = r.uint()
 		p.Content = string(r.blob())
@@ -554,13 +560,31 @@ func marshalNode(value any) (data []byte, err error) {
 		return w.data, nil
 	case clusterIDRequest:
 		w := mosiWriter{data: make([]byte, 0, 128)}
+		w.number(2) // UUID provenance or explicit legacy highwater-only reservation
 		w.text(v.Database)
 		w.text(v.Table)
 		w.number(v.Explicit)
 		w.number(v.Count)
+		w.text(v.Identity)
+		var flags uint64
+		if v.Read {
+			flags |= 1
+		}
+		if v.ObservedExplicit {
+			flags |= 2
+		}
+		w.number(flags)
 		return w.data, nil
 	case clusterIDReply:
-		return binary.AppendUvarint(nil, v.Base), nil
+		w := mosiWriter{}
+		w.number(2)
+		w.number(v.Base)
+		if v.State == (tableAllocatorState{}) {
+			w.text("") // UUID-less legacy reservation has no provenance payload
+		} else {
+			w.text(encodeTableAllocatorRecord(LogEntryTableAllocator{v.State}))
+		}
+		return w.data, nil
 	case objectViewDeclaration:
 		w := mosiWriter{data: make([]byte, 0, 128)}
 		w.text(v.URI)
@@ -815,9 +839,23 @@ func unmarshalNode(data []byte, target any) (err error) {
 	case *clusterHello:
 		*p = raw.hello()
 	case *clusterIDRequest:
-		*p = clusterIDRequest{Database: string(raw.blob()), Table: string(raw.blob()), Explicit: raw.uint(), Count: raw.uint()}
+		if raw.uint() != 2 {
+			panic("unsupported table allocator request version")
+		}
+		*p = clusterIDRequest{Database: string(raw.blob()), Table: string(raw.blob()), Explicit: raw.uint(), Count: raw.uint(), Identity: string(raw.blob())}
+		flags := raw.uint()
+		if flags&^3 != 0 {
+			panic("invalid table allocator request flags")
+		}
+		p.Read, p.ObservedExplicit = flags&1 != 0, flags&2 != 0
 	case *clusterIDReply:
+		if raw.uint() != 2 {
+			panic("unsupported table allocator reply version")
+		}
 		*p = clusterIDReply{Base: raw.uint()}
+		if state := raw.blob(); len(state) != 0 {
+			p.State = decodeTableAllocatorRecord(string(state)).state
+		}
 	case *objectViewDeclaration:
 		*p = objectViewDeclaration{URI: string(raw.blob()), View: raw.data}
 		raw.data = nil

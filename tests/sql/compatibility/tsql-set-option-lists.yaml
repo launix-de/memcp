@@ -1,0 +1,233 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/set-statements-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Boolean SET lists retain each existing option owner and module scope
+setup:
+- sql: CREATE TABLE set_list_values(id INT PRIMARY KEY,label NVARCHAR(12),short_label NVARCHAR(3))
+- sql: INSERT set_list_values VALUES(1,N'one',N'abc')
+- sql: "SET QUOTED_IDENTIFIER,ANSI_NULLS OFF;\nGO\nCREATE PROCEDURE dbo.set_list_module AS BEGIN\n  SET NOCOUNT,ANSI_WARNINGS\
+    \ ON;\n  SET QUOTED_IDENTIFIER,ANSI_NULLS ON;\n  SELECT \"stored\" AS label,SESSIONPROPERTY('ANSI_WARNINGS')\
+    \ AS warnings,\n    SESSIONPROPERTY('ANSI_NULLS') AS ansi,SESSIONPROPERTY('QUOTED_IDENTIFIER') AS quoted,\n\
+    \    @@OPTIONS&512 AS nocount;\nEND;\nGO\nSET QUOTED_IDENTIFIER,ANSI_NULLS ON;\n"
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS dbo.set_list_module
+- sql: DROP TABLE IF EXISTS set_list_values
+test_cases:
+- name: A shared ON value updates all admitted runtime and lexical settings
+  sql: "SET NOCOUNT,ANSI_WARNINGS,ANSI_NULLS,ANSI_PADDING,QUOTED_IDENTIFIER ON;\nSELECT SESSIONPROPERTY('ANSI_WARNINGS')\
+    \ AS warnings,SESSIONPROPERTY('ANSI_NULLS') AS ansi,\n  SESSIONPROPERTY('ANSI_PADDING') AS padding,SESSIONPROPERTY('QUOTED_IDENTIFIER')\
+    \ AS quoted,\n  @@OPTIONS&512 AS nocount;\n"
+  expect:
+    rows: 1
+    data:
+    - warnings: 1
+      ansi: 1
+      padding: 1
+      quoted: 1
+      nocount: 512
+- name: A shared OFF value retains modern padding and changes quoted literal parsing
+  sql: "SET ANSI_WARNINGS,NOCOUNT,QUOTED_IDENTIFIER,ANSI_NULLS,ANSI_PADDING,FMTONLY OFF;\nSELECT \"literal\" AS\
+    \ label,SESSIONPROPERTY('ANSI_WARNINGS') AS warnings,\n  SESSIONPROPERTY('ANSI_NULLS') AS ansi,SESSIONPROPERTY('ANSI_PADDING')\
+    \ AS padding,\n  SESSIONPROPERTY('QUOTED_IDENTIFIER') AS quoted,@@OPTIONS&512 AS nocount;\n"
+  expect:
+    rows: 1
+    data:
+    - label: literal
+      warnings: 0
+      ansi: 0
+      padding: 1
+      quoted: 0
+      nocount: 0
+- name: Existing individual forms retain their execution and lexical effects
+  sql: "SET ANSI_WARNINGS OFF; SET NOCOUNT ON; SET FMTONLY OFF;\nSET ANSI_PADDING OFF; SET QUOTED_IDENTIFIER OFF;\
+    \ SET ANSI_NULLS ON;\nSELECT \"single\" AS label,9/0 AS missing,SESSIONPROPERTY('ANSI_WARNINGS') AS warnings,\n\
+    \  SESSIONPROPERTY('ANSI_PADDING') AS padding,@@OPTIONS&512 AS nocount;\n"
+  expect:
+    rows: 1
+    data:
+    - label: single
+      missing: null
+      warnings: 0
+      padding: 1
+      nocount: 512
+- name: Comments and member order retain the actual quoted column binding
+  sql: 'SET QUOTED_IDENTIFIER /* member */, ANSI_WARNINGS, NOCOUNT ON;
+
+    SELECT "label" AS value FROM set_list_values WHERE id=1;
+
+    '
+  expect:
+    rows: 1
+    data:
+    - value: one
+- name: A false branch changes only its parse time option
+  sql: "SET QUOTED_IDENTIFIER,ANSI_WARNINGS ON;\nIF 1=0 SET ANSI_WARNINGS,QUOTED_IDENTIFIER OFF;\nSELECT \"literal\"\
+    \ AS label,SESSIONPROPERTY('ANSI_WARNINGS') AS warnings,\n  SESSIONPROPERTY('QUOTED_IDENTIFIER') AS quoted;\n"
+  expect:
+    rows: 1
+    data:
+    - label: literal
+      warnings: 1
+      quoted: 0
+- name: OFF list values survive GO on their actual connection
+  session_id: set-list-shared
+  sql: 'SET ANSI_WARNINGS,NOCOUNT OFF;
+
+    GO
+
+    SELECT SESSIONPROPERTY(''ANSI_WARNINGS'') AS warnings,@@OPTIONS&512 AS nocount;
+
+    '
+  expect:
+    rows: 1
+    data:
+    - warnings: 0
+      nocount: 0
+- name: A later request inherits the connection OFF values
+  session_id: set-list-shared
+  sql: SELECT 7/0 AS missing,SESSIONPROPERTY('ANSI_WARNINGS') AS warnings,@@OPTIONS&512 AS nocount
+  expect:
+    rows: 1
+    data:
+    - missing: null
+      warnings: 0
+      nocount: 0
+- name: An independent connection retains its own defaults
+  session_id: set-list-independent
+  sql: SELECT SESSIONPROPERTY('ANSI_WARNINGS') AS warnings,SESSIONPROPERTY('QUOTED_IDENTIFIER') AS quoted,@@OPTIONS&512
+    AS nocount
+  expect:
+    rows: 1
+    data:
+    - warnings: 1
+      quoted: 1
+      nocount: 0
+- name: Dynamic list changes restore the caller values after execution
+  sql: 'SET ANSI_WARNINGS,NOCOUNT OFF;
+
+    EXEC(N''SET NOCOUNT,ANSI_WARNINGS ON; SELECT SESSIONPROPERTY(''''ANSI_WARNINGS'''') AS warnings,@@OPTIONS&512
+    AS nocount;'');
+
+    SELECT SESSIONPROPERTY(''ANSI_WARNINGS'') AS warnings,@@OPTIONS&512 AS nocount;
+
+    '
+  expect:
+    rows: 2
+    data:
+    - warnings: 1
+      nocount: 512
+    - warnings: 0
+      nocount: 0
+- name: Stored source settings and runtime list changes retain separate owners
+  sql: "SET QUOTED_IDENTIFIER,ANSI_NULLS ON;\nSET ANSI_WARNINGS,NOCOUNT OFF;\nEXEC dbo.set_list_module;\nSELECT\
+    \ SESSIONPROPERTY('ANSI_WARNINGS') AS warnings,SESSIONPROPERTY('ANSI_NULLS') AS ansi,\n  SESSIONPROPERTY('QUOTED_IDENTIFIER')\
+    \ AS quoted,@@OPTIONS&512 AS nocount;\n"
+  expect:
+    rows: 2
+    data:
+    - label: stored
+      warnings: 1
+      ansi: 0
+      quoted: 0
+      nocount: 512
+    - warnings: 0
+      ansi: 1
+      quoted: 1
+      nocount: 0
+- name: FMTONLY list exit applies every member before the next actual query
+  tds:
+    statements:
+    - connection: owner
+      sql: SET ANSI_WARNINGS,NOCOUNT,FMTONLY ON
+    - connection: owner
+      sql: SELECT id,label FROM set_list_values WHERE id=1
+      expect:
+        rows: 0
+        column_types:
+        - name: id
+          type: INT
+        - name: label
+          type: NVARCHAR
+    - connection: observer
+      sql: SELECT id,label FROM set_list_values WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          label: one
+    - connection: owner
+      sql: SET FMTONLY,ANSI_WARNINGS,NOCOUNT OFF
+    - connection: owner
+      sql: SELECT id,label,SESSIONPROPERTY('ANSI_WARNINGS') AS warnings,@@OPTIONS&512 AS nocount FROM set_list_values
+        WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          label: one
+          warnings: 0
+          nocount: 0
+- name: Individual FMTONLY entry and exit still retain metadata and actual rows
+  tds:
+    statements:
+    - sql: SET FMTONLY ON
+    - sql: SELECT id FROM set_list_values
+      expect:
+        rows: 0
+        column_types:
+        - name: id
+          type: INT
+    - sql: SET FMTONLY OFF
+    - sql: SELECT id,label FROM set_list_values
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          label: one
+- name: List warning mode owns actual destination truncation
+  tds:
+    statements:
+    - sql: SET ANSI_WARNINGS,NOCOUNT OFF
+    - sql: INSERT set_list_values VALUES(2,N'two',N'abcdef')
+    - sql: SELECT id,short_label FROM set_list_values WHERE id=2
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          short_label: abc
+    - sql: DELETE FROM set_list_values WHERE id=2
+- name: Enabling warnings in a list retains structured arithmetic diagnostics
+  sql: 'SET NOCOUNT,ANSI_WARNINGS ON;
+
+    BEGIN TRY SELECT 1/0 AS missing; END TRY
+
+    BEGIN CATCH SELECT ERROR_NUMBER() AS number; END CATCH;
+
+    '
+  expect:
+    rows: 1
+    data:
+    - number: 8134
+- name: An unknown list member remains invalid SQL
+  sql: SET ANSI_WARNINGS,SET_LIST_UNKNOWN OFF
+  expect:
+    error: true
+- name: An incomplete list cannot replace its required ON or OFF value
+  sql: SET ANSI_WARNINGS,NOCOUNT MAYBE
+  expect:
+    error: true
+- name: Standalone SET completes without result rows or an affected-data-row count
+  sql: SET ANSI_WARNINGS,NOCOUNT,CONCAT_NULL_YIELDS_NULL OFF;
+  expect:
+    rows: 0
+- name: SET without NOCOUNT still clears the protocol count validity flag
+  tds:
+    rpc_packets:
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000530045005400200041004e00530049005f005700410052004e0049004e00470053002c004e004f0043004f0055004e0054002c0043004f004e004300410054005f004e0055004c004c005f005900490045004c00440053005f004e0055004c004c0020004f00460046003b00
+      done_count: false
+      done_rows: 0

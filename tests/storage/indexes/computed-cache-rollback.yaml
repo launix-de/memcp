@@ -1,0 +1,214 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Native rollback and statement savepoint undo retire warmed dependent
+    values
+  isolated: true
+setup:
+- sql: DROP TABLE IF EXISTS maintenance_target
+- sql: DROP TABLE IF EXISTS maintenance_source
+- sql: CREATE TABLE maintenance_source(id INT PRIMARY KEY,grp INT,value INT)
+- sql: CREATE TABLE maintenance_target(id INT PRIMARY KEY,grp INT,running INT)
+- sql: INSERT INTO maintenance_source VALUES(1,1,10),(2,1,20),(3,2,7)
+- sql: INSERT INTO maintenance_target(id,grp) VALUES(10,1),(20,2)
+- sql: CREATE TABLE maintenance_incoming(id INT PRIMARY KEY,grp INT,value INT)
+- sql: INSERT INTO maintenance_incoming VALUES(4,1,5),(5,2,-1)
+test_cases:
+- name: Register the native sum_value dependency
+  scm: |-
+    (createcolumn (table "memcp-tests" false "maintenance_target" false nil)
+      "sum_value" "INT" '() '("temp" true) '("grp")
+      (lambda (grp)
+        (scan nil (table "memcp-tests" false "maintenance_source" false nil)
+          (list 369436175368192 (scan_boundary "equal" "grp" 0 0 true true "" false)) (list grp)
+          '("grp") (lambda (source.grp) (equal? source.grp (outer 1 grp)))
+          '("value") (lambda (acc value) (+ acc value)) 0 + false)))
+  expect:
+    result: true
+- name: Register the native max_value dependency
+  scm: |-
+    (createcolumn (table "memcp-tests" false "maintenance_target" false nil)
+      "max_value" "INT" '() '("temp" true) '("grp")
+      (lambda (grp)
+        (scan nil (table "memcp-tests" false "maintenance_source" false nil)
+          (list 369436175368192 (scan_boundary "equal" "grp" 0 0 true true "" false)) (list grp)
+          '("grp") (lambda (source.grp) (equal? source.grp (outer 1 grp)))
+          '("value") (lambda (acc value) (max acc value)) 0 max false)))
+  expect:
+    result: true
+- name: Register an ORC with an actual nested dependency
+  scm: |-
+    (createcolumn (table "memcp-tests" false "maintenance_target" false nil) "running" "INT" '()
+      (list "sortcols" '("id") "sortdirs" (list false) "partitioncount" 0
+        "mapcols" '("grp")
+        "mapreducefn" (lambda (acc set_value grp)
+          (begin
+            (define subtotal (scan nil (table "memcp-tests" false "maintenance_source" false nil)
+              (list 369436175368192 (scan_boundary "equal" "grp" 0 0 true true "" false)) (list grp)
+              '("grp") (lambda (source.grp) (equal? source.grp (outer 1 grp)))
+              '("value") (lambda (inner value) (+ inner value)) 0 + false))
+            (define total (+ acc subtotal)) (set_value total) total))
+        "reduceinit" 0))
+  expect:
+    result: true
+- name: Warm incremental selective and ORC caches before mutation
+  sql: SELECT id,sum_value,max_value,running FROM maintenance_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+      sum_value: 30
+      max_value: 20
+      running: 30
+    - id: 20
+      sum_value: 7
+      max_value: 7
+      running: 37
+- name: Native dependency headers exist before the write
+  scm: |-
+    (begin
+      (define headers (get_assoc (show "memcp-tests" "maintenance_source" true) "triggers"))
+      (and (>= (count (filter headers (lambda (h) (strlike (get_assoc h "name") ".cache:%")))) 3)
+           (>= (count (filter headers (lambda (h) (strlike (get_assoc h "name") ".orcdep:%")))) 3)))
+  expect:
+    result: true
+- name: An invalidation wave must retain the actual native transaction
+  scm: |-
+    (createtrigger (table "memcp-tests" false "maintenance_target" false nil)
+      "maintenance_context_wave" "after_invalidate" "" ""
+      (lambda (OLD NEW session tx)
+        (if (nil? tx) (error "generated maintenance lost its native transaction") true)) false)
+  expect:
+    result: true
+- name: Warm native incremental UPDATE completes under its writer owner
+  sql: UPDATE maintenance_source SET value=value+5 WHERE grp=1
+  expect:
+    affected_rows: 2
+- name: Increment and selective invalidation preserve all exact values
+  sql: SELECT id,sum_value,max_value,running FROM maintenance_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+      sum_value: 40
+      max_value: 25
+      running: 40
+    - id: 20
+      sum_value: 7
+      max_value: 7
+      running: 47
+- name: Moving a dependency key uses full invalidation with the same transaction
+  sql: UPDATE maintenance_source SET grp=2 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: Full invalidation keeps both groups and the ORC correct
+  sql: SELECT id,sum_value,max_value,running FROM maintenance_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+      sum_value: 25
+      max_value: 25
+      running: 25
+    - id: 20
+      sum_value: 22
+      max_value: 15
+      running: 47
+- name: Begin the cache rollback transaction
+  sql: BEGIN
+  session_id: maintenance_rollback
+- name: Mutate a warmed dependency in the transaction
+  sql: UPDATE maintenance_source SET value=50 WHERE id=2
+  expect:
+    affected_rows: 1
+  session_id: maintenance_rollback
+- name: The transaction observes its updated native caches
+  sql: SELECT id,sum_value,max_value,running FROM maintenance_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 10
+      sum_value: 50
+      max_value: 50
+      running: 50
+    - id: 20
+      sum_value: 22
+      max_value: 15
+      running: 72
+  session_id: maintenance_rollback
+- name: Rollback the actual source and invalidate derived state
+  sql: ROLLBACK
+  session_id: maintenance_rollback
+- name: Rollback restores the actual source rows before caches are read
+  sql: SELECT id,grp,value FROM maintenance_source ORDER BY id
+  expect: &id002
+    rows: 3
+    data:
+    - id: 1
+      grp: 2
+      value: 15
+    - id: 2
+      grp: 1
+      value: 25
+    - id: 3
+      grp: 2
+      value: 7
+- name: Rollback restores exact source-dependent values
+  sql: SELECT id,sum_value,max_value,running FROM maintenance_target ORDER BY id
+  expect: &id001
+    rows: 2
+    data:
+    - id: 10
+      sum_value: 25
+      max_value: 25
+      running: 25
+    - id: 20
+      sum_value: 22
+      max_value: 15
+      running: 47
+- name: Add a checked source boundary for statement savepoint undo
+  syntax: tsql
+  sql: ALTER TABLE maintenance_source ADD CONSTRAINT maintenance_nonnegative CHECK([value]>=0)
+- name: Streaming CHECK failure reaches its first sink then restores the same parent
+    transaction
+  scm: |-
+    (begin
+      (createtrigger (table "memcp-tests" false "maintenance_source" false nil)
+        "maintenance_stream_observer" "after_insert" "" ""
+        (lambda (OLD NEW session tx)
+          (session "maintenance_seen" (+ 1 (coalesceNil (session "maintenance_seen") 0)))) false)
+      (define owner (newsession))
+      (owner "username" "root")
+      (owner "schema" "memcp-tests")
+      (owner "maintenance_seen" 0)
+      (define execute (lambda (sql)
+        (tsql_execute_request "memcp-tests" sql owner nil 0 (lambda (_row) true) (lambda fields true))))
+      (define result (try (lambda () (begin
+        (execute "BEGIN TRANSACTION")
+        (define parent (owner "__memcp_tx"))
+        (define rejected (try (lambda () (begin
+          (execute "INSERT INTO maintenance_source SELECT TOP(2) id,grp,[value] FROM maintenance_incoming ORDER BY id") false))
+          (lambda (cause) (strlike (string cause) "%maintenance_nonnegative%"))))
+        (define seen (owner "maintenance_seen"))
+        (define same_parent (identical? parent (owner "__memcp_tx")))
+        (define extra_rows (scan (owner "__memcp_tx")
+          (table "memcp-tests" false "maintenance_source" false (owner "__memcp_tx"))
+          '() '() '("id") (lambda (id) (>= id 4)) '()
+          (lambda (count) (+ count 1)) 0 + false))
+        (execute "COMMIT TRANSACTION")
+        (and rejected (equal? seen 1) same_parent (equal? extra_rows 0))))
+        (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+      (tsql_temporary_close owner)
+      result)
+  expect:
+    result: true
+- name: Statement savepoint undo invalidates every warmed derived value
+  sql: SELECT id,sum_value,max_value,running FROM maintenance_target ORDER BY id
+  expect: *id001
+- name: Rejected streamed candidates leave the actual source unchanged
+  sql: SELECT id,grp,value FROM maintenance_source ORDER BY id
+  expect: *id002
+cleanup:
+- sql: DROP TABLE IF EXISTS maintenance_incoming
+- sql: DROP TABLE IF EXISTS maintenance_target
+- sql: DROP TABLE IF EXISTS maintenance_source

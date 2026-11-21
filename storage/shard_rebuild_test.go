@@ -55,8 +55,8 @@ func TestColdShardLoadWaitObservesQueryCancellation(t *testing.T) {
 				tbl.publishTopologyLocked()
 				tbl.mu.Unlock()
 			}
-			if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
-				t.Fatalf("fixture rebuild failed: %s", result)
+			if result := RebuildTable(tbl, true, false, nil); result.err != nil {
+				t.Fatalf("fixture rebuild failed: %v", result)
 			}
 			shards := tbl.ActiveShards()
 			if multi && len(shards) < 2 {
@@ -248,7 +248,7 @@ func TestLoadSlotCancellationAndDeadlinePreserveTokens(t *testing.T) {
 
 func TestColdColumnLoadCancellationKeepsMutationAtomic(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	shard.mu.Lock()
 	shard.columns["payload"] = nil
@@ -820,7 +820,7 @@ func TestRegisteredCreateTableTriggerRunsOnCreate(t *testing.T) {
 			scm.NewSymbol("table"),
 			scm.NewString("tcreatetabletrigger"), scm.NewBool(false),
 			scm.NewString(".hook"), scm.NewBool(false),
-		}),
+			scm.NewNil()}),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("id")}),
 		scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("list"),
@@ -2610,9 +2610,9 @@ func TestFailedRebuildSchemaPublicationKeepsLaterWritesRecoverable(t *testing.T)
 	failing := &failSchemaWritePersistence{PersistenceEngine: persistence, failAt: 1}
 	tbl.schema.persistence = failing
 
-	result := RebuildTable(tbl, true, false)
-	if !strings.Contains(result, "schema publication failure") {
-		t.Fatalf("rebuild result %q does not report injected schema failure", result)
+	result := RebuildTable(tbl, true, false, nil)
+	if result.err == nil || !strings.Contains(result.err.Error(), "schema publication failure") {
+		t.Fatalf("rebuild result %v does not report injected schema failure", result)
 	}
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("after-failed-save")}}, nil, scm.NewNil(), false, nil)
 	if got := tbl.Count(); got != 2 {
@@ -2631,7 +2631,7 @@ func TestRebuildInsideActiveTransactionDoesNotWaitForItself(t *testing.T) {
 	tx := NewTxContext(TxCursorStability)
 	tx.Session = scm.NewSession()
 	scm.Apply(tx.Session, scm.NewString("__memcp_tx"), scm.NewAny(tx))
-	resultCh := make(chan string, 1)
+	resultCh := make(chan tableRebuildResult, 1)
 	panicCh := make(chan any, 1)
 	go func() {
 		defer func() {
@@ -2641,7 +2641,7 @@ func TestRebuildInsideActiveTransactionDoesNotWaitForItself(t *testing.T) {
 		}()
 		withTxSession(tx, func() scm.Scmer {
 			tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("same-request")}}, nil, scm.NewNil(), false, nil, tx)
-			resultCh <- RebuildTable(tbl, true, false)
+			resultCh <- RebuildTable(tbl, true, false, nil)
 			return scm.NewNil()
 		})
 	}()
@@ -2650,8 +2650,8 @@ func TestRebuildInsideActiveTransactionDoesNotWaitForItself(t *testing.T) {
 	case r := <-panicCh:
 		t.Fatalf("rebuild in active transaction panicked: %v", r)
 	case result := <-resultCh:
-		if strings.Contains(result, "errors:") {
-			t.Fatalf("rebuild in active transaction returned %q", result)
+		if result.err != nil {
+			t.Fatalf("rebuild in active transaction returned %v", result)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("rebuild waited for the transaction owned by its own request")
@@ -2720,8 +2720,8 @@ func TestEphemeralCacheColumnDDLBuffersSchemaPublicationUntilRebuild(t *testing.
 		t.Fatalf("live cache table has %d columns, want 32 before schema publication", got)
 	}
 
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
-		t.Fatalf("cache table rebuild failed: %s", result)
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
+		t.Fatalf("cache table rebuild failed: %v", result)
 	}
 	if got := counting.calls.Load(); got != 1 {
 		t.Fatalf("rebuild published schema %d times, want one deduplicated snapshot", got)
@@ -2778,8 +2778,8 @@ func TestACIDRolledBackInsertDoesNotReplayAfterRestart(t *testing.T) {
 
 func TestCursorRollbackOfMainDeleteSurvivesRestart(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "tcursorrollbackreload", 1)
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
-		t.Fatalf("preparing main storage failed: %s", result)
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
+		t.Fatalf("preparing main storage failed: %v", result)
 	}
 	shard := tbl.ActiveShards()[0]
 	if shard.main_count != 1 {
@@ -2888,7 +2888,7 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 				}, nil, scm.NewNil(), false, nil)
 				cleanup = cacheShardCleanup
 			}
-			if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+			if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 				t.Fatal(result)
 			}
 			shard := tbl.ActiveShards()[0]
@@ -2941,7 +2941,7 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 
 func TestNestedShardReadLeaseDoesNotWaitBehindWriter(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	release := shard.GetRead(nil, false)
 	defer release.Release()
@@ -3073,7 +3073,7 @@ func TestGroupPartitionHintsShareWeightedRowBudget(t *testing.T) {
 func TestNullDistinctUniqueSkipsColdShard(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "treviewuniquecold", 2)
 	tbl.Unique = []uniqueKey{{Id: "payload_unique", Cols: []string{"payload"}}}
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
 	shard := tbl.ActiveShards()[0]
@@ -3084,7 +3084,7 @@ func TestNullDistinctUniqueSkipsColdShard(t *testing.T) {
 	accepted := 0
 	tbl.ProcessUniqueCollision([]string{"payload"}, [][]scm.Scmer{{scm.NewNil()}}, false,
 		func(rows [][]scm.Scmer, _ *uniqueWriteGuard) { accepted += len(rows) }, nil,
-		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision %s", key) }, 0, nil, nil, nil)
+		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision %s", key) }, 0, nil, nil, nil, nil)
 	if accepted != 1 {
 		t.Fatalf("accepted=%d", accepted)
 	}
@@ -3106,7 +3106,7 @@ func TestPartitionUniqueKeepsUnrelatedShardsCold(t *testing.T) {
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString("low")}, {scm.NewInt(11), scm.NewString("high")},
 	}, nil, scm.NewNil(), false, nil)
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
 	shards := tbl.ActiveShards()
@@ -3121,7 +3121,7 @@ func TestPartitionUniqueKeepsUnrelatedShardsCold(t *testing.T) {
 	accepted := 0
 	tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{id}}, false,
 		func(rows [][]scm.Scmer, _ *uniqueWriteGuard) { accepted += len(rows) }, nil,
-		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision %s", key) }, 0, nil, nil, nil)
+		func(key string, _ []scm.Scmer) { t.Fatalf("unexpected collision %s", key) }, 0, nil, nil, nil, nil)
 	if accepted != 1 || shards[target].state() == COLD {
 		t.Fatal("partition-local unique probe did not inspect its target")
 	}
@@ -3137,7 +3137,7 @@ func TestPartitionUniqueKeepsUnrelatedShardsCold(t *testing.T) {
 
 func TestInsertReservationRetainsItsPreparedGeneration(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_insert_reservation_lifetime", 2)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	release, ok := reserveInsertRows(shard, 1, 10, false, -1)
 	if !ok {

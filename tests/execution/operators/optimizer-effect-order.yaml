@@ -1,0 +1,194 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Local initializer substitution preserves effects mutable reads failures and lexical publication
+setup: []
+test_cases:
+- name: A single-use effectful initializer completes before a later observation
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda () (begin (define cell (newsession)) (cell \"v\" 5) (define status (begin (cell \"v\" 8) 17)) (cell \"copy\" (cell \"v\")) (list status (cell \"copy\"))))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw) (optimized)))
+  expect:
+    result:
+    - - 17
+      - 8
+    - - 17
+      - 8
+- name: An unused effectful initializer still executes once
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda () (begin (define cell (newsession)) (cell \"v\" 5) (define unused (cell \"v\" 8)) (cell \"copy\" (cell \"v\")) (cell \"copy\")))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw) (optimized)))
+  expect:
+    result:
+    - 8
+    - 8
+- name: An unknown callback initializer preserves its invocation point
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda () (begin (define cell (newsession)) (cell \"v\" 5) ((lambda (write) (begin (define status (write)) (cell \"copy\" (cell \"v\")) (list status (cell \"copy\")))) (lambda () (begin (cell \"v\" 8) 17)))))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw) (optimized)))
+  expect:
+    result:
+    - - 17
+      - 8
+    - - 17
+      - 8
+- name: A captured session read precedes a later write
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda () (begin (define cell (newsession)) (cell \"v\" 5) (define previous (cell \"v\")) (cell \"v\" 9) (cell \"copy\" previous) (list (cell \"copy\") (cell \"v\"))))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw) (optimized)))
+  expect:
+    result:
+    - - 5
+      - 9
+    - - 5
+      - 9
+- name: An initializer executes even when its sole conditional use is skipped
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda () (begin (define cell (newsession)) (cell \"v\" 5) (define status (begin (cell \"v\" 8) 17)) (if false status 0) (cell \"copy\" (cell \"v\")) (cell \"copy\")))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw) (optimized)))
+  expect:
+    result:
+    - 8
+    - 8
+- name: An explicit initializer failure precedes later side effects
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda () (begin (define cell (newsession)) (cell \"v\" 5) (try (lambda () (begin (define status (error \"expected initializer failure\")) (cell \"v\" 8) status)) (lambda (_failure) (cell \"v\")))))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw) (optimized)))
+  expect:
+    result:
+    - 5
+    - 5
+- name: A failed Const native initializer precedes later side effects
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda () (begin (define cell (newsession)) (cell \"v\" 5) (try (lambda () (begin (define status (regexp_replace \"x\" \"[\" \"z\")) (cell \"v\" 8) status)) (lambda (_failure) (cell \"v\")))))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw) (optimized)))
+  expect:
+    result:
+    - 5
+    - 5
+- name: A pure initializer reads the parameter before a later local publication
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda (value) (begin (define previous (+ value 1)) (define value 10) (list previous value)))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw 4) (optimized 4)))
+  expect:
+    result:
+    - - 5
+      - 10
+    - - 5
+      - 10
+- name: Repeated local definitions cannot change an earlier arithmetic initializer
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda () (begin (define value 4) (define previous (+ value 1)) (define value 10) (list previous value)))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw) (optimized)))
+  expect:
+    result:
+    - - 5
+      - 10
+    - - 5
+      - 10
+- name: A locally supplied callable does not inherit a same-named native purity contract
+  scm: |-
+    (begin
+      (define syntax (source "shadowed-callee" 1 1 (scheme "(lambda () (begin (define cell (newsession)) (cell \"v\" 5) ((lambda (toUpper) (begin (define status (toUpper \"abc\")) (cell \"copy\" (cell \"v\")) (list status (cell \"copy\")))) (lambda (_text) (begin (cell \"v\" 8) \"ABC\")))))")))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw) (optimized)))
+  expect:
+    result:
+    - - ABC
+      - 8
+    - - ABC
+      - 8
+- name: Quoted callable-looking data remains opaque
+  scm: |-
+    (begin
+      (define datum (list 'cell "v" 99))
+      (define syntax (list 'lambda '() (list 'begin
+        (list 'define 'cell (list 'newsession))
+        (list 'cell "v" 5)
+        (list 'define 'datum (list 'quote datum))
+        (list 'list (list 'count 'datum) (list 'cell "v")))))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw) (optimized)))
+  expect:
+    result:
+    - - 3
+      - 5
+    - - 3
+      - 5
+- name: Pure scalar dependencies retain ordinary arithmetic results
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda (value) (begin (define doubled (* value 2)) (define shifted (+ doubled 1)) (list doubled shifted)))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (list (raw 4) (optimized 4)))
+  expect:
+    result:
+    - - 8
+      - 9
+    - - 8
+      - 9
+- name: A Const higher-order operator retains callback effects before later callbacks
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda (cell) (begin (define first (map '(8) (lambda (value) (cell \"v\" value)))) (map '(2) (lambda (value) (cell \"v\" value))) first))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (define run (lambda (fn) (begin
+        (define cell (newsession)) (cell "v" 5)
+        (define output (newsession)) (output "result" (fn cell))
+        (list (output "result") (cell "v")))))
+      (list (run raw) (run optimized)))
+  expect:
+    result:
+    - - - 8
+      - 2
+    - - - 8
+      - 2
+- name: A replacement callback retains its effects before the next replacement callback
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda (cell) (begin (define first (regexp_replace \"x\" \"x\" (lambda (_match) (begin (cell \"v\" 8) \"first\")))) (regexp_replace \"x\" \"x\" (lambda (_match) (begin (cell \"v\" 2) \"second\"))) first))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (define run (lambda (fn) (begin
+        (define cell (newsession)) (cell "v" 5)
+        (define output (newsession)) (output "result" (fn cell))
+        (list (output "result") (cell "v")))))
+      (list (run raw) (run optimized)))
+  expect:
+    result:
+    - - first
+      - 2
+    - - first
+      - 2
+cleanup: []

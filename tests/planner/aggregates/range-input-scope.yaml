@@ -1,0 +1,156 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Range probe admission requires every actual point and finite boundary caller coordinate
+  isolated: true
+setup:
+- sql: CREATE TABLE range_guard_accounts(id INT PRIMARY KEY)
+- sql: CREATE TABLE range_guard_events(id INT PRIMARY KEY,account_id INT,changed_at INT,quantity INT)
+test_cases:
+- name: Complete point and finite lower and upper domains resolve
+  scm: |-
+    (begin
+      (define account_key (list 'get_column "a" false "id" false))
+      (define cut (list 'get_column "periods" false "cut" false))
+      (define start (list 'get_column "periods" false "start_time" false))
+      (define axis (list 'get_column "e" false "changed_at" false))
+      (define account (list "a" "memcp-tests" "range_guard_accounts" false true
+        (sql_relation_declarations "memcp-tests" "range_guard_accounts" nil)))
+      (define events (list "e" "memcp-tests" "range_guard_events" false true
+        (sql_relation_declarations "memcp-tests" "range_guard_events" nil)))
+      (define periods (list "periods" nil
+        (make_query_block "memcp-tests" (list) (list "cut" 75 "start_time" 0)
+          true nil nil nil nil nil (list) (list) (list)) false true (list)))
+      (define stage (make_group_stage "range-guard-contract"
+        (make_query_block "memcp-tests" (list events) (list "quantity"
+          (list 'get_column "e" false "quantity" false)) true nil nil nil nil nil (list) (list) (list))
+        (list account_key) (list (list 'get_column "e" false "account_id" false))
+        (list) nil (list) (list) nil nil
+        (list (list 'range-lookup-keys (list account_key))
+          (list 'range-domains (list (list 'range-domain axis start 0 cut 1))))))
+      (expression_equal? (range_stage_inputs_resolve_in_sources? stage (list account periods) nil) true))
+  expect:
+    result: true
+- name: A missing finite upper caller cannot be eagerly admitted
+  scm: |-
+    (begin
+      (define account_key (list 'get_column "a" false "id" false))
+      (define cut (list 'get_column "periods" false "cut" false))
+      (define start (list 'get_column "periods" false "start_time" false))
+      (define axis (list 'get_column "e" false "changed_at" false))
+      (define account (list "a" "memcp-tests" "range_guard_accounts" false true
+        (sql_relation_declarations "memcp-tests" "range_guard_accounts" nil)))
+      (define events (list "e" "memcp-tests" "range_guard_events" false true
+        (sql_relation_declarations "memcp-tests" "range_guard_events" nil)))
+      (define periods (list "periods" nil
+        (make_query_block "memcp-tests" (list) (list "cut" 75 "start_time" 0)
+          true nil nil nil nil nil (list) (list) (list)) false true (list)))
+      (define stage (make_group_stage "range-guard-contract"
+        (make_query_block "memcp-tests" (list events) (list "quantity"
+          (list 'get_column "e" false "quantity" false)) true nil nil nil nil nil (list) (list) (list))
+        (list account_key) (list (list 'get_column "e" false "account_id" false))
+        (list) nil (list) (list) nil nil
+        (list (list 'range-lookup-keys (list account_key))
+          (list 'range-domains (list (list 'range-domain axis nil -1 cut 1))))))
+      (expression_equal? (range_stage_inputs_resolve_in_sources? stage (list account) nil) false))
+  expect:
+    result: true
+- name: A missing point caller cannot be eagerly admitted
+  scm: |-
+    (begin
+      (define account_key (list 'get_column "a" false "id" false))
+      (define cut (list 'get_column "periods" false "cut" false))
+      (define start (list 'get_column "periods" false "start_time" false))
+      (define axis (list 'get_column "e" false "changed_at" false))
+      (define account (list "a" "memcp-tests" "range_guard_accounts" false true
+        (sql_relation_declarations "memcp-tests" "range_guard_accounts" nil)))
+      (define events (list "e" "memcp-tests" "range_guard_events" false true
+        (sql_relation_declarations "memcp-tests" "range_guard_events" nil)))
+      (define periods (list "periods" nil
+        (make_query_block "memcp-tests" (list) (list "cut" 75 "start_time" 0)
+          true nil nil nil nil nil (list) (list) (list)) false true (list)))
+      (define stage (make_group_stage "range-guard-contract"
+        (make_query_block "memcp-tests" (list events) (list "quantity"
+          (list 'get_column "e" false "quantity" false)) true nil nil nil nil nil (list) (list) (list))
+        (list account_key) (list (list 'get_column "e" false "account_id" false))
+        (list) nil (list) (list) nil nil
+        (list (list 'range-lookup-keys (list account_key))
+          (list 'range-domains (list (list 'range-domain axis nil -1 cut 1))))))
+      (expression_equal? (range_stage_inputs_resolve_in_sources? stage (list periods) nil) false))
+  expect:
+    result: true
+- name: A NULL finite upper bound is still a resolvable input
+  scm: |-
+    (begin
+      (define account_key (list 'get_column "a" false "id" false))
+      (define cut (list 'get_column "periods" false "cut" false))
+      (define start (list 'get_column "periods" false "start_time" false))
+      (define axis (list 'get_column "e" false "changed_at" false))
+      (define account (list "a" "memcp-tests" "range_guard_accounts" false true
+        (sql_relation_declarations "memcp-tests" "range_guard_accounts" nil)))
+      (define events (list "e" "memcp-tests" "range_guard_events" false true
+        (sql_relation_declarations "memcp-tests" "range_guard_events" nil)))
+      (define periods (list "periods" nil
+        (make_query_block "memcp-tests" (list) (list "cut" 75 "start_time" 0)
+          true nil nil nil nil nil (list) (list) (list)) false true (list)))
+      (define stage (make_group_stage "range-guard-contract"
+        (make_query_block "memcp-tests" (list events) (list "quantity"
+          (list 'get_column "e" false "quantity" false)) true nil nil nil nil nil (list) (list) (list))
+        (list account_key) (list (list 'get_column "e" false "account_id" false))
+        (list) nil (list) (list) nil nil
+        (list (list 'range-lookup-keys (list account_key))
+          (list 'range-domains (list (list 'range-domain axis nil -1 nil 1))))))
+      (expression_equal? (range_stage_inputs_resolve_in_sources? stage (list account) nil) true))
+  expect:
+    result: true
+- name: Unbounded sentinels do not require a boundary source
+  scm: |-
+    (begin
+      (define account_key (list 'get_column "a" false "id" false))
+      (define cut (list 'get_column "periods" false "cut" false))
+      (define start (list 'get_column "periods" false "start_time" false))
+      (define axis (list 'get_column "e" false "changed_at" false))
+      (define account (list "a" "memcp-tests" "range_guard_accounts" false true
+        (sql_relation_declarations "memcp-tests" "range_guard_accounts" nil)))
+      (define events (list "e" "memcp-tests" "range_guard_events" false true
+        (sql_relation_declarations "memcp-tests" "range_guard_events" nil)))
+      (define periods (list "periods" nil
+        (make_query_block "memcp-tests" (list) (list "cut" 75 "start_time" 0)
+          true nil nil nil nil nil (list) (list) (list)) false true (list)))
+      (define stage (make_group_stage "range-guard-contract"
+        (make_query_block "memcp-tests" (list events) (list "quantity"
+          (list 'get_column "e" false "quantity" false)) true nil nil nil nil nil (list) (list) (list))
+        (list account_key) (list (list 'get_column "e" false "account_id" false))
+        (list) nil (list) (list) nil nil
+        (list (list 'range-lookup-keys (list account_key))
+          (list 'range-domains (list (list 'range-domain axis start -1 cut 2))))))
+      (expression_equal? (range_stage_inputs_resolve_in_sources? stage (list account) nil) true))
+  expect:
+    result: true
+- name: A finite lower bound must resolve as well
+  scm: |-
+    (begin
+      (define account_key (list 'get_column "a" false "id" false))
+      (define cut (list 'get_column "periods" false "cut" false))
+      (define start (list 'get_column "periods" false "start_time" false))
+      (define axis (list 'get_column "e" false "changed_at" false))
+      (define account (list "a" "memcp-tests" "range_guard_accounts" false true
+        (sql_relation_declarations "memcp-tests" "range_guard_accounts" nil)))
+      (define events (list "e" "memcp-tests" "range_guard_events" false true
+        (sql_relation_declarations "memcp-tests" "range_guard_events" nil)))
+      (define periods (list "periods" nil
+        (make_query_block "memcp-tests" (list) (list "cut" 75 "start_time" 0)
+          true nil nil nil nil nil (list) (list) (list)) false true (list)))
+      (define stage (make_group_stage "range-guard-contract"
+        (make_query_block "memcp-tests" (list events) (list "quantity"
+          (list 'get_column "e" false "quantity" false)) true nil nil nil nil nil (list) (list) (list))
+        (list account_key) (list (list 'get_column "e" false "account_id" false))
+        (list) nil (list) (list) nil nil
+        (list (list 'range-lookup-keys (list account_key))
+          (list 'range-domains (list (list 'range-domain axis start 0 nil 2))))))
+      (expression_equal? (range_stage_inputs_resolve_in_sources? stage (list account) nil) false))
+  expect:
+    result: true
+cleanup:
+- sql: DROP TABLE IF EXISTS range_guard_events
+- sql: DROP TABLE IF EXISTS range_guard_accounts

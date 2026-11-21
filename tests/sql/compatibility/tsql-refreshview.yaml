@@ -1,0 +1,134 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Refresh logical view declarations under the actual transaction without evaluating their rows
+setup:
+- sql: CREATE TABLE refresh_input(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO refresh_input VALUES(1,10),(2,20)
+- sql: CREATE VIEW refresh_result AS SELECT * FROM refresh_input
+- sql: CREATE VIEW refresh_failure AS SELECT 1/(id-1) AS value FROM refresh_input
+- sql: CREATE VIEW refresh_nested AS SELECT value FROM refresh_result
+- scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root") (s "schema" "memcp-tests") (s "syntax" "mysql")
+      (sql_with_statement s nil 0 "CREATE VIEW refresh_mysql AS SELECT id,value FROM refresh_input WHERE id=2" (lambda (tx)
+        (mysql_run_sql_statement tx "memcp-tests" "CREATE VIEW refresh_mysql AS SELECT id,value FROM refresh_input WHERE id=2" s
+          (lambda (_row) true) (lambda args true)))))
+- scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root") (s "schema" "memcp-tests") (s "syntax" "psql")
+      (sql_with_statement s nil 0 "CREATE VIEW refresh_psql AS SELECT id,value FROM refresh_input WHERE id=2" (lambda (tx)
+        (mysql_run_sql_statement tx "memcp-tests" "CREATE VIEW refresh_psql AS SELECT id,value FROM refresh_input WHERE id=2" s
+          (lambda (_row) true) (lambda args true)))))
+cleanup:
+- sql: DROP VIEW IF EXISTS refresh_mysql
+- sql: DROP VIEW IF EXISTS refresh_psql
+- sql: DROP VIEW IF EXISTS refresh_explicit
+- sql: DROP VIEW IF EXISTS refresh_private
+- sql: DROP VIEW IF EXISTS refresh_nested
+- sql: DROP VIEW IF EXISTS refresh_failure
+- sql: DROP VIEW IF EXISTS refresh_result
+- sql: DROP TABLE IF EXISTS refresh_input
+test_cases:
+- name: Refresh returns success and preserves the complete view result
+  sql: DECLARE @status INT; EXEC @status=sys.sp_refreshview N'dbo.refresh_result'; SELECT id,value FROM refresh_result ORDER BY id
+  expect:
+    rows: 2
+    data: [{id: 1,value: 10},{id: 2,value: 20}]
+- name: Named view argument accepts the declared canonical procedure name
+  sql: DECLARE @status INT; EXEC @status=SYS.SP_REFRESHVIEW @viewname=N'[dbo].[refresh_result]'; SELECT @status AS status
+  expect: {rows: 1,data: [{status: 0}]}
+- name: Adding an input column can refresh a complete star declaration
+  sql: ALTER TABLE refresh_input ADD extra INT NULL
+- name: Refresh publishes the current declaration and retains all original values
+  sql: EXEC sys.sp_refreshview N'refresh_result'; SELECT id,value,extra FROM refresh_result ORDER BY id
+  expect:
+    rows: 2
+    data: [{id: 1,value: 10,extra: null},{id: 2,value: 20,extra: null}]
+- name: Refreshing a nested declaration retains its original selected column
+  sql: EXEC sp_refreshview N'refresh_nested'; SELECT value FROM refresh_nested ORDER BY value
+  expect: {rows: 2,data: [{value: 10},{value: 20}]}
+- name: Refresh validates declarations without executing invalid row arithmetic
+  sql: DECLARE @status INT; EXEC @status=sp_refreshview N'refresh_failure'; SELECT @status AS status
+  expect: {rows: 1,data: [{status: 0}]}
+- name: The refreshed arithmetic view still executes its actual row expression
+  sql: SELECT value FROM refresh_failure
+  expect: {error: true,contains: division by zero}
+- name: An uncommitted view is visible to refresh in the creating transaction
+  session_id: refresh-private
+  sql: BEGIN TRANSACTION
+- name: Create the private declaration in the same transaction
+  session_id: refresh-private
+  sql: CREATE VIEW refresh_private AS SELECT id,value FROM refresh_input WHERE id=2
+- name: Refresh binds the actual uncommitted declaration
+  session_id: refresh-private
+  sql: DECLARE @status INT; EXEC @status=sp_refreshview N'refresh_private'; SELECT @status AS status
+  expect: {rows: 1,data: [{status: 0}]}
+- name: The private declaration retains its complete selected row
+  session_id: refresh-private
+  sql: SELECT id,value FROM refresh_private
+  expect: {rows: 1,data: [{id: 2,value: 20}]}
+- name: Rollback retires the private declaration
+  session_id: refresh-private
+  sql: ROLLBACK TRANSACTION
+- name: Rolled back declarations are absent from the public catalog
+  sql: SELECT OBJECT_ID(N'dbo.refresh_private',N'V') AS id
+  expect: {rows: 1,data: [{id: null}]}
+- name: A table cannot be refreshed as a view
+  sql: EXEC sp_refreshview N'refresh_input'
+  expect: {error: true}
+- name: A missing view cannot be refreshed
+  sql: EXEC sp_refreshview N'refresh_missing'
+  expect: {error: true}
+- name: A NULL view name is not an omitted argument
+  sql: EXEC sp_refreshview NULL
+  expect: {error: true}
+- name: A view argument is required
+  sql: EXEC sp_refreshview
+  expect: {error: true}
+- name: Additional arguments are not silently discarded
+  sql: EXEC sp_refreshview N'refresh_result',N'extra'
+  expect: {error: true}
+- name: A refresh cannot address a view in a different database
+  sql: EXEC sp_refreshview N'other_database.dbo.refresh_result'
+  expect: {error: true}
+- name: The shared system declaration exposes the implemented procedure
+  sql: SELECT CASE WHEN OBJECT_ID(N'sys.sp_refreshview',N'P') IS NOT NULL THEN 1 ELSE 0 END AS found
+  expect: {rows: 1,data: [{found: 1}]}
+- name: Bind a view that explicitly depends on the added column
+  sql: CREATE VIEW refresh_explicit AS SELECT id,extra FROM refresh_input
+- name: Retire the selected input declaration
+  sql: ALTER TABLE refresh_input DROP COLUMN extra
+- name: Refresh rejects a declaration whose input column is actually missing
+  sql: EXEC sp_refreshview N'refresh_explicit'
+  expect: {error: true}
+- name: Restore the actual input declaration
+  sql: ALTER TABLE refresh_input ADD extra INT NULL
+- name: Populate the restored input values
+  sql: UPDATE refresh_input SET extra=id*3
+  expect: {affected_rows: 2}
+- name: A failed refresh retains the declaration for a later successful binding
+  sql: EXEC sp_refreshview N'refresh_explicit'; SELECT id,extra FROM refresh_explicit ORDER BY id
+  expect: {rows: 2,data: [{id: 1,extra: 3},{id: 2,extra: 6}]}
+- name: Refresh retains the original SQL and logical declaration bytes
+  scm: |
+    (begin
+      (define before (sql_find_view nil "memcp-tests" "refresh_result"))
+      (define s (newsession))
+      (s "username" "root") (s "schema" "memcp-tests")
+      (define status (sql_with_statement s nil 0 "refresh declaration bytes" (lambda (tx)
+        (refresh_sql_view tx "memcp-tests" "refresh_result"
+          (tsql_policy (tsql_session_actor s)) s))))
+      (and (equal? status 0)
+        (expression_equal? before (sql_find_view nil "memcp-tests" "refresh_result"))))
+  expect: {result: true}
+- name: The common refresh binder retains a MySQL view dialect and selected rows
+  sql: EXEC sp_refreshview N'refresh_mysql'; SELECT id,value FROM refresh_mysql
+  expect: {rows: 1,data: [{id: 2,value: 20}]}
+- name: The common refresh binder retains a PostgreSQL view dialect and selected rows
+  sql: EXEC sp_refreshview N'refresh_psql'; SELECT id,value FROM refresh_psql
+  expect: {rows: 1,data: [{id: 2,value: 20}]}

@@ -241,7 +241,7 @@ func registerScanChannels(p *mosiPeer, session *scanRPCSession) {
 				return err
 			}))
 		}
-		for _, name := range []string{"scan.describe", "scan.execute", "insert.execute", "cluster.hello", "cluster.try_read", "cluster.report", "cluster.reserve_ids", "cluster.location", "cluster.location_update", "cluster.schema_locations"} {
+		for _, name := range []string{"scan.describe", "scan.execute", "insert.execute", "cluster.hello", "cluster.try_read", "cluster.report", "cluster.table_ids", "cluster.location", "cluster.location_update", "cluster.schema_locations"} {
 			name := name
 			p.registerChannel(name, workerChannel(func(peer *mosiPeer, payload []byte) error {
 				_, err := peer.scanSession.receiveInvocation(peer.ctxOrBackground(), name, payload)

@@ -41,7 +41,7 @@ setup:
         (set discounts '(0.04 0.05 0.06 0.07 0.08))
         (set rows (map (produceN 5000) (lambda (i)
           (list i 100.01 (nth discounts (- i (* 5 (floor (/ i 5))))) 10.00 "1994-06-15"))))
-        (insert (table "memcp-tests" false "psql_decimal_range" false)
+        (insert (table "memcp-tests" false "psql_decimal_range" false nil)
           '("id" "extended_price" "discount" "quantity" "ship_date") rows)
         5000)
 
@@ -731,6 +731,18 @@ test_cases:
   - name: Ranking functions require an ordering
     sql: SELECT RANK() OVER () FROM psql_data
     expect: {error: true}
+
+  - name: PostgreSQL NULL is a SQL value in direct projections
+    sql: SELECT NULL AS missing, COALESCE(NULL,7) AS fallback
+    expect: {rows: 1, data: [{missing: null, fallback: 7}]}
+
+  - name: PostgreSQL UNION retains a NULL branch beside integer values
+    sql: SELECT category FROM (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p ORDER BY COALESCE(category,-1)
+    expect: {rows: 3, data: [{category: null}, {category: 0}, {category: 1}]}
+
+  - name: PostgreSQL NULL branches retain IS NULL and COUNT semantics
+    sql: SELECT COUNT(*) AS matched,COUNT(category) AS valued FROM (SELECT NULL AS category UNION ALL SELECT 0 UNION ALL SELECT 1) p WHERE category IS NULL OR category=0
+    expect: {rows: 1, data: [{matched: 2, valued: 1}]}
 
 cleanup:
   - sql: "DROP VIEW IF EXISTS psql_data_view"

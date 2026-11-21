@@ -1,0 +1,228 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ISO literals: https://learn.microsoft.com/sql/t-sql/data-types/datetime2-transact-sql
+# Offsets: https://learn.microsoft.com/sql/t-sql/data-types/datetimeoffset-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Temporal DEFAULT catalog rendering uses actual native declarations and ISO literal contracts
+setup:
+- sql: CREATE TABLE temporal_catalog_defaults(id INT PRIMARY KEY,d DATE,dt DATETIME,sm SMALLDATETIME,modern DATETIME2(7),clock
+    TIME(4),dto DATETIMEOFFSET(7),whole DATETIME2(0))
+- scm: |-
+    (begin
+     (define s (newsession))
+     (sql_with_statement s nil 0 "native temporal defaults" (lambda (tx) (begin
+      (altercolumn (table "memcp-tests" false "temporal_catalog_defaults" false tx) "d" "add_default" (list (date_from_parts 1709164800 0 0) "" "DF_temporal_d" false) tx)
+      (altercolumn (table "memcp-tests" false "temporal_catalog_defaults" false tx) "dt" "add_default" (list (date_from_parts 1709210096 123000000 0) "" "DF_temporal_dt" false) tx)
+      (altercolumn (table "memcp-tests" false "temporal_catalog_defaults" false tx) "sm" "add_default" (list (date_from_parts 1709210100 0 0) "" "DF_temporal_sm" false) tx)
+      (altercolumn (table "memcp-tests" false "temporal_catalog_defaults" false tx) "modern" "add_default" (list (date_from_parts 1709210096 123456700 0) "" "DF_temporal_modern" false) tx)
+      (altercolumn (table "memcp-tests" false "temporal_catalog_defaults" false tx) "clock" "add_default" (list (date_from_parts -2208943504 123400000 0) "" "DF_temporal_clock" false) tx)
+      (altercolumn (table "memcp-tests" false "temporal_catalog_defaults" false tx) "dto" "add_default" (list (date_from_parts 1709210096 123456700 0) "" "DF_temporal_offset" false) tx)
+      (altercolumn (table "memcp-tests" false "temporal_catalog_defaults" false tx) "whole" "add_default" (list (date_from_parts 1709210096 0 0) "" "DF_temporal_whole" false) tx)
+      true))))
+- sql: CREATE TABLE temporal_catalog_legacy_zero(id INT PRIMARY KEY,dt DATETIME CONSTRAINT DF_temporal_zero_dt DEFAULT
+    0,sm SMALLDATETIME CONSTRAINT DF_temporal_zero_sm DEFAULT 0)
+cleanup:
+- sql: DROP TABLE IF EXISTS temporal_catalog_defaults
+- sql: DROP TABLE IF EXISTS temporal_catalog_legacy_zero
+test_cases:
+- name: Folded native temporal defaults expose every declared catalog definition
+  sql: SELECT name,definition FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'temporal_catalog_defaults',N'U')
+    ORDER BY name
+  expect:
+    rows: 7
+    data:
+    - name: DF_temporal_clock
+      definition: '''12:34:56.1234'''
+    - name: DF_temporal_d
+      definition: '''2024-02-29'''
+    - name: DF_temporal_dt
+      definition: '''2024-02-29T12:34:56.123'''
+    - name: DF_temporal_modern
+      definition: '''2024-02-29T12:34:56.1234567'''
+    - name: DF_temporal_offset
+      definition: '''2024-02-29T12:34:56.1234567+00:00'''
+    - name: DF_temporal_sm
+      definition: '''2024-02-29T12:35:00'''
+    - name: DF_temporal_whole
+      definition: '''2024-02-29T12:34:56'''
+- name: Folded DATETIME defaults resolve through the column constraint lookup predicate
+  sql: >-
+    SELECT c.name,d.definition FROM sys.columns c JOIN sys.default_constraints d ON d.object_id=c.default_object_id
+    WHERE c.object_id=OBJECT_ID(N'temporal_catalog_defaults',N'U')
+    AND c.default_object_id=OBJECT_ID(N'DF_temporal_dt',N'D')
+  expect:
+    rows: 1
+    data: [{name: dt, definition: "'2024-02-29T12:34:56.123'"}]
+- name: Folded DATETIME catalog literals carry rounded ticks into the next second
+  scm: (tsql_catalog_default_definition (list "RawType" "DATETIME" "Dimensions" '() "DefaultExpression" "" "Default" (date_from_parts 1709210096 999000000 0)))
+  expect: {result: "'2024-02-29T12:34:57.000'"}
+- name: Native declarations are folded calendar values and retain their precision
+  scm: |-
+    (begin
+     (define target (table "memcp-tests" false "temporal_catalog_defaults" false nil))
+     (map '("d" "dt" "sm" "modern" "clock" "dto" "whole") (lambda (name) (begin
+      (define column (show target "column" name false nil))
+      (list (column "RawType") (column "Dimensions") (column "DefaultExpression") (tsql_catalog_default_definition column))))))
+  expect:
+    result:
+    - - DATE
+      - []
+      - ''
+      - '''2024-02-29'''
+    - - DATETIME
+      - []
+      - ''
+      - '''2024-02-29T12:34:56.123'''
+    - - SMALLDATETIME
+      - []
+      - ''
+      - '''2024-02-29T12:35:00'''
+    - - DATETIME2
+      - - 7
+      - ''
+      - '''2024-02-29T12:34:56.1234567'''
+    - - TIME
+      - - 4
+      - ''
+      - '''12:34:56.1234'''
+    - - DATETIMEOFFSET
+      - - 7
+      - ''
+      - '''2024-02-29T12:34:56.1234567+00:00'''
+    - - DATETIME2
+      - - 0
+      - ''
+      - '''2024-02-29T12:34:56'''
+- name: Default insertion retains the same declared date and time values
+  sql: INSERT INTO temporal_catalog_defaults(id) VALUES(1)
+  expect:
+    affected_rows: 1
+- name: Inserted native defaults retain full calendar fractions
+  sql: SELECT id,CONVERT(NVARCHAR(30),d,126) AS d,CONVERT(NVARCHAR(30),dt,126) AS dt,CONVERT(NVARCHAR(30),sm,126)
+    AS sm,CONVERT(NVARCHAR(30),modern,126) AS modern,CONVERT(NVARCHAR(30),clock,126) AS clock,CONVERT(NVARCHAR(30),whole,126)
+    AS whole FROM temporal_catalog_defaults
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      d: '2024-02-29'
+      dt: '2024-02-29T12:34:56.123'
+      sm: '2024-02-29T12:35:00'
+      modern: '2024-02-29T12:34:56.1234567'
+      clock: '12:34:56.1234'
+      whole: '2024-02-29T12:34:56'
+- name: Legacy syscomments projects the same complete definitions
+  sql: SELECT d.name,c.text AS definition FROM sys.syscomments c JOIN sys.default_constraints d ON d.object_id=c.id
+    WHERE d.parent_object_id=OBJECT_ID(N'temporal_catalog_defaults',N'U') ORDER BY d.name
+  expect:
+    rows: 7
+    data:
+    - name: DF_temporal_clock
+      definition: '''12:34:56.1234'''
+    - name: DF_temporal_d
+      definition: '''2024-02-29'''
+    - name: DF_temporal_dt
+      definition: '''2024-02-29T12:34:56.123'''
+    - name: DF_temporal_modern
+      definition: '''2024-02-29T12:34:56.1234567'''
+    - name: DF_temporal_offset
+      definition: '''2024-02-29T12:34:56.1234567+00:00'''
+    - name: DF_temporal_sm
+      definition: '''2024-02-29T12:35:00'''
+    - name: DF_temporal_whole
+      definition: '''2024-02-29T12:34:56'''
+- name: Declared DATE renders its typed native value
+  scm: (tsql_catalog_default_definition (list "RawType" "DATE" "Dimensions" '() "DefaultExpression" "" "Default"
+    (date_from_parts 1709164800 0 0)))
+  expect:
+    result: '''2024-02-29'''
+- name: Declared DATETIME renders its typed native value
+  scm: (tsql_catalog_default_definition (list "RawType" "DATETIME" "Dimensions" '() "DefaultExpression" "" "Default"
+    (date_from_parts 1709210096 123000000 0)))
+  expect:
+    result: '''2024-02-29T12:34:56.123'''
+- name: Declared SMALLDATETIME renders its typed native value
+  scm: (tsql_catalog_default_definition (list "RawType" "SMALLDATETIME" "Dimensions" '() "DefaultExpression" ""
+    "Default" (date_from_parts 1709210100 0 0)))
+  expect:
+    result: '''2024-02-29T12:35:00'''
+- name: Declared DATETIME2 renders its typed native value
+  scm: (tsql_catalog_default_definition (list "RawType" "DATETIME2" "Dimensions" '(7) "DefaultExpression" "" "Default"
+    (date_from_parts 1709210096 123456700 0)))
+  expect:
+    result: '''2024-02-29T12:34:56.1234567'''
+- name: Declared TIME renders its typed native value
+  scm: (tsql_catalog_default_definition (list "RawType" "TIME" "Dimensions" '(4) "DefaultExpression" "" "Default"
+    (date_from_parts -2208943504 123400000 0)))
+  expect:
+    result: '''12:34:56.1234'''
+- name: Declared DATETIMEOFFSET renders its typed native value
+  scm: (tsql_catalog_default_definition (list "RawType" "DATETIMEOFFSET" "Dimensions" '(7) "DefaultExpression" ""
+    "Default" (date_from_parts 1709210096 123456700 0)))
+  expect:
+    result: '''2024-02-29T12:34:56.1234567+00:00'''
+- name: Declared DATETIME2 renders its typed native value without a fractional part
+  scm: (tsql_catalog_default_definition (list "RawType" "DATETIME2" "Dimensions" '(0) "DefaultExpression" "" "Default"
+    (date_from_parts 1709210096 0 0)))
+  expect:
+    result: '''2024-02-29T12:34:56'''
+- name: SQL source defaults preserve their original expression for every temporal declaration
+  scm: (map '("DATE" "DATETIME" "SMALLDATETIME" "DATETIME2" "TIME" "DATETIMEOFFSET") (lambda (type) (tsql_catalog_default_definition
+    (list "RawType" type "DefaultExpression" "SYSDATETIME()" "Default" nil))))
+  expect:
+    result:
+    - SYSDATETIME()
+    - SYSDATETIME()
+    - SYSDATETIME()
+    - SYSDATETIME()
+    - SYSDATETIME()
+    - SYSDATETIME()
+- name: A declared temporal SQL NULL stays the NULL definition
+  scm: (map '("DATE" "DATETIME" "SMALLDATETIME" "DATETIME2" "TIME" "DATETIMEOFFSET") (lambda (type) (tsql_catalog_default_definition
+    (list "RawType" type "DefaultExpression" "" "Default" nil))))
+  expect:
+    result:
+    - 'NULL'
+    - 'NULL'
+    - 'NULL'
+    - 'NULL'
+    - 'NULL'
+    - 'NULL'
+- name: An unresolved native offset cannot be fabricated as a SQL offset
+  scm: (tsql_catalog_default_definition (list "RawType" "DATETIMEOFFSET" "Dimensions" '(7) "DefaultExpression" ""
+    "Default" (date_from_parts 0 0 1)))
+  expect:
+    error: true
+    contains: requires native zone lookup
+- name: Retained SQL source does not require decoding an opaque native offset
+  scm: (tsql_catalog_default_definition (list "RawType" "DATETIMEOFFSET" "Dimensions" '(7) "DefaultExpression" "CAST('2024-02-29T12:34:56+05:30'
+    AS DATETIMEOFFSET(7))" "Default" (date_from_parts 0 0 1)))
+  expect:
+    result: CAST('2024-02-29T12:34:56+05:30' AS DATETIMEOFFSET(7))
+- name: SQL legacy numeric zero defaults expose their actual 1900 calendar declaration
+  sql: SELECT name,definition FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'temporal_catalog_legacy_zero',N'U')
+    ORDER BY name
+  expect:
+    rows: 2
+    data:
+    - name: DF_temporal_zero_dt
+      definition: '''1900-01-01T00:00:00.000'''
+    - name: DF_temporal_zero_sm
+      definition: '''1900-01-01T00:00:00'''
+- name: SQL legacy defaults still insert their normal declared calendar values
+  sql: INSERT INTO temporal_catalog_legacy_zero(id) VALUES(1); SELECT id,CONVERT(NVARCHAR(30),dt,126) AS dt,CONVERT(NVARCHAR(30),sm,126)
+    AS sm FROM temporal_catalog_legacy_zero
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      dt: '1900-01-01T00:00:00'
+      sm: '1900-01-01T00:00:00'
+- name: DATETIME rounding carries into the next second before literal rendering
+  scm: (tsql_catalog_default_definition (list "RawType" "DATETIME" "DefaultExpression" "" "Default" (date_from_parts 1709210096 999600000 0)))
+  expect: {result: "'2024-02-29T12:34:57.000'"}
+- name: DATETIME rounding carries into the next date before literal rendering
+  scm: (tsql_catalog_default_definition (list "RawType" "DATETIME" "DefaultExpression" "" "Default" (date_from_parts 1709251199 999600000 0)))
+  expect: {result: "'2024-03-01T00:00:00.000'"}

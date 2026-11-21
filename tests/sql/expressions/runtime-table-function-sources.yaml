@@ -1,0 +1,120 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Generated table-function rows use ordinary native joins, grouping, ordering and NULL semantics
+  isolated: true
+setup:
+- sql: CREATE TABLE generated_source_rows(id INT PRIMARY KEY)
+- sql: INSERT INTO generated_source_rows VALUES(1),(2),(3)
+cleanup:
+- sql: DROP TABLE IF EXISTS generated_source_rows
+test_cases:
+- name: Generated JSON rows join a native source
+  sql: SELECT t.id,j.value FROM generated_source_rows t JOIN JSON_TABLE('[3,1,2]', '$[*]' COLUMNS (value INT PATH
+    '$')) AS j ON t.id=j.value ORDER BY t.id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 1
+    - id: 2
+      value: 2
+    - id: 3
+      value: 3
+- name: Generated JSON rows retain ordered limits
+  sql: SELECT j.value FROM JSON_TABLE('[3,1,2]', '$[*]' COLUMNS (value INT PATH '$')) AS j ORDER BY j.value DESC
+    LIMIT 2
+  expect:
+    rows: 2
+    data:
+    - value: 3
+    - value: 2
+- name: Generated JSON rows feed ordinary aggregation
+  sql: SELECT COUNT(*) AS n,SUM(j.value) AS total FROM JSON_TABLE('[3,1,2]', '$[*]' COLUMNS (value INT PATH '$'))
+    AS j
+  expect:
+    rows: 1
+    data:
+    - n: 3
+      total: 6
+- name: Generated JSON rows retain grouped HAVING
+  sql: SELECT j.value,COUNT(*) AS n FROM JSON_TABLE('[2,1,2]', '$[*]' COLUMNS (value INT PATH '$')) AS j GROUP BY
+    j.value HAVING COUNT(*)>1 ORDER BY j.value
+  expect:
+    rows: 1
+    data:
+    - value: 2
+      n: 2
+- name: NULL generated integers are distinct from zero
+  sql: SELECT j.value FROM JSON_TABLE('[null,0,1]', '$[*]' COLUMNS (value INT PATH '$')) AS j WHERE j.value=0
+  expect:
+    rows: 1
+    data:
+    - value: 0
+- name: Generated NULL remains visible to IS NULL
+  sql: SELECT j.value FROM JSON_TABLE('[null,0,1]', '$[*]' COLUMNS (value INT PATH '$')) AS j WHERE j.value IS NULL
+  expect:
+    rows: 1
+    data:
+    - value: null
+- name: Empty generated source retains LEFT JOIN extension
+  sql: SELECT t.id,j.value FROM generated_source_rows t LEFT JOIN JSON_TABLE('[]', '$[*]' COLUMNS (value INT PATH
+    '$')) AS j ON t.id=j.value ORDER BY t.id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: null
+    - id: 2
+      value: null
+    - id: 3
+      value: null
+- name: Two independent generated aliases retain all pairs
+  sql: SELECT a.value AS a,b.value AS b FROM JSON_TABLE('[1,2]', '$[*]' COLUMNS(value INT PATH '$')) AS a JOIN JSON_TABLE('[1,2]',
+    '$[*]' COLUMNS(value INT PATH '$')) AS b ON a.value<b.value
+  expect:
+    rows: 1
+    data:
+    - a: 1
+      b: 2
+- name: PostgreSQL generated rows join native rows
+  sql: SELECT t.id,json_array_elements.value FROM generated_source_rows t JOIN json_array_elements('[3,1,2]') ON
+    json_array_elements.value=t.id ORDER BY t.id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 1
+    - id: 2
+      value: 2
+    - id: 3
+      value: 3
+  syntax: postgresql
+- name: PostgreSQL generated rows retain ordered limits
+  sql: SELECT value FROM json_array_elements_text('["z","a","m"]') ORDER BY value LIMIT 2
+  expect:
+    rows: 2
+    data:
+    - value: a
+    - value: m
+  syntax: postgresql
+- name: PostgreSQL generated rows support grouping
+  sql: SELECT value,COUNT(*) AS n FROM json_array_elements_text('["b","a","b"]') GROUP BY value ORDER BY value
+  expect:
+    rows: 2
+    data:
+    - value: a
+      n: 1
+    - value: b
+      n: 2
+  syntax: postgresql
+- name: PostgreSQL JSON object fields retain complete values
+  sql: SELECT key,value FROM json_each('{"z":2,"a":null}') ORDER BY key
+  expect:
+    rows: 2
+    data:
+    - key: a
+      value: null
+    - key: z
+      value: 2
+  syntax: postgresql

@@ -70,16 +70,25 @@ class ReleaseSourceTests(unittest.TestCase):
 				deb822 = deb822.replace(f"https://{mirror_host}/ubuntu",
 					"mirror+file:" + str(sources / "apt-mirrors.txt"))
 				(sources / "sources.list.d/ubuntu.sources").write_text(deb822)
-			fake = root / "sudo"
+			fake = root / "apt-get"
 			fake.write_text(f"#!{sys.executable}\n" + textwrap.dedent('''\
-				import json, os, pathlib, sys, time
+				import fcntl, json, os, pathlib, subprocess, sys, time
 				root = pathlib.Path(os.environ['FAKE_APT_ROOT'])
-				args = sys.argv[1:]
-				if args[0] != 'apt-get':
-				    os.execvp(args[0], args)
+				args = ['apt-get', *sys.argv[1:]]
 				with (root / 'calls.jsonl').open('a') as log:
 				    log.write(json.dumps(args) + '\\n')
+				options = {args[i+1].split('=',1)[0]: args[i+1].split('=',1)[1]
+				    for i in range(len(args)-1) if args[i] == '-o' and '=' in args[i+1]}
+				default_sources = pathlib.Path(os.environ['APT_SOURCES_DIRECTORY'])
+				source_list = pathlib.Path(options.get('Dir::Etc::sourcelist', default_sources / 'sources.list'))
+				source_parts = pathlib.Path(options.get('Dir::Etc::sourceparts', default_sources / 'sources.list.d'))
+				files = [source_list, *source_parts.glob('*.list'), *source_parts.glob('*.sources')]
+				contents = [p.read_text() for p in files if p.is_file()]
+				with (root / 'sources.jsonl').open('a') as log:
+				    log.write(json.dumps(contents) + '\\n')
 				scenario = os.environ['FAKE_APT_SCENARIO']
+				if scenario == 'foreign-repository' and any('example.invalid' in text for text in contents):
+				    sys.exit(100)
 				if 'update' in args:
 				    count = sum('update' in json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines())
 				    if scenario == 'hang' and count == 1:
@@ -90,6 +99,33 @@ class ReleaseSourceTests(unittest.TestCase):
 				        mirrors = pathlib.Path(os.environ['APT_SOURCES_DIRECTORY']) / 'apt-mirrors.txt'
 				        if os.environ['FAKE_APT_MIRROR_HOST'] in mirrors.read_text():
 				            sys.exit(100)
+				elif scenario in {'install-lock-after-timeout', 'install-lock-dirty'}:
+				    count = sum('install' in json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines())
+				    if count == 1:
+				        # A separate package child outlives the timed-out frontend.
+				        child = "import fcntl,pathlib,sys,time; p=pathlib.Path(sys.argv[1]); f=(p/'package.lock').open('w'); fcntl.flock(f,fcntl.LOCK_EX); (p/'lock-ready').touch(); time.sleep(0.8); f.close()"
+				        subprocess.Popen([sys.executable, '-c', child, str(root)],
+				            start_new_session=True, stdin=subprocess.DEVNULL,
+				            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+				        deadline = time.monotonic() + 1
+				        while not (root / 'lock-ready').exists():
+				            if time.monotonic() >= deadline:
+				                sys.exit(101)
+				            time.sleep(0.005)
+				        time.sleep(10)
+				    with (root / 'package.lock').open('a') as lock:
+				        try:
+				            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+				        except BlockingIOError:
+				            if options.get('DPkg::Lock::Timeout') != '60':
+				                print('package lock still held', flush=True)
+				                sys.exit(100)
+				            print('waiting for package child', flush=True)
+				            fcntl.flock(lock, fcntl.LOCK_EX)
+				        print('package lock acquired', flush=True)
+				    if scenario == 'install-lock-dirty':
+				        print('package journal needs repair', flush=True)
+				        sys.exit(100)
 				elif scenario == 'install-transient-timeout':
 				    count = sum('install' in json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines())
 				    if count == 1:
@@ -104,18 +140,29 @@ class ReleaseSourceTests(unittest.TestCase):
 				    sys.exit(100)
 			'''))
 			fake.chmod(0o755)
+			privileged = root / 'sudo'
+			privileged.write_text(f"#!{sys.executable}\n" + textwrap.dedent('''\
+				import json, os, pathlib, sys
+				with (pathlib.Path(os.environ['FAKE_APT_ROOT']) / 'privileged.jsonl').open('a') as log:
+				    log.write(json.dumps(sys.argv[1:]) + '\\n')
+				os.execvp(sys.argv[1], sys.argv[1:])
+			'''))
+			privileged.chmod(0o755)
 			env = os.environ.copy()
 			env.update(PATH=str(root) + os.pathsep + env['PATH'],
 				PACKAGES=packages, APT_SOURCES_DIRECTORY=str(sources),
 				GITHUB_ACTION_PATH=str(ROOT / ".github/actions/setup-apt"),
 				INDEX_TIMEOUT_SECONDS="0.5" if scenario == "hang" else "2",
-				INSTALL_TIMEOUT_SECONDS="0.5" if scenario in {"install-hang", "install-transient-timeout", "update-then-install-timeout"} else "2",
+				INSTALL_TIMEOUT_SECONDS="0.5" if scenario in {"install-hang", "install-lock-after-timeout", "install-lock-dirty", "install-transient-timeout", "update-then-install-timeout"} else "2",
 				FAKE_APT_ROOT=str(root), FAKE_APT_SCENARIO=scenario,
 				FAKE_APT_MIRROR_HOST=mirror_host, FAKE_APT_MIRRORLIST='1' if mirrorlist else '0')
 			result = subprocess.run(["bash", "-c", body], env=env, text=True,
 				stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5)
 			log = root / "calls.jsonl"
 			calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+			result.privileged_calls = [json.loads(line) for line in (root / 'privileged.jsonl').read_text().splitlines()] if (root / 'privileged.jsonl').exists() else []
+			result.source_contents = [json.loads(line) for line in (root / 'sources.jsonl').read_text().splitlines()] if (root / 'sources.jsonl').exists() else []
+			result.mirror_contents = (sources / 'apt-mirrors.txt').read_text() if (sources / 'apt-mirrors.txt').exists() else None
 			return result, calls, (sources / "sources.list").read_text(), \
 				(sources / "sources.list.d/ubuntu.sources").read_text(), \
 				(sources / "sources.list.d/other.list").read_text(), legacy, deb822, unrelated
@@ -141,6 +188,23 @@ class ReleaseSourceTests(unittest.TestCase):
 		self.assertEqual(unrelated, old_unrelated)
 		self.assertIn("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", deb822)
 
+	def test_unrelated_repository_failure_cannot_block_ubuntu_packages(self):
+		result, calls, legacy, deb822, unrelated, old_legacy, old_deb822, old_unrelated = self.apt_setup("foreign-repository")
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(len(calls), 2)
+		self.assertEqual((legacy, deb822, unrelated), (old_legacy, old_deb822, old_unrelated))
+		for sources in result.source_contents:
+			self.assertIn(old_legacy, sources)
+			self.assertIn(old_deb822, sources)
+			self.assertNotIn(old_unrelated, sources)
+
+	def test_timeout_owner_shares_privilege_with_package_children(self):
+		result, calls, *_ = self.apt_setup("success")
+		self.assertEqual(result.returncode, 0, result.stdout)
+		monitors = [args for args in result.privileged_calls if 'apt-get' in args]
+		self.assertEqual(len(monitors), len(calls))
+		self.assertTrue(all(args[0] == 'timeout' and '--kill-after=10s' in args for args in monitors))
+
 	def test_hung_apt_request_is_terminated_before_bounded_recovery(self):
 		result, calls, *_ = self.apt_setup("hang")
 		self.assertEqual(result.returncode, 0, result.stdout)
@@ -160,6 +224,16 @@ class ReleaseSourceTests(unittest.TestCase):
 		self.assertNotIn("apt-get", php)
 		self.assertIn('$GITHUB_ACTION_PATH/../setup-apt/install.sh', php)
 		self.assertNotIn("continue-on-error", php)
+
+	def test_aws_runner_mirror_recovers_without_changing_signed_source(self):
+		result, calls, _, deb822, unrelated, _, old_deb822, old_unrelated = self.apt_setup(
+			"mirrorlist", mirror_host="us-east-2.ec2.archive.ubuntu.com")
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertEqual(len(calls), 3)
+		self.assertEqual(deb822, old_deb822)
+		self.assertEqual(unrelated, old_unrelated)
+		self.assertEqual(result.mirror_contents, "https://archive.ubuntu.com/ubuntu/\n")
+		self.assertIn("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", deb822)
 
 	def test_regional_mirror_recovery_preserves_signed_sources_and_unrelated_repositories(self):
 		result, calls, legacy, deb822, unrelated, old_legacy, old_deb822, old_unrelated = self.apt_setup(
@@ -229,6 +303,27 @@ class ReleaseSourceTests(unittest.TestCase):
 		self.assertEqual(unrelated, old_unrelated)
 		self.assertIn("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg", deb822)
 		self.assertTrue(all(call[-2:] == ["mariadb-client", "rpm"] for call in calls if "install" in call))
+
+	def test_timed_out_package_child_finishes_before_recovery_installs(self):
+		result, calls, *_ = self.apt_setup("install-lock-after-timeout")
+		self.assertEqual(result.returncode, 0, result.stdout)
+		self.assertIn("waiting for package child", result.stdout)
+		self.assertIn("package lock acquired", result.stdout)
+		self.assertEqual(sum("install" in call for call in calls), 2)
+		self.assertEqual(sum("update" in call for call in calls), 2)
+		for call in calls:
+			if "install" in call:
+				self.assertIn("DPkg::Lock::Timeout=60", call)
+		self.assertFalse(any("dpkg" in call or "rm" in call for call in result.privileged_calls))
+
+	def test_drained_package_lock_does_not_hide_a_dirty_package_journal(self):
+		result, calls, *_ = self.apt_setup("install-lock-dirty")
+		self.assertNotEqual(result.returncode, 0, result.stdout)
+		self.assertIn("package lock acquired", result.stdout)
+		self.assertIn("package journal needs repair", result.stdout)
+		self.assertIn("INFRASTRUCTURE_FAILURE", result.stdout)
+		self.assertEqual(sum("install" in call for call in calls), 2)
+		self.assertEqual(sum("update" in call for call in calls), 2)
 
 	def test_apt_install_timeout_on_recovery_mirror_is_not_retried_again(self):
 		result, calls, *_ = self.apt_setup("update-then-install-timeout")

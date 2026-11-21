@@ -1,0 +1,267 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Native CHECK declarations share current object catalog identity, visibility and classification contracts
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+setup:
+- sql: CREATE TABLE check_catalog_parent(id INT PRIMARY KEY,value INT)
+- sql: ALTER TABLE check_catalog_parent ADD CONSTRAINT check_catalog_positive CHECK(value>=0)
+- sql: INSERT check_catalog_parent VALUES(1,4)
+- sql: CREATE TABLE check_catalog_child(id INT PRIMARY KEY,parent_id INT)
+- sql: ALTER TABLE check_catalog_child ADD CONSTRAINT check_catalog_reference FOREIGN KEY(parent_id) REFERENCES
+    check_catalog_parent(id)
+- sql: ALTER TABLE check_catalog_parent ADD CONSTRAINT check_catalog_drop_target CHECK(value<100)
+- sql: CREATE TABLE check_catalog_untrusted(id INT PRIMARY KEY,value NVARCHAR(24))
+- sql: INSERT check_catalog_untrusted VALUES(1,N'31/12/2024')
+cleanup:
+- sql: DROP TABLE IF EXISTS check_catalog_unvalidated_add
+- sql: DROP TABLE IF EXISTS check_catalog_inline
+- sql: DROP TABLE IF EXISTS check_catalog_untrusted
+- sql: DROP TABLE IF EXISTS check_catalog_child
+- sql: DROP TABLE IF EXISTS check_catalog_parent
+test_cases:
+- name: Native CHECK declarations have actual object and containing relation metadata
+  sql: "SELECT name,RTRIM(type) AS kind,type_desc,OBJECT_NAME(parent_object_id) AS containing,\n  CASE WHEN parent_object_id=OBJECT_ID(N'check_catalog_parent',N'U')\
+    \ THEN 1 ELSE 0 END AS actual_parent\nFROM sys.objects WHERE name=N'check_catalog_positive'\n"
+  expect:
+    rows: 1
+    data:
+    - name: check_catalog_positive
+      kind: C
+      type_desc: CHECK_CONSTRAINT
+      containing: check_catalog_parent
+      actual_parent: 1
+- name: Constraint and relation identities occupy distinct registry namespaces
+  sql: SELECT CASE WHEN object_id<>parent_object_id AND object_id>0 AND parent_object_id>0 THEN 1 ELSE 0 END AS
+    distinct_ids FROM sys.objects WHERE name=N'check_catalog_positive'
+  expect:
+    rows: 1
+    data:
+    - distinct_ids: 1
+- name: Object name and properties resolve the currently declared CHECK object
+  sql: SELECT OBJECT_NAME(object_id) AS resolved,OBJECTPROPERTY(object_id,N'IsCheckCnst') AS is_check,OBJECTPROPERTY(object_id,N'IsConstraint')
+    AS is_constraint,OBJECTPROPERTY(object_id,N'IsForeignKey') AS is_foreign FROM sys.objects WHERE name=N'check_catalog_positive'
+  expect:
+    rows: 1
+    data:
+    - resolved: check_catalog_positive
+      is_check: 1
+      is_constraint: 1
+      is_foreign: 0
+- name: Foreign constraints retain their existing class and containing object
+  sql: SELECT name,RTRIM(type) AS kind,OBJECT_NAME(parent_object_id) AS containing FROM sys.objects WHERE name=N'check_catalog_reference'
+  expect:
+    rows: 1
+    data:
+    - name: check_catalog_reference
+      kind: F
+      containing: check_catalog_child
+- name: A metadata-driven revalidation source enumerates both real constraint kinds
+  sql: SELECT name,RTRIM(type) AS kind FROM sys.objects WHERE type IN(N'C',N'F') AND name IN(N'check_catalog_positive',N'check_catalog_reference')
+    ORDER BY name
+  expect:
+    rows: 2
+    data:
+    - name: check_catalog_positive
+      kind: C
+    - name: check_catalog_reference
+      kind: F
+- name: Constraint enumeration joins the complete object catalog to real containing tables
+  sql: SELECT a.name AS constraint_name,b.name AS table_name FROM sys.objects AS a INNER JOIN (SELECT name,object_id
+    FROM sys.objects WHERE type=N'U') AS b ON a.parent_object_id=b.object_id WHERE SCHEMA_NAME(a.schema_id)=N'dbo'
+    AND (a.type=N'C' OR a.type=N'F') ORDER BY a.type DESC,a.name
+  expect:
+    rows: 3
+    data:
+    - constraint_name: check_catalog_reference
+      table_name: check_catalog_child
+    - constraint_name: check_catalog_drop_target
+      table_name: check_catalog_parent
+    - constraint_name: check_catalog_positive
+      table_name: check_catalog_parent
+- name: A new CHECK declaration is visible through an already executed catalog query
+  sql: DECLARE @before INT; SELECT @before=COUNT(*) FROM sys.objects WHERE name=N'check_catalog_added'; ALTER TABLE
+    check_catalog_parent ADD CONSTRAINT check_catalog_added CHECK(value<100); SELECT @before AS total; SELECT COUNT(*)
+    AS total FROM sys.objects WHERE name=N'check_catalog_added';
+  expect:
+    rows: 2
+    data:
+    - total: 0
+    - total: 1
+- name: Dropping a CHECK removes its catalog row rather than trusting the persistent ID slot
+  sql: DECLARE @id INT; SELECT @id=object_id FROM sys.objects WHERE name=N'check_catalog_drop_target'; ALTER TABLE
+    check_catalog_parent DROP CONSTRAINT check_catalog_drop_target; SELECT COUNT(*) AS total FROM sys.objects WHERE
+    name=N'check_catalog_drop_target'; SELECT OBJECT_NAME(@id) AS old_name,OBJECTPROPERTY(@id,N'IsCheckCnst') AS
+    old_kind;
+  expect:
+    rows: 2
+    data:
+    - total: 0
+    - old_name: null
+      old_kind: null
+- name: Transactional CHECK catalog visibility follows the native declaration owner
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE check_catalog_parent ADD CONSTRAINT check_catalog_rolled_back CHECK(value<100)
+    - connection: owner
+      sql: SELECT COUNT(*) AS total FROM sys.objects WHERE name=N'check_catalog_rolled_back'
+      expect:
+        rows: 1
+        data:
+        - total: 1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT COUNT(*) AS total FROM sys.objects WHERE name=N'check_catalog_rolled_back'
+      expect:
+        rows: 1
+        data:
+        - total: 0
+- name: Native CHECK catalog rows drive actual historical validation without publishing failed changes
+  tds:
+    statements:
+    - connection: owner
+      sql: SET LANGUAGE Deutsch
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE check_catalog_untrusted ADD CONSTRAINT check_catalog_requires_validation CHECK(ISDATE(value)=1)
+    - connection: owner
+      sql: ALTER TABLE check_catalog_untrusted NOCHECK CONSTRAINT check_catalog_requires_validation
+    - connection: owner
+      sql: SELECT name,RTRIM(type) AS kind FROM sys.objects WHERE name=N'check_catalog_requires_validation'
+      expect:
+        rows: 1
+        data:
+        - name: check_catalog_requires_validation
+          kind: C
+    - connection: owner
+      sql: SET LANGUAGE us_english
+    - connection: owner
+      sql: DECLARE @command NVARCHAR(MAX); SELECT @command=N'ALTER TABLE '+QUOTENAME(OBJECT_NAME(parent_object_id))+N'
+        WITH CHECK CHECK CONSTRAINT '+QUOTENAME(name) FROM sys.objects WHERE name=N'check_catalog_requires_validation'
+        AND type=N'C'; EXEC(@command);
+      expect:
+        error: true
+        contains:
+        - check_catalog_requires_validation failed
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT id,value FROM check_catalog_untrusted
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 31/12/2024
+    - connection: owner
+      sql: SELECT COUNT(*) AS total FROM sys.objects WHERE name=N'check_catalog_requires_validation'
+      expect:
+        rows: 1
+        data:
+        - total: 0
+- name: Direct constraint name lookup retains its positive compatibility target
+  sql: SELECT CASE WHEN OBJECT_ID(N'check_catalog_positive',N'C')=object_id THEN 1 ELSE 0 END AS same_id FROM sys.objects
+    WHERE name=N'check_catalog_positive'
+  expect:
+    rows: 1
+    data:
+    - same_id: 1
+  noncritical: true
+- name: Inline CHECK syntax retains its independent positive declaration target
+  sql: CREATE TABLE check_catalog_inline(id INT PRIMARY KEY,value INT,CONSTRAINT check_catalog_inline_positive CHECK(value>=0));
+    SELECT COUNT(*) AS total FROM sys.objects WHERE name=N'check_catalog_inline_positive'
+  expect:
+    rows: 1
+    data:
+    - total: 1
+  noncritical: true
+- name: Adding an unvalidated CHECK retains its independent positive syntax target
+  sql: CREATE TABLE check_catalog_unvalidated_add(id INT PRIMARY KEY,value INT); INSERT check_catalog_unvalidated_add
+    VALUES(1,-1); ALTER TABLE check_catalog_unvalidated_add WITH NOCHECK ADD CONSTRAINT check_catalog_unvalidated_added
+    CHECK(value>=0); SELECT name,RTRIM(type) AS kind FROM sys.objects WHERE name=N'check_catalog_unvalidated_added'
+  expect:
+    rows: 1
+    data:
+    - name: check_catalog_unvalidated_added
+      kind: C
+  noncritical: true
+
+- name: A real FALSE CHECK violation reports SQL 547 while preserving an OFF transaction
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: INSERT check_catalog_parent VALUES(2,5)
+    - connection: owner
+      sql: BEGIN TRY INSERT check_catalog_parent VALUES(3,-1); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number,@@TRANCOUNT AS depth,XACT_STATE() AS state; END CATCH
+      expect:
+        rows: 1
+        data: [{error_number: 547, depth: 1, state: 1}]
+    - connection: owner
+      sql: SELECT id,value FROM check_catalog_parent ORDER BY id
+      expect:
+        rows: 2
+        data: [{id: 1, value: 4}, {id: 2, value: 5}]
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT id,value FROM check_catalog_parent ORDER BY id
+      expect:
+        rows: 1
+        data: [{id: 1, value: 4}]
+- name: A defective native predicate keeps native provenance and fails the actual SQL owner closed
+  setup:
+  - sql: DROP TABLE IF EXISTS check_catalog_contract_error
+  - sql: CREATE TABLE check_catalog_contract_error(id INT PRIMARY KEY,value INT)
+  - sql: INSERT check_catalog_contract_error VALUES(1,7)
+  scm: |
+    (begin
+      (registertriggerlanguage "check-contract-native-error" (lambda (source context)
+        (lambda (OLD NEW session tx) (if (session "invalid_native_check_result") 1 true))) false true)
+      (define owner (newsession)) (owner "username" "root") (owner "schema" "memcp-tests")
+      (define target (table "memcp-tests" false "check_catalog_contract_error" false nil))
+      (tx_begin_acid owner)
+      (createcheck target "CK_catalog_contract_error" "check-contract-native-error" "scalar" '("value")
+        (owner "__memcp_tx") owner)
+      (tx_commit owner)
+      (define run (lambda (text) (tsql_execute_request "memcp-tests" text owner nil 0
+        (lambda (row) true) (lambda fields true))))
+      (try (lambda () (begin
+        (run "SET XACT_ABORT OFF; BEGIN TRANSACTION; UPDATE check_catalog_contract_error SET value=11 WHERE id=1;")
+        (define tx (owner "__memcp_tx"))
+        (define own (scan tx target '() '() '() (lambda () true) '("value")
+          (lambda (sum value) (+ sum value)) 0 +))
+        (define observer (scan nil target '() '() '() (lambda () true) '("value")
+          (lambda (sum value) (+ sum value)) 0 +))
+        (owner "invalid_native_check_result" true)
+        (define failure (try (lambda () (begin
+          (run "INSERT check_catalog_contract_error VALUES(2,9)") (list false nil)))
+          (lambda (cause) (list true (tsql_failure_origin cause)))))
+        (list own observer failure (tx_state tx)
+          (scan nil target '() '() '() (lambda () true) '("value") (lambda (sum value) (+ sum value)) 0 +)
+          (count (coalesceNil ((show target "constraints") "Checks") '())))))
+        (lambda (failure) (begin
+          (if (equal? (tx_state (owner "__memcp_tx")) "active") (tx_rollback owner) true)
+          (error failure)))))
+  expect: {result: [11, 7, [true, native], aborted, 7, 1]}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS check_catalog_contract_error
+
+- name: An actual FALSE diagnostic retains one opaque identity through repeated projections
+  scm: |
+    (begin
+      (define cause (try (lambda () (__constraint_result "CK_catalog_identity" false))
+        (lambda (failure) failure)))
+      (list (identical? (failure_value cause) (failure_value cause))
+        (failure_value cause) (tsql_error_value (tsql_error_context cause) "number")))
+  expect:
+    result: [true, [constraint-violation, check, CK_catalog_identity, check constraint CK_catalog_identity failed], 547]

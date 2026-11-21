@@ -1,0 +1,301 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server 2022 references: https://dbfiddle.uk/YyoMWOWC https://dbfiddle.uk/21t1BoQ7
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Terminal single-source XML AUTO and module-scoped SELECT ROWCOUNT limits
+setup:
+- sql: CREATE TABLE xml_auto_source(id INT PRIMARY KEY,title NVARCHAR(60),optional_value INT,enabled BIT)
+- sql: INSERT INTO xml_auto_source VALUES(1,N'A&B',NULL,1),(2,N'<x>',7,0),(3,NULL,NULL,NULL)
+- sql: CREATE VIEW xml_auto_view AS SELECT id,title FROM xml_auto_source
+- sql: 'CREATE PROCEDURE xml_auto_page @page_index INT=0,@page_size INT=2,@total INT OUTPUT AS BEGIN
+
+    SELECT @total=COUNT(*) FROM xml_auto_source;
+
+    DECLARE @boundary INT=@page_index*@page_size+1,@last INT;
+
+    IF @boundary<=@total BEGIN SET ROWCOUNT @boundary; SELECT @last=id FROM xml_auto_source ORDER BY id DESC; END
+    ELSE SET @page_size=0;
+
+    SET ROWCOUNT @page_size;
+
+    SELECT e.id,e.title FROM xml_auto_source e WHERE e.id<=@last ORDER BY e.id DESC FOR XML AUTO;
+
+    END'
+- sql: CREATE PROCEDURE xml_auto_limit_child AS BEGIN SET ROWCOUNT 1; SELECT id FROM xml_auto_source ORDER BY id;
+    END
+cleanup:
+- sql: SET ROWCOUNT 0
+- sql: DROP PROCEDURE IF EXISTS xml_auto_page
+- sql: DROP PROCEDURE IF EXISTS xml_auto_limit_child
+- sql: DROP VIEW IF EXISTS xml_auto_view
+- sql: DROP TABLE IF EXISTS xml_auto_source
+test_cases:
+- name: AUTO emits source aliases with escaped attributes and omitted NULLs
+  sql: SELECT e.id,e.title,e.enabled FROM xml_auto_source e ORDER BY e.id FOR XML AUTO
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <e id="1" title="A&amp;B" enabled="1"/><e id="2" title="&lt;x&gt;"
+        enabled="0"/><e id="3"/>
+- name: Attribute order follows the projection order
+  sql: SELECT e.title,e.id FROM xml_auto_source e WHERE id=1 FOR XML AUTO
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <e title="A&amp;B" id="1"/>
+- name: Empty AUTO input has metadata but no document row
+  sql: SELECT e.id FROM xml_auto_source e WHERE id=99 FOR XML AUTO
+  expect:
+    rows: 0
+    data: []
+- name: An inline view keeps its semantic element alias
+  sql: SELECT v.id,v.title FROM xml_auto_view v WHERE id=1 FOR XML AUTO
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <v id="1" title="A&amp;B"/>
+- name: An inline derived operand keeps its semantic element alias
+  sql: SELECT d.id FROM (SELECT id FROM xml_auto_source WHERE id=2) d FOR XML AUTO
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <d id="2"/>
+- name: Qualified default owner names are retained in unaliased elements
+  sql: SELECT id FROM dbo.xml_auto_source WHERE id=1 FOR XML AUTO
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <dbo.xml_auto_source id="1"/>
+- name: Computed named expressions are valid AUTO attributes
+  sql: SELECT e.id+1 AS next_id FROM xml_auto_source e WHERE id=1 FOR XML AUTO
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <e next_id="2"/>
+- name: Duplicate and all NULL source rows remain separate elements
+  sql: SELECT d.value FROM (SELECT CAST(NULL AS INT) AS value UNION ALL SELECT NULL UNION ALL SELECT 1 UNION ALL
+    SELECT 1) d ORDER BY value FOR XML AUTO
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <d/><d/><d value="1"/><d value="1"/>
+- name: Column names encode spaces leading digits and reserved escape markers
+  sql: SELECT id AS [key value],id AS [1key],id AS [_x0041_],id AS [_X0041_],id AS [a:b] FROM xml_auto_source e
+    WHERE id=1 FOR XML AUTO
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <e key_x0020_value="1" _x0031_key="1" _x005F_x0041_="1" _X0041_="1"
+        a:b="1"/>
+- name: Unicode element aliases are kept as XML names
+  sql: SELECT id FROM xml_auto_source AS [Grüße] WHERE id=1 FOR XML AUTO
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <Grüße id="1"/>
+- name: AUTO attribute control escapes use SQL Server hexadecimal character references
+  sql: SELECT NCHAR(9)+NCHAR(10)+NCHAR(13)+N'"&<>'+NCHAR(39)+NCHAR(0) AS value FROM xml_auto_source e WHERE id=1
+    FOR XML AUTO
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <e value="&#x09;&#x0A;&#x0D;&quot;&amp;&lt;&gt;'&#x00;"/>
+- name: Decimal and money preserve their declared scales
+  sql: SELECT CAST(12.5 AS DECIMAL(8,2)) AS amount,CAST(12.5 AS MONEY) AS price FROM xml_auto_source e WHERE id=1
+    FOR XML AUTO
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <e amount="12.50" price="12.5000"/>
+- name: Temporal attributes use the SQL XML ISO representation
+  sql: SELECT CAST('2024-03-02T12:34:56.120' AS DATETIME2(3)) AS stamp FROM xml_auto_source e WHERE id=1 FOR XML
+    AUTO
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <e stamp="2024-03-02T12:34:56.120"/>
+- name: A positive cap limits an ordered SELECT
+  sql: SET ROWCOUNT 2; SELECT id FROM xml_auto_source ORDER BY id; SET ROWCOUNT 0
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: TOP smaller than ROWCOUNT retains its own bound
+  sql: SET ROWCOUNT 2; SELECT TOP 1 id FROM xml_auto_source ORDER BY id DESC; SET ROWCOUNT 0
+  expect:
+    rows: 1
+    data:
+    - id: 3
+- name: ROWCOUNT smaller than TOP controls the final output
+  sql: SET ROWCOUNT 2; SELECT TOP 3 id FROM xml_auto_source ORDER BY id DESC; SET ROWCOUNT 0
+  expect:
+    rows: 2
+    data:
+    - id: 3
+    - id: 2
+- name: Zero disables the previous row cap
+  sql: SET ROWCOUNT 1; SET ROWCOUNT 0; SELECT id FROM xml_auto_source ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+- name: An ordered assignment retains the last row inside the cap
+  sql: DECLARE @last INT; SET ROWCOUNT 2; SELECT @last=id FROM xml_auto_source ORDER BY id DESC; SET ROWCOUNT 0;
+    SELECT @last AS last_id
+  expect:
+    rows: 1
+    data:
+    - last_id: 2
+- name: A BIGINT cap is not truncated to signed INT
+  sql: DECLARE @cap BIGINT=2147483648; SET ROWCOUNT @cap; SELECT id FROM xml_auto_source ORDER BY id; SET ROWCOUNT
+    0
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 3
+- name: A NULL setting raises 507 and retains the previous cap
+  sql: DECLARE @cap INT=NULL,@caught INT,@last INT; SET ROWCOUNT 2; BEGIN TRY SET ROWCOUNT @cap; END TRY BEGIN CATCH
+    SET @caught=ERROR_NUMBER(); END CATCH; SELECT @last=id FROM xml_auto_source ORDER BY id; SET ROWCOUNT 0; SELECT
+    @caught AS error_number,@last AS last_id
+  expect:
+    rows: 1
+    data:
+    - error_number: 507
+      last_id: 2
+- name: A negative setting raises 507 and retains the previous cap
+  sql: DECLARE @cap INT=-1,@caught INT,@last INT; SET ROWCOUNT 2; BEGIN TRY SET ROWCOUNT @cap; END TRY BEGIN CATCH
+    SET @caught=ERROR_NUMBER(); END CATCH; SELECT @last=id FROM xml_auto_source ORDER BY id; SET ROWCOUNT 0; SELECT
+    @caught AS error_number,@last AS last_id
+  expect:
+    rows: 1
+    data:
+    - error_number: 507
+      last_id: 2
+- name: Successful SET ROWCOUNT completes with zero affected rows
+  sql: SET ROWCOUNT 2; SELECT @@ROWCOUNT AS affected; SET ROWCOUNT 0
+  expect:
+    rows: 1
+    data:
+    - affected: 0
+- name: Procedure row caps restore the caller setting
+  sql: SET ROWCOUNT 2; EXEC xml_auto_limit_child; SELECT id FROM xml_auto_source ORDER BY id; SET ROWCOUNT 0
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 1
+    - id: 2
+- name: Dynamic execution row caps restore the caller setting
+  sql: SET ROWCOUNT 2; EXEC(N'SET ROWCOUNT 1; SELECT id FROM xml_auto_source ORDER BY id'); SELECT id FROM xml_auto_source
+    ORDER BY id; SET ROWCOUNT 0
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 1
+    - id: 2
+- name: ROWCOUNT bounds AUTO source rows before serialization
+  sql: SET ROWCOUNT 2; SELECT e.id FROM xml_auto_source e ORDER BY e.id FOR XML AUTO; SET ROWCOUNT 0
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <e id="1"/><e id="2"/>
+- name: A procedure composes count assignment paging bounds and terminal AUTO
+  sql: DECLARE @total INT; EXEC xml_auto_page @page_index=0,@page_size=2,@total=@total OUTPUT
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <e id="3"/><e id="2" title="&lt;x&gt;"/>
+- name: An out of range page emits no AUTO result row
+  sql: DECLARE @total INT; EXEC xml_auto_page @page_index=5,@page_size=2,@total=@total OUTPUT
+  expect:
+    rows: 0
+    data: []
+- name: Ordinary qualified table resolution remains unchanged
+  sql: SELECT id FROM dbo.xml_auto_source WHERE id=2
+  expect:
+    rows: 1
+    data:
+    - id: 2
+- name: AUTO text is emitted over TDS as a Unicode large value
+  tds:
+    statements:
+    - sql: SELECT e.id FROM xml_auto_source e WHERE id=1 FOR XML AUTO
+      expect:
+        rows: 1
+        data:
+        - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <e id="1"/>
+- name: AUTO publishes its processed input count independently of its single text result
+  scm: "(begin\n  (define session (newsession)) (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
+    )\n  (define result (newsession))\n  (tsql_execute_request \"memcp-tests\" \"SELECT e.id FROM xml_auto_source\
+    \ e ORDER BY id FOR XML AUTO\" session nil 0\n    (lambda (row) (result \"text\" (row \"XML_F52E2B61-18A1-11d1-B105-00805F49916B\"\
+    ))) (lambda args true))\n  (tsql_execute_request \"memcp-tests\" \"SELECT @@ROWCOUNT AS affected\" session nil\
+    \ 0\n    (lambda (row) (result \"count\" (row \"affected\"))) (lambda args true))\n  (list (result \"text\"\
+    ) (result \"count\")))"
+  expect:
+    result:
+    - <e id="1"/><e id="2"/><e id="3"/>
+    - 3
+- name: Empty AUTO still publishes one nullable NTEXT output declaration
+  scm: "(begin\n  (define session (newsession)) (session \"username\" \"root\") (session \"schema\" \"memcp-tests\"\
+    )\n  (define result (newsession))\n  (tsql_execute_request \"memcp-tests\" \"SELECT e.id FROM xml_auto_source\
+    \ e WHERE id=99 FOR XML AUTO\" session nil 0\n    (lambda (_row) (error \"empty XML input emitted a row\"))\
+    \ (lambda (_names fields) (result \"field\" (car fields))))\n  (define field (result \"field\"))\n  (list (field\
+    \ \"name\") (field \"sql_type\") (bit_and (field \"flags\") 1)))"
+  expect:
+    result:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B
+    - NTEXT
+    - 1
+- name: Multiple sources require hierarchical AUTO grouping
+  sql: SELECT a.id,b.title FROM xml_auto_source a JOIN xml_auto_source b ON a.id=b.id WHERE a.id=1 FOR XML AUTO
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <a id="1"><b title="A&amp;B"/></a>
+  noncritical: true
+- name: TYPE produces a SQL XML scalar
+  sql: SELECT e.id FROM xml_auto_source e WHERE id=1 FOR XML AUTO,TYPE
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <e id="1"/>
+  noncritical: true
+- name: Nested AUTO remains a scalar SQL text producer
+  sql: SELECT (SELECT e.id FROM xml_auto_source e WHERE id=1 FOR XML AUTO) AS value
+  expect:
+    rows: 1
+    data:
+    - value: <e id="1"/>
+  noncritical: true
+- name: FLOAT XML attributes use the distinct scientific profile
+  sql: SELECT CAST(1.2 AS FLOAT) AS value FROM xml_auto_source e WHERE id=1 FOR XML AUTO
+  expect:
+    rows: 1
+    data:
+    - XML_F52E2B61-18A1-11d1-B105-00805F49916B: <e value="1.200000000000000e+000"/>
+  noncritical: true
+- name: UPDATE row caps restrict native target mutation
+  sql: SET ROWCOUNT 2; UPDATE xml_auto_source SET optional_value=optional_value; SELECT @@ROWCOUNT AS affected;
+    SET ROWCOUNT 0
+  expect:
+    rows: 1
+    data:
+    - affected: 2
+  noncritical: true
+- name: Static cursor snapshots honor ROWCOUNT independently of FETCH
+  sql: DECLARE cap_cursor CURSOR LOCAL STATIC FOR SELECT id FROM xml_auto_source ORDER BY id; SET ROWCOUNT 2; OPEN
+    cap_cursor; SET ROWCOUNT 0; SELECT @@CURSOR_ROWS AS affected; CLOSE cap_cursor; DEALLOCATE cap_cursor
+  expect:
+    rows: 1
+    data:
+    - affected: 2
+  noncritical: true

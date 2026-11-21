@@ -1,0 +1,186 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Runtime metadata group inputs retain normal DISTINCT, aggregate empty-input, NULL and binding contracts
+setup:
+- sql: CREATE TABLE runtime_group_anchor(id INT)
+test_cases:
+- name: Empty DISTINCT over a metadata CTE retains no output group
+  sql: |-
+    WITH permissions_view AS (
+      SELECT CAST(OBJECT_NAME(p.major_id) AS VARCHAR(100)) AS object_name,p.permission_name
+      FROM sys.database_permissions p LEFT JOIN sys.database_principals d ON p.grantee_principal_id=d.principal_id
+      LEFT JOIN sys.server_principals s ON d.sid=s.sid
+    )
+    SELECT DISTINCT object_name,LTRIM(RTRIM(permission_name)) AS permission_name FROM permissions_view WHERE 1=0
+  expect:
+    rows: 0
+    data: []
+- name: Empty grouped metadata CTE retains no named group
+  sql: |-
+    WITH permissions_view AS (
+      SELECT CAST(OBJECT_NAME(p.major_id) AS VARCHAR(100)) AS object_name,p.permission_name
+      FROM sys.database_permissions p LEFT JOIN sys.database_principals d ON p.grantee_principal_id=d.principal_id
+      LEFT JOIN sys.server_principals s ON d.sid=s.sid
+    )
+    SELECT object_name,COUNT(*) AS n FROM permissions_view WHERE 1=0 GROUP BY object_name
+  expect:
+    rows: 0
+    data: []
+- name: Scalar aggregate over the same empty metadata CTE retains its default row
+  sql: |-
+    WITH permissions_view AS (
+      SELECT CAST(OBJECT_NAME(p.major_id) AS VARCHAR(100)) AS object_name,p.permission_name
+      FROM sys.database_permissions p LEFT JOIN sys.database_principals d ON p.grantee_principal_id=d.principal_id
+      LEFT JOIN sys.server_principals s ON d.sid=s.sid
+    )
+    SELECT COUNT(*) AS n,SUM(LEN(permission_name)) AS total FROM permissions_view WHERE 1=0
+  expect:
+    rows: 1
+    data:
+    - n: 0
+      total: null
+- name: Outer count observes the empty DISTINCT relation rather than one null group
+  sql: |-
+    WITH permissions_view AS (
+      SELECT CAST(OBJECT_NAME(p.major_id) AS VARCHAR(100)) AS object_name,p.permission_name
+      FROM sys.database_permissions p LEFT JOIN sys.database_principals d ON p.grantee_principal_id=d.principal_id
+      LEFT JOIN sys.server_principals s ON d.sid=s.sid
+    )
+    SELECT COUNT(*) AS n FROM (SELECT DISTINCT object_name,permission_name FROM permissions_view WHERE 1=0) d
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: Nonempty runtime DISTINCT preserves NULL and zero as different groups
+  sql: WITH values_view AS (SELECT v FROM (VALUES(1),(1),(NULL),(0)) x(v)) SELECT DISTINCT v FROM values_view ORDER
+    BY v
+  expect:
+    rows: 3
+    data:
+    - v: null
+    - v: 0
+    - v: 1
+- name: Runtime grouping retains duplicate counts and NULL identity
+  sql: WITH values_view AS (SELECT v FROM (VALUES(1),(1),(NULL),(0)) x(v)) SELECT v,COUNT(*) AS n FROM values_view
+    GROUP BY v ORDER BY v
+  expect:
+    rows: 3
+    data:
+    - v: null
+      n: 1
+    - v: 0
+      n: 1
+    - v: 1
+      n: 2
+- name: Nonempty metadata group inputs preserve duplicate elimination and NULL identity
+  sql: |-
+    WITH values_view AS (
+      SELECT CAST(OBJECT_NAME(o.object_id) AS VARCHAR(100)) AS object_name,x.v
+      FROM sys.objects o
+      LEFT JOIN sys.database_principals d ON d.name=N'runtime_group_absent_principal'
+      LEFT JOIN sys.server_principals s ON d.sid=s.sid
+      CROSS JOIN (VALUES(1),(1),(NULL),(0)) x(v)
+      WHERE o.name=N'runtime_group_anchor'
+    )
+    SELECT DISTINCT object_name,v FROM values_view ORDER BY v
+  expect:
+    rows: 3
+    data:
+    - object_name: runtime_group_anchor
+      v: null
+    - object_name: runtime_group_anchor
+      v: 0
+    - object_name: runtime_group_anchor
+      v: 1
+- name: Nonempty metadata groups preserve bag counts through dependent stages
+  sql: |-
+    WITH values_view AS (
+      SELECT CAST(OBJECT_NAME(o.object_id) AS VARCHAR(100)) AS object_name,x.v
+      FROM sys.objects o
+      LEFT JOIN sys.database_principals d ON d.name=N'runtime_group_absent_principal'
+      LEFT JOIN sys.server_principals s ON d.sid=s.sid
+      CROSS JOIN (VALUES(1),(1),(NULL),(0)) x(v)
+      WHERE o.name=N'runtime_group_anchor'
+    )
+    SELECT object_name,v,COUNT(*) AS n FROM values_view GROUP BY object_name,v ORDER BY v
+  expect:
+    rows: 3
+    data:
+    - object_name: runtime_group_anchor
+      v: null
+      n: 1
+    - object_name: runtime_group_anchor
+      v: 0
+      n: 1
+    - object_name: runtime_group_anchor
+      v: 1
+      n: 2
+- name: An empty DISTINCT selection still binds every selected column
+  sql: |-
+    WITH permissions_view AS (
+      SELECT CAST(OBJECT_NAME(p.major_id) AS VARCHAR(100)) AS object_name,p.permission_name
+      FROM sys.database_permissions p LEFT JOIN sys.database_principals d ON p.grantee_principal_id=d.principal_id
+      LEFT JOIN sys.server_principals s ON d.sid=s.sid
+    )
+    SELECT DISTINCT missing_column FROM permissions_view WHERE 1=0
+  expect:
+    error: true
+- name: An empty DISTINCT selection still validates explicitly forbidden conversions
+  sql: |-
+    WITH permissions_view AS (
+      SELECT CAST(OBJECT_NAME(p.major_id) AS VARCHAR(100)) AS object_name,p.permission_name
+      FROM sys.database_permissions p LEFT JOIN sys.database_principals d ON p.grantee_principal_id=d.principal_id
+      LEFT JOIN sys.server_principals s ON d.sid=s.sid
+    )
+    SELECT DISTINCT CAST(1 AS XML) AS value FROM permissions_view WHERE 1=0
+  expect:
+    error: true
+- name: Add duplicate and NULL business rows for invocation COUNT controls
+  sql: INSERT runtime_group_anchor VALUES(1),(1),(NULL),(2)
+  expect: {rows_affected: 4}
+- name: Invocation metadata COUNT retains every joined business row
+  sql: SELECT COUNT(*) AS n FROM runtime_group_anchor a CROSS JOIN sys.objects o WHERE o.name=N'runtime_group_anchor'
+  expect: {rows: 1,data: [{n: 4}]}
+- name: Invocation COUNT retains unmatched optional rows
+  sql: SELECT COUNT(*) AS n FROM runtime_group_anchor a LEFT JOIN sys.objects o ON o.name=N'absent_count_source'
+  expect: {rows: 1,data: [{n: 4}]}
+- name: An empty invocation COUNT retains its neutral row
+  sql: SELECT COUNT(*) AS n FROM runtime_group_anchor a CROSS JOIN sys.objects o WHERE o.name=N'absent_count_source'
+  expect: {rows: 1,data: [{n: 0}]}
+- name: A NULL constant group keeps its complete invocation coordinate
+  sql: DECLARE @marker INT=NULL; SELECT @marker AS marker,COUNT(*) AS n FROM runtime_group_anchor a CROSS JOIN sys.objects o WHERE o.name=N'runtime_group_anchor' GROUP BY @marker
+  expect: {rows: 1,data: [{marker: null,n: 4}]}
+- name: An empty explicit constant group does not invent a row
+  sql: DECLARE @marker INT=7; SELECT @marker AS marker,COUNT(*) AS n FROM runtime_group_anchor a CROSS JOIN sys.objects o WHERE o.name=N'absent_count_source' GROUP BY @marker
+  expect: {rows: 0,data: []}
+- name: Nullable COUNT expressions retain their original NULL filtering
+  sql: SELECT COUNT(a.id) AS n FROM runtime_group_anchor a CROSS JOIN sys.objects o WHERE o.name=N'runtime_group_anchor'
+  expect: {rows: 1,data: [{n: 3}]}
+- name: DISTINCT COUNT retains its existing value domain
+  sql: SELECT COUNT(DISTINCT a.id) AS n FROM runtime_group_anchor a CROSS JOIN sys.objects o WHERE o.name=N'runtime_group_anchor'
+  expect: {rows: 1,data: [{n: 2}]}
+- name: Row-dependent groups preserve duplicate and NULL multiplicity
+  sql: SELECT a.id,COUNT(*) AS n FROM runtime_group_anchor a CROSS JOIN sys.objects o WHERE o.name=N'runtime_group_anchor' GROUP BY a.id ORDER BY a.id
+  expect: {rows: 3,data: [{id: null,n: 1},{id: 1,n: 2},{id: 2,n: 1}]}
+
+- name: HAVING consumes the completed invocation count
+  sql: SELECT COUNT(*) AS n FROM runtime_group_anchor a CROSS JOIN sys.objects o WHERE o.name=N'runtime_group_anchor' HAVING COUNT(*)>3
+  expect: {rows: 1,data: [{n: 4}]}
+- name: HAVING can reject the completed invocation count
+  sql: SELECT COUNT(*) AS n FROM runtime_group_anchor a CROSS JOIN sys.objects o WHERE o.name=N'runtime_group_anchor' HAVING COUNT(*)>4
+  expect: {rows: 0,data: []}
+- name: Repeated count projections share values without changing their output slots
+  sql: SELECT COUNT(*) AS first_count,COUNT(*) AS second_count FROM runtime_group_anchor a CROSS JOIN sys.objects o WHERE o.name=N'runtime_group_anchor'
+  expect: {rows: 1,data: [{first_count: 4,second_count: 4}]}
+- name: A single-row catalog input counts its completed page
+  sql: SELECT COUNT(*) AS n FROM(SELECT TOP(1) a.id FROM runtime_group_anchor a CROSS JOIN sys.objects o WHERE o.name=N'runtime_group_anchor' ORDER BY a.id) q
+  expect: {rows: 1,data: [{n: 1}]}
+- name: A multirow catalog page remains a positive derived-input target
+  sql: SELECT COUNT(*) AS n FROM(SELECT TOP(2) a.id FROM runtime_group_anchor a CROSS JOIN sys.objects o WHERE o.name=N'runtime_group_anchor' ORDER BY a.id) q
+  expect: {rows: 1,data: [{n: 2}]}
+  noncritical: true
+
+cleanup:
+- sql: DROP TABLE runtime_group_anchor

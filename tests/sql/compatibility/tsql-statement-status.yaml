@@ -1,0 +1,200 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server 2022 statement-boundary references: lVLwl6h9 and lis7ogXp.
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Statement-owned ERROR status and native connection-owned SMALLINT SPID
+setup:
+  - sql: DROP TABLE IF EXISTS status_values
+  - sql: DROP TABLE IF EXISTS status_connections
+  - sql: CREATE TABLE status_values(id INT PRIMARY KEY,value INT)
+  - sql: INSERT status_values VALUES(1,7),(2,9)
+  - sql: CREATE TABLE status_connections(slot INT PRIMARY KEY,identity_value SMALLINT)
+  - sql: CREATE PROCEDURE status_success AS SET NOCOUNT ON
+  - sql: CREATE PROCEDURE status_throw AS THROW 50121,'procedure status',1
+  - sql: CREATE PROCEDURE status_identity AS SELECT @@SPID AS identity_value
+cleanup:
+  - sql: DROP PROCEDURE IF EXISTS status_identity
+  - sql: DROP PROCEDURE IF EXISTS status_throw
+  - sql: DROP PROCEDURE IF EXISTS status_success
+  - sql: DROP TABLE IF EXISTS status_connections
+  - sql: DROP TABLE IF EXISTS status_values
+test_cases:
+  - name: Successful SQL statements expose zero ERROR status
+    sql: SELECT @@ERROR AS status
+    expect: {rows: 1,data: [{status: 0}]}
+  - name: First CATCH statement sees the actual error while later statements clear ERROR
+    sql: |
+      DECLARE @value INT,@first INT,@number INT,@next INT,@retained INT;
+      BEGIN TRY SET @value=1/0; END TRY
+      BEGIN CATCH
+        SELECT @first=@@ERROR,@number=ERROR_NUMBER();
+        SELECT @next=@@ERROR,@retained=ERROR_NUMBER();
+      END CATCH;
+      SELECT @first AS first_error,@number AS catch_number,@next AS next_error,@retained AS retained_number;
+    expect: {rows: 1,data: [{first_error: 8134,catch_number: 8134,next_error: 0,retained_number: 8134}]}
+  - name: SET consumes prior ERROR before publishing its own successful completion
+    sql: |
+      DECLARE @value INT,@saved INT,@after INT;
+      BEGIN TRY SET @value=1/0; END TRY
+      BEGIN CATCH SET @saved=@@ERROR; SET @after=@@ERROR; END CATCH;
+      SELECT @saved AS saved,@after AS after_set;
+    expect: {rows: 1,data: [{saved: 8134,after_set: 0}]}
+  - name: An entire DECLARE statement shares the input status across initializers
+    sql: |
+      DECLARE @value INT,@first_result INT,@second_result INT,@after INT;
+      BEGIN TRY SET @value=1/0; END TRY
+      BEGIN CATCH
+        DECLARE @first INT=@@ERROR,@second INT=@@ERROR;
+        SELECT @first_result=@first,@second_result=@second,@after=@@ERROR;
+      END CATCH;
+      SELECT @first_result AS first_value,@second_result AS second_value,@after AS after_declare;
+    expect: {rows: 1,data: [{first_value: 8134,second_value: 8134,after_declare: 0}]}
+  - name: IF reads the failed statement status before its successful predicate completion
+    sql: |
+      DECLARE @value INT,@inside INT=-1;
+      BEGIN TRY SET @value=1/0; END TRY
+      BEGIN CATCH IF @@ERROR=8134 SET @inside=@@ERROR; END CATCH;
+      SELECT @inside AS inside_if;
+    expect: {rows: 1,data: [{inside_if: 0}]}
+  - name: BEGIN block preserves the last leaf status for its first statement
+    sql: |
+      DECLARE @value INT,@inside INT=-1;
+      BEGIN TRY SET @value=1/0; END TRY
+      BEGIN CATCH BEGIN SET @inside=@@ERROR; END; END CATCH;
+      SELECT @inside AS inside_begin;
+    expect: {rows: 1,data: [{inside_begin: 8134}]}
+  - name: Nested BEGIN TRY establishes its own error-status boundary
+    sql: |
+      DECLARE @value INT,@inside INT=-1;
+      BEGIN TRY SET @value=1/0; END TRY
+      BEGIN CATCH BEGIN TRY SET @inside=@@ERROR; END TRY BEGIN CATCH SET @inside=99; END CATCH; END CATCH;
+      SELECT @inside AS nested_try;
+    expect: {rows: 1,data: [{nested_try: 0}]}
+  - name: THROW preserves its explicit numeric diagnostic
+    sql: |
+      DECLARE @status INT,@number INT;
+      BEGIN TRY THROW 50123,'custom status',1; END TRY
+      BEGIN CATCH SELECT @status=@@ERROR,@number=ERROR_NUMBER(); END CATCH;
+      SELECT @status AS status,@number AS catch_number;
+    expect: {rows: 1,data: [{status: 50123,catch_number: 50123}]}
+  - name: Arithmetic overflow publishes its structured frontend number
+    sql: |
+      DECLARE @value INT=2147483647,@status INT;
+      BEGIN TRY SET @value=@value+1; END TRY BEGIN CATCH SET @status=@@ERROR; END CATCH;
+      SELECT @value AS retained_value,@status AS status;
+    expect: {rows: 1,data: [{retained_value: 2147483647,status: 8115}]}
+  - name: A native integrity diagnostic remains numeric without guessing a SQL Server mapping
+    sql: |
+      DECLARE @status INT,@number INT;
+      BEGIN TRY INSERT status_values VALUES(1,99); END TRY
+      BEGIN CATCH SELECT @status=@@ERROR,@number=ERROR_NUMBER(); END CATCH;
+      SELECT CASE WHEN @status>0 AND @status=@number THEN 1 ELSE 0 END AS actual_numeric,
+        (SELECT value FROM status_values WHERE id=1) AS retained_value;
+    expect: {rows: 1,data: [{actual_numeric: 1,retained_value: 7}]}
+  - name: DML ERROR and ROWCOUNT can be consumed together before either completion changes
+    sql: |
+      DECLARE @status INT,@rows INT;
+      UPDATE status_values SET value=value WHERE id IN(1,2);
+      SELECT @status=@@ERROR,@rows=@@ROWCOUNT;
+      SELECT @status AS status,@rows AS total;
+    expect: {rows: 1,data: [{status: 0,total: 2}]}
+  - name: Successful child procedure execution clears the caller status
+    sql: |
+      DECLARE @value INT,@saved INT,@after INT,@original INT;
+      BEGIN TRY THROW 50123,'custom status',1; END TRY
+      BEGIN CATCH
+        SET @saved=@@ERROR;
+        EXEC status_success;
+        SELECT @after=@@ERROR,@original=ERROR_NUMBER();
+      END CATCH;
+      SELECT @saved AS saved,@after AS after_exec,@original AS original_number;
+    expect: {rows: 1,data: [{saved: 50123,after_exec: 0,original_number: 50123}]}
+  - name: A failed child procedure publishes its original error at the caller CATCH edge
+    sql: |
+      DECLARE @status INT;
+      BEGIN TRY EXEC status_throw; END TRY BEGIN CATCH SET @status=@@ERROR; END CATCH;
+      SELECT @status AS status;
+    expect: {rows: 1,data: [{status: 50121}]}
+  - name: Dynamic execution preserves its actual child diagnostic
+    sql: |
+      DECLARE @status INT;
+      BEGIN TRY EXEC(N'THROW 50124,''dynamic status'',1;'); END TRY
+      BEGIN CATCH SET @status=@@ERROR; END CATCH;
+      SELECT @status AS status;
+    expect: {rows: 1,data: [{status: 50124}]}
+  - name: Unhandled SQL failure publishes status to its actual connection
+    session_id: status_a
+    sql: THROW 50131,'connection status',1
+    expect: {error: true,contains: ['50131','connection status']}
+  - name: Another connection does not inherit the failed connection status
+    session_id: status_b
+    sql: SELECT @@ERROR AS status
+    expect: {rows: 1,data: [{status: 0}]}
+  - name: The same connection retains its previous failed request status
+    session_id: status_a
+    # Capture at the first SQL statement; the runner performs a separate EXPLAIN
+    # before a SELECT-prefixed test, which itself completes successfully.
+    sql: DECLARE @saved INT=@@ERROR; SELECT @saved AS status
+    expect: {rows: 1,data: [{status: 50131}]}
+  - name: A successful subsequent request clears that connection status
+    session_id: status_a
+    sql: SELECT @@ERROR AS status
+    expect: {rows: 1,data: [{status: 0}]}
+  - name: SPID is a positive stable identity within one request
+    sql: SELECT CASE WHEN @@SPID>0 AND @@SPID<=32767 AND @@SPID=@@SPID THEN 1 ELSE 0 END AS stable
+    expect: {rows: 1,data: [{stable: 1}]}
+  - name: First named connection records its actual SPID
+    session_id: status_a
+    sql: INSERT status_connections VALUES(1,@@SPID)
+    expect: {affected_rows: 1}
+  - name: The first connection retains SPID across requests and transaction decisions
+    session_id: status_a
+    sql: BEGIN TRANSACTION; COMMIT; SELECT CASE WHEN @@SPID=(SELECT identity_value FROM status_connections WHERE slot=1) THEN 1 ELSE 0 END AS retained
+    expect: {rows: 1,data: [{retained: 1}]}
+  - name: A second connection records a different SPID
+    session_id: status_b
+    sql: INSERT status_connections VALUES(2,@@SPID)
+    expect: {affected_rows: 1}
+  - name: Distinct active connections never alias their SPID
+    sql: SELECT COUNT(DISTINCT identity_value) AS total FROM status_connections
+    expect: {rows: 1,data: [{total: 2}]}
+  - name: Procedure and independent INSERT EXEC scopes retain the owning connection SPID
+    sql: DECLARE @ids TABLE(identity_value SMALLINT); INSERT @ids EXEC status_identity; SELECT CASE WHEN (SELECT identity_value FROM @ids)=@@SPID THEN 1 ELSE 0 END AS same_connection
+    expect: {rows: 1,data: [{same_connection: 1}]}
+  - name: SPID bounds are checked without wrapping one identity into another
+    scm: |
+      (and (equal? (tsql_spid 1) 1) (equal? (tsql_spid 32767) 32767)
+        (reduce (list 0 32768) (lambda (valid value)
+          (and valid (try (lambda () (begin (tsql_spid value) false))
+            (lambda (failure) (match (failure_value failure)
+              (list "tsql-error" 8115 _message 1) true _ (error failure)))))) true))
+    expect: {result: true}
+  - name: ERROR and SPID retain their declared wire metadata
+    tds:
+      statements:
+        - sql: SELECT @@ERROR AS status,@@SPID AS identity_value WHERE 1=0
+          expect: {rows: 0,column_types: [{name: status,type: INT},{name: identity_value,type: SMALLINT}]}
+  - name: WHILE consumes prior ERROR before entering its loop body
+    sql: |
+      DECLARE @value INT,@inside INT=-1;
+      BEGIN TRY SET @value=1/0; END TRY
+      BEGIN CATCH WHILE @@ERROR=8134 BEGIN SET @inside=@@ERROR; BREAK; END; END CATCH;
+      SELECT @inside AS inside_loop;
+    expect: {rows: 1,data: [{inside_loop: 0}]}
+  - name: Informational RAISERROR completes with zero ERROR status
+    sql: RAISERROR('informational status',10,1); SELECT @@ERROR AS status
+    expect: {rows: 1,data: [{status: 0}]}
+  - name: Opaque native failures retain their identity and never invent successful status
+    scm: |
+      (begin
+        (define scope (newsession))
+        (define cause (handle_failure "opaque diagnostic"))
+        (and (nil? (failure_diagnostic cause))
+          (try (lambda () (begin (tsql_with_error_status scope (lambda () (error cause))) false))
+            (lambda (failure)
+              (and (equal? (failure_value failure) cause)
+                (equal? (scope "__tsql_last_error") (list nil)))))))
+    expect: {result: true}

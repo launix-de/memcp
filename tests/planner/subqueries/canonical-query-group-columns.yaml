@@ -106,6 +106,74 @@ test_cases:
         - id: 2
           enabled: 1
 
+  - name: "Scalar query source declares one state output before binding callers"
+    syntax: tsql
+    setup:
+      - sql: "DROP TABLE IF EXISTS cqgc_bound_calls"
+      - sql: "CREATE TABLE cqgc_bound_calls (id INT PRIMARY KEY, account_id INT)"
+      - sql: "INSERT INTO cqgc_bound_calls VALUES (1,1),(2,9),(3,1),(4,NULL)"
+    sql: |
+      CREATE FUNCTION dbo.cqgc_count(@account INT) RETURNS INT AS BEGIN
+        DECLARE @value INT=0;
+        SELECT @value=COUNT(*) FROM cqgc_items WHERE account_id=@account;
+        RETURN @value;
+      END
+
+  - name: "Bound scalar COUNT reads its created output including missing and NULL domains"
+    syntax: tsql
+    sql: SELECT id,dbo.cqgc_count(account_id) AS total FROM cqgc_bound_calls ORDER BY id
+    expect:
+      rows: 4
+      data: [{id: 1, total: 2}, {id: 2, total: 0}, {id: 3, total: 2}, {id: 4, total: 0}]
+
+  - name: "Warm scalar COUNT keeps the same interface under a different caller alias"
+    syntax: tsql
+    sql: SELECT caller.id,dbo.cqgc_count(caller.account_id) AS total FROM cqgc_bound_calls caller ORDER BY caller.id
+    expect:
+      rows: 4
+      data: [{id: 1, total: 2}, {id: 2, total: 0}, {id: 3, total: 2}, {id: 4, total: 0}]
+
+  - name: "A second scalar aggregate can extend an already used state carrier"
+    syntax: tsql
+    sql: |
+      CREATE FUNCTION dbo.cqgc_sum(@account INT) RETURNS INT AS BEGIN
+        DECLARE @value INT=0;
+        SELECT @value=SUM(enabled) FROM cqgc_items WHERE account_id=@account;
+        RETURN @value;
+      END
+
+  - name: "COUNT and SUM keep separate output columns and empty input semantics"
+    syntax: tsql
+    sql: SELECT id,dbo.cqgc_count(account_id) AS total,dbo.cqgc_sum(account_id) AS enabled_sum FROM cqgc_bound_calls ORDER BY id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, total: 2, enabled_sum: 2}
+        - {id: 2, total: 0, enabled_sum: null}
+        - {id: 3, total: 2, enabled_sum: 2}
+        - {id: 4, total: 0, enabled_sum: null}
+
+  - name: "Warm aggregate extensions retain duplicate callers and projection order"
+    syntax: tsql
+    sql: SELECT caller.id,dbo.cqgc_sum(caller.account_id) AS enabled_sum,dbo.cqgc_count(caller.account_id) AS total FROM cqgc_bound_calls caller ORDER BY caller.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, enabled_sum: 2, total: 2}
+        - {id: 2, enabled_sum: null, total: 0}
+        - {id: 3, enabled_sum: 2, total: 2}
+        - {id: 4, enabled_sum: null, total: 0}
+
+  - name: "Drop the scalar count declaration"
+    syntax: tsql
+    sql: DROP FUNCTION dbo.cqgc_count
+
+  - name: "Drop the scalar sum declaration"
+    syntax: tsql
+    sql: DROP FUNCTION dbo.cqgc_sum
+    cleanup:
+      - sql: "DROP TABLE cqgc_bound_calls"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS cqgc_items"
   - sql: "DROP TABLE IF EXISTS cqgc_categories"

@@ -16,15 +16,13 @@ Copyright (C) 2025-2026  MemCP Contributors
 */
 package storage
 
-import (
-	"context"
-	"fmt"
-	"sync"
-	"sync/atomic"
-	"time"
-
-	"github.com/launix-de/memcp/scm"
-)
+import "fmt"
+import "sync"
+import "time"
+import "context"
+import "sync/atomic"
+import "runtime/debug"
+import "github.com/launix-de/memcp/scm"
 
 // Per-entry overhead: cacheMapEntry struct (~80 bytes) + map bucket slot (~128 bytes) + softItem (~120 bytes)
 const cacheMapEntryOverhead = 328
@@ -38,13 +36,18 @@ type cacheMapEntry struct {
 }
 
 type cacheMap struct {
-	call func(...scm.Scmer) scm.Scmer // immutable owner accessor, initialized before publication
+	call      func(...scm.Scmer) scm.Scmer // immutable owner accessor, initialized before publication
+	factories *cacheMapFactoryLifetime     // process owner, independent of request/entry lifetime
 	// residentBytes is published at entry replacement/eviction boundaries.
 	// Owning tables can include memo entries without taking the cache mutex.
 	residentBytes atomic.Int64
 	mu            sync.RWMutex
 	entries       map[string]*cacheMapEntry
 	flights       map[string]*cacheMapFlight
+	closed        bool
+	closeDone     chan struct{}
+	publications  sync.WaitGroup
+	producers     sync.WaitGroup // includes abandoned flights until their factories actually finish
 }
 
 type cacheMapFlight struct {
@@ -85,14 +88,19 @@ func NewCacheMap(a ...scm.Scmer) scm.Scmer {
 	}
 	// The constructor factory is immutable and retained only by this accessor.
 	cm := &cacheMap{
-		entries: make(map[string]*cacheMapEntry),
-		flights: make(map[string]*cacheMapFlight),
+		entries:   make(map[string]*cacheMapEntry),
+		flights:   make(map[string]*cacheMapFlight),
+		factories: processCacheMapFactories,
 	}
 	cm.call = func(a ...scm.Scmer) scm.Scmer {
 		switch len(a) {
 		case 0:
 			// list all keys
 			cm.mu.RLock()
+			if cm.closed {
+				cm.mu.RUnlock()
+				panic("cachemap is closed")
+			}
 			keys := make([]scm.Scmer, 0, len(cm.entries))
 			for k := range cm.entries {
 				keys = append(keys, scm.NewString(k))
@@ -103,6 +111,10 @@ func NewCacheMap(a ...scm.Scmer) scm.Scmer {
 			// get
 			key := scm.String(a[0])
 			cm.mu.RLock()
+			if cm.closed {
+				cm.mu.RUnlock()
+				panic("cachemap is closed")
+			}
 			entry, ok := cm.entries[key]
 			cm.mu.RUnlock()
 			if !ok {
@@ -156,6 +168,12 @@ func registerCacheMapEntry(entry *cacheMapEntry) {
 func (cm *cacheMap) store(key string, value scm.Scmer) {
 	entry := newCacheMapEntry(cm, key, value)
 	cm.mu.Lock()
+	if cm.closed {
+		cm.mu.Unlock()
+		panic("cachemap is closed")
+	}
+	cm.publications.Add(1)
+	defer cm.publications.Done()
 	old := cm.entries[key]
 	cm.entries[key] = entry
 	delta := entry.size
@@ -190,6 +208,10 @@ func cacheMapContext(queryState scm.Scmer) context.Context {
 
 func (cm *cacheMap) getOrCompute(key string, queryState scm.Scmer, producer scm.Scmer) scm.Scmer {
 	cm.mu.RLock()
+	if cm.closed {
+		cm.mu.RUnlock()
+		panic("cachemap is closed")
+	}
 	if entry := cm.entries[key]; entry != nil {
 		entry.lastUsed.Store(time.Now().UnixNano())
 		cm.mu.RUnlock()
@@ -198,6 +220,10 @@ func (cm *cacheMap) getOrCompute(key string, queryState scm.Scmer, producer scm.
 	cm.mu.RUnlock()
 
 	cm.mu.Lock()
+	if cm.closed {
+		cm.mu.Unlock()
+		panic("cachemap is closed")
+	}
 	if entry := cm.entries[key]; entry != nil {
 		entry.lastUsed.Store(time.Now().UnixNano())
 		cm.mu.Unlock()
@@ -205,13 +231,21 @@ func (cm *cacheMap) getOrCompute(key string, queryState scm.Scmer, producer scm.
 	}
 	flight := cm.flights[key]
 	if flight == nil {
-		compileCtx, cancel := context.WithCancel(context.Background())
+		compileCtx, cancel, admitted := cm.factories.admit()
+		if !admitted {
+			cm.mu.Unlock()
+			panic("cachemap factories are shut down")
+		}
 		flight = &cacheMapFlight{
 			done:    make(chan struct{}),
 			cancel:  cancel,
 			waiters: 1,
 		}
 		cm.flights[key] = flight
+		// Close excludes new admissions under this mutex before joining. A
+		// cancelled waiter may detach its flight from the key directory, but
+		// that must not detach the running factory from its native owner.
+		cm.producers.Add(1)
 		go cm.runProducer(compileCtx, key, producer, flight)
 	} else {
 		flight.waiters++
@@ -244,6 +278,11 @@ func (cm *cacheMap) cancelWaiter(key string, flight *cacheMapFlight) {
 }
 
 func (cm *cacheMap) runProducer(ctx context.Context, key string, producer scm.Scmer, flight *cacheMapFlight) {
+	// These outer defers finish last, after result publication, waiter wakeup
+	// and the per-cache lifetime. Detached flights retain this process owner.
+	defer cm.factories.producers.Done()
+	defer flight.cancel()
+	defer cm.producers.Done()
 	// A finished owner call includes native cache registration. Waking waiters
 	// earlier let a following lifecycle reset race the still-running producer.
 	defer close(flight.done)
@@ -260,11 +299,18 @@ func (cm *cacheMap) runProducer(ctx context.Context, key string, producer scm.Sc
 		return
 	}
 	delete(cm.flights, key)
+	if cm.closed {
+		entry = nil
+		failed = true
+		panicValue = "cachemap is closed"
+	}
 	flight.value = value
 	flight.panicValue = panicValue
 	flight.failed = failed || ctx.Err() != nil
 	var old *cacheMapEntry
 	if entry != nil {
+		cm.publications.Add(1)
+		defer cm.publications.Done()
 		old = cm.entries[key]
 		cm.entries[key] = entry
 		delta := entry.size
@@ -288,6 +334,11 @@ func runCacheMapProducer(ctx context.Context, producer scm.Scmer) (value scm.Scm
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			panicValue = recovered
+			// Preserve diagnostics from the producer goroutine before its stack
+			// unwinds. An existing carrier already owns the original failure.
+			if _, hasStack := recovered.(interface{ OriginalStack() string }); !hasStack {
+				panicValue = scanError{recovered, string(debug.Stack())}
+			}
 		}
 	}()
 	value = scm.Apply(producer)
@@ -332,11 +383,12 @@ func (cm *cacheMap) executeClusterRequest(ctx context.Context, r scm.ClusterRequ
 	}
 	return scm.NewNil(), fmt.Errorf("unsupported cachemap request %q", r.Method)
 }
-func (cm *cacheMap) ProjectClusterView(view scm.Scmer, keys []scm.Scmer) (scm.Scmer, error) {
+func (cm *cacheMap) ProjectClusterView(view scm.Scmer, demands []scm.ClusterCallDemand) (scm.Scmer, error) {
 	pairs := view.Slice()
 	prepared := append([]scm.Scmer(nil), pairs...)
-	for _, key := range keys {
-		if key.IsNil() {
+	for _, demand := range demands {
+		key := demand.Key
+		if demand.Arity != 1 || key.IsNil() {
 			continue
 		}
 		found := false
@@ -350,7 +402,7 @@ func (cm *cacheMap) ProjectClusterView(view scm.Scmer, keys []scm.Scmer) (scm.Sc
 			prepared = append(prepared, key, cm.call(key))
 		}
 	}
-	return scm.ProjectClusterAssoc(scm.NewSlice(prepared), keys)
+	return scm.ProjectClusterAssoc(scm.NewSlice(prepared), demands)
 }
 func init() {
 	scm.RegisterClusterObjectType("cachemap", func(handle scm.ClusterHandle) scm.Scmer {
@@ -369,4 +421,35 @@ func (cm *cacheMap) HandleClusterRequest(ctx context.Context, payload []byte) {
 func (cm *cacheMap) ClusterView(ctx context.Context) (scm.Scmer, error) {
 	value, err := cm.executeClusterRequest(ctx, scm.ClusterRequest{Method: "view"})
 	return scm.ClusterViewValue(value, err)
+}
+
+// Close ends this native resource's actual lifetime, including independently
+// retained GlobalCache entries and asynchronous factories. Invocation owners
+// join their readers before closing a transaction-owned cache.
+func (cm *cacheMap) Close() error {
+	cm.mu.Lock()
+	if cm.closed {
+		done := cm.closeDone
+		cm.mu.Unlock()
+		<-done
+		return nil
+	}
+	cm.closed = true
+	cm.closeDone = make(chan struct{})
+	defer close(cm.closeDone)
+	for _, flight := range cm.flights {
+		flight.cancel()
+	}
+	cm.mu.Unlock()
+	cm.producers.Wait()
+	cm.publications.Wait()
+	cm.mu.Lock()
+	entries := cm.entries
+	cm.entries = nil
+	cm.residentBytes.Store(0)
+	cm.mu.Unlock()
+	for _, entry := range entries {
+		GlobalCache.Remove(entry)
+	}
+	return nil
 }

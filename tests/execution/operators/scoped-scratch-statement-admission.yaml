@@ -1,0 +1,158 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Parallel caller-scoped MEMORY producers preserve native transaction Undo without claiming public statement ownership
+setup:
+- sql: CREATE TABLE scratch_public_safe(id INT)
+- sql: INSERT INTO scratch_public_safe VALUES(5)
+- sql: CREATE TABLE scratch_public_memory(id INT) ENGINE=MEMORY
+- sql: INSERT INTO scratch_public_memory VALUES(5)
+- scm: |
+    (begin
+      (define __test_scratch_count (lambda (tx source)
+        (scan tx source '() '() '() (lambda () true) '("id") (lambda (n _id) (+ n 1)) 0 +)))
+      (define __test_scratch_pair (lambda (explicit failure) (begin
+        (define owner (newsession)) (owner "username" "root")
+        (define scope (new_relation_scope owner))
+        (define make (lambda () (begin
+          (define name (concat ".scratch-admission:" (uuid)))
+          (createtable "memcp-tests" name (list (list "column" "id" "INT" '() '()))
+            (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+          (table "memcp-tests" false name false nil))))
+        (define left (make)) (define right (make))
+        (if explicit (tx_begin_acid owner) true)
+        (define outcome (try (lambda ()
+          (list true (with_query_request owner nil 0 "parallel scoped producers" "acid" (lambda (statement)
+            (statement "parallel scoped producers" false (lambda (tx) (begin
+              (define producer (lambda (target number)
+                (lambda (emit)
+                  (with_table_mutation (list target) (list "insert" '()) tx owner
+                    (lambda (bound) (begin
+                      (insert target '("id") (list (list number)) '() nil false nil bound)
+                      (if (and failure (equal? number 2)) (error "scratch-producer-failed") true)
+                      (emit (list number))))))))
+              (scan_order_merge_reduce tx (list (producer left 1) (producer right 2))
+                (list 0) (list <) 0 -1 (lambda (row) (car row)) + 0))))))))
+          (lambda (cause) (list false (failure_value cause)))))
+        (define before (if explicit
+          (list (__test_scratch_count (owner "__memcp_tx") left) (__test_scratch_count (owner "__memcp_tx") right))
+          (list (__test_scratch_count nil left) (__test_scratch_count nil right))))
+        (if explicit (tx_rollback owner) true)
+        (define after (list (__test_scratch_count nil left) (__test_scratch_count nil right)))
+        (close_relation_scope scope)
+        (list outcome before after))))
+      (define __test_public_statement_undo (lambda (name) (begin
+        (define owner (newsession)) (owner "username" "root")
+        (define source (table "memcp-tests" false name false nil))
+        (define result (with_query_request owner nil 0 "public statement undo" "acid" (lambda (statement)
+          (statement "public statement undo" false (lambda (tx) (begin
+            (define caught (try (lambda () (begin
+              (with_table_mutation (list source) (list "insert" '()) tx owner (lambda (bound) (begin
+                (insert source '("id") (list (list 7)) '() nil false nil bound)
+                (error "public-producer-failed")))) false))
+              (lambda (cause) (expression_equal? (failure_value cause) "public-producer-failed"))))
+            (list caught (scan tx source '() '() '() (lambda () true) '("id") (lambda (sum id) (+ sum id)) 0 +))))))))
+        (and (expression_equal? result (list true 5))
+          (equal? (scan nil source '() '() '() (lambda () true) '("id") (lambda (sum id) (+ sum id)) 0 +) 5)))))
+      (globalvars "__test_scratch_count" (close_procedure __test_scratch_count))
+      (globalvars "__test_scratch_pair" (close_procedure __test_scratch_pair))
+      (globalvars "__test_public_statement_undo" (close_procedure __test_public_statement_undo))
+      true)
+cleanup:
+- scm: |
+    (begin
+      (globalvars "__test_scratch_count" nil)
+      (globalvars "__test_scratch_pair" nil)
+      (globalvars "__test_public_statement_undo" nil)
+      true)
+- sql: DROP TABLE IF EXISTS scratch_public_memory
+- sql: DROP TABLE IF EXISTS scratch_public_safe
+
+test_cases:
+- name: Two actual caller-scoped MEMORY producers share implicit ACID and retain both complete results
+  scm: (expression_equal? ((globalvars "__test_scratch_pair") false false) (list (list true 3) (list 1 1) (list 1 1)))
+  expect: {result: true}
+- name: Both successful scoped producers retain their parent transaction rollback
+  scm: (expression_equal? ((globalvars "__test_scratch_pair") true false) (list (list true 3) (list 1 1) (list 0 0)))
+  expect: {result: true}
+- name: A genuine producer failure drains parallel siblings before implicit rollback restores both carriers
+  scm: (expression_equal? ((globalvars "__test_scratch_pair") false true) (list (list false "scratch-producer-failed") (list 0 0) (list 0 0)))
+  expect: {result: true}
+- name: Ordinary public SAFE data retains checked statement Undo after an internally caught failure
+  scm: ((globalvars "__test_public_statement_undo") "scratch_public_safe")
+  expect: {result: true}
+- name: Ordinary public MEMORY data retains checked statement Undo after an internally caught failure
+  scm: ((globalvars "__test_public_statement_undo") "scratch_public_memory")
+  expect: {result: true}
+- name: A checked public parent retains ownership of its nested caller-scoped scratch writes
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define scope (new_relation_scope owner))
+      (define name (concat ".scratch-parent:" (uuid)))
+      (createtable "memcp-tests" name (list (list "column" "id" "INT" '() '()))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (define scratch (table "memcp-tests" false name false nil))
+      (define target (table "memcp-tests" false "scratch_public_safe" false nil))
+      (define result (with_query_request owner nil 0 "checked parent and scratch" "acid" (lambda (statement)
+        (statement "checked parent and scratch" false (lambda (tx) (begin
+          (define caught (try (lambda () (begin
+            (with_table_mutation (list target) (list "insert" '()) tx owner (lambda (bound) (begin
+              (insert target '("id") (list (list 11)) '() nil false nil bound)
+              (with_table_mutation (list scratch) (list "insert" '()) bound owner (lambda (nested)
+                (insert scratch '("id") (list (list 13)) '() nil false nil nested)))
+              (error "checked-parent-failed")))) false))
+            (lambda (cause) (expression_equal? (failure_value cause) "checked-parent-failed"))))
+          (list caught ((globalvars "__test_scratch_count") tx scratch)
+            (scan tx target '() '() '() (lambda () true) '("id") (lambda (sum id) (+ sum id)) 0 +))))))))
+      (close_relation_scope scope)
+      (expression_equal? result (list true 0 5)))
+  expect: {result: true}
+- name: A mixed public and scratch target producer retains the public whole-statement Undo
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define scope (new_relation_scope owner))
+      (define name (concat ".scratch-mixed:" (uuid)))
+      (createtable "memcp-tests" name (list (list "column" "id" "INT" '() '()))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (define scratch (table "memcp-tests" false name false nil))
+      (define target (table "memcp-tests" false "scratch_public_safe" false nil))
+      (define result (with_query_request owner nil 0 "mixed public and scratch" "acid" (lambda (statement)
+        (statement "mixed public and scratch" false (lambda (tx) (begin
+          (define caught (try (lambda () (begin
+            (with_table_mutation (list scratch target) (list "insert" '()) tx owner (lambda (bound) (begin
+              (insert scratch '("id") (list (list 13)) '() nil false nil bound)
+              (insert target '("id") (list (list 11)) '() nil false nil bound)
+              (error "mixed-producer-failed")))) false))
+            (lambda (cause) (expression_equal? (failure_value cause) "mixed-producer-failed"))))
+          (list caught ((globalvars "__test_scratch_count") tx scratch)
+            (scan tx target '() '() '() (lambda () true) '("id") (lambda (sum id) (+ sum id)) 0 +))))))))
+      (close_relation_scope scope)
+      (expression_equal? result (list true 0 5)))
+  expect: {result: true}
+- name: Transactional SQL temporary data retains whole-statement atomicity on a real duplicate
+  syntax: tsql
+  sql: |
+    DECLARE @caught INT=0;
+    CREATE TABLE #scratch_atomic(id INT NOT NULL PRIMARY KEY);
+    INSERT #scratch_atomic VALUES(5);
+    BEGIN TRY INSERT #scratch_atomic VALUES(7),(5); END TRY
+    BEGIN CATCH SET @caught=1; END CATCH;
+    SELECT @caught AS caught,COUNT(*) AS total,SUM(id) AS sum FROM #scratch_atomic;
+    DROP TABLE #scratch_atomic;
+  expect: {rows: 1,data: [{caught: 1,total: 1,sum: 5}]}
+- name: Transactional SQL temporary data retains explicit parent rollback
+  syntax: tsql
+  sql: |
+    DECLARE @before INT;
+    CREATE TABLE #scratch_rollback(id INT);
+    INSERT #scratch_rollback VALUES(5);
+    BEGIN TRANSACTION;
+    INSERT #scratch_rollback VALUES(7);
+    SELECT @before=COUNT(*) FROM #scratch_rollback;
+    ROLLBACK TRANSACTION;
+    SELECT @before AS before_count,COUNT(*) AS after_count,SUM(id) AS sum FROM #scratch_rollback;
+    DROP TABLE #scratch_rollback;
+  expect: {rows: 1,data: [{before_count: 2,after_count: 1,sum: 5}]}

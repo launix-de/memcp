@@ -1,0 +1,81 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: NOEXEC INSERT SELECT obtains complete declared output types even when projections contain no compiler annotations
+setup:
+  - sql: CREATE TABLE projection_source(id INT,code NVARCHAR(16))
+  - sql: INSERT projection_source VALUES(1,N'a'),(1,N'a'),(2,N'b')
+  - sql: CREATE TABLE projection_case(Id INT,Code NVARCHAR(16))
+  - sql: CREATE VIEW projection_view AS SELECT id,code FROM projection_source
+  - sql: CREATE TABLE projection_target(id INT,code NVARCHAR(16))
+cleanup:
+  - sql: DROP VIEW IF EXISTS projection_view
+  - sql: DROP TABLE IF EXISTS projection_case
+  - sql: DROP PROCEDURE IF EXISTS projection_module
+  - sql: DROP TABLE IF EXISTS projection_target
+  - sql: DROP TABLE IF EXISTS projection_source
+test_cases:
+  - name: Direct declared projections compile without executing the insert
+    sql: SET NOEXEC ON; INSERT projection_target SELECT id,code FROM projection_source; SET NOEXEC OFF; SELECT COUNT(*) AS inserted FROM projection_target
+    expect: {rows: 1,data: [{inserted: 0}]}
+  - name: DISTINCT preserves the complete declared projection directory
+    sql: SET NOEXEC ON; INSERT projection_target SELECT DISTINCT id,code FROM projection_source; SET NOEXEC OFF; SELECT COUNT(*) AS inserted FROM projection_target
+    expect: {rows: 1,data: [{inserted: 0}]}
+  - name: Local declaration columns receive the same compile-only assignment checking
+    tds:
+      statements:
+        - sql: SET NOEXEC ON
+        - sql: |
+            CREATE PROCEDURE projection_module AS BEGIN
+              DECLARE @output TABLE(id INT,code NVARCHAR(16));
+              INSERT @output SELECT DISTINCT id,code FROM projection_source;
+            END
+        - sql: SET NOEXEC OFF; SELECT OBJECT_ID(N'projection_module',N'P') AS module_id
+          expect: {rows: 1,data: [{module_id: null}]}
+  - name: A set projection retains the first branch declarations without executing either branch
+    sql: SET NOEXEC ON; INSERT projection_target SELECT id,code FROM projection_source UNION ALL SELECT id,code FROM projection_source; SET NOEXEC OFF; SELECT COUNT(*) AS inserted FROM projection_target
+    expect: {rows: 1,data: [{inserted: 0}]}
+  - name: Mixed local and stored joined inputs preserve every output descriptor
+    tds:
+      statements:
+        - sql: SET NOEXEC ON
+        - sql: |
+            CREATE PROCEDURE projection_module AS BEGIN
+              DECLARE @filter TABLE(id INT);
+              DECLARE @output TABLE(id INT,code NVARCHAR(16));
+              DECLARE @limit INT;
+              INSERT @output SELECT DISTINCT s.id,s.code FROM projection_source s
+                INNER JOIN @filter f ON s.id=f.id
+                INNER JOIN projection_source other ON other.id=s.id
+                WHERE YEAR(CAST(N'2024-01-01' AS DATETIME))<@limit;
+            END
+        - sql: SET NOEXEC OFF; SELECT OBJECT_ID(N'projection_module',N'P') AS module_id
+          expect: {rows: 1,data: [{module_id: null}]}
+  - name: Case folded source names retain complete output contracts
+    sql: SET NOEXEC ON; INSERT projection_target SELECT DISTINCT ID,CODE FROM projection_case; SET NOEXEC OFF; SELECT COUNT(*) AS inserted FROM projection_target
+    expect: {rows: 1,data: [{inserted: 0}]}
+  - name: Joined view exports retain their ordinary declared output descriptors
+    sql: SET NOEXEC ON; INSERT projection_target SELECT DISTINCT v.id,v.code FROM projection_view v INNER JOIN projection_source s ON v.id=s.id; SET NOEXEC OFF; SELECT COUNT(*) AS inserted FROM projection_target
+    expect: {rows: 1,data: [{inserted: 0}]}
+  - name: Annotation free logical projections publish complete declared assignment contracts
+    scm: |
+      (begin
+        (define planning (newsession))
+        (planning "username" "root")
+        (planning "schema" "memcp-tests")
+        (define query (make_query_block "memcp-tests"
+          (list (list "source" "memcp-tests" "projection_source" false nil nil))
+          (list "id" (list 'get_column "source" false "id" false)
+            "code" (list 'get_column "source" false "code" false))
+          true nil nil nil nil nil nil nil nil))
+        (define receipt (tsql_compile_query_binding query (tsql_policy "root") planning nil))
+        (define typed (nth receipt 3))
+        (and (expression_equal? (sql_info_datatype (tsql_compile_projection_info typed 0)) "INT")
+          (expression_equal? (sql_info_type (tsql_compile_projection_info typed 1)) "NVARCHAR")))
+    expect: {result: true}
+  - name: Ordinary execution still inserts every DISTINCT row
+    sql: INSERT projection_target SELECT DISTINCT id,code FROM projection_source; SELECT id,code FROM projection_target ORDER BY id
+    expect: {rows: 2,data: [{id: 1,code: a},{id: 2,code: b}]}

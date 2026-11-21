@@ -1,0 +1,257 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/functions/rowcount-transact-sql
+# SQL Server 2022 declaration, EXEC and control-boundary references:
+# https://dbfiddle.uk/E21PB00H https://dbfiddle.uk/BbmAFeAA https://dbfiddle.uk/Xz8JsAT4
+# https://dbfiddle.uk/hpSgprNS
+metadata:
+  version: '1.0'
+  syntax: tsql
+  requires_tds: true
+  description: Statement completion owns ROWCOUNT independently of NOCOUNT and transport sinks
+  isolated: true
+setup:
+- sql: CREATE TABLE rowcount_source(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO rowcount_source VALUES(1,10),(2,20),(3,30)
+- sql: |
+    CREATE PROCEDURE rowcount_child @seen INT OUTPUT AS BEGIN
+      SET @seen=@@ROWCOUNT;
+      UPDATE rowcount_source SET value=value WHERE id=1;
+      RETURN 5;
+    END
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS rowcount_child
+- sql: DROP TABLE IF EXISTS rowcount_source
+- sql: DROP TABLE IF EXISTS rowcount_inserted
+- sql: DROP TABLE IF EXISTS rowcount_copy
+test_cases:
+- name: UPDATE publishes actual matched rows after native completion
+  sql: UPDATE rowcount_source SET value=value; SELECT @@ROWCOUNT AS affected
+  expect: {rows: 1, data: [{affected: 3}]}
+- name: A zero row DELETE publishes zero rather than preserving an earlier count
+  sql: |
+    UPDATE rowcount_source SET value=value;
+    DELETE FROM rowcount_source WHERE id=99;
+    SELECT @@ROWCOUNT AS affected;
+  expect: {rows: 1, data: [{affected: 0}]}
+- name: INSERT SELECT and DELETE publish their actual target counts
+  sql: |
+    CREATE TABLE rowcount_inserted(id INT PRIMARY KEY);
+    INSERT INTO rowcount_inserted SELECT id FROM rowcount_source;
+    DECLARE @inserted INT=@@ROWCOUNT;
+    DELETE FROM rowcount_inserted WHERE id<3;
+    DECLARE @deleted INT=@@ROWCOUNT;
+    DROP TABLE rowcount_inserted;
+    SELECT @inserted AS inserted_rows,@deleted AS deleted_rows;
+  expect: {rows: 1, data: [{inserted_rows: 3, deleted_rows: 2}]}
+- name: SELECT assignment counts every consumed row independently of its final scalar
+  sql: |
+    DECLARE @value INT;
+    SELECT @value=value FROM rowcount_source ORDER BY id;
+    SELECT @@ROWCOUNT AS affected,@value AS last_value;
+  expect: {rows: 1, data: [{affected: 3, last_value: 30}]}
+- name: Empty SELECT assignment publishes zero and preserves the variable
+  sql: |
+    DECLARE @value INT=77;
+    SELECT @value=value FROM rowcount_source WHERE id=99;
+    SELECT @@ROWCOUNT AS affected,@value AS last_value;
+  expect: {rows: 1, data: [{affected: 0, last_value: 77}]}
+- name: Simple assignments read the previous count then publish one
+  sql: |
+    DECLARE @previous INT;
+    UPDATE rowcount_source SET value=value;
+    SET @previous=@@ROWCOUNT;
+    SELECT @previous AS previous_count,@@ROWCOUNT AS assignment_count;
+  expect: {rows: 1, data: [{previous_count: 3, assignment_count: 1}]}
+- name: Uninitialized scalar and table declarations preserve the count
+  sql: |
+    UPDATE rowcount_source SET value=value;
+    DECLARE @value INT;
+    DECLARE @items TABLE(id INT);
+    SELECT @@ROWCOUNT AS affected;
+  expect: {rows: 1, data: [{affected: 3}]}
+- name: A declaration initializer reads the preceding count and completes as one
+  sql: |
+    UPDATE rowcount_source SET value=value;
+    DECLARE @previous INT=@@ROWCOUNT,@other INT=@@ROWCOUNT;
+    SELECT @previous AS previous_count,@other AS second_count,@@ROWCOUNT AS declaration_count;
+  expect: {rows: 1, data: [{previous_count: 3, second_count: 3, declaration_count: 1}]}
+- name: NOCOUNT suppresses messages without suppressing statement row counts
+  sql: |
+    SET NOCOUNT ON;
+    UPDATE rowcount_source SET value=value;
+    DECLARE @affected INT=@@ROWCOUNT;
+    SET NOCOUNT OFF;
+    SELECT @affected AS affected,@@ROWCOUNT AS option_count;
+  expect: {rows: 1, data: [{affected: 3, option_count: 0}]}
+- name: PRINT resets the count after evaluating its message
+  sql: |
+    UPDATE rowcount_source SET value=value;
+    PRINT 'rowcount reset';
+    SELECT @@ROWCOUNT AS affected;
+  expect: {rows: 1, data: [{affected: 0}]}
+- name: An ordinary BEGIN block preserves the preceding count
+  sql: |
+    UPDATE rowcount_source SET value=value;
+    BEGIN SELECT @@ROWCOUNT AS affected; END;
+  expect: {rows: 1, data: [{affected: 3}]}
+- name: IF evaluates the preceding count before its control boundary resets it
+  sql: |
+    UPDATE rowcount_source SET value=value;
+    IF @@ROWCOUNT=3 SELECT @@ROWCOUNT AS affected ELSE SELECT 99 AS affected;
+  expect: {rows: 1, data: [{affected: 0}]}
+- name: A false WHILE resets count without executing its body
+  sql: |
+    UPDATE rowcount_source SET value=value;
+    WHILE 1=0 UPDATE rowcount_source SET value=value;
+    SELECT @@ROWCOUNT AS affected;
+  expect: {rows: 1, data: [{affected: 0}]}
+- name: BREAK preserves the count of the last body statement
+  sql: |
+    WHILE 1=1 BEGIN
+      UPDATE rowcount_source SET value=value;
+      BREAK;
+    END;
+    SELECT @@ROWCOUNT AS affected;
+  expect: {rows: 1, data: [{affected: 3}]}
+- name: Normal TRY completion resets row count without changing its native result
+  sql: |
+    BEGIN TRY UPDATE rowcount_source SET value=value; END TRY
+    BEGIN CATCH THROW; END CATCH;
+    SELECT @@ROWCOUNT AS affected;
+  expect: {rows: 1, data: [{affected: 0}]}
+- name: RAISERROR transfers with a reset count into CATCH
+  sql: |
+    UPDATE rowcount_source SET value=value;
+    BEGIN TRY RAISERROR('rowcount diagnostic',16,1); END TRY
+    BEGIN CATCH SELECT @@ROWCOUNT AS affected; END CATCH;
+  expect: {rows: 1, data: [{affected: 0}]}
+- name: Procedure statements update shared count while EXEC adds no assignment completion
+  sql: |
+    DECLARE @seen INT,@status INT;
+    UPDATE rowcount_source SET value=value;
+    EXEC @status=rowcount_child @seen OUTPUT;
+    SELECT @seen AS entry_count,@status AS return_status,@@ROWCOUNT AS final_count;
+  expect: {rows: 1, data: [{entry_count: 3, return_status: 5, final_count: 1}]}
+- name: Empty dynamic EXEC preserves the preceding count
+  sql: |
+    UPDATE rowcount_source SET value=value;
+    EXEC(N'');
+    SELECT @@ROWCOUNT AS affected;
+  expect: {rows: 1, data: [{affected: 3}]}
+- name: Dynamic child DML publishes its actual count
+  sql: |
+    UPDATE rowcount_source SET value=value;
+    EXEC(N'UPDATE rowcount_source SET value=value WHERE id=1');
+    SELECT @@ROWCOUNT AS affected;
+  expect: {rows: 1, data: [{affected: 1}]}
+- name: SELECT INTO exposes its inserted row count
+  sql: |
+    SELECT id INTO rowcount_copy FROM rowcount_source;
+    DECLARE @affected INT=@@ROWCOUNT;
+    DROP TABLE rowcount_copy;
+    SELECT @affected AS affected;
+  expect: {rows: 1, data: [{affected: 3}]}
+- name: Cursor declaration open fetch and close publish their distinct completions
+  sql: |
+    DECLARE values_cursor CURSOR LOCAL STATIC READ_ONLY FOR SELECT id FROM rowcount_source WHERE id=1;
+    DECLARE @declared INT=@@ROWCOUNT,@opened INT,@fetched INT,@missing INT,@closed INT,@value INT;
+    OPEN values_cursor;
+    SET @opened=@@ROWCOUNT;
+    FETCH NEXT FROM values_cursor INTO @value;
+    SET @fetched=@@ROWCOUNT;
+    FETCH NEXT FROM values_cursor INTO @value;
+    SET @missing=@@ROWCOUNT;
+    CLOSE values_cursor;
+    SET @closed=@@ROWCOUNT;
+    DEALLOCATE values_cursor;
+    SELECT @declared AS declared_count,@opened AS opened_count,@fetched AS fetched_count,
+      @missing AS missing_count,@closed AS closed_count,@@ROWCOUNT AS deallocated_count;
+  expect:
+    rows: 1
+    data: [{declared_count: 1, opened_count: 0, fetched_count: 1, missing_count: 0, closed_count: 0, deallocated_count: 0}]
+- name: Transaction completion resets count independently of committed visibility
+  sql: |
+    BEGIN TRANSACTION;
+    UPDATE rowcount_source SET value=value;
+    COMMIT TRANSACTION;
+    SELECT @@ROWCOUNT AS affected;
+  expect: {rows: 1, data: [{affected: 0}]}
+- name: SELECT counts its actual stream even when the caller sink returns nil
+  scm: |
+    (begin
+      (define s (newsession))
+      (s "username" "root") (s "schema" "memcp-tests")
+      (define result (newsession))
+      (tsql_execute_request "memcp-tests" "SELECT id FROM rowcount_source ORDER BY id" s nil 0
+        (lambda (_row) nil) (lambda args true))
+      (tsql_execute_request "memcp-tests" "SELECT @@ROWCOUNT AS n" s nil 0
+        (lambda (row) (result "n" (row "n"))) (lambda args true))
+      (equal? (result "n") 3))
+  expect: {result: true}
+- name: Empty result metadata still completes as zero on its own connection
+  scm: |
+    (begin
+      (define first (newsession)) (define second (newsession))
+      (first "username" "root") (second "username" "root")
+      (define run (lambda (s text row) (tsql_execute_request "memcp-tests" text s nil 0 row (lambda args true))))
+      (run first "UPDATE rowcount_source SET value=value" (lambda (_row) true))
+      (run second "UPDATE rowcount_source SET value=value WHERE id=1" (lambda (_row) true))
+      (run first "SELECT id FROM rowcount_source WHERE id=99" (lambda (_row) (error "unexpected result")))
+      (define output (newsession))
+      (run first "SELECT @@ROWCOUNT AS n" (lambda (row) (output "first" (row "n"))))
+      (run second "SELECT @@ROWCOUNT AS n" (lambda (row) (output "second" (row "n"))))
+      (and (equal? (output "first") 0) (equal? (output "second") 1)))
+  expect: {result: true}
+- name: Empty wire result retains the declared INT contract
+  tds:
+    statements:
+    - sql: SELECT @@ROWCOUNT AS affected WHERE 1=0
+      expect:
+        rows: 0
+        column_types: [{name: affected, type: INT}]
+- name: Final output count follows joins groups sets windows and empty domains with a nil sink
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define run (lambda (text) (begin
+        (tsql_execute_request "memcp-tests" text s nil 0 (lambda (_row) nil) (lambda args true))
+        (define output (newsession))
+        (tsql_execute_request "memcp-tests" "SELECT @@ROWCOUNT AS n" s nil 0
+          (lambda (row) (output "n" (row "n"))) (lambda args true))
+        (output "n"))))
+      (define counts (map (list
+        "SELECT a.id,b.id AS matched_id FROM rowcount_source a LEFT JOIN rowcount_source b ON b.id<=a.id"
+        "SELECT value,COUNT(*) AS n FROM rowcount_source GROUP BY value"
+        "SELECT COUNT(*) AS n FROM rowcount_source WHERE id<0"
+        "SELECT id FROM rowcount_source WHERE id<0"
+        "SELECT id FROM rowcount_source WHERE id<=2 UNION ALL SELECT id FROM rowcount_source WHERE id=1"
+        "SELECT DISTINCT id FROM rowcount_source"
+        "SELECT TOP 2 id FROM rowcount_source ORDER BY id DESC"
+        "SELECT id,ROW_NUMBER() OVER(ORDER BY id) AS n FROM rowcount_source"
+        "SELECT id,LAG(id) OVER(ORDER BY id) AS previous_id,LEAD(id) OVER(ORDER BY id) AS next_id FROM rowcount_source"
+        "SELECT a.id,b.id AS matched_id FROM rowcount_source a FULL OUTER JOIN rowcount_source b ON a.id=b.id+1") run))
+      (tx_rollback s)
+      counts)
+  expect: {data: [[6,3,1,0,3,3,2,3,3,4]]}
+
+- name: Repeated ordinal assignment slots count rows independently of typed NULL results
+  sql: |
+    DECLARE @value INT=77;
+    SELECT @value=CAST(NULL AS INT),@value=CAST(NULL AS INT) FROM rowcount_source ORDER BY id;
+    SELECT @@ROWCOUNT AS affected,@value AS last_value;
+  expect: {rows: 1,data: [{affected: 3,last_value: null}]}
+- name: A named transaction retains its SQL name argument and resets completion count
+  sql: |
+    DECLARE @name VARCHAR(32)='rowcount_scope';
+    BEGIN TRANSACTION @name;
+    UPDATE rowcount_source SET value=value WHERE id<=2;
+    COMMIT TRANSACTION @name;
+    SELECT @@ROWCOUNT AS affected;
+  expect: {rows: 1,data: [{affected: 0}]}
+- name: The global token preserves case-insensitive spelling and arithmetic boundaries
+  sql: UPDATE rowcount_source SET value=value; SELECT @@rowcount+0 AS lower_count,@@ROWCOUNT AS upper_count
+  expect: {rows: 1,data: [{lower_count: 3,upper_count: 3}]}
+- name: An identifier continuation cannot become a ROWCOUNT prefix plus an alias
+  sql: SELECT @@ROWCOUNT_suffix
+  expect: {error: true}

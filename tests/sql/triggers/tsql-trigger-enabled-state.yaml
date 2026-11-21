@@ -1,0 +1,118 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Durable statement trigger state preserves SQL effects and native constraints
+setup:
+- sql: CREATE TABLE trigger_state_input(id INT PRIMARY KEY)
+- sql: CREATE TABLE trigger_state_log(id INT)
+- sql: CREATE TABLE trigger_state_other(id INT PRIMARY KEY)
+- sql: CREATE TABLE trigger_state_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE trigger_state_child(id INT PRIMARY KEY, parent_id INT, CONSTRAINT trigger_state_fk FOREIGN KEY(parent_id) REFERENCES trigger_state_parent(id))
+- sql: CREATE TRIGGER trigger_state_audit ON trigger_state_input AFTER INSERT,UPDATE AS INSERT INTO trigger_state_log SELECT id FROM inserted
+- sql: CREATE TRIGGER trigger_state_other_audit ON trigger_state_other AFTER INSERT AS PRINT N'other'
+- sql: CREATE TRIGGER trigger_state_child_audit ON trigger_state_child AFTER INSERT AS PRINT N'child'
+- sql: CREATE TABLE trigger_state_replace_input(id INT PRIMARY KEY)
+- sql: INSERT INTO trigger_state_replace_input VALUES(1),(2)
+- sql: CREATE TRIGGER trigger_state_replace_guard ON trigger_state_replace_input INSTEAD OF DELETE AS PRINT N'retained'
+cleanup:
+- sql: DROP TABLE IF EXISTS trigger_state_replace_input
+- sql: DROP TABLE IF EXISTS trigger_state_child
+- sql: DROP TABLE IF EXISTS trigger_state_parent
+- sql: DROP TABLE IF EXISTS trigger_state_other
+- sql: DROP TABLE IF EXISTS trigger_state_input
+- sql: DROP TABLE IF EXISTS trigger_state_log
+test_cases:
+- name: A named ALTER TABLE disables the existing declaration
+  sql: ALTER TABLE trigger_state_input DISABLE TRIGGER trigger_state_audit
+- name: Disabled trigger still exists with its exact source and event mask
+  scm: |
+    (begin
+      (define rows (show (table "memcp-tests" false "trigger_state_input" false nil) "statement_triggers"))
+      (define declaration (car rows))
+      (and (equal? (count rows) 1) (declaration "disabled")
+        (equal? (declaration "source") "INSERT INTO trigger_state_log SELECT id FROM inserted")
+        (expression_equal? (declaration "events") '("insert" "update"))))
+  expect: {result: true}
+- name: Base insertion continues while its audit trigger is disabled
+  sql: INSERT INTO trigger_state_input VALUES(1)
+- name: Disabled body publishes no audit row
+  sql: SELECT COUNT(*) AS total FROM trigger_state_log
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Standalone enable restores the existing body
+  sql: ENABLE TRIGGER dbo.trigger_state_audit ON dbo.trigger_state_input
+- name: Enabled insertion fires the retained body
+  sql: INSERT INTO trigger_state_input VALUES(2)
+- name: Only the enabled insertion is audited
+  sql: SELECT id FROM trigger_state_log ORDER BY id
+  expect: {rows: 1, data: [{id: 2}]}
+- name: Standalone disable has the same durable effect
+  sql: DISABLE TRIGGER trigger_state_audit ON trigger_state_input
+- name: Trigger source alteration enables a previously disabled trigger
+  sql: ALTER TRIGGER trigger_state_audit ON trigger_state_input AFTER INSERT,UPDATE AS INSERT INTO trigger_state_log SELECT id+10 FROM inserted
+- name: Altered enabled trigger executes its new source
+  sql: INSERT INTO trigger_state_input VALUES(3)
+- name: Source replacement and implicit enable are both visible
+  sql: SELECT id FROM trigger_state_log ORDER BY id
+  expect: {rows: 2, data: [{id: 2}, {id: 13}]}
+- name: A trigger on another table cannot be disabled by the wrong target
+  sql: ALTER TABLE trigger_state_input DISABLE TRIGGER trigger_state_other_audit
+  expect: {error: true, contains: does not belong to target table}
+- name: A mixed valid and missing list fails without disabling its valid prefix
+  sql: ALTER TABLE trigger_state_input DISABLE TRIGGER trigger_state_audit, trigger_state_missing
+  expect: {error: true, contains: does not belong to target table}
+- name: Invalid target list retains the active trigger state
+  scm: (not ((car (show (table "memcp-tests" false "trigger_state_input" false nil) "statement_triggers")) "disabled"))
+  expect: {result: true}
+- name: ALL selects user statement triggers on the named table
+  sql: ALTER TABLE trigger_state_child DISABLE TRIGGER ALL
+- name: ALL never disables native foreign key enforcement
+  sql: INSERT INTO trigger_state_child VALUES(1,999)
+  expect: {error: true, contains: foreign key}
+- name: Native constraint rejection still leaves the target empty
+  sql: SELECT COUNT(*) AS total FROM trigger_state_child
+  expect: {rows: 1, data: [{total: 0}]}
+- name: ALL can enable the same statement declarations again
+  sql: ALTER TABLE trigger_state_child ENABLE TRIGGER ALL
+- name: Native savepoint rollback restores enabled state and external visibility
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define input (table "memcp-tests" false "trigger_state_input" false tx))
+      (define saved (tx_savepoint tx))
+      (statement_trigger_state input '("trigger_state_audit") false tx)
+      (define own_disabled ((car (show input "statement_triggers" tx)) "disabled"))
+      (define outside_enabled (not ((car (show input "statement_triggers")) "disabled")))
+      (tx_rollback_to_savepoint tx saved)
+      (define restored (not ((car (show input "statement_triggers" tx)) "disabled")))
+      (tx_commit owner)
+      (and own_disabled outside_enabled restored
+        (not ((car (show input "statement_triggers")) "disabled")))))
+  expect: {result: true}
+- name: Whole transaction rollback removes a pending state change
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define input (table "memcp-tests" false "trigger_state_input" false tx))
+      (statement_trigger_state input nil false tx)
+      (tx_rollback owner)
+      (not ((car (show input "statement_triggers")) "disabled"))))
+  expect: {result: true}
+- name: A disabled replacement declaration permits the ordinary deletion
+  sql: DISABLE TRIGGER trigger_state_replace_guard ON trigger_state_replace_input
+- name: Ordinary deletion runs while its replacement is disabled
+  sql: DELETE FROM trigger_state_replace_input WHERE id=1
+  expect: {rows: 1, data: [{affected_rows: 1}]}
+- name: Disabling replacement preserves only the undeleted row
+  sql: SELECT id FROM trigger_state_replace_input
+  expect: {rows: 1, data: [{id: 2}]}
+- name: Reenable the existing replacement program
+  sql: ENABLE TRIGGER trigger_state_replace_guard ON trigger_state_replace_input
+- name: Enabled replacement prevents the base deletion again
+  sql: DELETE FROM trigger_state_replace_input WHERE id=2
+- name: Replacement body retains the actual original row
+  sql: SELECT id FROM trigger_state_replace_input
+  expect: {rows: 1, data: [{id: 2}]}

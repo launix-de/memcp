@@ -75,10 +75,15 @@ start_server base base-fill
 curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
   (begin
     /* This adapter runs only against predecessor binaries. The candidate has
-    one four-argument table interface; old releases had two arguments. */
-    (define fixture_table (lambda (database name)
-      (coalesceNil (apply table (list database false name false))
-        (apply table (list database name)))))
+    one explicit-transaction table interface; old releases had two or four arguments.
+    Pinned two-argument native functions accept surplus arguments and return nil
+    for the false name; lazy coalesceNil then calls the two-argument shape.
+    Four-argument writers resolve the existing fixture first and never execute
+    that fallback. There is no exception catch or ignored arity error. */
+    (define fixture_table (lambda (database name) (begin
+      (define handle (coalesceNil (apply table (list database false name false))
+        (apply table (list database name))))
+      (if handle handle (error "missing owned upgrade fixture relation")))))
     (createcolumn (fixture_table "memcp-tests" "up_compute") "doubled" "INT" (quote ()) (quote ())
       (quote ("val")) (lambda (val) (* val 2)))
     (insert (fixture_table "memcp-tests" "up_group_events")
@@ -104,6 +109,58 @@ stop_server
 start_server base base-restart
 python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json"
 bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
+# Only OLD manufactures obsolete derived callbacks, after its unchanged public
+# oracle. No candidate-side data preparation or schema-file edits are allowed.
+curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
+  (begin
+    (define fixture_table (lambda (database name) (begin
+      (define handle (coalesceNil (apply table (list database false name false))
+        (apply table (list database name))))
+      (if handle handle (error "missing owned upgrade fixture relation")))))
+    /* Legacy FK code is produced only by OLD, without weakening candidate
+    system ownership or rewriting the persisted reader input. */
+    (createtrigger
+        (fixture_table "memcp-tests" "up_fk_abi_child")
+        "__fk_up_fk_abi_ref_child_insert"
+        "before_insert"
+        ""
+        ""
+        (lambda (OLD NEW session tx)
+          (begin
+            (__fk_check_ref "memcp-tests" "up_fk_abi_parent" (quote ("id")) (list (get_assoc NEW "parent_id")) "up_fk_abi_ref")
+            NEW))
+        false)
+      (createtrigger
+        (fixture_table "memcp-tests" "up_fk_abi_child")
+        "__fk_up_fk_abi_ref_child_update"
+        "before_update"
+        ""
+        ""
+        (lambda (OLD NEW session tx)
+          (begin
+            (__fk_check_ref "memcp-tests" "up_fk_abi_parent" (quote ("id")) (list (get_assoc NEW "parent_id")) "up_fk_abi_ref")
+            NEW))
+        false)
+      (createtrigger
+        (fixture_table "memcp-tests" "up_fk_abi_parent")
+        "__fk_up_fk_abi_ref_parent_delete"
+        "before_delete"
+        ""
+        ""
+        (lambda (OLD NEW session tx)
+          (__fk_on_parent_delete "memcp-tests" "up_fk_abi_child" (quote ("parent_id")) (list (get_assoc OLD "id")) "up_fk_abi_ref" "CASCADE"))
+        false)
+      (createtrigger
+        (fixture_table "memcp-tests" "up_fk_abi_parent")
+        "__fk_up_fk_abi_ref_parent_update"
+        "after_update"
+        ""
+        ""
+        (lambda (OLD NEW session tx)
+          (__fk_on_parent_update "memcp-tests" "up_fk_abi_child" (quote ("parent_id")) (list (get_assoc OLD "id")) (list (get_assoc NEW "id")) "up_fk_abi_ref" "CASCADE"))
+        false)
+    true)
+'
 stop_server
 
 # Read the predecessor's untouched persisted data before any candidate DML.

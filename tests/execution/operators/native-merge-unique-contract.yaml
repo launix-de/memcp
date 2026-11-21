@@ -1,0 +1,75 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Loading the SQL planner preserves the canonical merge_unique language contract
+setup: []
+cleanup: []
+test_cases:
+- name: A catalog of segments preserves first occurrence order and empty segments
+  scm: (merge_unique (list (list 3 1) (list) (list 1 2) (list 3)))
+  expect: {result: [3, 1, 2]}
+- name: Separate segment arguments retain their public variadic contract
+  scm: (merge_unique (list "a" "b") (list "b" "c") (list))
+  expect: {result: [a, b, c]}
+- name: Raw and optimized variadic calls preserve complete values on repeated invocations
+  scm: |
+    (begin
+      (define syntax (list 'lambda (list 'a 'b 'c)
+        (list 'merge_unique (list 'list 'a 'b) (list 'list 'b 'c))))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (define compiled (jit (eval (optimize (clone_optimizer_expression syntax)))))
+      (list (raw 1 2 3) (optimized 1 2 3) (compiled 1 2 3)
+        (raw 2 2 1) (optimized 2 2 1) (compiled 2 2 1)))
+  expect: {result: [[1, 2, 3], [1, 2, 3], [1, 2, 3], [2, 1], [2, 1], [2, 1]]}
+- name: A live segment catalog and its input segments retain their original values
+  scm: |
+    (begin
+      (define first (list 3 1))
+      (define second (list 1 2))
+      (define catalog (list first second))
+      (define result (merge_unique catalog))
+      (list result first second catalog))
+  expect: {result: [[3, 1, 2], [3, 1], [1, 2], [[3, 1], [1, 2]]]}
+- name: Live variadic inputs retain their original values after deduplication
+  scm: |
+    (begin
+      (define first (list 3 1))
+      (define second (list 1 2))
+      (define result (merge_unique first second))
+      (list result first second))
+  expect: {result: [[3, 1, 2], [3, 1], [1, 2]]}
+- name: Blank string and symbol list failures retain the original prefix and distinguish operand tags
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (value) (merge_unique value))"))
+      (define exercise (lambda (operation) (begin
+        (define observe (lambda (value) (try (lambda () (operation value)) (lambda (failure) (concat failure)))))
+        (define text_message (observe ""))
+        (define symbol_message (observe (symbol "")))
+        (and (strlike text_message "%expects a list, got  (tag=_%)")
+          (strlike symbol_message "%expects a list, got  (tag=_%)")
+          (not (equal? text_message symbol_message))))))
+      (list (exercise (eval (clone_optimizer_expression syntax)))
+        (exercise (eval (optimize (clone_optimizer_expression syntax))))
+        (exercise (jit (eval (optimize (clone_optimizer_expression syntax)))))))
+  expect: {result: [true, true, true]}
+- name: Invalid nested segment failures preserve the operand distinction
+  scm: |
+    (begin
+      (define observe (lambda (value) (try (lambda () (merge_unique (list value))) (lambda (failure) (concat failure)))))
+      (define text_message (observe ""))
+      (define symbol_message (observe (symbol "")))
+      (and (strlike text_message "%expects a list, got  (tag=_%)")
+        (strlike symbol_message "%expects a list, got  (tag=_%)")
+        (not (equal? text_message symbol_message))))
+  expect: {result: true}
+- name: Nil list operands remain valid empty inputs after diagnostic changes
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (value) (merge_unique value))"))
+      (list ((eval (clone_optimizer_expression syntax)) nil)
+        ((eval (optimize (clone_optimizer_expression syntax))) nil)
+        ((jit (eval (optimize (clone_optimizer_expression syntax)))) nil)
+        (merge_unique (list nil (list 2 1) nil))))
+  expect: {result: [[], [], [], [2, 1]]}

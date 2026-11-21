@@ -1,0 +1,34 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Procedure compilation does not hold publication ownership and cannot publish into a replacement database
+setup:
+- scm: (createdatabase "routine_publication_owner" false)
+cleanup:
+- scm: (dropdatabase "routine_publication_owner" true)
+test_cases:
+- name: A compiler can replace its database before publication and the retired declaration is rejected
+  scm: |
+    (begin
+      (registerprocedurelanguage "fixture-replace-on-compile" (lambda (_source context)
+        (!begin
+          (dropdatabase (context "schema") false)
+          (createdatabase (context "schema") false)
+          (lambda () 7))))
+      (try (lambda ()
+        (createprocedure "routine_publication_owner" "retired" "fixture-replace-on-compile" "source" nil false))
+        (lambda (failure) (regexp_test (string failure) "database was replaced before procedure publication"))))
+  expect: {result: true}
+- name: The replacement catalog contains no declaration from the retired owner
+  scm: (showprocedures "routine_publication_owner" "")
+  expect: {result: []}
+- name: A completed compiler publishes through the current native catalog owner
+  scm: |
+    (begin
+      (registerprocedurelanguage "fixture-constant-compiler" (lambda (_source _context) (lambda () 17)))
+      (createprocedure "routine_publication_owner" "current" "fixture-constant-compiler" "source" nil false))
+  expect: {result: true}
+- name: The current native procedure is callable after publication
+  scm: ((procedure "routine_publication_owner" "current"))
+  expect: {result: 17}

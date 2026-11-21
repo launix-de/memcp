@@ -1,0 +1,89 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Native transactional declarations remain private and unsupported initialization profiles fail before effects
+setup:
+- sql: CREATE TABLE admission_existing(id INT PRIMARY KEY)
+cleanup:
+- sql: DROP TABLE IF EXISTS admission_existing
+- sql: DROP TABLE IF EXISTS admission_rejected
+test_cases:
+- name: Client begins an explicit installation transaction
+  session_id: admission-client
+  sql: BEGIN TRANSACTION
+  expect: {affected_rows: 0}
+- name: Permanent creation fails explicitly before catalog publication
+  session_id: admission-client
+  sql: CREATE TABLE admission_rejected(id INT PRIMARY KEY)
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+- name: Client can roll back the rejected statement normally
+  session_id: admission-client
+  sql: ROLLBACK TRANSACTION
+  expect: {affected_rows: 0}
+- name: Rejected creation is absent from the live catalog
+  sql: SELECT name FROM sys.objects WHERE name=N'admission_rejected'
+  expect: {rows: 0}
+- name: Native constructors reject all ordinary declaration engines without schema writes or oninit side effects
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define output (newsession)) (output "initializations" 0)
+      (define schema_file (concat (arg "data" "data" "data") "/memcp-tests/schema.json"))
+      (define before (readfile schema_file))
+      (tsql_execute_request "memcp-tests" "BEGIN TRANSACTION" s nil 0 (lambda (_row) true) (lambda args true))
+      (define tx (s "__memcp_tx"))
+      (define checks (map '("safe" "logged" "sloppy" "memory" "cache") (lambda (engine) (begin
+        (define name (concat "admission_native_" engine))
+        (define rejected (try (lambda () (begin
+          (createtable "memcp-tests" name (list (list "column" "id" "INT" (list) (list)))
+            (list "engine" engine "oninit" (lambda (_tx) (output "initializations" (+ (output "initializations") 1))))
+            false tx)
+          false)) (lambda (_failure) true)))
+        (and rejected (nil? (table "memcp-tests" false name false tx)))))))
+      (tsql_execute_request "memcp-tests" "ROLLBACK TRANSACTION" s nil 0 (lambda (_row) true) (lambda args true))
+      (and (reduce checks (lambda (valid value) (and valid value)) true)
+        (equal? (output "initializations") 0) (equal? before (readfile schema_file))))
+  expect: {result: true}
+- name: An existing idempotent native declaration remains a no-op inside an explicit transaction
+  session_id: admission-existing
+  sql: BEGIN TRANSACTION; CREATE TABLE IF NOT EXISTS admission_existing(id INT PRIMARY KEY); ROLLBACK TRANSACTION
+  expect: {affected_rows: 0}
+- name: Independent native runtime lifetimes remain supported inside row transactions
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (tsql_execute_request "memcp-tests" "BEGIN TRANSACTION" s nil 0 (lambda (_row) true) (lambda args true))
+      (define tx (s "__memcp_tx"))
+      (define columns (list (list "column" "id" "INT" (list) (list))))
+      (define scope (new_relation_scope s))
+      (define cache_created (createtable "memcp-tests" ".admission_cache" columns
+        (list "engine" "cache" "oninit" (lambda (_tx) true)) false tx))
+      (define memory_created (createtable "memcp-tests" ".admission_memory" columns
+        (list "engine" "memory" "ephemeral" true "scope" scope) false tx))
+      (define memory_visible (not (nil? (table "memcp-tests" false ".admission_memory" false tx))))
+      (tsql_execute_request "memcp-tests" "ROLLBACK TRANSACTION" s nil 0 (lambda (_row) true) (lambda args true))
+      (close_relation_scope scope)
+      (droptable "memcp-tests" ".admission_cache" true)
+      (and cache_created memory_created memory_visible
+        (nil? (table "memcp-tests" false ".admission_memory" false tx))))
+  expect: {result: true}
+- name: Real TDS transaction admission leaves no table after rollback
+  tds:
+    statements:
+    - sql: BEGIN TRANSACTION
+    - sql: CREATE TABLE admission_rejected(id INT PRIMARY KEY)
+      expect: {affected_rows: 0}
+    - sql: ROLLBACK TRANSACTION
+    - sql: SELECT name FROM sys.objects WHERE name=N'admission_rejected'
+      expect: {rows: 0}
+- name: Restart cannot recover a declaration that admission rejected
+  syntax: mysql
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect: {rows: 0}
+- name: Restart retains only previously committed declarations
+  sql: SELECT name FROM sys.objects WHERE name IN(N'admission_existing',N'admission_rejected')
+  expect: {rows: 1,data: [{name: admission_existing}]}

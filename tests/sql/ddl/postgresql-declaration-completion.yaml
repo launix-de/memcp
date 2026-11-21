@@ -1,0 +1,101 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: postgresql
+  isolated: true
+  description: PostgreSQL declaration completion retains command tags without affected
+    counts
+  requires_mysql: true
+setup: []
+cleanup:
+- sql: DROP TABLE IF EXISTS "pg_completion_rows"
+- sql: DROP TABLE IF EXISTS "pg_completion_wire"
+test_cases:
+- name: PostgreSQL creates an ordinary declared relation
+  sql: CREATE TABLE "pg_completion_rows"("id" INT PRIMARY KEY,"value" INT)
+  expect:
+    rows: 1
+    data:
+    - command_tag: CREATE TABLE
+    result_not_contains: '"affected_rows"'
+- name: Conditional PostgreSQL creation preserves an existing declaration
+  sql: CREATE TABLE IF NOT EXISTS "pg_completion_rows"("other" INT)
+  expect:
+    rows: 1
+    data:
+    - command_tag: CREATE TABLE
+    result_not_contains: '"affected_rows"'
+- name: Reused PostgreSQL declaration retains its actual input columns
+  sql: INSERT INTO "pg_completion_rows"("id","value") VALUES(1,7)
+  expect:
+    affected_rows: 1
+- name: PostgreSQL schema readback agrees with the completed declaration
+  sql: SELECT "id","value" FROM "pg_completion_rows"
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: PostgreSQL creation without a conditional clause rejects an existing relation
+  sql: CREATE TABLE "pg_completion_rows"("other" INT)
+  expect:
+    error: true
+- name: Rejected PostgreSQL duplicate creation preserves the original row and schema
+  sql: SELECT "id","value" FROM "pg_completion_rows"
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: PostgreSQL removes the declared relation
+  sql: DROP TABLE "pg_completion_rows"
+  expect:
+    rows: 1
+    data:
+    - command_tag: DROP TABLE
+    result_not_contains: '"affected_rows"'
+- name: Completed PostgreSQL removal makes the old declaration unavailable
+  sql: SELECT "id" FROM "pg_completion_rows"
+  expect:
+    error: true
+- name: Conditional PostgreSQL removal accepts an absent declaration
+  sql: DROP TABLE IF EXISTS "pg_completion_rows"
+  expect:
+    rows: 1
+    data:
+    - command_tag: DROP TABLE
+    result_not_contains: '"affected_rows"'
+- name: PostgreSQL removal without a conditional clause rejects a missing relation
+  sql: DROP TABLE "pg_completion_rows"
+  expect:
+    error: true
+- name: PostgreSQL syntax tunnel adapts count-free tags only at the MySQL transport
+  mysql:
+    statements:
+    - sql: SET syntax='postgresql'
+    - sql: CREATE TABLE "pg_completion_wire"("id" INT)
+      expect:
+        affected_rows: 0
+    - sql: CREATE TABLE IF NOT EXISTS "pg_completion_wire"("other" INT)
+      expect:
+        affected_rows: 0
+    - sql: CREATE TABLE "pg_completion_wire"("other" INT)
+      expect:
+        error: true
+    - sql: INSERT INTO "pg_completion_wire"("id") VALUES(3)
+      expect:
+        affected_rows: 1
+    - sql: SELECT "id" FROM "pg_completion_wire"
+      expect:
+        rows: 1
+        data:
+        - id: 3
+    - sql: DROP TABLE "pg_completion_wire"
+      expect:
+        affected_rows: 0
+    - sql: SELECT "id" FROM "pg_completion_wire"
+      expect:
+        error: true
+    - sql: DROP TABLE IF EXISTS "pg_completion_wire"
+      expect:
+        affected_rows: 0

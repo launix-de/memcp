@@ -1,0 +1,233 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Native failure dispositions retain rollback-only private views and exact completed statement Undo
+setup:
+- sql: CREATE TABLE failure_policy_reentry(id INT)
+- sql: CREATE TABLE failure_policy_restored(id INT)
+- sql: CREATE TABLE failure_policy_scalar(id INT)
+- sql: CREATE TABLE failure_policy_preserve(id INT)
+- sql: CREATE TABLE failure_policy_rollback(id INT)
+- sql: CREATE TABLE failure_policy_unrestored(id INT)
+- sql: CREATE TABLE failure_policy_invalid(id INT)
+- sql: CREATE TABLE failure_policy_audit(id INT)
+- scm: |-
+    (begin
+      (define count_rows (lambda (tx target)
+        (scan tx target '() '() '() (lambda () true) '("id") (lambda (n id) (+ n id)) 0 +)))
+      (define run_case (lambda (name disposition checked) (begin
+        (define owner (newsession)) (owner "username" "root")
+        (define target (table "memcp-tests" false name false nil))
+        (define audit (table "memcp-tests" false "failure_policy_audit" false nil))
+        (tx_begin_acid owner)
+        (define saved (tx_savepoint (owner "__memcp_tx")))
+        (with_query_request owner nil 0 "prior write" "acid" (lambda (statement)
+          (statement "prior write" false (lambda (tx)
+            (with_table_mutation (list target) (list "insert" '()) tx owner
+              (lambda (bound) (insert target '("id") (list (list 99)) '() nil false nil bound)))))))
+        (define observed (newsession))
+        (define failed (try (lambda ()
+          (with_query_request owner nil 0 "failing write" "acid" (lambda (statement)
+            (statement "failing write" false (lambda (tx)
+              (if (and (string? checked) (equal? checked "raw"))
+                (begin (insert target '("id") (list (list 2)) '() nil false nil tx) (error "controlled raw failure"))
+                checked (with_table_mutation (list target audit) (list "insert" '()) tx owner
+                  (lambda (bound) (begin
+                    (insert target '("id") (list (list 2)) '() nil false nil bound)
+                    (insert audit '("id") (list (list 2)) '() nil false nil bound)
+                    (error "controlled producer failure"))))
+                (error "controlled scalar failure")))
+              (lambda (failure completion) (begin
+                (observed "completion" completion)
+                disposition))))))
+          (lambda (cause) (failure_value cause))))
+        (define tx (owner "__memcp_tx"))
+        (define state (tx_state tx))
+        (define own (if (equal? state "aborted") -1 (count_rows tx target)))
+        (define observer (count_rows nil target))
+        (define audit_rows (count_rows nil audit))
+        (define scratch_scope (new_relation_scope owner))
+        (define scratch_value (if (equal? state "rollback-only")
+          (with_query_request owner nil 0 "read operator scratch" "acid" (lambda (statement)
+            (statement "read operator scratch" false (lambda (tx) (begin
+              (define scratch_name (concat ".failure-policy-scratch:" (uuid)))
+              (createtable "memcp-tests" scratch_name (list (list "column" "id" "INT" '() '()))
+                (list "engine" "memory" "ephemeral" true "scope" scratch_scope) false nil)
+              (define scratch (table "memcp-tests" false scratch_name false nil))
+              (with_table_mutation (list scratch) (list "insert" '()) tx owner
+                (lambda (bound) (insert scratch '("id") (list (list 7)) '() nil false nil bound)))
+              (count_rows tx scratch)))))) 0))
+        (define admission (if (equal? state "rollback-only")
+          (list
+            (try (lambda () (tx_commit owner) false) (lambda (cause) (transaction_rollback_only_failure? cause)))
+            (try (lambda () (tx_rollback_to_savepoint tx saved) false) (lambda (cause) (transaction_rollback_only_failure? cause)))
+            (try (lambda ()
+              (with_query_request owner nil 0 "denied write" "acid" (lambda (statement)
+                (statement "denied write" false (lambda (tx)
+                  (insert target '("id") (list (list 3)) '() nil false nil tx)))))
+              false) (lambda (cause) (transaction_rollback_only_failure? cause)))
+            (not (nil? (owner "transaction")))
+            (count_rows tx target)) '()))
+        (define marker (not (nil? (owner "transaction"))))
+        (with_query_request owner nil 0 "final decision" "acid" (lambda (statement)
+          (statement "final decision" true (lambda (_tx)
+            (if (and (equal? disposition "preserve") (equal? state "active")) (tx_commit owner) (tx_rollback owner))))))
+        (close_relation_scope scratch_scope)
+        (list (observed "completion") state own observer audit_rows admission
+          (tx_state (owner "__memcp_tx")) (count_rows nil target) marker failed scratch_value))))
+      (globalvars "__test_native_failure_disposition" (close_procedure run_case))
+      true)
+cleanup:
+- scm: (globalvars "__test_native_failure_disposition" nil)
+- sql: DROP TABLE failure_policy_restored
+- sql: DROP TABLE failure_policy_scalar
+- sql: DROP TABLE failure_policy_preserve
+- sql: DROP TABLE failure_policy_rollback
+- sql: DROP TABLE failure_policy_unrestored
+- sql: DROP TABLE failure_policy_invalid
+- sql: DROP TABLE failure_policy_audit
+- sql: DROP TABLE failure_policy_reentry
+test_cases:
+- name: Restored statement failure retains private rows in a rollback-only transaction
+  scm: ((globalvars "__test_native_failure_disposition") "failure_policy_restored" "rollback-only" true)
+  expect:
+    result:
+    - restored
+    - rollback-only
+    - 99
+    - 0
+    - 0
+    - - true
+      - true
+      - true
+      - true
+      - 99
+    - aborted
+    - 0
+    - true
+    - controlled producer failure
+    - 7
+- name: Untouched scalar failure can mark the same transaction rollback-only
+  scm: ((globalvars "__test_native_failure_disposition") "failure_policy_scalar" "rollback-only" false)
+  expect:
+    result:
+    - untouched
+    - rollback-only
+    - 99
+    - 0
+    - 0
+    - - true
+      - true
+      - true
+      - true
+      - 99
+    - aborted
+    - 0
+    - true
+    - controlled scalar failure
+    - 7
+- name: A preserving policy keeps complete statement undo and earlier committable work
+  scm: ((globalvars "__test_native_failure_disposition") "failure_policy_preserve" "preserve" true)
+  expect:
+    result:
+    - restored
+    - active
+    - 99
+    - 0
+    - 0
+    - []
+    - committed
+    - 99
+    - true
+    - controlled producer failure
+    - 0
+- name: A rollback policy discards the entire original transaction
+  scm: ((globalvars "__test_native_failure_disposition") "failure_policy_rollback" "rollback" true)
+  expect:
+    result:
+    - restored
+    - aborted
+    - -1
+    - 0
+    - 0
+    - []
+    - aborted
+    - 0
+    - false
+    - controlled producer failure
+    - 0
+- name: An unrestored raw mutation cannot acquire rollback-only preservation
+  scm: ((globalvars "__test_native_failure_disposition") "failure_policy_unrestored" "rollback-only" "raw")
+  expect:
+    result:
+    - unrestored
+    - aborted
+    - -1
+    - 0
+    - 0
+    - []
+    - aborted
+    - 0
+    - true
+    - controlled raw failure
+    - 0
+- name: Invalid policy results retain native rollback ownership
+  scm: ((globalvars "__test_native_failure_disposition") "failure_policy_invalid" "invalid" false)
+  expect:
+    result:
+    - untouched
+    - aborted
+    - -1
+    - 0
+    - 0
+    - []
+    - aborted
+    - 0
+    - true
+    - invalid statement failure disposition "invalid"
+    - 0
+- name: A failure policy cannot commit or mutate the original decision owner
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define target (table "memcp-tests" false "failure_policy_reentry" false nil))
+      (define sum_rows (lambda (tx) (scan tx target '() '() '() (lambda () true) '("id") (lambda (n id) (+ n id)) 0 +)))
+      (tx_begin_acid owner)
+      (with_query_request owner nil 0 "prior data" "acid" (lambda (statement)
+        (statement "prior data" false (lambda (tx)
+          (with_table_mutation (list target) (list "insert" '()) tx owner
+            (lambda (bound) (insert target '("id") (list (list 99)) '() nil false nil bound)))))))
+      (define checked (newsession))
+      (try (lambda ()
+        (with_query_request owner nil 0 "scalar failure" "acid" (lambda (statement)
+          (statement "scalar failure" false (lambda (_tx) (error "original scalar error"))
+            (lambda (_failure completion) (begin
+              (checked "completion" completion)
+              (checked "commit_rejected" (try (lambda () (tx_commit owner) false) (lambda (_failure) true)))
+              (checked "mutation_rejected" (try (lambda ()
+                (insert target '("id") (list (list 77)) '() nil false nil (owner "__memcp_tx")) false)
+                (lambda (_failure) true)))
+              "preserve"))))))
+        (lambda (_failure) true))
+      (define before (list (tx_state (owner "__memcp_tx")) (sum_rows (owner "__memcp_tx")) (sum_rows nil)
+        (checked "completion") (checked "commit_rejected") (checked "mutation_rejected")))
+      (with_query_request owner nil 0 "commit prior data" "acid" (lambda (statement)
+        (statement "commit prior data" false (lambda (_tx) (tx_commit owner)))))
+      (list before (sum_rows nil)))
+  expect:
+    result:
+    - - active
+      - 99
+      - 0
+      - untouched
+      - true
+      - true
+    - 99
+- name: Displayed rollback-only error text cannot forge a native admission failure
+  scm: (list (transaction_rollback_only_failure? nil) (transaction_rollback_only_failure? "transaction is rollback-only;
+    full ROLLBACK required"))
+  expect:
+    result:
+    - false
+    - false

@@ -1,0 +1,155 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Dynamic-syntax lambda parameters retain lexical ownership during optimization
+setup: []
+cleanup: []
+test_cases:
+- name: Native callable values and same-spelled lexical callbacks retain different meanings
+  scm: |
+    (begin
+      (define make-code (lambda ()
+        (list 'lambda (list 'toUpper 'value)
+          (list 'list
+            (list (list 'eval (list 'symbol "toUpper")) 'value)
+            (list toUpper 'value)
+            (list 'toUpper 'value)
+            (list 'map (list 'list "a" "b") 'toUpper)))))
+      (define state (newsession))
+      (define replacement (lambda (word) (begin
+        (state "calls" (+ (state "calls") 1)) (concat "#" word))))
+      (define run (lambda (function) (begin
+        (state "calls" 0)
+        (define value (function replacement "ab"))
+        (list value (state "calls")))))
+      (list (run (eval (make-code)))
+        (run (eval (optimize (make-code))))
+        (run (jit (eval (optimize (make-code)))))))
+  expect:
+    result:
+    - [["#ab", "AB", "#ab", ["#a", "#b"]], 4]
+    - [["#ab", "AB", "#ab", ["#a", "#b"]], 4]
+    - [["#ab", "AB", "#ab", ["#a", "#b"]], 4]
+- name: Captured eval-visible native names retain their lexical callback on direct calls
+  scm: |
+    (begin
+      (define source "(lambda (toUpper) (list (eval (symbol \"toUpper\")) (lambda (value) (toUpper value))))")
+      (define state (newsession))
+      (define replacement (lambda (word) (begin
+        (state "calls" (+ (state "calls") 1)) (concat "#" word))))
+      (define run (lambda (optimized compiled) (begin
+        (state "calls" 0)
+        (define syntax (scheme source))
+        (define factory (eval (if optimized (optimize syntax) syntax)))
+        (define pair (factory replacement))
+        (define function (if compiled (jit (cadr pair)) (cadr pair)))
+        (list ((car pair) "x") (function "ab") (state "calls")))))
+      (list (run false false) (run true false) (run true true)))
+  expect:
+    result: [["#x", "#ab", 2], ["#x", "#ab", 2], ["#x", "#ab", 2]]
+- name: An eval-visible callback parameter retains ordinary and higher-order calls
+  scm: |
+    (begin
+      (define source "(lambda (toUpper value) (list ((eval (symbol \"toUpper\")) \"x\") (toUpper value) (map (list \"a\" \"b\") toUpper)))")
+      (define raw (eval (scheme source)))
+      (define optimized (eval (optimize (scheme source))))
+      (define twice (eval (optimize (optimize (scheme source)))))
+      (define state (newsession))
+      (define replacement (lambda (word) (begin
+        (state "calls" (+ (state "calls") 1)) (concat "#" word))))
+      (define run (lambda (function) (begin
+        (state "calls" 0)
+        (define result (function replacement "ab"))
+        (list result (state "calls")))))
+      (define expected (list (list "#x" "#ab" (list "#a" "#b")) 4))
+      (and (expression_equal? (run raw) expected)
+        (expression_equal? (run optimized) expected)
+        (expression_equal? (run twice) expected)
+        (expression_equal? (run (jit optimized)) expected)))
+  expect: {result: true}
+- name: A computed second list argument remains separate from a captured first symbol argument
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (prefix pairs) (map (coalesceNil pairs '()) (lambda (pair) (list prefix (nth pair 0)))))"))
+      (define pairs (list (list 11 "first") (list 22 "second")))
+      (define exercise (lambda (operation) (list
+        (operation (symbol "") pairs)
+        (operation "context" pairs)
+        (operation (symbol "") nil)
+        pairs)))
+      (list (exercise (eval (clone_optimizer_expression syntax)))
+        (exercise (eval (optimize (clone_optimizer_expression syntax))))
+        (exercise (jit (eval (optimize (clone_optimizer_expression syntax)))))))
+  expect:
+    result:
+    - [[[{symbol: ""}, 11], [{symbol: ""}, 22]], [[context, 11], [context, 22]], [], [[11, first], [22, second]]]
+    - [[[{symbol: ""}, 11], [{symbol: ""}, 22]], [[context, 11], [context, 22]], [], [[11, first], [22, second]]]
+    - [[[{symbol: ""}, 11], [{symbol: ""}, 22]], [[context, 11], [context, 22]], [], [[11, first], [22, second]]]
+- name: A nested caller retains its second list through a local coalesce binding and direct helper call
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda () (begin (define collect (lambda (prefix pairs) (map (coalesceNil pairs '()) (lambda (pair) (list prefix (nth pair 0)))))) (lambda (prefix pairs unused) (begin (define pair_list (coalesceNil pairs '())) (collect prefix pair_list)))))"))
+      (define pairs (list (list 11 "first") (list 22 "second")))
+      (define exercise (lambda (factory) (begin
+        (define operation (factory))
+        (list (operation (symbol "") pairs 99)
+          (operation "later" (list (list 33)) 88)
+          (operation (symbol "") pairs 77)))))
+      (list (exercise (eval (clone_optimizer_expression syntax)))
+        (exercise (eval (optimize (clone_optimizer_expression syntax))))
+        (exercise (jit (eval (optimize (clone_optimizer_expression syntax)))))))
+  expect:
+    result:
+    - [[[{symbol: ""}, 11], [{symbol: ""}, 22]], [[later, 33]], [[{symbol: ""}, 11], [{symbol: ""}, 22]]]
+    - [[[{symbol: ""}, 11], [{symbol: ""}, 22]], [[later, 33]], [[{symbol: ""}, 11], [{symbol: ""}, 22]]]
+    - [[[{symbol: ""}, 11], [{symbol: ""}, 22]], [[later, 33]], [[{symbol: ""}, 11], [{symbol: ""}, 22]]]
+- name: Nested list producers preserve both values across a named rebinding
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (left right) (begin (define produced (merge (list (map left (lambda (item) (+ item 1))) (map right (lambda (item) (+ item 10)))))) (define before produced) (define produced (merge (list produced (list 99)))) (list before produced)))"))
+      (define exercise (lambda (operation) (list
+        (operation (list 1 2) (list 3 4))
+        (operation (list) (list 5))
+        (operation (list 1 2) (list 3 4)))))
+      (list (exercise (eval (clone_optimizer_expression syntax)))
+        (exercise (eval (optimize (clone_optimizer_expression syntax))))
+        (exercise (jit (eval (optimize (clone_optimizer_expression syntax)))))))
+  expect:
+    result:
+    - [[[2, 3, 13, 14], [2, 3, 13, 14, 99]], [[15], [15, 99]], [[2, 3, 13, 14], [2, 3, 13, 14, 99]]]
+    - [[[2, 3, 13, 14], [2, 3, 13, 14, 99]], [[15], [15, 99]], [[2, 3, 13, 14], [2, 3, 13, 14, 99]]]
+    - [[[2, 3, 13, 14], [2, 3, 13, 14, 99]], [[15], [15, 99]], [[2, 3, 13, 14], [2, 3, 13, 14, 99]]]
+- name: A nested callback captures an eval-visible parameter instead of a global
+  scm: |
+    (begin
+      (define source "(lambda (toUpper) (list ((eval (symbol \"toUpper\")) \"x\") (lambda (value) (regexp_replace value \"[ab]\" toUpper))))")
+      (define raw (eval (scheme source)))
+      (define optimized (eval (optimize (scheme source))))
+      (define twice (eval (optimize (optimize (scheme source)))))
+      (define state (newsession))
+      (define replacement (lambda (word) (begin
+        (state "calls" (+ (state "calls") 1)) (concat "#" word))))
+      (define run (lambda (function) (begin
+        (state "calls" 0)
+        (define pair (function replacement))
+        (define result ((cadr pair) "ab"))
+        (list (car pair) result (state "calls")))))
+      (define expected (list "#x" "#a#b" 3))
+      (and (expression_equal? (run raw) expected)
+        (expression_equal? (run optimized) expected)
+        (expression_equal? (run twice) expected)
+        (expression_equal? (run (jit optimized)) expected)))
+  expect: {result: true}
+- name: An eval-visible rest parameter shadows a native callable as a complete value
+  scm: |
+    (begin
+      (define source "(lambda toUpper (list (eval (symbol \"toUpper\")) toUpper))")
+      (define raw (eval (scheme source)))
+      (define optimized (eval (optimize (scheme source))))
+      (define twice (eval (optimize (optimize (scheme source)))))
+      (define expected (list (list "a" "b") (list "a" "b")))
+      (and (expression_equal? (raw "a" "b") expected)
+        (expression_equal? (optimized "a" "b") expected)
+        (expression_equal? (twice "a" "b") expected)
+        (expression_equal? ((jit optimized) "a" "b") expected)))
+  expect: {result: true}

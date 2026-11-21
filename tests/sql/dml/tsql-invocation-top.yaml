@@ -1,0 +1,56 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/queries/top-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Invocation-scoped DML TOP expressions retain native target limits
+setup:
+- sql: CREATE TABLE bounded_target(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO bounded_target VALUES(1,10),(2,20),(3,30),(4,40),(5,50)
+- sql: CREATE TABLE bounded_keep(id INT PRIMARY KEY)
+- sql: INSERT INTO bounded_keep VALUES(2),(4)
+- sql: CREATE TABLE bounded_copy(id INT PRIMARY KEY,value INT)
+test_cases:
+- name: A variable limits matching updates without choosing an ordered subset
+  sql: DECLARE @n INT=2; UPDATE TOP(@n) bounded_target SET value=value+100; SELECT COUNT(*) AS n,SUM(CASE WHEN value>100 THEN 1 ELSE 0 END) AS changed,SUM(value) AS total FROM bounded_target
+  expect: {rows: 1,data: [{n: 5,changed: 2,total: 350}]}
+- name: Reset the complete input independently of the unordered selection
+  sql: UPDATE bounded_target SET value=id*10
+- name: A scalar expression limits the native mutation count
+  sql: DECLARE @n INT=1; UPDATE TOP(@n+1) bounded_target SET value=0; SELECT COUNT(*) AS n FROM bounded_target WHERE value=0
+  expect: {rows: 1,data: [{n: 2}]}
+- name: A zero invocation limit leaves every input row intact
+  sql: DECLARE @n INT=0; DELETE TOP(@n) FROM bounded_target; SELECT COUNT(*) AS n FROM bounded_target
+  expect: {rows: 1,data: [{n: 5}]}
+- name: Repeated anti-join batches terminate with the complete intended result
+  sql: |
+    DECLARE @batch INT=1,@n INT=1;
+    WHILE @n>0 BEGIN
+      DELETE TOP(@batch) t FROM bounded_target AS t
+      WHERE NOT EXISTS(SELECT 1 FROM bounded_keep AS k WHERE k.id=t.id);
+      SET @n=@@ROWCOUNT;
+    END;
+    SELECT id FROM bounded_target ORDER BY id
+  expect: {rows: 2,data: [{id: 2},{id: 4}]}
+- name: INSERT SELECT uses the same invocation bound
+  sql: DECLARE @n INT=1; INSERT TOP(@n) INTO bounded_copy SELECT id,value FROM bounded_target; SELECT COUNT(*) AS n FROM bounded_copy
+  expect: {rows: 1,data: [{n: 1}]}
+- name: Reset the insert target
+  sql: DELETE FROM bounded_copy
+- name: INSERT VALUES uses the same invocation bound
+  sql: DECLARE @n INT=1; INSERT TOP(@n) INTO bounded_copy VALUES(11,110),(12,120); SELECT COUNT(*) AS n FROM bounded_copy
+  expect: {rows: 1,data: [{n: 1}]}
+- name: Negative runtime counts fail before deleting target rows
+  sql: DECLARE @n INT=-1; DELETE TOP(@n) FROM bounded_target
+  expect: {error: true,contains: nonnegative count}
+- name: NULL runtime counts fail before deleting target rows
+  sql: DECLARE @n INT=NULL; DELETE TOP(@n) FROM bounded_target
+  expect: {error: true,contains: nonnegative count}
+- name: Rejected counts leave the full surviving key set intact
+  sql: SELECT id FROM bounded_target ORDER BY id
+  expect: {rows: 2,data: [{id: 2},{id: 4}]}
+cleanup:
+- sql: DROP TABLE IF EXISTS bounded_copy
+- sql: DROP TABLE IF EXISTS bounded_keep
+- sql: DROP TABLE IF EXISTS bounded_target

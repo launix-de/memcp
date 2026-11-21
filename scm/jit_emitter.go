@@ -95,6 +95,9 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 			coverage = JITCoverage{}
 		}
 	}()
+	if proc != nil && jitLexicalPublicationNeedsRuntime(proc.Params, body) {
+		panic("jit: named binding publication requires a runtime lexical frame")
+	}
 	numVars, firstAssignment := jitRequiredLocalSlots(body, numVars)
 
 	freeRegs := jitDefaultFreeGPRegs()
@@ -103,8 +106,21 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		freeFPRegs |= uint64(1) << uint(jitNativeFPRegisterBank.Registers[index])
 	}
 	inputArgCount := -1
-	if proc != nil && proc.Params.GetTag() == tagSlice {
-		inputArgCount = len(proc.Params.Slice())
+	inputSlotCount := numVars
+	params := NewNil()
+	if proc != nil {
+		params = proc.Params.WithoutSourceInfo()
+		switch params.GetTag() {
+		case tagSlice:
+			inputArgCount = len(params.Slice())
+			inputSlotCount = inputArgCount
+		case tagSymbol:
+			// callFunction packs variadic arguments into one owned list binding.
+			// This is not a fixed source arity for self-tail-call rewriting.
+			inputSlotCount = 1
+		case tagNil:
+			inputSlotCount = 0
+		}
 	}
 	selfSymbols := jitSelfSymbols(proc)
 	ctx := &JITContext{
@@ -153,7 +169,9 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	_, _, moreStackPC := jitRuntimeStackCheck()
 	var stackCheckFrameFixup jitRuntimeStackFixup
 	var stackRetryLabel, stackGrowLabel JITLabel
-	hasStackCheck := moreStackPC != 0 && inputArgCount >= 0
+	// Every entry uses the same native func(...Scmer) Scmer ABI, including
+	// Scheme lambdas whose source parameter list is variadic or absent.
+	hasStackCheck := moreStackPC != 0
 	if hasStackCheck {
 		stackRetryLabel = ctx.ReserveLabel()
 		stackGrowLabel = ctx.ReserveLabel()
@@ -198,8 +216,8 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	if numVars > 0 && !useInputFrame {
 		ctx.AllocStack(int32(numVars * 16))
 		inputSlots := numVars
-		if inputArgCount >= 0 && inputArgCount < inputSlots {
-			inputSlots = inputArgCount
+		if inputSlotCount < inputSlots {
+			inputSlots = inputSlotCount
 		}
 		for i := 0; i < inputSlots; i++ {
 			srcOff := int32(i * 16)
@@ -284,11 +302,9 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 			}
 			vars[sym] = desc
 		}
-		switch proc.Params.GetTag() {
+		switch params.GetTag() {
 		case tagSlice:
-			params := proc.Params.Slice()
-			for i := 0; i < len(params) && (inputArgCount < 0 || i < inputArgCount); i++ {
-				param := params[i]
+			for i, param := range params.Slice() {
 				for param.GetTag() == tagSourceInfo {
 					param = param.SourceInfo().value
 				}
@@ -301,7 +317,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 			// Variadic Scheme calls pass one materialized list binding. This
 			// symbol also needs a slot when the body has not been renumbered.
 			if !proc.NumberedOnly {
-				putVar(proc.Params.Symbol(), 0)
+				putVar(params.Symbol(), 0)
 			}
 		}
 		if len(vars) > 0 || len(numbered) > 0 || captured != nil {

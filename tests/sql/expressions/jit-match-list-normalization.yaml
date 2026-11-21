@@ -47,4 +47,39 @@ test_cases:
           (match value (list? items) (count items) _ -1))))
         (if (equal? (size data) 40)
           true (error "dictionary match changed its flattened length")))
+  - name: "Variadic matching owns one input binding in a large local frame"
+    scm: |
+      (begin
+        (define body (list 'match (list 'var 0)
+          (list 'list 'a 'b 'c 'd)
+          (list 'list 'a 'b 'c 'd (list 'nil? (list 'var 4095)))
+          '_ false))
+        (define project (jit (eval (optimize (list 'lambda 'args body 4096)))))
+        (define first (project "first" (list 2 3) nil 4))
+        (define second (project "second" (list 5 6) nil 7))
+        (if (and
+          (expression_equal? first (list "first" (list 2 3) nil 4 true))
+          (expression_equal? second (list "second" (list 5 6) nil 7 true))
+          (equal? (project 1 2) false))
+          true (error "variadic local frame changed arguments or nil locals")))
+  - name: "Absent parameters leave large local frames nil"
+    scm: |
+      (begin
+        (define body (list 'list (list 'nil? (list 'var 0))
+          (list 'nil? (list 'var 4095))))
+        (define inspect (jit (eval (optimize (list 'lambda nil body 4096)))))
+        (if (and (expression_equal? (inspect) (list true true))
+          (expression_equal? (inspect "ignored input") (list true true)))
+          true (error "absent parameters populated local slots")))
+  - name: "Fixed parameters retain their binding across large-frame matching"
+    scm: |
+      (begin
+        (define body (list 'match (list 'var 0) (list 'list 'a 'b)
+          (list 'list 'b 'a (list 'nil? (list 'var 4095))) '_ false))
+        (define project (jit (eval (optimize
+          (list 'lambda (list 'value) body 4096)))))
+        (if (and
+          (expression_equal? (project (list "left" "right")) (list "right" "left" true))
+          (equal? (project nil) false))
+          true (error "fixed-parameter local frame changed match semantics")))
 cleanup: []

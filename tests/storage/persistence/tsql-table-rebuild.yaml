@@ -1,0 +1,133 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/alter-table-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Explicit table rebuild preserves rows and the original transaction
+setup:
+- sql: CREATE TABLE native_rebuild_rows(id INT PRIMARY KEY,value INT CONSTRAINT native_rebuild_default DEFAULT (7),label NVARCHAR(12))
+- sql: INSERT native_rebuild_rows VALUES(1,11,N'first'),(2,22,NULL)
+- sql: CREATE TABLE native_rebuild_drop_rows(id INT PRIMARY KEY)
+- sql: INSERT native_rebuild_drop_rows VALUES(1)
+test_cases:
+- name: A whole table rebuild runs through ordinary ALTER permission
+  sql: ALTER TABLE dbo.native_rebuild_rows REBUILD
+- name: Complete rows and nullable values survive a whole table rebuild
+  sql: SELECT id,value,label FROM native_rebuild_rows ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 11,label: first},{id: 2,value: 22,label: null}]}
+- name: Prior writes and later inserts retain the original transaction across rebuild
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'UPDATE native_rebuild_rows SET value=12 WHERE id=1'}
+    - {connection: owner, sql: 'ALTER TABLE native_rebuild_rows REBUILD PARTITION = ALL'}
+    - connection: owner
+      sql: SELECT id,value,label FROM native_rebuild_rows ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 12,label: first},{id: 2,value: 22,label: null}]}
+    - connection: observer
+      sql: SELECT id,value,label FROM native_rebuild_rows ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 11,label: first},{id: 2,value: 22,label: null}]}
+    - {connection: owner, sql: 'INSERT native_rebuild_rows VALUES(3,33,N''later'')'}
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect: {rows: 1,data: [{state: 1,depth: 1}]}
+    - {connection: owner, sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: SELECT id,value,label FROM native_rebuild_rows ORDER BY id
+      expect: {rows: 3,data: [{id: 1,value: 12,label: first},{id: 2,value: 22,label: null},{id: 3,value: 33,label: later}]}
+- name: A later rebuild cannot publish a private deletion before rollback
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'DELETE FROM native_rebuild_rows WHERE id=3'}
+    - {connection: owner, sql: 'ALTER TABLE native_rebuild_rows REBUILD'}
+    - connection: owner
+      sql: SELECT id,value FROM native_rebuild_rows ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 12},{id: 2,value: 22}]}
+    - connection: observer
+      sql: SELECT id,value FROM native_rebuild_rows ORDER BY id
+      expect: {rows: 3,data: [{id: 1,value: 12},{id: 2,value: 22},{id: 3,value: 33}]}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+- name: Rollback retains the complete committed predecessor
+  sql: SELECT id,value,label FROM native_rebuild_rows ORDER BY id
+  expect: {rows: 3,data: [{id: 1,value: 12,label: first},{id: 2,value: 22,label: null},{id: 3,value: 33,label: later}]}
+- name: Actual primary key enforcement survives rebuild
+  sql: INSERT native_rebuild_rows(id,value) VALUES(1,99)
+  expect: {error: true}
+- name: Future defaults remain executable after rebuild
+  sql: INSERT native_rebuild_rows(id) VALUES(4)
+- name: The later default is stored without changing historical values
+  sql: SELECT id,value,label FROM native_rebuild_rows ORDER BY id
+  expect: {rows: 4,data: [{id: 1,value: 12,label: first},{id: 2,value: 22,label: null},{id: 3,value: 33,label: later},{id: 4,value: 7,label: null}]}
+- name: A missing relation cannot select global maintenance
+  sql: ALTER TABLE native_rebuild_absent REBUILD PARTITION = ALL
+  expect: {error: true}
+- name: The declared default remains actual catalog data
+  sql: SELECT name,parent_column_id FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'native_rebuild_rows')
+  expect: {rows: 1,data: [{name: native_rebuild_default,parent_column_id: 2}]}
+- name: A retained native handle cannot rebuild its own dropped generation
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin_acid s)
+      (define tx (s "__memcp_tx"))
+      (define target (table "memcp-tests" false "native_rebuild_drop_rows" false tx))
+      (droptable "memcp-tests" "native_rebuild_drop_rows" false tx)
+      (define rejected (try (lambda () (begin (rebuild target true false tx true) false))
+        (lambda (cause) (equal? (failure_value cause)
+          "table is outside its native catalog lifetime: native_rebuild_drop_rows"))))
+      (define hidden (nil? (table "memcp-tests" false "native_rebuild_drop_rows" false tx)))
+      (define observed (scan nil target '() '() '() (lambda () true) '("id") + 0 +))
+      (tx_rollback s)
+      (list rejected hidden observed
+        (scan nil target '() '() '() (lambda () true) '("id") + 0 +)))
+  expect: {result: [true,true,1,1]}
+- name: NOEXEC validates rebuild syntax without running pending layout maintenance
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE native_rebuild_rows ADD noexec_flag INT NOT NULL DEFAULT (3)'}
+    - {connection: owner, sql: SET NOEXEC ON}
+    - {connection: owner, sql: 'ALTER TABLE dbo.native_rebuild_rows REBUILD PARTITION = ALL'}
+    - {connection: owner, sql: SET NOEXEC OFF}
+    - connection: owner
+      sql: SELECT id,value,noexec_flag FROM native_rebuild_rows ORDER BY id
+      expect: {rows: 4,data: [{id: 1,value: 12,noexec_flag: 3},{id: 2,value: 22,noexec_flag: 3},{id: 3,value: 33,noexec_flag: 3},{id: 4,value: 7,noexec_flag: 3}]}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'native_rebuild_rows') AND name=N'noexec_flag'
+      expect: {rows: 1,data: [{n: 0}]}
+- name: Lose the process after completed rebuilds and transaction decisions
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Recover the same physical database
+  action: restart
+- name: Recovery preserves complete committed and rolled back values
+  sql: SELECT id,value,label FROM native_rebuild_rows ORDER BY id
+  expect: {rows: 4,data: [{id: 1,value: 12,label: first},{id: 2,value: 22,label: null},{id: 3,value: 33,label: later},{id: 4,value: 7,label: null}]}
+- name: Rebuilding a pending column layout retains all values
+  noncritical: true
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'ALTER TABLE native_rebuild_rows ADD flag INT NOT NULL DEFAULT (3)'}
+    - {connection: owner, sql: 'ALTER TABLE native_rebuild_rows REBUILD PARTITION = ALL'}
+    - connection: owner
+      sql: SELECT id,value,flag FROM native_rebuild_rows ORDER BY id
+      expect: {rows: 4,data: [{id: 1,value: 12,flag: 3},{id: 2,value: 22,flag: 3},{id: 3,value: 33,flag: 3},{id: 4,value: 7,flag: 3}]}
+    - {connection: owner, sql: COMMIT TRANSACTION}
+- name: A rebuild composes with unrelated table retirement
+  noncritical: true
+  tds:
+    statements:
+    - {connection: owner, sql: BEGIN TRANSACTION}
+    - {connection: owner, sql: 'DROP TABLE native_rebuild_drop_rows'}
+    - {connection: owner, sql: 'ALTER TABLE native_rebuild_rows REBUILD PARTITION = ALL'}
+    - connection: owner
+      sql: SELECT id,value FROM native_rebuild_rows ORDER BY id
+      expect: {rows: 4,data: [{id: 1,value: 12},{id: 2,value: 22},{id: 3,value: 33},{id: 4,value: 7}]}
+    - {connection: owner, sql: ROLLBACK TRANSACTION}
+cleanup:
+- sql: DROP TABLE IF EXISTS native_rebuild_rows
+- sql: DROP TABLE IF EXISTS native_rebuild_drop_rows

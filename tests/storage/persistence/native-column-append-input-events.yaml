@@ -1,0 +1,62 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Checked private column inputs retain their actual native producer event
+setup:
+- sql: DROP TABLE IF EXISTS append_input_event_rows
+- sql: CREATE TABLE append_input_event_rows(id INT PRIMARY KEY,value INT)
+- sql: INSERT append_input_event_rows VALUES(1,7)
+test_cases:
+- name: An INSERT descriptor cannot authorize an existing-row UPDATE callback
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "append_input_event_rows" false tx))
+      (try (lambda () (begin
+        (createcolumn target "flag" "INT" '() '("null" false "default" 3) nil nil tx)
+        (define denied (try (lambda () (begin
+          (with_table_mutation (list target) (list "insert" '()) tx owner (lambda (bound)
+            (scan bound target '() '() '() (lambda () true) '("$update")
+              (lambda (n update) (begin (update '("value" 99)) (+ n 1))) 0 +)))
+          false)) (lambda (cause)
+            (equal? (failure_value cause) "private declaration input requires its checked UPDATE producer"))))
+        (define own (scan tx target '() '() '() (lambda () true) '("id" "value" "flag")
+          (lambda (rows id value flag) (merge rows (list (list id value flag)))) '() merge))
+        (define observed (scan nil target '() '() '() (lambda () true) '("id" "value")
+          (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+        (define state (tx_state tx))
+        (tx_rollback owner)
+        (list denied state own observed
+          (scan nil target '() '() '() (lambda () true) '("id" "value")
+            (lambda (rows id value) (merge rows (list (list id value)))) '() merge))))
+        (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+  expect: {result: [true, active, [[1, 7, 3]], [[1, 7]], [[1, 7]]]}
+- name: An UPDATE descriptor cannot authorize a native INSERT sink
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "append_input_event_rows" false tx))
+      (try (lambda () (begin
+        (createcolumn target "flag" "INT" '() '("null" false "default" 3) nil nil tx)
+        (define denied (try (lambda () (begin
+          (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+            (insert target '("id" "value") (list (list 2 99)) '() nil false nil bound)))
+          false)) (lambda (cause)
+            (equal? (failure_value cause) "private declaration input requires its checked INSERT producer without collision callbacks"))))
+        (define own (scan tx target '() '() '() (lambda () true) '("id" "value" "flag")
+          (lambda (rows id value flag) (merge rows (list (list id value flag)))) '() merge))
+        (define observed (scan nil target '() '() '() (lambda () true) '("id" "value")
+          (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+        (define state (tx_state tx))
+        (tx_rollback owner)
+        (list denied state own observed
+          (scan nil target '() '() '() (lambda () true) '("id" "value")
+            (lambda (rows id value) (merge rows (list (list id value)))) '() merge))))
+        (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+  expect: {result: [true, active, [[1, 7, 3]], [[1, 7]], [[1, 7]]]}
+cleanup:
+- sql: DROP TABLE IF EXISTS append_input_event_rows

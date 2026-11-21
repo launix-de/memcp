@@ -1,0 +1,63 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Computed UNION grouping keys preserve numeric zero, one and SQL NULL
+setup:
+- sql: CREATE TABLE union_key_values(id INT PRIMARY KEY)
+- sql: INSERT union_key_values VALUES(245000),(245001),(245002)
+cleanup:
+- sql: DROP TABLE IF EXISTS union_key_values
+test_cases:
+- name: Numeric group key terminals retain their structural slots beside Boolean guards
+  scm: |
+    (begin
+      (define keys (list 0 1 2))
+      (define index (make_group_key_index keys keys))
+      (and (expression_equal? (lookup_group_key_index index 0) 0)
+        (expression_equal? (lookup_group_key_index index 1) 1)
+        (expression_equal? (lookup_group_key_index index 2) 2)
+        (nil? (lookup_group_key_index index true))
+        (nil? (lookup_group_key_index index false))
+        (nil? (lookup_group_key_index index nil))))
+  expect: {result: true}
+- name: Grouped computed keys retain zero and one before a set operation
+  sql: |
+    SELECT CAST(id-245000 AS INT) AS bucket,SUM(CAST(0.5 AS FLOAT)) AS quantity
+    FROM union_key_values WHERE id IN(245000,245001) GROUP BY CAST(id-245000 AS INT) ORDER BY bucket
+  expect: {rows: 2,data: [{bucket: 0,quantity: 0.5},{bucket: 1,quantity: 0.5}]}
+- name: Complete grouped tuples survive computed UNION DISTINCT keys
+  sql: |
+    SELECT CAST(id-245000 AS INT) AS bucket,SUM(CAST(0.5 AS FLOAT)) AS quantity
+      FROM union_key_values WHERE id IN(245000,245001) GROUP BY CAST(id-245000 AS INT)
+    UNION SELECT CAST(id-245000 AS INT),CASE WHEN id=245000 THEN 2 ELSE NULL END
+      FROM union_key_values WHERE id IN(245000,245001) ORDER BY bucket,quantity
+  expect: {rows: 4,data: [{bucket: 0,quantity: 0.5},{bucket: 0,quantity: 2},
+      {bucket: 1,quantity: null},{bucket: 1,quantity: 0.5}]}
+- name: Computed zero is distinct from the nullable CASE result
+  sql: |
+    SELECT CAST(id-245000 AS INT) AS value FROM union_key_values WHERE id IN(245000,245001)
+    UNION SELECT CASE WHEN id=245002 THEN NULL ELSE CAST(id-245000 AS INT) END
+      FROM union_key_values WHERE id IN(245000,245001,245002) ORDER BY value
+  expect: {rows: 3,data: [{value: null},{value: 0},{value: 1}]}
+- name: A final unique row window counts NULL then numeric zero
+  sql: |
+    SELECT CAST(id-245000 AS INT) AS value FROM union_key_values WHERE id IN(245000,245001)
+    UNION SELECT CASE WHEN id=245002 THEN NULL ELSE CAST(id-245000 AS INT) END
+      FROM union_key_values WHERE id IN(245000,245001,245002)
+    ORDER BY value OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
+  expect: {rows: 1,data: [{value: 0}]}
+- name: UNION ALL retains identical computed zero and one branch values
+  sql: |
+    SELECT CAST(id-245000 AS INT) AS value FROM union_key_values WHERE id IN(245000,245001)
+    UNION ALL SELECT CAST(id-245000 AS INT) FROM union_key_values WHERE id IN(245000,245001) ORDER BY value
+  expect: {rows: 4,data: [{value: 0},{value: 0},{value: 1},{value: 1}]}
+- name: Literal zero and one remain separate nonnull DISTINCT keys
+  sql: SELECT 0 AS value UNION SELECT 1 UNION SELECT NULL ORDER BY value
+  expect: {rows: 3,data: [{value: null},{value: 0},{value: 1}]}
+- name: Outer grouping keeps a computed unique set's zero and one keys
+  sql: |
+    SELECT value,COUNT(*) AS total FROM (
+      SELECT CAST(id-245000 AS INT) AS value FROM union_key_values
+      UNION SELECT CAST(id-245000 AS INT) FROM union_key_values) u GROUP BY value ORDER BY value
+  expect: {rows: 3,data: [{value: 0,total: 1},{value: 1,total: 1},{value: 2,total: 1}]}

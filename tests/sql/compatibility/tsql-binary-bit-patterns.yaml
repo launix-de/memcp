@@ -1,0 +1,172 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server 2022 values, SQL result types and operand admission:
+# https://dbfiddle.uk/lAtOX0Ht, https://dbfiddle.uk/DuTJPj2R,
+# https://dbfiddle.uk/kZI_FQER and https://dbfiddle.uk/DcYmafqA.
+metadata:
+  version: '1.0'
+  description: Declared binary and integer bit patterns preserve byte alignment and SQL widths
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup:
+- sql: >-
+    CREATE TABLE binary_bit_inputs(id INT PRIMARY KEY,t TINYINT,s SMALLINT,i INT,b BIGINT,
+      flag BIT,raw VARBINARY(16),fixed BINARY(8),rv ROWVERSION)
+- sql: >-
+    INSERT binary_bit_inputs(id,t,s,i,b,flag,raw,fixed) VALUES
+      (1,255,-2,-2,-2,1,0x0001000200030080,0x12),
+      (2,NULL,NULL,NULL,NULL,NULL,NULL,NULL)
+- sql: CREATE TABLE binary_bit_image(value IMAGE)
+cleanup:
+- sql: DROP VIEW IF EXISTS binary_bit_view
+- sql: DROP TABLE IF EXISTS binary_bit_image
+- sql: DROP TABLE IF EXISTS binary_bit_inputs
+test_cases:
+- name: Original version build mask accepts its binary literal
+  sql: SELECT @@MICROSOFTVERSION & 0xffff AS build,0xffff & @@MICROSOFTVERSION AS reversed
+  expect: {rows: 1, data: [{build: 0, reversed: 0}]}
+- name: Integer masks keep the low word and both operand orders
+  sql: SELECT CAST(16909060 AS INT)&0xffff AS masked,0xffff&CAST(16909060 AS INT) AS reversed
+  expect: {rows: 1, data: [{masked: 772, reversed: 772}]}
+- name: Empty and short binary values are zero extended
+  sql: SELECT CAST(-1 AS INT)&0x AS empty_value,CAST(-1 AS INT)&0xff AS short_value,0xff&CAST(-1 AS SMALLINT) AS small_value
+  expect: {rows: 1, data: [{empty_value: 0, short_value: 255, small_value: 255}]}
+- name: Overwide values keep the rightmost bytes at each declared width
+  sql: >-
+    SELECT CAST(255 AS TINYINT)&0x0100 AS tiny_value,
+      CAST(-1 AS SMALLINT)&0x010203 AS small_value,
+      CAST(-1 AS INT)&0x0102030405 AS int_value,
+      0x010203040506070809&CAST(-1 AS BIGINT) AS big_value
+  expect: {rows: 1, data: [{tiny_value: 0, small_value: 515, int_value: 33752069, big_value: 144964032628459529}]}
+- name: Fixed binary padding remains part of the input bit pattern
+  sql: >-
+    SELECT CAST(-1 AS INT)&CAST(0x12 AS BINARY(8)) AS padded,
+      CAST(-1 AS INT)&CAST(0x12 AS VARBINARY(8)) AS variable,
+      CAST(0xff AS VARBINARY(MAX))&255 AS unbounded
+  expect: {rows: 1, data: [{padded: 0, variable: 18, unbounded: 255}]}
+- name: Tiny integer AND OR and XOR retain unsigned width in either order
+  sql: >-
+    SELECT CAST(255 AS TINYINT)&0x80 AS masked,0x80&CAST(255 AS TINYINT) AS reverse_and,
+      CAST(255 AS TINYINT)|0x80 AS merged,0x80|CAST(255 AS TINYINT) AS reverse_or,
+      CAST(255 AS TINYINT)^0x80 AS flipped,0x80^CAST(255 AS TINYINT) AS reverse_xor
+  expect: {rows: 1, data: [{masked: 128, reverse_and: 128, merged: 255, reverse_or: 255, flipped: 127, reverse_xor: 127}]}
+- name: Small integer operations retain their signed result
+  sql: >-
+    SELECT CAST(-2 AS SMALLINT)&0x8001 AS masked,0x8001&CAST(-2 AS SMALLINT) AS reverse_and,
+      CAST(-2 AS SMALLINT)|0x8001 AS merged,0x8001|CAST(-2 AS SMALLINT) AS reverse_or,
+      CAST(-2 AS SMALLINT)^0x8001 AS flipped,0x8001^CAST(-2 AS SMALLINT) AS reverse_xor
+  expect: {rows: 1, data: [{masked: -32768, reverse_and: -32768, merged: -1, reverse_or: -1, flipped: 32767, reverse_xor: 32767}]}
+- name: Integer operations retain their signed result
+  sql: >-
+    SELECT CAST(-2 AS INT)&0x80000001 AS masked,0x80000001&CAST(-2 AS INT) AS reverse_and,
+      CAST(-2 AS INT)|0x80000001 AS merged,0x80000001|CAST(-2 AS INT) AS reverse_or,
+      CAST(-2 AS INT)^0x80000001 AS flipped,0x80000001^CAST(-2 AS INT) AS reverse_xor
+  expect: {rows: 1, data: [{masked: -2147483648, reverse_and: -2147483648, merged: -1, reverse_or: -1, flipped: 2147483647, reverse_xor: 2147483647}]}
+- name: Big integer operations preserve exact signed sixty four bit values
+  sql: >-
+    SELECT CAST(-2 AS BIGINT)&0x8000000000000001 AS masked,0x8000000000000001&CAST(-2 AS BIGINT) AS reverse_and,
+      CAST(-2 AS BIGINT)|0x8000000000000001 AS merged,0x8000000000000001|CAST(-2 AS BIGINT) AS reverse_or,
+      CAST(-2 AS BIGINT)^0x8000000000000001 AS flipped,0x8000000000000001^CAST(-2 AS BIGINT) AS reverse_xor
+  expect: {rows: 1, data: [{masked: -9223372036854775808, reverse_and: -9223372036854775808, merged: -1, reverse_or: -1, flipped: 9223372036854775807, reverse_xor: 9223372036854775807}]}
+- name: BIT uses the last byte nonzero conversion rather than its low bit
+  sql: >-
+    SELECT CAST(1 AS BIT)&0x02 AS masked,0x02&CAST(1 AS BIT) AS reverse_and,
+      CAST(0 AS BIT)|0x80 AS merged,0x80|CAST(0 AS BIT) AS reverse_or,
+      CAST(1 AS BIT)^0x03 AS flipped,0x03^CAST(1 AS BIT) AS reverse_xor
+  expect: {rows: 1, data: [{masked: true, reverse_and: true, merged: true, reverse_or: true, flipped: false, reverse_xor: false}]}
+- name: BIT conversion follows byte truncation for overwide and empty values
+  sql: >-
+    SELECT CAST(1 AS BIT)&0x0100 AS truncated,CAST(1 AS BIT)^0x0100 AS inverted,
+      CAST(1 AS BIT)&0x AS empty_value,CAST(1 AS BIT)|0x AS merged
+  expect: {rows: 1, data: [{truncated: false, inverted: true, empty_value: false, merged: true}]}
+- name: Typed NULL operands preserve nullable scalar results
+  sql: >-
+    SELECT CAST(NULL AS VARBINARY(2))&CAST(1 AS SMALLINT) AS small_value,
+      CAST(1 AS BIT)|CAST(NULL AS VARBINARY(8)) AS bit_value,
+      CAST(NULL AS BIGINT)^0xff AS big_value
+  expect: {rows: 1, data: [{small_value: null, bit_value: null, big_value: null}]}
+- name: Declared source columns retain duplicates and NULLs without carrier type inference
+  sql: >-
+    SELECT id,t&raw AS tiny_value,s&raw AS small_value,i&raw AS int_value,b&raw AS big_value,
+      flag&raw AS masked,raw|flag AS merged,flag^raw AS flipped FROM binary_bit_inputs ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - {id: 1, tiny_value: 128, small_value: 128, int_value: 196736, big_value: 281483566841984, masked: true, merged: true, flipped: false}
+    - {id: 2, tiny_value: null, small_value: null, int_value: null, big_value: null, masked: null, merged: null, flipped: null}
+- name: Rowversion participates through its declared binary contract
+  sql: SELECT rv&0 AS masked FROM binary_bit_inputs ORDER BY id
+  expect: {rows: 2, data: [{masked: 0}, {masked: 0}]}
+- name: Integer compound assignments use the same binary alignment
+  sql: >-
+    DECLARE @i INT=-1,@s SMALLINT=-1,@t TINYINT=255,@b BIGINT=-1;
+    SET @i &=0x0102030405; SET @s |=0x8000; SET @t ^=0xff; SET @b &=0x010203040506070809;
+    SELECT @i AS i,@s AS s,@t AS t,@b AS b;
+  expect: {rows: 1, data: [{i: 33752069, s: -1, t: 0, b: 144964032628459529}]}
+- name: BIT compound assignments use the ordinary destination conversion
+  sql: >-
+    DECLARE @first BIT=1,@missing BIT=NULL,@last BIT=0;
+    SET @first &=0; SET @missing ^=1; SET @last |=0x02;
+    SELECT @first AS first_value,@missing AS missing,@last AS last_value;
+  expect: {rows: 1, data: [{first_value: false, missing: null, last_value: true}]}
+- name: Binary variable compound assignment retains its destination declaration
+  sql: DECLARE @raw VARBINARY(8)=0xffff; SET @raw &=255; SELECT CONVERT(VARCHAR(100),@raw,2) AS bytes
+  expect: {rows: 1, data: [{bytes: 000000FF}]}
+- name: Native column assignment and rollback retain the original values
+  sql: >-
+    BEGIN TRAN; UPDATE binary_bit_inputs SET i=i&raw,flag=flag^raw WHERE id=1;
+    SELECT i,flag FROM binary_bit_inputs WHERE id=1; ROLLBACK;
+    SELECT i,flag FROM binary_bit_inputs WHERE id=1;
+  expect: {rows: 2, data: [{i: 196736, flag: false}, {i: -2, flag: true}]}
+- name: Stored view preserves the typed bit expressions
+  sql: CREATE VIEW binary_bit_view AS SELECT id,i&raw AS masked,flag^raw AS flipped FROM binary_bit_inputs
+  expect: {rows: 0}
+- name: Stored view reads exact integer and BIT values
+  sql: SELECT id,masked,flipped FROM binary_bit_view ORDER BY id
+  expect: {rows: 2, data: [{id: 1, masked: 196736, flipped: false}, {id: 2, masked: null, flipped: null}]}
+- name: Stored source recipes survive restart
+  action: restart
+- name: Restored view retains its declared operands and result values
+  sql: SELECT id,masked,flipped FROM binary_bit_view ORDER BY id
+  expect: {rows: 2, data: [{id: 1, masked: 196736, flipped: false}, {id: 2, masked: null, flipped: null}]}
+- name: TDS result widths come from integer declarations even for typed NULL
+  tds:
+    statements:
+    - sql: >-
+        SELECT CAST(255 AS TINYINT)&0x80 AS t,CAST(-2 AS SMALLINT)&0x8001 AS s,
+          CAST(-2 AS INT)&0x80000001 AS i,CAST(-2 AS BIGINT)&0x8000000000000001 AS b,
+          CAST(1 AS BIT)&0x02 AS flag
+      expect:
+        rows: 1
+        data: [{t: 128, s: -32768, i: -2147483648, b: -9223372036854775808, flag: true}]
+        column_types: [{name: t, type: TINYINT}, {name: s, type: SMALLINT}, {name: i, type: INT}, {name: b, type: BIGINT}, {name: flag, type: BIT}]
+    - sql: >-
+        SELECT CAST(NULL AS TINYINT)&0xff AS t,CAST(NULL AS SMALLINT)&0xff AS s,
+          CAST(NULL AS INT)&0xff AS i,CAST(NULL AS BIGINT)&0xff AS b,
+          CAST(NULL AS BIT)&0xff AS flag
+      expect:
+        rows: 1
+        data: [{t: null, s: null, i: null, b: null, flag: null}]
+        column_types: [{name: t, type: TINYINT}, {name: s, type: SMALLINT}, {name: i, type: INT}, {name: b, type: BIGINT}, {name: flag, type: BIT}]
+- name: Two binary operands remain an invalid AND
+  sql: SELECT 0x01&0x02 AS value
+  expect: {error: true}
+- name: Two binary operands remain an invalid OR
+  sql: SELECT CAST(0x01 AS BINARY(2))|0x02 AS value
+  expect: {error: true}
+- name: Typed binary NULL does not admit a second binary operand
+  sql: SELECT CAST(NULL AS VARBINARY(2))^0xff AS value
+  expect: {error: true}
+- name: Untyped NULL does not select an integer binary overload
+  sql: SELECT 0xff&NULL AS value
+  expect: {error: true}
+- name: Image is not an admitted binary operand
+  sql: SELECT value&1 AS masked FROM binary_bit_image
+  expect: {error: true}
+- name: Decimal remains an invalid bit operand
+  sql: SELECT CAST(1 AS DECIMAL(3,0))&0xff AS value
+  expect: {error: true}
+- name: Floating point remains an invalid bit operand
+  sql: SELECT CAST(1 AS FLOAT)|0xff AS value
+  expect: {error: true}

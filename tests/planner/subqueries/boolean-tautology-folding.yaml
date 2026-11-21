@@ -303,6 +303,108 @@ test_cases:
     sql: SELECT d.agg_unbound FROM (SELECT SUM(val) AS total FROM taut_parent) d
     expect: {error: true}
 
+  - name: "Boolean literal recognition preserves scalar spelling"
+    scm: |
+      (and (equal? (map '(true false "1" "0" 1 0 nil)
+          boolean_fold_true_literal?) '(true false true false true false false))
+        (equal? (map '(true false "1" "0" 1 0 nil)
+          boolean_fold_false_literal?) '(false true false true false true true)))
+    expect: {result: true}
+
+  - name: "Conditional expression syntax preserves NULL and dynamic branches"
+    sql: |
+      SELECT ID, CASE WHEN NULL THEN 10 WHEN ID = 1 THEN NULL
+        WHEN ID = 2 THEN 20 ELSE 30 END AS answer
+      FROM taut_parent ORDER BY ID
+    expect:
+      data:
+        - {ID: 1, answer: null}
+        - {ID: 2, answer: 20}
+        - {ID: 3, answer: 30}
+
+  - name: "Empty expression syntax is not a scalar boolean literal"
+    scm: |
+      (and (not (boolean_fold_true_literal? '()))
+        (not (boolean_fold_false_literal? '())))
+    expect: {result: true}
+
+  - name: "Quoted values and logical operators remain expression syntax"
+    scm: |
+      (begin
+        (define quoted (list (quote quote) '(0 false "0")))
+        (define reference (list (quote get_column) "outer" false "value" false))
+        (define src (list "p" "memcp-tests" "taut_parent" false nil
+          (sql_relation_declarations "memcp-tests" "taut_parent" nil)))
+        (define nested (make_query_block "memcp-tests" (list src) (list "value" reference)
+          true nil nil nil nil nil '() '() '()))
+        (reduce (list quoted reference nested
+          (list (quote inner_select) nested) (list (quote sql_not) reference))
+          (lambda (ok expr) (and ok (not (boolean_fold_true_literal? expr))
+            (not (boolean_fold_false_literal? expr)))) true))
+    expect: {result: true}
+
+  - name: "Literal substitution preserves quoted column data"
+    scm: |
+      (begin
+        (define value (list (quote get_column) "literal_input" false "value" false))
+        (define quoted (list (quote quote) value))
+        (define bindings (list (list "literal_input" '("value" 7))))
+        (and (expression_equal? (fold_single_literal_expr bindings quoted) quoted)
+          (equal? (fold_single_literal_expr bindings value) 7)))
+    expect: {result: true}
+
+  - name: "Literal folding preserves quoted native declaration payloads"
+    scm: |
+      (begin
+        (define scope (new_relation_scope (newsession)))
+        (createtable "memcp-tests" "taut_native_literal_payload"
+          (list (list "column" "value" "ANY" '()
+            (list "default" '("and" true false))))
+          (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+        (define declarations (sql_relation_declarations "memcp-tests" "taut_native_literal_payload" nil))
+        (define quoted (list (quote quote) declarations))
+        (define result (and
+          (expression_equal? ((car (declarations "columns")) "Default") '("and" true false))
+          (expression_equal? (fold_single_literal_expr '() quoted) quoted)
+          (not (logical_sql_null_literal? (list declarations)))
+          (not (logical_sql_null_literal? (list
+            (list "source" "memcp-tests" "taut_native_literal_payload" false nil declarations))))))
+        (close_relation_scope scope) result)
+    expect: {result: true}
+
+  - name: "NULL literal recognition preserves native procedure and lambda AST thunks"
+    scm: |
+      (begin
+        (define actual (sql_null_literal))
+        (define procedure (list (lambda () nil)))
+        (define ast (list (list (quote lambda) '() nil)))
+        (define symbolic (list (list (quote lambda) '() (quote nil))))
+        (and (logical_sql_null_literal? actual)
+          (logical_sql_null_literal? procedure)
+          (logical_sql_null_literal? ast)
+          (logical_sql_null_literal? symbolic)
+          (nil? (fold_single_literal_expr '() actual))
+          (nil? (fold_single_literal_expr '() ast))
+          (not (logical_sql_null_literal? (list (lambda () 7))))
+          (not (logical_sql_null_literal? (list (list (quote lambda) '(value) nil))))
+          (not (logical_sql_null_literal? (list (list "lambda" '() nil))))
+          (not (logical_sql_null_literal? (list (list (quote quote) (car ast)))))))
+    expect: {result: true}
+
+  - name: "Literal connective folding retains scalar rules and expression operands"
+    scm: |
+      (begin
+        (define value (list (quote get_column) "input" false "value" false))
+        (define composite (list value "BOOL" nil))
+        (and (expression_equal? (fold_literal_and (list true value)) value)
+          (expression_equal? (fold_literal_or (list false value)) value)
+          (expression_equal? (fold_single_literal_expr '() composite) composite)
+          (equal? (fold_literal_and '("1" true)) true)
+          (equal? (fold_literal_or '("0" false)) false)
+          (equal? (fold_literal_and '(false true)) false)
+          (equal? (fold_literal_or '(true false)) true)))
+    expect: {result: true}
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS taut_child"
   - sql: "DROP TABLE IF EXISTS taut_parent"

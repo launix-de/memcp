@@ -1,0 +1,54 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Borrowed statement error policy follows the actual unhandled failure
+setup:
+  - sql: CREATE TABLE profile_prefix(id INT)
+  - sql: CREATE TABLE profile_sink(id INT)
+  - sql: CREATE TABLE profile_input(id INT)
+  - sql: |
+      CREATE PROCEDURE profile_source AS BEGIN
+        BEGIN TRY EXEC(N'SELECT missing_profile_column FROM profile_input;'); END TRY
+        BEGIN CATCH PRINT N'handled compile failure'; END CATCH;
+        THROW 51021,N'subsequent runtime failure',1;
+      END;
+cleanup:
+  - sql: DROP PROCEDURE IF EXISTS profile_source
+  - sql: DROP TABLE IF EXISTS profile_input
+  - sql: DROP TABLE IF EXISTS profile_sink
+  - sql: DROP TABLE IF EXISTS profile_prefix
+test_cases:
+  - name: A handled lower binding failure cannot mask a later runtime failure in INSERT EXEC
+    sql: |
+      SET XACT_ABORT ON;
+      BEGIN TRANSACTION;
+      INSERT profile_prefix VALUES(99);
+      BEGIN TRY INSERT profile_sink EXEC profile_source; END TRY
+      BEGIN CATCH
+        SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth,ERROR_NUMBER() AS error_number;
+        SELECT id AS prefix_id FROM profile_prefix;
+        ROLLBACK TRANSACTION;
+      END CATCH;
+      SELECT COUNT(*) AS remaining FROM profile_prefix;
+      SELECT COUNT(*) AS remaining FROM profile_sink;
+    expect:
+      rows: 4
+      data: [{state: -1, depth: 1, error_number: 51021}, {prefix_id: 99}, {remaining: 0}, {remaining: 0}]
+  - name: Immutable annotations preserve the original datum and the nearest named provenance
+    scm: |
+      (begin
+        (define original '("language-error" 17))
+        (define inner (failure_annotate original "phase" "compile"))
+        (define outer (failure_annotate inner "operation" "execute"))
+        (define revised (failure_annotate outer "phase" "runtime"))
+        (and (equal? (failure_value revised) original)
+          (equal? (failure_annotation inner "phase") "compile")
+          (equal? (failure_annotation outer "phase") "compile")
+          (equal? (failure_annotation revised "phase") "runtime")
+          (equal? (failure_annotation revised "operation") "execute")
+          (nil? (failure_annotation revised "absent"))
+          (not (transaction_rollback_only_failure? revised))
+          (not (transaction_serialization_failure? revised))))
+    expect: {result: true}

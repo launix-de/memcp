@@ -1,0 +1,211 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: Declaration completion has no count while zero-row DML has a valid count
+cleanup:
+- sql: DROP TRIGGER IF EXISTS dbo.completion_guard
+- sql: DROP PROCEDURE IF EXISTS dbo.completion_source
+- sql: DROP VIEW IF EXISTS dbo.completion_view
+- sql: DROP TABLE IF EXISTS completion_input
+- sql: DROP TRIGGER IF EXISTS dbo.completion_wire_guard
+- sql: DROP PROCEDURE IF EXISTS dbo.completion_wire_proc
+- sql: DROP VIEW IF EXISTS dbo.completion_wire_view
+- sql: DROP TABLE IF EXISTS completion_wire_retired
+- sql: DROP TABLE IF EXISTS completion_wire
+test_cases:
+- name: HTTP CREATE TABLE has no affected count
+  sql: CREATE TABLE completion_input(id INT PRIMARY KEY,value INT)
+  expect: {rows: 0,result_not_contains: '"affected_rows"'}
+- name: Created table is a genuine catalog object
+  sql: SELECT CASE WHEN OBJECT_ID(N'dbo.completion_input',N'U') IS NOT NULL THEN 1 ELSE 0 END AS installed
+  expect: {rows: 1,data: [{installed: 1}]}
+- name: A failed CREATE does not become a successful declaration completion
+  sql: CREATE TABLE completion_input(replacement INT)
+  expect: {error: true}
+- name: HTTP INSERT retains its affected count
+  sql: INSERT INTO completion_input VALUES(1,5)
+  expect: {affected_rows: 1,result_contains: '"affected_rows"'}
+- name: HTTP zero row UPDATE retains a present zero count
+  sql: UPDATE completion_input SET value=99 WHERE id=99
+  expect: {affected_rows: 0,result_contains: '"affected_rows"'}
+- name: HTTP CREATE VIEW has no count
+  sql: CREATE VIEW dbo.completion_view AS SELECT id,value FROM completion_input
+  expect: {rows: 0,result_not_contains: '"affected_rows"'}
+- name: Created view reads real rows
+  sql: SELECT id,value FROM dbo.completion_view
+  expect: {rows: 1,data: [{id: 1,value: 5}]}
+- name: HTTP ALTER VIEW has no count
+  sql: ALTER VIEW dbo.completion_view AS SELECT id,value+1 AS value FROM completion_input
+  expect: {rows: 0,result_not_contains: '"affected_rows"'}
+- name: Altered view publishes the new formula
+  sql: SELECT id,value FROM dbo.completion_view
+  expect: {rows: 1,data: [{id: 1,value: 6}]}
+- name: HTTP CREATE PROCEDURE has no count despite a native numeric completion
+  sql: CREATE PROCEDURE dbo.completion_source AS SELECT CAST(7 AS INT) AS value
+  expect: {rows: 0,result_not_contains: '"affected_rows"'}
+- name: Procedure source really executes
+  sql: EXEC dbo.completion_source
+  expect: {rows: 1,data: [{value: 7}]}
+- name: HTTP CREATE TRIGGER has no affected count
+  sql: CREATE TRIGGER dbo.completion_guard ON completion_input AFTER INSERT AS BEGIN UPDATE completion_input SET value=value+100 WHERE id=1; END
+  expect: {rows: 0,result_not_contains: '"affected_rows"'}
+- name: Installed trigger executes on a real mutation
+  sql: INSERT INTO completion_input VALUES(2,20)
+- name: Trigger effect is visible in native table data
+  sql: SELECT value FROM completion_input WHERE id=1
+  expect: {rows: 1,data: [{value: 105}]}
+- name: HTTP DROP TRIGGER has no count
+  sql: DROP TRIGGER dbo.completion_guard
+  expect: {rows: 0,result_not_contains: '"affected_rows"'}
+- name: Mutation after trigger deletion has no trigger effect
+  sql: INSERT INTO completion_input VALUES(3,30)
+- name: Trigger deletion preserves the prior stored value
+  sql: SELECT value FROM completion_input WHERE id=1
+  expect: {rows: 1,data: [{value: 105}]}
+- name: HTTP DROP PROCEDURE has no count
+  sql: DROP PROCEDURE dbo.completion_source
+  expect: {rows: 0,result_not_contains: '"affected_rows"'}
+- name: Dropped procedure cannot execute
+  sql: EXEC dbo.completion_source
+  expect: {error: true}
+- name: HTTP NOCOUNT suppresses a real DML count while preserving its write
+  session_id: completion_http
+  sql: SET NOCOUNT ON; UPDATE completion_input SET value=6 WHERE id=1
+  expect: {rows: 0,result_not_contains: '"affected_rows"'}
+- name: NOCOUNT leaves data and query results intact
+  session_id: completion_http
+  sql: SELECT value FROM completion_input WHERE id=1
+  expect: {rows: 1,data: [{value: 6}]}
+- name: HTTP NOCOUNT OFF restores a present genuine zero count
+  session_id: completion_http
+  sql: SET NOCOUNT OFF; UPDATE completion_input SET value=7 WHERE id=99
+  expect: {affected_rows: 0,result_contains: '"affected_rows"'}
+- name: Wire DONE_COUNT distinguishes declaration absence from a valid DML zero
+  tds:
+    rpc_packets:
+    # CREATE TABLE completion_wire(id INT PRIMARY KEY,value INT)
+    - packet_type: 1
+      payload_hex: 1600000012000000020000000000000000000100000043005200450041005400450020005400410042004c004500200063006f006d0070006c006500740069006f006e005f007700690072006500280069006400200049004e00540020005000520049004d0041005200590020004b00450059002c00760061006c0075006500200049004e0054002900
+      done_count: false
+      done_rows: 0
+    # INSERT INTO completion_wire VALUES(1,5)
+    - packet_type: 1
+      payload_hex: 1600000012000000020000000000000000000100000049004e005300450052005400200049004e0054004f00200063006f006d0070006c006500740069006f006e005f0077006900720065002000560041004c00550045005300280031002c0035002900
+      done_count: true
+      done_rows: 1
+    # UPDATE completion_wire SET value=6 WHERE id=2
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000550050004400410054004500200063006f006d0070006c006500740069006f006e005f00770069007200650020005300450054002000760061006c00750065003d0036002000570048004500520045002000690064003d003200
+      done_count: true
+      done_rows: 0
+    # SET NOCOUNT ON
+    - packet_type: 1
+      payload_hex: 1600000012000000020000000000000000000100000053004500540020004e004f0043004f0055004e00540020004f004e00
+      done_count: false
+    # UPDATE completion_wire SET value=7 WHERE id=1
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000550050004400410054004500200063006f006d0070006c006500740069006f006e005f00770069007200650020005300450054002000760061006c00750065003d0037002000570048004500520045002000690064003d003100
+      done_count: false
+      done_rows: 1
+    # SET NOCOUNT OFF
+    - packet_type: 1
+      payload_hex: 1600000012000000020000000000000000000100000053004500540020004e004f0043004f0055004e00540020004f0046004600
+    # UPDATE completion_wire SET value=8 WHERE id=1
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000550050004400410054004500200063006f006d0070006c006500740069006f006e005f00770069007200650020005300450054002000760061006c00750065003d0038002000570048004500520045002000690064003d003100
+      done_count: true
+      done_rows: 1
+    # CREATE TABLE #completion_local(id INT)
+    - packet_type: 1
+      payload_hex: 1600000012000000020000000000000000000100000043005200450041005400450020005400410042004c0045002000230063006f006d0070006c006500740069006f006e005f006c006f00630061006c00280069006400200049004e0054002900
+      done_count: false
+      done_rows: 0
+    # INSERT INTO #completion_local VALUES(1)
+    - packet_type: 1
+      payload_hex: 1600000012000000020000000000000000000100000049004e005300450052005400200049004e0054004f002000230063006f006d0070006c006500740069006f006e005f006c006f00630061006c002000560041004c00550045005300280031002900
+      done_count: true
+      done_rows: 1
+    # DROP TABLE #completion_local
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000440052004f00500020005400410042004c0045002000230063006f006d0070006c006500740069006f006e005f006c006f00630061006c00
+      done_count: false
+      done_rows: 0
+    # CREATE VIEW dbo.completion_wire_view AS SELECT id,value FROM completion_wire
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000430052004500410054004500200056004900450057002000640062006f002e0063006f006d0070006c006500740069006f006e005f0077006900720065005f0076006900650077002000410053002000530045004c004500430054002000690064002c00760061006c00750065002000460052004f004d00200063006f006d0070006c006500740069006f006e005f007700690072006500
+      done_count: false
+      done_rows: 0
+    # ALTER VIEW dbo.completion_wire_view AS SELECT id,value+1 AS value FROM completion_wire
+    - packet_type: 1
+      payload_hex: 1600000012000000020000000000000000000100000041004c00540045005200200056004900450057002000640062006f002e0063006f006d0070006c006500740069006f006e005f0077006900720065005f0076006900650077002000410053002000530045004c004500430054002000690064002c00760061006c00750065002b0031002000410053002000760061006c00750065002000460052004f004d00200063006f006d0070006c006500740069006f006e005f007700690072006500
+      done_count: false
+      done_rows: 0
+    # DROP VIEW dbo.completion_wire_view
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000440052004f005000200056004900450057002000640062006f002e0063006f006d0070006c006500740069006f006e005f0077006900720065005f007600690065007700
+      done_count: false
+      done_rows: 0
+    # CREATE PROCEDURE dbo.completion_wire_proc AS SELECT CAST(3 AS INT) AS value
+    - packet_type: 1
+      payload_hex: 160000001200000002000000000000000000010000004300520045004100540045002000500052004f004300450044005500520045002000640062006f002e0063006f006d0070006c006500740069006f006e005f0077006900720065005f00700072006f0063002000410053002000530045004c004500430054002000430041005300540028003300200041005300200049004e00540029002000410053002000760061006c0075006500
+      done_count: false
+      done_rows: 0
+    # ALTER PROCEDURE dbo.completion_wire_proc AS SELECT CAST(4 AS INT) AS value
+    - packet_type: 1
+      payload_hex: 1600000012000000020000000000000000000100000041004c005400450052002000500052004f004300450044005500520045002000640062006f002e0063006f006d0070006c006500740069006f006e005f0077006900720065005f00700072006f0063002000410053002000530045004c004500430054002000430041005300540028003400200041005300200049004e00540029002000410053002000760061006c0075006500
+      done_count: false
+      done_rows: 0
+    # DROP PROCEDURE dbo.completion_wire_proc
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000440052004f0050002000500052004f004300450044005500520045002000640062006f002e0063006f006d0070006c006500740069006f006e005f0077006900720065005f00700072006f006300
+      done_count: false
+      done_rows: 0
+    # CREATE TRIGGER dbo.completion_wire_guard ON completion_wire AFTER INSERT AS BEGIN PRINT N'installed'; END
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000430052004500410054004500200054005200490047004700450052002000640062006f002e0063006f006d0070006c006500740069006f006e005f0077006900720065005f006700750061007200640020004f004e00200063006f006d0070006c006500740069006f006e005f007700690072006500200041004600540045005200200049004e005300450052005400200041005300200042004500470049004e0020005000520049004e00540020004e00270069006e007300740061006c006c006500640027003b00200045004e004400
+      done_count: false
+      done_rows: 0
+    # DROP TRIGGER dbo.completion_wire_guard
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000440052004f005000200054005200490047004700450052002000640062006f002e0063006f006d0070006c006500740069006f006e005f0077006900720065005f0067007500610072006400
+      done_count: false
+      done_rows: 0
+    # CREATE TABLE completion_wire_retired(id INT)
+    - packet_type: 1
+      payload_hex: 1600000012000000020000000000000000000100000043005200450041005400450020005400410042004c004500200063006f006d0070006c006500740069006f006e005f0077006900720065005f007200650074006900720065006400280069006400200049004e0054002900
+      done_count: false
+      done_rows: 0
+    # DROP TABLE completion_wire_retired
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000440052004f00500020005400410042004c004500200063006f006d0070006c006500740069006f006e005f0077006900720065005f007200650074006900720065006400
+      done_count: false
+      done_rows: 0
+    # DROP TABLE IF EXISTS completion_wire_retired
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000440052004f00500020005400410042004c0045002000490046002000450058004900530054005300200063006f006d0070006c006500740069006f006e005f0077006900720065005f007200650074006900720065006400
+      done_count: false
+      done_rows: 0
+- name: Wire writes are visible through the common SQL frontend
+  sql: SELECT id,value FROM completion_wire
+  expect: {rows: 1,data: [{id: 1,value: 8}]}
+- name: HTTP DROP VIEW has no count
+  sql: DROP VIEW dbo.completion_view
+  expect: {rows: 0,result_not_contains: '"affected_rows"'}
+- name: Dropped view is absent
+  sql: SELECT CASE WHEN OBJECT_ID(N'dbo.completion_view',N'V') IS NULL THEN 1 ELSE 0 END AS removed
+  expect: {rows: 1,data: [{removed: 1}]}
+- name: HTTP DROP TABLE has no affected count
+  sql: DROP TABLE completion_input
+  expect: {rows: 0,result_not_contains: '"affected_rows"'}
+- name: Removed table is absent from its native catalog
+  sql: SELECT CASE WHEN OBJECT_ID(N'dbo.completion_input',N'U') IS NULL THEN 1 ELSE 0 END AS removed
+  expect: {rows: 1,data: [{removed: 1}]}
+- name: Conditional absent DROP has no count either
+  sql: DROP TABLE IF EXISTS completion_input
+  expect: {rows: 0,result_not_contains: '"affected_rows"'}
+- name: A failed DROP remains an error
+  sql: DROP TABLE completion_input
+  expect: {error: true}

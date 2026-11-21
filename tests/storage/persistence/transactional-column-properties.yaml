@@ -1,0 +1,130 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/alter-table-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Column marker removal preserves original transactions values unrelated properties and recovery
+setup:
+- sql: DROP TABLE IF EXISTS property_marker_rows
+- sql: DROP TABLE IF EXISTS property_marker_prefix
+- sql: CREATE TABLE property_marker_rows(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER ROWGUIDCOL NULL DEFAULT('00000000-0000-0000-0000-000000000009'),plain_guid UNIQUEIDENTIFIER NULL)
+- sql: INSERT property_marker_rows(id,guid) VALUES(1,'00000000-0000-0000-0000-000000000001'),(2,'00000000-0000-0000-0000-000000000001'),(3,NULL)
+- sql: CREATE TABLE property_marker_prefix(id INT PRIMARY KEY,value INT)
+- sql: INSERT property_marker_prefix VALUES(1,0)
+- scm: (altercolumn (table "memcp-tests" false "property_marker_rows" false nil) "guid" "properties" '("tsql.rowguidcol" true "client.marker" 7))
+cleanup:
+- sql: DROP TABLE IF EXISTS property_marker_rows
+- sql: DROP TABLE IF EXISTS property_marker_prefix
+test_cases:
+- name: Catalog marker flags describe each actual declaration
+  sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_marker_rows',N'U') ORDER BY column_id
+  expect:
+    rows: 3
+    data: [{name: id, marked: 0}, {name: guid, marked: 1}, {name: plain_guid, marked: 0}]
+- name: Marker removal shares the original row transaction and savepoint
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; UPDATE property_marker_prefix SET value=9 WHERE id=1; SAVE TRANSACTION retained_prefix
+    - connection: owner
+      sql: IF EXISTS(SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID(N'property_marker_rows',N'U') AND name=N'guid' AND is_rowguidcol=1) ALTER TABLE property_marker_rows ALTER COLUMN guid DROP ROWGUIDCOL
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_marker_rows') AND name=N'guid'
+      expect: {rows: 1, data: [{marked: 0}]}
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_marker_rows') AND name=N'guid'
+      expect: {rows: 1, data: [{marked: 1}]}
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(36),guid) AS guid FROM property_marker_rows ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - {id: 1, guid: '00000000-0000-0000-0000-000000000001'}
+        - {id: 2, guid: '00000000-0000-0000-0000-000000000001'}
+        - {id: 3, guid: null}
+    - connection: owner
+      sql: ROLLBACK TRANSACTION retained_prefix
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_marker_rows') AND name=N'guid'
+      expect: {rows: 1, data: [{marked: 1}]}
+    - connection: owner
+      sql: SELECT value FROM property_marker_prefix
+      expect: {rows: 1, data: [{value: 9}]}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT value FROM property_marker_prefix
+      expect: {rows: 1, data: [{value: 9}]}
+- name: Committed marker removal and earlier data share one decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; UPDATE property_marker_prefix SET value=12 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE property_marker_rows ADD label VARCHAR(8) NULL
+    - connection: owner
+      sql: SELECT COUNT(*) AS visible_columns FROM sys.columns WHERE object_id=OBJECT_ID(N'property_marker_rows') AND name=N'label'
+      expect: {rows: 1, data: [{visible_columns: 1}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS visible_columns FROM sys.columns WHERE object_id=OBJECT_ID(N'property_marker_rows') AND name=N'label'
+      expect: {rows: 1, data: [{visible_columns: 0}]}
+    - connection: owner
+      sql: ALTER TABLE property_marker_rows ALTER COLUMN guid DROP ROWGUIDCOL
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_marker_rows') AND name=N'guid'
+      expect: {rows: 1, data: [{marked: 1}]}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_marker_rows') AND name=N'guid'
+      expect: {rows: 1, data: [{marked: 0}]}
+    - connection: observer
+      sql: SELECT value FROM property_marker_prefix
+      expect: {rows: 1, data: [{value: 12}]}
+- name: An absent marker reports the SQL Server semantic error
+  sql: BEGIN TRY ALTER TABLE property_marker_rows ALTER COLUMN plain_guid DROP ROWGUIDCOL; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH
+  expect: {rows: 1, data: [{code: 4926}]}
+- name: A missing column reports the SQL Server endpoint error
+  sql: BEGIN TRY ALTER TABLE property_marker_rows ALTER COLUMN absent_guid DROP ROWGUIDCOL; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH
+  expect: {rows: 1, data: [{code: 4924}]}
+- name: Removing one property retains unrelated scalar metadata
+  scm: |
+    (begin
+      (define column (show (table "memcp-tests" false "property_marker_rows" false nil) "column" "guid" false))
+      (and (equal? ((column "Properties") "client.marker") 7)
+        (not (has_assoc? (column "Properties") "tsql.rowguidcol"))
+        (equal? (column "RawType") "UNIQUEIDENTIFIER") (column "Null")))
+  expect: {result: true}
+- name: Durable marker decision survives a hard process interruption
+  scm: (crash)
+  restart_timeout: 60
+  expect: {interrupted_ok: true}
+- name: Restart the committed marker and append decision
+  action: restart
+- name: Recovered metadata retains the committed marker removal
+  sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.all_columns WHERE object_id=OBJECT_ID(N'property_marker_rows',N'U') ORDER BY column_id
+  expect:
+    rows: 4
+    data: [{name: id, marked: 0}, {name: guid, marked: 0}, {name: plain_guid, marked: 0}, {name: label, marked: 0}]
+- name: Recovery retains all actual values and duplicate GUIDs
+  sql: SELECT id,guid FROM property_marker_rows ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - {id: 1, guid: '00000000-0000-0000-0000-000000000001'}
+    - {id: 2, guid: '00000000-0000-0000-0000-000000000001'}
+    - {id: 3, guid: null}
+- name: Recovery retains the original data transaction prefix
+  sql: SELECT value FROM property_marker_prefix
+  expect: {rows: 1, data: [{value: 12}]}
+- name: Recovery retains unrelated scalar declaration properties
+  scm: (equal? (((show (table "memcp-tests" false "property_marker_rows" false nil) "column" "guid" false) "Properties") "client.marker") 7)
+  expect: {result: true}
+- name: Removing a marker retains the independently declared default
+  sql: INSERT property_marker_rows(id) VALUES(4)
+  expect: {affected_rows: 1}
+- name: A recovered default still supplies its actual declared value
+  sql: SELECT id,guid,label FROM property_marker_rows WHERE id=4
+  expect: {rows: 1, data: [{id: 4, guid: '00000000-0000-0000-0000-000000000009', label: null}]}

@@ -62,7 +62,7 @@ test_cases:
       tm: null
   noncritical: true
 - name: Force exact clock compression
-  scm: (rebuild (table "memcp-tests" false "tsql_clock_recovery" false) true false)
+  scm: (rebuild (table "memcp-tests" false "tsql_clock_recovery" false nil) true false)
 - name: Publish exact clock column files
   syntax: mysql
   sql: SHUTDOWN
@@ -122,4 +122,93 @@ test_cases:
   noncritical: true
 - sql: DROP TABLE IF EXISTS tsql_clock_recovery
   name: 'Fixture cleanup 001: DROP TABLE IF EXISTS tsql_clock_recovery'
+- name: Create native precise calendar fixture
+  syntax: mysql
+  sql: CREATE TABLE native_precise_clock(id INT PRIMARY KEY,value DATETIME)
+- name: Insert distinct nanoseconds and a nullable calendar
+  syntax: mysql
+  sql: INSERT INTO native_precise_clock VALUES(1,'2026-03-15 12:13:14.1234567'),(2,'2026-03-15 12:13:14.1234568'),(3,NULL)
+- name: Native precise delta values
+  syntax: mysql
+  sql: SELECT id,value FROM native_precise_clock ORDER BY id
+  expect:
+    data:
+    - {id: 1, value: '2026-03-15 12:13:14.1234567'}
+    - {id: 2, value: '2026-03-15 12:13:14.1234568'}
+    - {id: 3, value: null}
+- name: Crash native precise calendar deltas
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Recover native precise calendar deltas
+  action: restart
+- name: Native precise values after WAL replay
+  syntax: mysql
+  sql: SELECT id,value FROM native_precise_clock ORDER BY id
+  expect:
+    data:
+    - {id: 1, value: '2026-03-15 12:13:14.1234567'}
+    - {id: 2, value: '2026-03-15 12:13:14.1234568'}
+    - {id: 3, value: null}
+- name: A calendar update retains recovered subsecond values
+  syntax: mysql
+  sql: UPDATE native_precise_clock SET value=DATE_ADD(value,INTERVAL 0 SECOND)
+- name: Compress native precise calendar columns
+  scm: (rebuild (table "memcp-tests" false "native_precise_clock" false nil) true false)
+- name: Persist native precise calendar columns
+  syntax: mysql
+  sql: SHUTDOWN
+- name: Native precise values after column compression
+  syntax: mysql
+  sql: SELECT id,value FROM native_precise_clock ORDER BY id
+  expect:
+    data:
+    - {id: 1, value: '2026-03-15 12:13:14.1234567'}
+    - {id: 2, value: '2026-03-15 12:13:14.1234568'}
+    - {id: 3, value: null}
+- name: Compressed precise calendar join retains distinct nanoseconds
+  syntax: mysql
+  sql: SELECT COUNT(*) AS count FROM native_precise_clock a JOIN native_precise_clock b ON a.value=b.value
+  expect: {data: [{count: 2}]}
+- name: Drop native precise calendar fixture
+  syntax: mysql
+  sql: DROP TABLE native_precise_clock
+- name: Create opaque JSON collision fixture beside precise calendars
+  syntax: mysql
+  sql: CREATE TABLE precise_json_collision(id INT PRIMARY KEY,payload JSON,stamp DATETIME)
+- name: Store JSON fields that resemble reserved native scalar encodings
+  syntax: mysql
+  sql: >-
+    INSERT INTO precise_json_collision VALUES
+    (1,'{"scmer_date_v1":[0,100,0]}','2026-03-15 12:13:14.1234567'),
+    (2,'{"scmer_bson_v1":[3,"AA=="]}','2026-03-15 12:13:14.1234568'),
+    (3,'{"nested":{"scmer_date_v1":[0,100,0]}}',NULL)
+- name: Crash opaque JSON and precise calendar deltas
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Recover opaque JSON and precise calendar deltas
+  action: restart
+- name: Versioned WAL retains opaque JSON marker keys and native clocks
+  syntax: mysql
+  sql: SELECT id,payload,stamp FROM precise_json_collision ORDER BY id
+  expect:
+    data:
+    - {id: 1, payload: {scmer_date_v1: [0,100,0]}, stamp: '2026-03-15 12:13:14.1234567'}
+    - {id: 2, payload: {scmer_bson_v1: [3,'AA==']}, stamp: '2026-03-15 12:13:14.1234568'}
+    - {id: 3, payload: {nested: {scmer_date_v1: [0,100,0]}}, stamp: null}
+- name: Rebuild opaque JSON and calendar columns
+  scm: (rebuild (table "memcp-tests" false "precise_json_collision" false nil) true false)
+- name: Persist opaque JSON and calendar columns
+  syntax: mysql
+  sql: SHUTDOWN
+- name: Scalar column formats retain JSON keys and precise clocks
+  syntax: mysql
+  sql: SELECT id,payload,stamp FROM precise_json_collision ORDER BY id
+  expect:
+    data:
+    - {id: 1, payload: {scmer_date_v1: [0,100,0]}, stamp: '2026-03-15 12:13:14.1234567'}
+    - {id: 2, payload: {scmer_bson_v1: [3,'AA==']}, stamp: '2026-03-15 12:13:14.1234568'}
+    - {id: 3, payload: {nested: {scmer_date_v1: [0,100,0]}}, stamp: null}
+- name: Drop opaque JSON collision fixture
+  syntax: mysql
+  sql: DROP TABLE precise_json_collision
 cleanup: []

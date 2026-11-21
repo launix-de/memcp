@@ -1,0 +1,63 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/queries/from-using-pivot-and-unpivot
+metadata:
+  syntax: tsql
+  isolated: true
+  description: UNPIVOT retains duplicates excludes NULL values and checks identical input types
+setup:
+- sql: CREATE TABLE unpivot_input(grp INT,a INT,b INT)
+- sql: INSERT INTO unpivot_input VALUES(1,10,20),(2,NULL,30),(3,NULL,NULL),(1,10,20)
+- sql: CREATE TABLE unpivot_mixed(a INT,b BIGINT)
+- sql: INSERT INTO unpivot_mixed VALUES(1,2)
+- sql: CREATE TABLE unpivot_widths(a VARCHAR(10),b VARCHAR(20))
+- sql: INSERT INTO unpivot_widths VALUES('a','b')
+test_cases:
+- name: Complete narrowing preserves duplicate rows and discards NULL values
+  sql: SELECT grp,amount,label FROM unpivot_input UNPIVOT(amount FOR label IN(a,b)) AS u ORDER BY grp,label,amount
+  expect: {rows: 5,data: [{grp: 1,amount: 10,label: a},{grp: 1,amount: 10,label: a},{grp: 1,amount: 20,label: b},{grp: 1,amount: 20,label: b},{grp: 2,amount: 30,label: b}]}
+- name: Every NULL input row disappears
+  sql: SELECT grp,amount,label FROM unpivot_input UNPIVOT(amount FOR label IN(a,b)) u WHERE grp=3
+  expect: {rows: 0}
+- name: A one-column list still excludes NULL and retains original duplicates
+  sql: SELECT grp,amount,label FROM (SELECT grp,a FROM unpivot_input) AS s UNPIVOT(amount FOR label IN(a)) AS u ORDER BY grp,amount
+  expect: {rows: 2,data: [{grp: 1,amount: 10,label: a},{grp: 1,amount: 10,label: a}]}
+- name: Folded input spellings retain the requested column-name values
+  sql: SELECT grp,amount,label FROM unpivot_input UNPIVOT(amount FOR label IN(A,B)) AS u WHERE grp=2
+  expect: {rows: 1,data: [{grp: 2,amount: 30,label: B}]}
+- name: A CTE declaration composes narrowing and grouped output in a stored view
+  sql: CREATE VIEW unpivot_result AS WITH expanded AS(SELECT grp,amount FROM unpivot_input UNPIVOT(amount FOR label IN(a,b)) AS u) SELECT grp,SUM(amount) AS total FROM expanded GROUP BY grp
+- name: The stored view has complete values rather than a materialized copy
+  sql: SELECT grp,total FROM unpivot_result ORDER BY grp
+  expect: {rows: 2,data: [{grp: 1,total: 60},{grp: 2,total: 30}]}
+- name: New source rows remain visible through the view
+  sql: INSERT INTO unpivot_input VALUES(3,7,8)
+- name: View consumption recomputes all intended groups
+  sql: SELECT grp,total FROM unpivot_result ORDER BY grp
+  expect: {rows: 3,data: [{grp: 1,total: 60},{grp: 2,total: 30},{grp: 3,total: 15}]}
+- name: Different numeric input types cannot silently acquire UNION promotion
+  sql: SELECT amount,label FROM unpivot_mixed UNPIVOT(amount FOR label IN(a,b)) AS u
+  expect: {error: true,contains: UNPIVOT list}
+- name: Different character widths require an explicit source conversion
+  sql: SELECT amount,label FROM unpivot_widths UNPIVOT(amount FOR label IN(a,b)) AS u
+  expect: {error: true,contains: UNPIVOT list}
+- name: An explicitly normalized source retains its complete string values
+  sql: SELECT amount,label FROM (SELECT CAST(a AS VARCHAR(20)) AS a,b FROM unpivot_widths) AS s UNPIVOT(amount FOR label IN(a,b)) AS u ORDER BY label
+  expect: {rows: 2,data: [{amount: a,label: a},{amount: b,label: b}]}
+- name: Missing source columns remain actual binding errors
+  sql: SELECT * FROM unpivot_input UNPIVOT(amount FOR label IN(a,missing)) AS u
+  expect: {error: true,contains: UNPIVOT requires one input column}
+- name: Output values cannot reuse an original column name
+  sql: SELECT * FROM unpivot_input UNPIVOT(a FOR label IN(a,b)) AS u
+  expect: {error: true,contains: UNPIVOT output column already exists}
+- name: Output column-name fields cannot reuse an original column name
+  sql: SELECT * FROM unpivot_input UNPIVOT(amount FOR grp IN(a,b)) AS u
+  expect: {error: true,contains: UNPIVOT output column already exists}
+- name: Repeated input names are invalid SQL
+  sql: SELECT * FROM unpivot_input UNPIVOT(amount FOR label IN(a,a)) AS u
+  expect: {error: true,contains: duplicate UNPIVOT input column}
+cleanup:
+- sql: DROP VIEW IF EXISTS unpivot_result
+- sql: DROP TABLE IF EXISTS unpivot_widths
+- sql: DROP TABLE IF EXISTS unpivot_mixed
+- sql: DROP TABLE IF EXISTS unpivot_input

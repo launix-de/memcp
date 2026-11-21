@@ -1,0 +1,246 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: postgresql
+  isolated: true
+  description: PostgreSQL omitted foreign names use execution-time declaration namespaces and UTF8 byte limits
+setup:
+- sql: DROP TABLE IF EXISTS pg_auto_conflict
+- sql: DROP TABLE IF EXISTS pg_auto_chain
+- sql: DROP TABLE IF EXISTS pg_auto_child
+- sql: DROP TABLE IF EXISTS pg_auto_literal
+- sql: DROP TABLE IF EXISTS "S_pg_auto_fold"
+- sql: DROP TABLE IF EXISTS "pg_auto_tttttttttttttttttttttttttttttttt"
+- sql: DROP TABLE IF EXISTS pg_auto_reserved
+- sql: DROP TABLE IF EXISTS pg_auto_single
+- sql: DROP TABLE IF EXISTS pg_auto_parent
+- sql: CREATE TABLE pg_auto_parent(a INT NOT NULL,b INT NOT NULL,PRIMARY KEY(a,b))
+- sql: INSERT INTO pg_auto_parent VALUES(1,7),(2,8)
+- sql: CREATE TABLE pg_auto_single(id INT PRIMARY KEY)
+- sql: INSERT INTO pg_auto_single VALUES(1),(2)
+- sql: CREATE TABLE pg_auto_reserved(id INT PRIMARY KEY,a INT,b INT,CONSTRAINT pg_auto_child_a_b_fkey FOREIGN KEY(a,b)
+    REFERENCES pg_auto_parent(a,b))
+cleanup:
+- sql: DROP TABLE IF EXISTS pg_auto_conflict
+- sql: DROP TABLE IF EXISTS pg_auto_chain
+- sql: DROP TABLE IF EXISTS pg_auto_child
+- sql: DROP TABLE IF EXISTS pg_auto_literal
+- sql: DROP TABLE IF EXISTS "S_pg_auto_fold"
+- sql: DROP TABLE IF EXISTS "pg_auto_tttttttttttttttttttttttttttttttt"
+- sql: DROP TABLE IF EXISTS pg_auto_reserved
+- sql: DROP TABLE IF EXISTS pg_auto_single
+- sql: DROP TABLE IF EXISTS pg_auto_parent
+test_cases:
+- name: Omitted names reserve existing namespace and later explicit names in one CREATE
+  sql: CREATE TABLE pg_auto_child(id INT PRIMARY KEY,a INT,b INT,FOREIGN KEY(a,b) REFERENCES pg_auto_parent(a,b),CONSTRAINT
+    pg_auto_child_a_b_fkey1 FOREIGN KEY(a,b) REFERENCES pg_auto_parent(a,b),FOREIGN KEY(a,b) REFERENCES pg_auto_parent(a,b))
+  expect:
+    rows: 1
+    data:
+    - command_tag: CREATE TABLE
+- name: Actual generated composite names retain every column and reference
+  scm: |-
+    (map ((show (table "memcp-tests" false "pg_auto_child" false nil) "constraints" nil) "ForeignKeys")
+      (lambda (key) (list (key "Id") (key "Role") (key "LocalColumns") (key "OtherTable") (key "OtherColumns"))))
+  expect:
+    result:
+    - - pg_auto_child_a_b_fkey2
+      - referencing
+      - - a
+        - b
+      - pg_auto_parent
+      - - a
+        - b
+    - - pg_auto_child_a_b_fkey1
+      - referencing
+      - - a
+        - b
+      - pg_auto_parent
+      - - a
+        - b
+    - - pg_auto_child_a_b_fkey3
+      - referencing
+      - - a
+        - b
+      - pg_auto_parent
+      - - a
+        - b
+- name: Composite generated declarations reject a real orphan tuple
+  sql: INSERT INTO pg_auto_child VALUES(1,1,8)
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: All composite declarations accept and retain valid values
+  sql: INSERT INTO pg_auto_child VALUES(1,1,7)
+  expect:
+    affected_rows: 1
+- name: Another omitted child gets its own relation and column derived name
+  sql: CREATE TABLE pg_auto_chain(id INT PRIMARY KEY,parent_id INT,FOREIGN KEY(parent_id) REFERENCES pg_auto_child(id))
+  expect:
+    rows: 1
+    data:
+    - command_tag: CREATE TABLE
+- name: A valid second-level reference is retained
+  sql: INSERT INTO pg_auto_chain VALUES(1,1)
+  expect:
+    affected_rows: 1
+- name: An explicit quoted nil remains an ordinary exact name
+  sql: CREATE TABLE pg_auto_literal(id INT PRIMARY KEY,parent_id INT,CONSTRAINT "nil" FOREIGN KEY(parent_id) REFERENCES
+    pg_auto_single(id))
+  expect:
+    rows: 1
+    data:
+    - command_tag: CREATE TABLE
+- name: Explicit nil and an independent omitted name remain distinct
+  scm: |-
+    (list
+      (map ((show (table "memcp-tests" false "pg_auto_literal" false nil) "constraints" nil) "ForeignKeys") (lambda (key) (key "Id")))
+      (map ((show (table "memcp-tests" false "pg_auto_chain" false nil) "constraints" nil) "ForeignKeys") (lambda (key) (key "Id"))))
+  expect:
+    result:
+    - - nil
+    - - pg_auto_chain_parent_id_fkey
+- name: A later explicit folded name reserves the preferred generated name
+  sql: CREATE TABLE "S_pg_auto_fold"(id INT PRIMARY KEY,parent_id INT,FOREIGN KEY(parent_id) REFERENCES pg_auto_single(id),CONSTRAINT
+    "ſ_pg_auto_fold_parent_id_fkey" FOREIGN KEY(parent_id) REFERENCES pg_auto_single(id))
+  expect:
+    rows: 1
+    data:
+    - command_tag: CREATE TABLE
+- name: Native Unicode namespace folding selects the next suffix
+  scm: (map ((show (table "memcp-tests" false "S_pg_auto_fold" false nil) "constraints" nil) "ForeignKeys") (lambda
+    (key) (key "Id")))
+  expect:
+    result:
+    - S_pg_auto_fold_parent_id_fkey1
+    - ſ_pg_auto_fold_parent_id_fkey
+- name: Long identifiers generate a whole UTF8 constraint within the byte limit
+  sql: CREATE TABLE "pg_auto_tttttttttttttttttttttttttttttttt"(id INT PRIMARY KEY,"界界界界界界界界界界界界界界界" INT,FOREIGN
+    KEY("界界界界界界界界界界界界界界界") REFERENCES pg_auto_single(id))
+  expect:
+    rows: 1
+    data:
+    - command_tag: CREATE TABLE
+- name: The persisted name balances byte budgets without splitting a scalar
+  scm: (map ((show (table "memcp-tests" false "pg_auto_tttttttttttttttttttttttttttttttt" false nil) "constraints"
+    nil) "ForeignKeys") (lambda (key) (list (key "Id") (strlen (key "Id")))))
+  expect:
+    result:
+    - - pg_auto_ttttttttttttttttttttt_界界界界界界界界界_fkey
+      - 62
+- name: The truncated-name declaration really enforces its original long column
+  sql: INSERT INTO "pg_auto_tttttttttttttttttttttttttttttttt" VALUES(1,99)
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: The truncated-name declaration accepts a valid referenced value
+  sql: INSERT INTO "pg_auto_tttttttttttttttttttttttttttttttt" VALUES(1,1)
+  expect:
+    affected_rows: 1
+- name: Name construction preserves suffix and longest-component reduction
+  scm: |-
+    (list
+      (psql_constraint_object_name "short" "column" "fkey12")
+      (psql_constraint_object_name "abcdefghijklmnopqrstuvwxyz0123456789" "abcdefghijklmnopqrstuvwxyz0123456789" "fkey")
+      (psql_foreign_name_addition '("left" "right")))
+  expect:
+    result:
+    - short_column_fkey12
+    - abcdefghijklmnopqrstuvwxyz012_abcdefghijklmnopqrstuvwxyz01_fkey
+    - left_right
+- name: Normalization preserves complete preexisting referential action fields
+  scm: |-
+    (psql_foreign_definitions "memcp-tests" "pg_auto_actions"
+      (list (list "foreign" nil '("left" "right") "pg_auto_parent" '("a" "b") "cascade" "set null")
+        (list "foreign" "explicit_action" '("left") "pg_auto_single" '("id") "restrict" "cascade")) nil)
+  expect:
+    result:
+    - - foreign
+      - pg_auto_actions_left_right_fkey
+      - - left
+        - right
+      - pg_auto_parent
+      - - a
+        - b
+      - cascade
+      - set null
+    - - foreign
+      - explicit_action
+      - - left
+      - pg_auto_single
+      - - id
+      - restrict
+      - cascade
+- name: Execution names observe own pending declarations without exposing them to observers
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (try (lambda () (begin
+        (createtable "memcp-tests" "pg_auto_pending_names"
+          (list (list "column" "id" "int" '() (list "null" false))
+            (list "unique" "pending_key" '("id") '("constraint_name" "pg_auto_pending_parent_id_fkey")))
+          '() false tx)
+        (define definitions (list (list "foreign" nil '("parent_id") "pg_auto_single" '("id"))))
+        (define actual (list
+          (cadr (car (psql_foreign_definitions "memcp-tests" "pg_auto_pending" definitions tx)))
+          (cadr (car (psql_foreign_definitions "memcp-tests" "pg_auto_pending" definitions nil)))))
+        (tx_rollback owner)
+        (list actual (nil? (table "memcp-tests" false "pg_auto_pending_names" false nil)))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - - pg_auto_pending_parent_id_fkey1
+      - pg_auto_pending_parent_id_fkey
+    - true
+- name: An actual duplicate explicit name still fails atomically
+  sql: CREATE TABLE pg_auto_conflict(id INT PRIMARY KEY,parent_id INT,CONSTRAINT "nil" FOREIGN KEY(parent_id) REFERENCES
+    pg_auto_single(id))
+  expect:
+    error: true
+    contains: declaration name already exists
+- name: Rejected explicit collision publishes no relation
+  scm: (nil? (table "memcp-tests" false "pg_auto_conflict" false nil))
+  expect:
+    result: true
+- name: Conditional CREATE retains the original relation and declarations
+  sql: CREATE TABLE IF NOT EXISTS pg_auto_child(other INT,FOREIGN KEY(other) REFERENCES pg_auto_single(id))
+  expect:
+    rows: 1
+    data:
+    - command_tag: CREATE TABLE
+- name: Conditional creation preserved complete original rows
+  sql: SELECT id,a,b FROM pg_auto_child
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      a: 1
+      b: 7
+- name: Persist generated foreign declarations
+  action: restart
+- name: Restart preserves every generated and explicit composite name
+  scm: (map (filter ((show (table "memcp-tests" false "pg_auto_child" false nil) "constraints" nil) "ForeignKeys")
+    (lambda (key) (equal? (key "Role") "referencing"))) (lambda (key) (key "Id")))
+  expect:
+    result:
+    - pg_auto_child_a_b_fkey2
+    - pg_auto_child_a_b_fkey1
+    - pg_auto_child_a_b_fkey3
+- name: Restart preserves the chained values
+  sql: SELECT id,parent_id FROM pg_auto_chain
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      parent_id: 1
+- name: Recovered generated declarations still reject actual orphans
+  sql: INSERT INTO pg_auto_child VALUES(2,99,8)
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Recovered parent protection still rejects referenced deletion
+  sql: DELETE FROM pg_auto_child WHERE id=1
+  expect:
+    error: true
+    contains: foreign key constraint

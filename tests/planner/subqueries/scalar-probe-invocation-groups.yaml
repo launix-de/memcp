@@ -1,0 +1,31 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Scalar probes retain nested invocation group capabilities in the complete consumer scope
+test_cases:
+  - name: A scalar count consumes every distinct local source group
+    sql: DECLARE @items TABLE(id INT); INSERT @items VALUES(1),(1),(2); SELECT (SELECT COUNT(id) FROM (SELECT id FROM @items GROUP BY id) grouped) AS n
+    expect: {rows: 1, data: [{n: 2}]}
+  - name: A scalar sum consumes one value per local source group
+    sql: DECLARE @items TABLE(id INT); INSERT @items VALUES(1),(1),(2); SELECT (SELECT SUM(id) FROM (SELECT id FROM @items GROUP BY id) grouped) AS n
+    expect: {rows: 1, data: [{n: 3}]}
+  - name: Empty grouped input retains the outer scalar count and sum defaults
+    sql: DECLARE @items TABLE(id INT); SELECT (SELECT COUNT(id) FROM (SELECT id FROM @items GROUP BY id) grouped) AS count_value,(SELECT SUM(id) FROM (SELECT id FROM @items GROUP BY id) grouped) AS sum_value
+    expect: {rows: 1, data: [{count_value: 0,sum_value: null}]}
+  - name: A real NULL group contributes no operand to count or sum
+    sql: DECLARE @items TABLE(id INT); INSERT @items VALUES(NULL),(NULL),(1),(1); SELECT (SELECT COUNT(id) FROM (SELECT id FROM @items GROUP BY id) grouped) AS count_value,(SELECT SUM(id) FROM (SELECT id FROM @items GROUP BY id) grouped) AS sum_value
+    expect: {rows: 1, data: [{count_value: 1,sum_value: 1}]}
+  - name: Outer correlation filters the completed local groups independently for each caller
+    sql: DECLARE @items TABLE(id INT); INSERT @items VALUES(1),(1),(2); SELECT target.id,(SELECT COUNT(id) FROM (SELECT id FROM @items GROUP BY id) grouped WHERE grouped.id<=target.id) AS n FROM @items target ORDER BY target.id
+    expect: {rows: 3, data: [{id: 1,n: 1},{id: 1,n: 1},{id: 2,n: 2}]}
+  - name: Scalar first-row consumers retain their existing nested group lifetime
+    sql: DECLARE @items TABLE(id INT); INSERT @items VALUES(1),(1),(2); SELECT (SELECT id FROM (SELECT id FROM @items GROUP BY id) grouped WHERE id=2) AS value
+    expect: {rows: 1, data: [{value: 2}]}
+  - name: Independent probes retain separate local sources and payloads
+    sql: DECLARE @left_items TABLE(id INT); DECLARE @right_items TABLE(id INT); INSERT @left_items VALUES(1),(1),(2); INSERT @right_items VALUES(7),(7),(9); SELECT (SELECT SUM(id) FROM (SELECT id FROM @left_items GROUP BY id) grouped) AS left_value,(SELECT SUM(id) FROM (SELECT id FROM @right_items GROUP BY id) grouped) AS right_value
+    expect: {rows: 1, data: [{left_value: 3,right_value: 16}]}
+  - name: COUNT star retains multiplicity of completed local groups
+    sql: DECLARE @items TABLE(id INT); INSERT @items VALUES(1),(1),(2); SELECT (SELECT COUNT(*) FROM (SELECT id FROM @items GROUP BY id) grouped) AS n
+    expect: {rows: 1, data: [{n: 2}]}

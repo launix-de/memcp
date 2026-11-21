@@ -58,7 +58,7 @@ func TableFromScmer(s scm.Scmer) *table {
 	return (*table)(s.Custom(TagTable))
 }
 
-// String implements serialization for table pointers: (table "schema" false "name" false)
+// String implements serialization for table pointers: (table "schema" false "name" false nil)
 func (t *table) String() string {
 	var name string
 	if published := t.publishedName.Load(); published != nil {
@@ -66,7 +66,7 @@ func (t *table) String() string {
 	} else {
 		name = t.Name // unpublished constructors own the fallback
 	}
-	return "(table " + strconv.Quote(t.schema.Name) + " false " + strconv.Quote(name) + " false)"
+	return "(table " + strconv.Quote(t.schema.Name) + " false " + strconv.Quote(name) + " false nil)"
 }
 
 type dataset []scm.Scmer
@@ -110,10 +110,11 @@ type column struct {
 	Name string
 	Typ  string
 	// EnumValues is immutable declaration metadata; existing JSON schemas omit it.
-	EnumValues        []string  `json:",omitempty"`
-	Typdimensions     []int     // type dimensions for DECIMAL(10,3) and VARCHAR(5)
-	Computor          scm.Scmer `json:"-"`          // TODO: marshaljson -> serialize
-	ComputorInputCols []string  `json:",omitempty"` // input cols for computor (persisted in schema)
+	EnumValues         []string                  `json:",omitempty"`
+	Typdimensions      []int                     // type dimensions for DECIMAL(10,3) and VARCHAR(5)
+	ComputorDefinition *computedColumnDefinition `json:"computor_definition,omitempty"`
+	Computor           scm.Scmer                 `json:"-"`          // TODO: marshaljson -> serialize
+	ComputorInputCols  []string                  `json:",omitempty"` // input cols for computor (persisted in schema)
 	// Ordinary computed-column identity consists of its value recipe and source
 	// dependencies. Preparation filters are invocation-local, not that identity.
 	// Preparation hints are not stored. Ordered columns retain their separate OrcFilter.
@@ -125,20 +126,25 @@ type column struct {
 	AutoIncrement            bool
 	Default                  scm.Scmer
 	DefaultExpression        string
+	// Deferred declarations require the owning frontend to supply invocation data.
+	// Storage retains only the opaque source; it never executes frontend syntax.
+	DefaultDeferred bool `json:",omitempty"`
 	// Optional declaration label; owned and published with the existing default.
-	DefaultName       string                         `json:"default_name,omitempty"`
-	InitialValue      scm.Scmer                      `json:"initial_value,omitempty"`
-	InitialValues     map[string]columnInitialExtent `json:"initial_values,omitempty"`
-	OnUpdate          scm.Scmer
-	AllowNull         bool
-	IsTemp            bool // cache-owned storage; computed recipes remain table metadata
-	cacheOwner        *table
-	cachePayloadEmpty atomic.Bool
-	Collation         string
-	Comment           string
-	sanitizer         func(scm.Scmer) scm.Scmer
-	lastAccessed      int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
-	cacheUsers        int64 // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
+	DefaultName           string                         `json:"default_name,omitempty"`
+	InitialValue          scm.Scmer                      `json:"initial_value,omitempty"`
+	InitialValues         map[string]columnInitialExtent `json:"initial_values,omitempty"`
+	OnUpdate              scm.Scmer
+	AllowNull             bool
+	IsTemp                bool // cache-owned storage; computed recipes remain table metadata
+	cacheOwner            *table
+	cachePayloadEmpty     atomic.Bool
+	Collation             string
+	Comment               string
+	DeclarationProperties columnDeclarationProperties `json:"declaration_properties,omitempty"`
+	sanitizer             func(scm.Scmer) scm.Scmer
+	recoverPersisted      func(scm.Scmer) scm.Scmer
+	lastAccessed          int64 // atomic; UnixNano timestamp for CacheManager LRU (lock-free via sync/atomic)
+	cacheUsers            int64 // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
 
 	// Statistics — updated at rebuild time, O(1) access for query planning.
 	// DistinctEstimate is the sum of per-shard DistinctCount() (upper bound).
@@ -165,16 +171,35 @@ func (c *column) hasDefault() bool {
 
 // Named defaults share the existing declaration namespace, not a second catalog.
 // Callers own schemalock; this is DDL admission only, never an execution check.
-func (t *table) hasDeclarationName(name string, excluded *column, includeKeyIDs bool) bool {
+func (t *table) hasColumnCheckDeclarationName(name string, excluded *column) bool {
 	for _, c := range t.Columns {
 		if c != excluded && c.DefaultName != "" && strings.EqualFold(c.DefaultName, name) {
 			return true
 		}
 	}
+	for _, check := range t.Checks {
+		if strings.EqualFold(check.Id, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func (t *table) hasNonForeignDeclarationName(name string, excluded *column, includeKeyIDs bool) bool {
+	if t.hasColumnCheckDeclarationName(name, excluded) {
+		return true
+	}
 	for _, key := range t.Unique {
 		if (includeKeyIDs && strings.EqualFold(key.Id, name)) || (key.ConstraintName != "" && strings.EqualFold(key.ConstraintName, name)) {
 			return true
 		}
+	}
+	return false
+}
+
+func (t *table) hasDeclarationName(name string, excluded *column, includeKeyIDs bool) bool {
+	if t.hasNonForeignDeclarationName(name, excluded, includeKeyIDs) {
+		return true
 	}
 	for _, key := range t.Foreign {
 		if key.Tbl1 == t.Name && strings.EqualFold(key.Id, name) {
@@ -194,6 +219,9 @@ func (db *database) hasDeclarationNameLocked(name string, excluded *column) bool
 }
 
 func (c *column) defaultValue() scm.Scmer {
+	if c.DefaultDeferred {
+		panic("deferred default requires an explicit frontend value: " + c.Name)
+	}
 	if strings.EqualFold(c.DefaultExpression, "CURRENT_TIMESTAMP") {
 		return scm.NewDate(time.Now().Unix())
 	}
@@ -341,6 +369,7 @@ const (
 type tablePartitionRouting struct{ _ byte }
 
 type tableShardTopology struct {
+	dropped    bool // terminal logical table; never a rebuild successor
 	routing    *tablePartitionRouting
 	mode       ShardMode
 	shards     []*storageShard
@@ -357,6 +386,8 @@ type tableShardTopology struct {
 	drained            chan struct{}
 	operationDrainOnce sync.Once
 	drainOnce          sync.Once
+	// Flat completion proofs, never references to earlier payload directories.
+	retirementDependencies []<-chan struct{}
 }
 
 // tableSchemaTopology is the immutable storage generation written to
@@ -496,13 +527,16 @@ const (
 )
 
 type foreignKey struct {
-	Id         string
-	Tbl1       string
-	Cols1      []string
-	Tbl2       string
-	Cols2      []string
-	Updatemode foreignKeyMode
-	Deletemode foreignKeyMode
+	Id                     string
+	Tbl1                   string
+	Cols1                  []string
+	Tbl2                   string
+	Cols2                  []string
+	Updatemode             foreignKeyMode
+	Deletemode             foreignKeyMode
+	Untrusted              bool `json:"Untrusted,omitempty"` // historical integrity has not been proven; write enforcement is unchanged
+	validationStatePresent bool // decoded field presence fences historical journal domains
+	payloadFootprint       uint // native allocation ownership only; never part of semantic equality or JSON
 }
 
 // hasDuplicateUniqueValues validates a proposed UNIQUE key against the current
@@ -534,6 +568,7 @@ func (t *table) hasDuplicateUniqueValues(cols []string, nullsNotDistinct bool, c
 		readAccesses[i] = shard.GetRead(currentTx, false)
 		shard = readAccesses[i].shard
 		shards[i] = shard
+		initializedColumns := shard.initializedColumnInput(currentTx)
 		func() {
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
@@ -549,7 +584,7 @@ func (t *table) hasDuplicateUniqueValues(cols []string, nullsNotDistinct bool, c
 				key := make([]scm.Scmer, len(cols))
 				hasNull := false
 				for i, col := range cols {
-					key[i] = shard.rowValueByRecidLocked(recid, col)
+					key[i] = shard.rowValueByRecidLocked(recid, col, currentTx, initializedColumns)
 					if key[i].IsNil() {
 						hasNull = true
 					}
@@ -621,19 +656,45 @@ type table struct {
 	contributionWriters  atomic.Int64
 
 	// Immutable, bounded filter observations, published after complete scans.
-	filterFeedback  atomic.Pointer[tableFilterFeedback]
-	schema          *database
-	Name            string
-	Columns         []*column
-	Unique          []uniqueKey            // unique keys
-	Foreign         []foreignKey           // foreign keys
-	Triggers        []TriggerDescription   // triggers on this table
-	PersistencyMode PersistencyMode        /* 0 = safe (default), 1 = sloppy, 2 = memory */
-	OnInit          atomicTableInitializer `json:"oninit,omitempty"` // immutable closed callback, atomically published
-	cacheUsers      int64                  // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
+	filterFeedback                 atomic.Pointer[tableFilterFeedback]
+	schema                         *database
+	Name                           string
+	Columns                        []*column
+	Unique                         []uniqueKey          // unique keys
+	Foreign                        []foreignKey         // foreign keys
+	Checks                         []*checkDeclaration  `json:",omitempty"`
+	Triggers                       []TriggerDescription // triggers on this table
+	triggerMemoryBytes             atomic.Uint64        // producer-owned container + optional finite FK program estimates
+	statementTriggerEvents         atomic.Uint32        // event mask derived by the trigger declaration owner
+	hasNonStatementTriggers        atomic.Bool
+	synchronousRowMutationEvents   atomic.Uint32
+	cascadingForeignMutationEvents atomic.Uint32
+	checkMemoryBytes               atomic.Uint64
+	hasCheckConstraints            atomic.Bool
+	foreignMemoryBytes             atomic.Uint64                    // native Foreign container + producer-owned payload facts
+	CreatorIncarnation             string                           `json:"creator_incarnation,omitempty"`
+	CreatorNamespace               string                           `json:"creator_namespace,omitempty"`
+	CatalogDecisionID              string                           `json:"catalog_decision,omitempty"`
+	CreatorTxID                    string                           `json:"creator_tx,omitempty"`
+	dropVersion                    atomic.Uint64                    // authoritative only at the shared catalog cut
+	CatalogVersion                 catalogVersion                   `json:"catalog_version,omitempty"`
+	creator                        atomic.Pointer[transactionState] `json:"-"`
+	catalogDataEntered             atomic.Bool                      `json:"-"`
+	RuntimeIdentity                string                           `json:"runtime_identity,omitempty"`
+	transitionRelation             *nativeTransitionRelation        // runtime-owned result lifetime, never schema authority
+	dataOwner                      *relationScope                   // explicitly independent private MEMORY data; native lifetime only
+	relationLifetime               *relationScope                   // actual lexical MEMORY identity owner, including caller-owned query scratch
+	mutationReadOnly               bool                             // immutable native result relation; only its owning scope may retire it
+	ScopedSchema                   bool                             `json:"scoped_schema,omitempty"`
+	Ephemeral                      bool                             `json:"ephemeral,omitempty"`
+	PersistencyMode                PersistencyMode                  /* 0 = safe (default), 1 = sloppy, 2 = memory */
+	OnInit                         atomicTableInitializer           `json:"oninit,omitempty"` // immutable closed callback, atomically published
+	cacheUsers                     int64                            // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
 	// Immutable reverse dependency list, published by registration with CAS.
 	// Eviction visits only these sources; it never scans the whole catalog.
 	cacheTriggerSources atomic.Pointer[cacheTriggerSource]
+	// Existing t.mu owns this runtime-only declaration admission count.
+	triggerDeclarationReaders uint64
 	// LOCK ORDER CONTRACT:
 	//   1. db.schemalock
 	//   2. t.ddlMu
@@ -675,7 +736,10 @@ type table struct {
 	tableLockState      atomic.Int64                     // 0 = unlocked, -1 = WRITE, positive = READ count
 	tableLockReadOwners map[*scm.SessionState]uint32     // guarded by tableLockMu
 	_                   [32]byte                         // separate table locks from insert traffic
-	Auto_increment      uint64                           // atomic runtime accesses; next generated ID is this value plus one
+	Allocator           *tableAllocatorState             `json:"allocator,omitempty"` // immutable imported header, never a guessed legacy seed
+	allocator           atomic.Pointer[tableAllocatorState]
+	allocatorRecovery   atomic.Bool
+	Auto_increment      uint64 // atomic runtime accesses; next generated ID is this value plus one
 	Collation           string
 	Charset             string
 	Comment             string
@@ -798,8 +862,11 @@ type table struct {
 	// Cold decode state, consumed before publication; keep out of hot field groups.
 	RestoredKeyFrequencies *persistedKeyFrequencies `json:"key_frequencies,omitempty"`
 	RestoredFilterFeedback *persistedFilterFeedback `json:"filter_feedback,omitempty"`
-	RestoredShardForwards  map[string]string        `json:"shard_forwards,omitempty"`
-	replicaRoutes          sync.Once                // cold restoration of persisted UUID edges, never granted reads
+	// Native declaration/write lifetime, separate from physical row readers.
+	writeAdmission tableWriteAdmission
+
+	RestoredShardForwards map[string]string `json:"shard_forwards,omitempty"`
+	replicaRoutes         sync.Once         // cold restoration of persisted UUID edges, never granted reads
 }
 
 var nextPlannerStatsToken atomic.Uint64
@@ -838,6 +905,11 @@ func (t *table) waitForTransactions(ctx context.Context, shards []*storageShard)
 		}
 		return false
 	}
+	return t.waitForShardDrain(ctx, hasActive)
+}
+
+// Physical journal and read owners share the existing cold drain condition.
+func (t *table) waitForShardDrain(ctx context.Context, hasActive func() bool) error {
 	if !hasActive() {
 		return ctx.Err()
 	}
@@ -949,6 +1021,31 @@ func (t *table) publishTopologyLocked() *tableShardTopology {
 		dimensions:        append([]shardDimension(nil), t.PDimensions...),
 		operationsDrained: make(chan struct{}),
 		drained:           make(chan struct{}),
+	}
+	// Reusing a physical UUID does not invalidate operation/transaction pins
+	// acquired through an earlier topology. Carry only their drain channels;
+	// retaining topology pointers would keep old payload chains alive.
+	if previous := t.topology.Load(); previous != nil {
+		old := make(map[*storageShard]bool, len(previous.shards))
+		for _, shard := range previous.shards {
+			old[shard] = true
+		}
+		for _, shard := range topology.shards {
+			if shard == nil || !old[shard] {
+				continue
+			}
+			// Include the current predecessor before Swap/retire: checking its
+			// counters now would race a reader still acquiring that input.
+			topology.retirementDependencies = append(topology.retirementDependencies, previous.drained)
+			for _, dependency := range previous.retirementDependencies {
+				select {
+				case <-dependency:
+				default:
+					topology.retirementDependencies = append(topology.retirementDependencies, dependency)
+				}
+			}
+			break
+		}
 	}
 	for _, shard := range topology.shards {
 		if shard != nil {
@@ -1071,6 +1168,18 @@ func (t *table) MarshalJSON() ([]byte, error) {
 	// Reservations publish once per batch; snapshot the same counter without
 	// acquiring the topology mutex during schema persistence.
 	autoIncrement := atomic.LoadUint64(&t.Auto_increment)
+	allocator := t.allocatorSnapshot()
+	if allocator != nil {
+		if !allocator.IssuedKnown && autoIncrement > allocator.High {
+			// Legacy recovery can raise the historical highwater without
+			// inventing seed/issued provenance. Preserve that exact highwater
+			// when a checkpoint later retires its row WAL.
+			recovered := *allocator
+			recovered.High = autoIncrement
+			allocator = &recovered
+		}
+		autoIncrement = allocator.High
+	}
 	topology := t.schemaTopology.Load()
 	if topology == nil {
 		active := t.activeTopology()
@@ -1128,10 +1237,20 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		DroppedColumns     map[string]bool `json:"dropped_columns"`
 		Unique             []uniqueKey
 		Foreign            []foreignKey
+		Checks             []*checkDeclaration `json:",omitempty"`
 		Triggers           []TriggerDescription
+		CreatorIncarnation string `json:"creator_incarnation,omitempty"`
+		CreatorNamespace   string `json:"creator_namespace,omitempty"`
+		CatalogDecisionID  string `json:"catalog_decision,omitempty"`
+		CreatorTxID        string `json:"creator_tx,omitempty"`
+		CatalogVersion     uint64 `json:"catalog_version,omitempty"`
+		RuntimeIdentity    string `json:"runtime_identity,omitempty"`
+		Ephemeral          bool   `json:"ephemeral,omitempty"`
+		ScopedSchema       bool   `json:"scoped_schema,omitempty"`
 		PersistencyMode    PersistencyMode
-		OnInit             *scm.Scmer `json:"oninit,omitempty"`
-		AutoIncrement      uint64     `json:"Auto_increment"`
+		OnInit             *scm.Scmer           `json:"oninit,omitempty"`
+		AutoIncrement      uint64               `json:"Auto_increment"`
+		Allocator          *tableAllocatorState `json:"allocator,omitempty"`
 		Collation          string
 		Charset            string
 		Comment            string
@@ -1146,7 +1265,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 	// Lazy compilation updates runtime trigger fields under t.mu, independently
 	// of schema ownership. Copy the declarations before encoding outside the lock.
 	t.mu.Lock()
-	triggers := append([]TriggerDescription(nil), t.Triggers...)
+	triggers := t.visibleTriggerDescriptionsLocked(nil)
 	t.mu.Unlock()
 	if t.schema != nil && sharedClusterDatabase(t.schema.Name) {
 		// Generated computation edges bind a node's private cache objects. The
@@ -1167,10 +1286,19 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		DroppedColumns:     t.DroppedColumns,
 		Unique:             t.Unique,
 		Foreign:            t.Foreign,
+		Checks:             t.Checks,
 		Triggers:           triggers,
+		CreatorIncarnation: t.CreatorIncarnation, CreatorNamespace: t.CreatorNamespace,
+		CatalogDecisionID:  t.CatalogDecisionID,
+		CreatorTxID:        t.CreatorTxID,
+		CatalogVersion:     t.CatalogVersion.Load(),
+		RuntimeIdentity:    t.RuntimeIdentity,
+		Ephemeral:          t.Ephemeral,
+		ScopedSchema:       t.ScopedSchema,
 		PersistencyMode:    t.PersistencyMode,
 		OnInit:             t.OnInit.Load(),
 		AutoIncrement:      autoIncrement,
+		Allocator:          allocator,
 		Collation:          t.Collation,
 		Charset:            t.Charset,
 		Comment:            t.Comment,
@@ -1240,7 +1368,13 @@ func (t *table) pinActiveTopology() *tableShardTopology {
 }
 
 func (t *table) activeTopology() *tableShardTopology {
+	if transition := t.transitionRelation; transition != nil && transition.retired.Load() {
+		panic("native transition relation is outside its completion scope")
+	}
 	if topology := t.topology.Load(); topology != nil {
+		if topology.dropped {
+			panic("table is outside its native catalog lifetime: " + t.Name)
+		}
 		return topology
 	}
 	// Tables are unpublished while constructors populate their initial shard.
@@ -1869,6 +2003,19 @@ func (t *table) evict(mode evictionMode, currentSize int64, freedByType *[numEvi
 // Schema metadata belongs to the table, never to every referencing shard.
 func (t *table) metadataMemory() uint {
 	size := uint(unsafe.Sizeof(*t)) + uint(len(t.Name))
+	if topology := t.topology.Load(); topology != nil {
+		size += uint(cap(topology.retirementDependencies)) * uint(unsafe.Sizeof((<-chan struct{})(nil)))
+	}
+	if initial := t.Allocator; initial != nil {
+		size += uint(unsafe.Sizeof(*initial)) + uint(len(initial.Table))
+	}
+	if current := t.allocator.Load(); current != nil && current != t.Allocator {
+		size += uint(unsafe.Sizeof(*current)) + uint(len(current.Table))
+	}
+	size += t.writeAdmission.metadataMemory()
+	size += uint(t.triggerMemoryBytes.Load())
+	size += uint(t.foreignMemoryBytes.Load())
+	size += uint(t.checkMemoryBytes.Load())
 	if t.publishedName.Load() != nil {
 		// The published descriptor shares Name's string payload.
 		size += uint(unsafe.Sizeof(""))
@@ -1879,6 +2026,10 @@ func (t *table) metadataMemory() uint {
 	for edge := t.cacheTriggerSources.Load(); edge != nil; edge = edge.next {
 		size += uint(unsafe.Sizeof(*edge))
 	}
+	size += uint(cap(t.Unique)) * uint(unsafe.Sizeof(uniqueKey{}))
+	for _, key := range t.Unique {
+		size += uint(cap(key.Cols)) * uint(unsafe.Sizeof(""))
+	}
 	size += uint(cap(t.Columns)) * uint(unsafe.Sizeof((*column)(nil)))
 	var declarationPayloads map[scm.Scmer]struct{}
 	for _, c := range t.Columns {
@@ -1887,6 +2038,9 @@ func (t *table) metadataMemory() uint {
 		size += uint(cap(c.EnumValues)) * uint(unsafe.Sizeof(""))
 		for _, label := range c.EnumValues {
 			size += uint(len(label))
+		}
+		for key, value := range c.DeclarationProperties {
+			size += 64 + uint(len(key)) + scm.ComputeSize(value)
 		}
 		// As with shard bookkeeping, map entry/bucket overhead is an estimate.
 		size += 64 * uint(len(c.InitialValues))
@@ -1918,31 +2072,71 @@ func (t *table) metadataMemory() uint {
 		size += uint(cap(names.declarations)) * uint(unsafe.Sizeof((*column)(nil)))
 		// Ordinals extend the existing name-directory entries. Names still
 		// borrow column strings; there is no second column lookup directory.
+		size += names.initialBytes
 		size += uint(len(names.exact)+len(names.folded)) * uint(unsafe.Sizeof(int(0)))
 	}
 	if snapshot := t.showColumnsSnapshot.Load(); snapshot != nil && snapshot.metadata != nil {
+		size += uint(unsafe.Sizeof(*snapshot))
+		if previous := snapshot.metadata.catalogPrevious; previous != nil {
+			// A pending constraint delta shares column data, UNIQUE rows and old
+			// constraint row payloads. Only these immutable descriptor/wrapper roots
+			// remain additional owners until the database version is published.
+			size += uint(unsafe.Sizeof(*previous)) + uint(unsafe.Sizeof(*previous.metadata))
+			size += uint(len(previous.metadata.declarations.Slice())+len(previous.metadata.constraints.Slice())) * uint(unsafe.Sizeof(scm.Scmer{}))
+			size += uint(len(previous.metadata.constraints.Slice()[3].Slice())) * uint(unsafe.Sizeof(scm.Scmer{}))
+			if len(previous.metadata.constraints.Slice()) == 6 {
+				size += uint(len(previous.metadata.constraints.Slice()[5].Slice())) * uint(unsafe.Sizeof(scm.Scmer{}))
+			}
+		}
+		if directory := snapshot.metadata.foreignByID; directory != nil {
+			size += directory.metadataMemory()
+		}
+		if previous := snapshot.metadata.catalogPrevious; previous != nil && previous.metadata.foreignByID != snapshot.metadata.foreignByID && previous.metadata.foreignByID != nil {
+			size += previous.metadata.foreignByID.metadataMemory()
+		}
 		size += uint(unsafe.Sizeof(*snapshot.metadata))
 		if snapshot.metadata.columns != nil {
 			// Names borrow the column strings; charge only the new pointer array.
 			size += uint(cap(snapshot.metadata.columns.names)) * uint(unsafe.Sizeof(""))
 		}
-		if rows := snapshot.metadata.columnRows; !rows.IsNil() {
-			// SHOW and point reads borrow the same row arrays. Property labels
-			// are package constants; names/defaults/type declarations belong to
-			// columns. Only row arrays, dimension arrays and formatted type text
-			// are owned by this render, charged once through this shared payload.
-			size += uint(cap(rows.Slice())) * uint(unsafe.Sizeof(scm.Scmer{}))
+		// Descriptive data survives statistics renders. Count each owned wrapper
+		// or formatted type once even while current SHOW and the schema-owned
+		// descriptor share it, and retain the charge after those renders diverge.
+		renderPayloads := make(map[scm.Scmer]struct{})
+		chargeRows := func(rows scm.Scmer) {
+			if rows.IsNil() {
+				return
+			}
+			size += uint(len(rows.Slice())) * uint(unsafe.Sizeof(scm.Scmer{}))
 			for _, row := range rows.Slice() {
 				fields := row.Slice()
-				size += uint(cap(fields)) * uint(unsafe.Sizeof(scm.Scmer{}))
-				// column.show publishes Type at 3 and Dimensions at 9.
-				dimensions := fields[9].Slice()
-				size += uint(cap(dimensions)) * uint(unsafe.Sizeof(scm.Scmer{}))
-				if len(dimensions) != 0 {
-					size += uint(len(fields[3].String()))
+				size += uint(len(fields)) * uint(unsafe.Sizeof(scm.Scmer{}))
+				for field := 0; field < len(fields); field += 2 {
+					switch fields[field].String() {
+					case "Dimensions", "EnumValues", "Properties":
+						value := fields[field+1]
+						if _, charged := renderPayloads[value]; !charged {
+							renderPayloads[value] = struct{}{}
+							size += uint(len(value.Slice())) * uint(unsafe.Sizeof(scm.Scmer{}))
+						}
+					}
+				}
+				// The native description owns formatted Type text only for dimensions.
+				if len(fields[9].Slice()) != 0 {
+					if _, charged := renderPayloads[fields[3]]; !charged {
+						renderPayloads[fields[3]] = struct{}{}
+						size += uint(len(fields[3].String()))
+					}
 				}
 			}
 		}
+		chargeRows(snapshot.metadata.columnRows)
+		if declaration := snapshot.metadata.declarations; !declaration.IsNil() {
+			fields := declaration.Slice()
+			size += uint(len(fields)) * uint(unsafe.Sizeof(scm.Scmer{}))
+			chargeRows(fields[1])
+		}
+
 		if snapshot.metadata.constraints != emptyTableConstraints {
 			// The field is already included in the wrapper; only its retained
 			// payload belongs here. Empty metadata is one shared package value.
@@ -2042,12 +2236,16 @@ type tableShowColumnsSnapshot struct {
 }
 
 type tableShowColumnsSnapshotMetadata struct {
+	catalogVersion            uint64
+	catalogPrevious           *tableShowColumnsSnapshot
 	plannerColumnsFingerprint uint64
 	columns                   *tableShowColumnsMetadata
 	columnNames               *tableColumnNamesSnapshot
 	statistics                *tableStatisticsSnapshot
+	foreignByID               *tableForeignMetadata
 	constraints               scm.Scmer // immutable declarations, replaced only by schema-owned DDL
 	columnRows                scm.Scmer // same full SHOW payload, retained during rendered-value invalidation
+	declarations              scm.Scmer // one schema-owned column/constraint publication, independent of statistics
 }
 
 func plannerFingerprintMix(fingerprint, value uint64) uint64 {
@@ -2118,21 +2316,26 @@ type tableShowColumnsMetadata struct {
 }
 
 type tableColumnNamesSnapshot struct {
-	declarations []*column // immutable directory; column fields retain existing ownership
-	exact        map[string]tableColumnName
-	folded       map[string]tableColumnName
+	declarations            []*column // immutable directory; column fields retain existing ownership
+	hasDeclaredComputations bool
+	initialByShard          map[uuid.UUID]*nativeColumnInitialInput
+	initialBytes            uint
+	exact                   map[string]tableColumnName
+	folded                  map[string]tableColumnName
 }
 
 // Name and ordinal are frozen together at declaration publication. The ordinal
 // addresses the matching full SHOW payload, never mutable column fields.
 type tableColumnName struct {
-	name    string
-	ordinal int
+	name        string
+	ordinal     int
+	computed    bool
+	computation scm.Scmer // immutable declared input names and closed pure procedure
 }
 
 func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableColumnNamesSnapshot) *tableShowColumnsSnapshot {
 	if columnNames == nil {
-		columnNames = t.buildColumnNamesSnapshot() // unpublished constructor or schema mutation owner
+		columnNames = t.buildColumnNamesSnapshot(t.Columns) // unpublished constructor or schema mutation owner
 	}
 	columns := columnNames.declarations
 	// Costing may price native rows without inspecting or invoking opaque
@@ -2144,19 +2347,9 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 	names := make([]string, len(columns))
 	distinctEstimates := make([]uint64, len(columns))
 	plannerStatistics := make([]*columnPlannerStatistics, len(columns))
-	filterSchema := plannerFingerprintString(0x1d26d8e71, t.Collation)
+	filterSchema := storedColumnFilterSchema(t.Collation, columns)
 	for i, c := range columns {
 		names[i] = c.Name
-		filterSchema = plannerFingerprintString(filterSchema, c.Name)
-		filterSchema = plannerFingerprintString(filterSchema, c.Typ)
-		filterSchema = plannerFingerprintString(filterSchema, c.Collation)
-		for _, dimension := range c.Typdimensions {
-			filterSchema = plannerFingerprintMix(filterSchema, uint64(dimension))
-		}
-		filterSchema = plannerFingerprintMix(filterSchema, uint64(len(c.Typdimensions)))
-		for _, label := range c.EnumValues {
-			filterSchema = plannerFingerprintString(filterSchema, label)
-		}
 		keyType := ""
 		for _, uk := range t.Unique {
 			for _, col := range uk.Cols {
@@ -2210,8 +2403,14 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 		},
 	}
 	if current := t.showColumnsSnapshot.Load(); current != nil {
+		snapshot.metadata.catalogVersion = current.metadata.catalogVersion
+		snapshot.metadata.catalogPrevious = current.metadata.catalogPrevious
 		snapshot.metadata.statistics = current.metadata.statistics
 		snapshot.metadata.constraints = current.metadata.constraints
+		snapshot.metadata.foreignByID = current.metadata.foreignByID
+		snapshot.metadata.declarations = current.metadata.declarations
+	} else {
+		snapshot.metadata.declarations = buildTableDeclarations(snapshot.metadata.columnRows, snapshot.metadata.constraints)
 	}
 	return snapshot
 }
@@ -2243,29 +2442,98 @@ func (t *table) publishReadProgramSnapshot() {
 	t.publishShowColumnsSnapshot(false)
 }
 
-func (t *table) buildColumnNamesSnapshot() *tableColumnNamesSnapshot {
+// buildTableDeclarations copies only the descriptive fields of an immutable
+// SHOW render. Value payloads belong to that render or the native declarations;
+// no statistics, data traversal, SQL rules or catalog capabilities are added.
+// Schema mutation owners call it before publishing columns and constraints.
+func buildTableDeclarations(rows, constraints scm.Scmer) scm.Scmer {
+	columns := make([]scm.Scmer, len(rows.Slice()))
+	for index, row := range rows.Slice() {
+		fields := row.Slice()
+		length := 0
+		for field := 0; field < len(fields); field += 2 {
+			if !columnDescriptionStatistic(fields[field].String()) {
+				length += 2
+			}
+		}
+		declaration := make([]scm.Scmer, 0, length)
+		for field := 0; field < len(fields); field += 2 {
+			if !columnDescriptionStatistic(fields[field].String()) {
+				declaration = append(declaration, fields[field], fields[field+1])
+			}
+		}
+		columns[index] = scm.NewSlice(declaration)
+	}
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewString("columns"), scm.NewSlice(columns),
+		scm.NewString("constraints"), constraints,
+	})
+}
+
+func columnDescriptionStatistic(name string) bool {
+	switch name {
+	case "DistinctEstimate", "RowEstimate", "StatisticsKnown", "StatisticsConfidence", "StatisticsSource", "DistinctEstimateSource", "NullFraction", "MinEstimate", "MaxEstimate", "AverageValueBytes":
+		return true
+	default:
+		return false
+	}
+}
+
+func (t *table) buildColumnNamesSnapshot(columns []*column) *tableColumnNamesSnapshot {
 	if t.publishedName.Load() == nil {
 		// The first column-directory publication belongs to the unpublished
 		// constructor/load. Later publications retain RENAME's immutable name.
 		name := t.Name
 		t.publishedName.CompareAndSwap(nil, &name)
 	}
-	exact := make(map[string]tableColumnName, len(t.Columns))
-	folded := make(map[string]tableColumnName, len(t.Columns))
-	for i, c := range t.Columns {
-		entry := tableColumnName{name: c.Name, ordinal: i}
+	exact := make(map[string]tableColumnName, len(columns))
+	folded := make(map[string]tableColumnName, len(columns))
+	hasDeclaredComputations := false
+	var initialByShard map[uuid.UUID]*nativeColumnInitialInput
+	var initialBytes uint
+	for i, c := range columns {
+		if !isRuntimeComputedColumn(c) && c.ComputorDefinition == nil {
+			value := c.InitialValue
+			if c.recoverPersisted != nil && !value.IsNil() {
+				value = c.recoverPersisted(value)
+			}
+			for id, extent := range c.InitialValues {
+				identity, err := uuid.Parse(id)
+				if err != nil {
+					panic("invalid native column initialization identity")
+				}
+				if initialByShard == nil {
+					initialByShard = make(map[uuid.UUID]*nativeColumnInitialInput)
+					initialBytes += 64
+				}
+				input := initialByShard[identity]
+				if input == nil {
+					input = &nativeColumnInitialInput{fields: make(map[string]nativeColumnInitialValue)}
+					initialByShard[identity] = input
+					initialBytes += 128 + uint(unsafe.Sizeof(*input)) + 64
+				}
+				input.fields[c.Name] = nativeColumnInitialValue{columnRecoveryValue: columnRecoveryValue{Value: value, columnInitialExtent: extent}, main: &StorageConst{value: value, count: uint64(extent.MainRows)}}
+				initialBytes += 128 + uint(unsafe.Sizeof(StorageConst{})) + scm.ComputeSize(value) - uint(unsafe.Sizeof(scm.Scmer{}))
+			}
+		}
+		computed := c.ComputorDefinition != nil
+		hasDeclaredComputations = hasDeclaredComputations || computed
+		entry := tableColumnName{name: c.Name, ordinal: i, computed: computed}
+		if computed {
+			entry.computation = scm.NewSlice([]scm.Scmer{showStringSlice(c.ComputorInputCols), c.Computor})
+		}
 		exact[c.Name] = entry
 		foldedName := scm.CaseFoldKey(c.Name)
 		if _, exists := folded[foldedName]; !exists {
 			folded[foldedName] = entry
 		}
 	}
-	return &tableColumnNamesSnapshot{declarations: append([]*column(nil), t.Columns...), exact: exact, folded: folded}
+	return &tableColumnNamesSnapshot{declarations: append([]*column(nil), columns...), exact: exact, folded: folded, hasDeclaredComputations: hasDeclaredComputations, initialByShard: initialByShard, initialBytes: initialBytes}
 }
 
 func (t *table) publishColumnNamesSnapshot() *tableColumnNamesSnapshot {
 
-	snapshot := t.buildColumnNamesSnapshot()
+	snapshot := t.buildColumnNamesSnapshot(t.Columns)
 	t.columnNamesSnapshot.Store(snapshot)
 	return snapshot
 }
@@ -2278,12 +2546,9 @@ var emptyTableConstraints = scm.NewSlice([]scm.Scmer{
 	scm.NewString("ForeignKeys"), scm.NewSlice(nil),
 })
 
-func (t *table) buildConstraintMetadata() scm.Scmer {
-	if len(t.Unique) == 0 && len(t.Foreign) == 0 {
-		return emptyTableConstraints
-	}
-	keys := make([]scm.Scmer, len(t.Unique))
-	for i, key := range t.Unique {
+func uniqueConstraintMetadata(definitions []uniqueKey) []scm.Scmer {
+	keys := make([]scm.Scmer, len(definitions))
+	for i, key := range definitions {
 		keys[i] = scm.NewSlice([]scm.Scmer{
 			scm.NewString("Id"), scm.NewString(key.Id),
 			scm.NewString("Cols"), showStringSlice(key.Cols),
@@ -2291,11 +2556,33 @@ func (t *table) buildConstraintMetadata() scm.Scmer {
 			scm.NewString("nulls_not_distinct"), scm.NewBool(key.NullsNotDistinct),
 		})
 	}
-	foreign := make([]scm.Scmer, 0, len(t.Foreign))
+	return keys
+}
+
+func (t *table) buildConstraintMetadata(foreignDeclarations []foreignKey) scm.Scmer {
+	if len(t.Unique) == 0 && len(foreignDeclarations) == 0 && len(t.Checks) == 0 {
+		return emptyTableConstraints
+	}
+	keys := uniqueConstraintMetadata(t.Unique)
+	constraints := []scm.Scmer{
+		scm.NewString("Unique"), scm.NewSlice(keys),
+		scm.NewString("ForeignKeys"), t.buildForeignConstraintMetadata(foreignDeclarations),
+	}
+	if len(t.Checks) != 0 {
+		constraints = append(constraints, scm.NewString("Checks"), checkConstraintMetadata(t.Checks, false))
+	}
+	return scm.NewSlice(constraints)
+}
+
+// Foreign descriptions consume only explicit declarations and this admitted
+// endpoint's stable name. Public amendments can build them outside schema locks
+// without reading or rebuilding unrelated UNIQUE metadata.
+func (t *table) buildForeignConstraintMetadata(foreignDeclarations []foreignKey) scm.Scmer {
+	foreign := make([]scm.Scmer, 0, len(foreignDeclarations))
 	// Self references can occur twice in the existing native endpoint directory.
 	// List each declaration once, without changing that enforcement directory.
-	seen := make(map[[3]string]bool, len(t.Foreign))
-	for _, key := range t.Foreign {
+	seen := make(map[[3]string]bool, len(foreignDeclarations))
+	for _, key := range foreignDeclarations {
 		identity := [3]string{key.Id, key.Tbl1, key.Tbl2}
 		if seen[identity] {
 			continue
@@ -2307,7 +2594,7 @@ func (t *table) buildConstraintMetadata() scm.Scmer {
 			role, other = "referencing", key.Tbl2
 			local, remote = key.Cols1, key.Cols2
 		}
-		foreign = append(foreign, scm.NewSlice([]scm.Scmer{
+		fields := []scm.Scmer{
 			scm.NewString("Id"), scm.NewString(key.Id),
 			scm.NewString("Role"), scm.NewString(role),
 			scm.NewString("LocalColumns"), showStringSlice(local),
@@ -2315,19 +2602,20 @@ func (t *table) buildConstraintMetadata() scm.Scmer {
 			scm.NewString("OtherColumns"), showStringSlice(remote),
 			scm.NewString("UpdateMode"), scm.NewString(showForeignKeyMode(key.Updatemode)),
 			scm.NewString("DeleteMode"), scm.NewString(showForeignKeyMode(key.Deletemode)),
-		}))
+		}
+		if key.Untrusted {
+			fields = append(fields, scm.NewString("Enabled"), scm.NewBool(true), scm.NewString("Trusted"), scm.NewBool(false))
+		}
+		foreign = append(foreign, scm.NewSlice(fields))
 	}
-	return scm.NewSlice([]scm.Scmer{
-		scm.NewString("Unique"), scm.NewSlice(keys),
-		scm.NewString("ForeignKeys"), scm.NewSlice(foreign),
-	})
+	return scm.NewSlice(foreign)
 }
 
 // Constraints borrows one immutable catalog publication. It never acquires a
 // schema/table/shard lock, visits storage, rebuilds metadata, or updates counters.
 func (t *table) Constraints() scm.Scmer {
 	if t != nil {
-		if snapshot := t.showColumnsSnapshot.Load(); snapshot != nil && !snapshot.metadata.constraints.IsNil() {
+		if snapshot := t.catalogVisibleMetadata(); snapshot != nil && !snapshot.metadata.constraints.IsNil() {
 			return snapshot.metadata.constraints
 		}
 	}
@@ -2339,15 +2627,23 @@ func (t *table) Constraints() scm.Scmer {
 // lazy refresh carry forward immutable constraint metadata; they never inspect
 // mutable Foreign slices or acquire a catalog lock.
 func (t *table) publishShowColumnsSnapshot(constraintsChanged bool) scm.Scmer {
+	if constraintsChanged {
+		t.refreshForeignMemoryLocked()
+		t.refreshCheckMemoryLocked()
+	}
 	for {
 		current := t.showColumnsSnapshot.Load()
 		snapshot := t.buildShowColumnsSnapshot(t.CountEstimate(), nil)
 		if constraintsChanged {
-			snapshot.metadata.constraints = t.buildConstraintMetadata()
+			snapshot.metadata.constraints = t.buildConstraintMetadata(t.Foreign)
+			snapshot.metadata.foreignByID = buildForeignMetadataDirectory(snapshot.metadata.constraints)
+		}
+		snapshot.metadata.declarations = buildTableDeclarations(snapshot.metadata.columnRows, snapshot.metadata.constraints)
+		if constraintsChanged {
 			t.columnNamesSnapshot.Store(snapshot.metadata.columnNames)
 			t.showColumnsSnapshot.Store(snapshot)
 		} else {
-			// A maintenance/lazy render must not overwrite a newer declaration.
+			// A column-only schema publication must not overwrite a newer owner.
 			if !t.showColumnsSnapshot.CompareAndSwap(current, snapshot) {
 				continue
 			}
@@ -2364,6 +2660,45 @@ func (t *table) publishShowColumnsSnapshot(constraintsChanged bool) scm.Scmer {
 	}
 }
 
+// refreshShowColumnsStatistics publishes estimates while retaining the exact
+// schema-owned description. Maintenance never reconstructs declaration facts
+// from mutable columns or combines them with a different constraint revision.
+func (t *table) refreshShowColumnsStatistics() scm.Scmer {
+	for {
+		current := t.showColumnsSnapshot.Load()
+		var names *tableColumnNamesSnapshot
+		if current != nil {
+			names = current.metadata.columnNames
+		}
+		snapshot := t.buildShowColumnsSnapshot(t.CountEstimate(), names)
+		if current != nil {
+			snapshot.metadata.constraints = current.metadata.constraints
+			snapshot.metadata.foreignByID = current.metadata.foreignByID
+			snapshot.metadata.declarations = current.metadata.declarations
+		}
+		if t.showColumnsSnapshot.CompareAndSwap(current, snapshot) {
+			t.columnNamesSnapshot.CompareAndSwap(names, snapshot.metadata.columnNames)
+			t.publishPlannerStatsToken()
+			visible := t.catalogVisibleMetadata()
+			if visible.value.IsNil() {
+				return visible.metadata.columnRows
+			}
+			return visible.value
+		}
+	}
+}
+
+// Declarations borrows columns and constraints from one immutable publication.
+// It performs no lazy construction, ownership acquisition or storage access.
+func (t *table) Declarations() scm.Scmer {
+	if t != nil {
+		if snapshot := t.catalogVisibleMetadata(); snapshot != nil && snapshot.metadata != nil {
+			return snapshot.metadata.declarations
+		}
+	}
+	return scm.NewNil()
+}
+
 func (t *table) invalidateShowColumnsSnapshot() {
 	names := t.publishColumnNamesSnapshot()
 	// Invalidation already constructs complete declarations for point reads.
@@ -2372,6 +2707,7 @@ func (t *table) invalidateShowColumnsSnapshot() {
 	for {
 		current := t.showColumnsSnapshot.Load()
 		snapshot := t.buildShowColumnsSnapshot(t.CountEstimate(), names)
+		snapshot.metadata.declarations = buildTableDeclarations(snapshot.metadata.columnRows, snapshot.metadata.constraints)
 		if t.showColumnsSnapshot.CompareAndSwap(current, snapshot) {
 			break
 		}
@@ -2383,11 +2719,11 @@ func (t *table) invalidateShowColumnsSnapshot() {
 // name directory. Lookup is O(1) in column count, with no locks, shard access,
 // counters or lazy rendering. Constructors and DDL publish descriptions before
 // exposing the table; an unpublished/missing declaration returns nil.
-func (t *table) ShowColumn(name string, ignoreCase bool) scm.Scmer {
+func (t *table) ShowColumn(name string, ignoreCase bool, tx *TxContext) scm.Scmer {
 	if t == nil {
 		return scm.NewNil()
 	}
-	snapshot := t.showColumnsSnapshot.Load()
+	snapshot := t.declarationMetadataForTx(tx)
 	if snapshot == nil || snapshot.metadata == nil || snapshot.metadata.columnNames == nil {
 		return scm.NewNil()
 	}
@@ -2402,6 +2738,28 @@ func (t *table) ShowColumn(name string, ignoreCase bool) scm.Scmer {
 		}
 	}
 	return scm.NewNil()
+}
+
+// ShowComputation borrows a declared computation from the same immutable
+// directory as ShowColumn. Runtime caches have no declaration and return nil.
+// The closed pure function retains no invocation, session or transaction.
+func (t *table) ShowComputation(name string, ignoreCase bool, tx *TxContext) scm.Scmer {
+	if t == nil {
+		return scm.NewNil()
+	}
+	snapshot := t.declarationMetadataForTx(tx)
+	if snapshot == nil || snapshot.metadata == nil || snapshot.metadata.columnNames == nil {
+		return scm.NewNil()
+	}
+	names := snapshot.metadata.columnNames
+	resolved, ok := names.exact[name]
+	if !ok && ignoreCase {
+		resolved, ok = names.folded[scm.CaseFoldKey(name)]
+	}
+	if !ok || !resolved.computed {
+		return scm.NewNil()
+	}
+	return resolved.computation
 }
 
 // ResolveColumnName reads immutable DDL metadata without scanning SHOW rows.
@@ -2423,15 +2781,20 @@ func (t *table) ResolveColumnName(name string, ignoreCase bool) (string, bool) {
 	return "", false
 }
 
-func (t *table) ShowColumns() scm.Scmer {
+func (t *table) ShowColumns(tx *TxContext) scm.Scmer {
 	if t == nil {
 		return scm.NewNil()
 	}
-	snapshot := t.showColumnsSnapshot.Load()
+	snapshot := t.declarationMetadataForTx(tx)
 	if snapshot != nil && !snapshot.value.IsNil() {
 		return snapshot.value
 	}
-	return t.publishShowColumnsSnapshot(false)
+	if snapshot != nil && snapshot.metadata != nil && !snapshot.metadata.columnRows.IsNil() {
+		return snapshot.metadata.columnRows
+	}
+	// Only an unpublished native constructor/test table can lack a declaration
+	// publication. Published and transactional metadata readers never render it.
+	return t.refreshShowColumnsStatistics()
 }
 
 // PlannerStatistics returns one immutable, atomically published catalog value.
@@ -2446,7 +2809,7 @@ func (t *table) PlannerStatistics() scm.Scmer {
 		if snapshot != nil && !snapshot.plannerValue.IsNil() {
 			return snapshot.plannerValue
 		}
-		t.publishShowColumnsSnapshot(false)
+		t.refreshShowColumnsStatistics()
 	}
 }
 
@@ -2465,7 +2828,7 @@ func (t *table) PlannerStatisticsFingerprint(includeFeedback bool) uint64 {
 			}
 			return snapshot.plannerFingerprint
 		}
-		t.publishShowColumnsSnapshot(false)
+		t.refreshShowColumnsStatistics()
 	}
 }
 
@@ -2561,10 +2924,13 @@ func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint,
 		scm.NewString("Key"), scm.NewString(keyType),
 		scm.NewString("Default"), c.Default,
 		scm.NewString("DefaultExpression"), scm.NewString(c.DefaultExpression),
+		scm.NewString("DefaultDeferred"), scm.NewBool(c.DefaultDeferred),
 		scm.NewString("DefaultName"), scm.NewString(c.DefaultName),
 		scm.NewString("Extra"), scm.NewString(extra),
+		scm.NewString("Computed"), scm.NewBool(isRuntimeComputedColumn(c)),
 		scm.NewString("Privileges"), scm.NewString("select,insert,update,references"),
 		scm.NewString("Comment"), scm.NewString(c.Comment),
+		scm.NewString("Properties"), c.DeclarationProperties.description(),
 		scm.NewString("DistinctEstimate"), scm.NewInt(int64(distinctEstimate)),
 		scm.NewString("RowEstimate"), scm.NewInt(int64(rowEstimate)),
 		scm.NewString("StatisticsKnown"), scm.NewBool(statisticsKnown),
@@ -2650,6 +3016,7 @@ func truncateStringCharacters(value string, limit int) string {
 }
 
 func (c *column) UpdateSanitizer() {
+	c.recoverPersisted = nil
 	typ := strings.ToUpper(c.Typ)
 	allowNull := c.AllowNull
 	name := c.Name
@@ -2697,6 +3064,11 @@ func (c *column) UpdateSanitizer() {
 					panic("cannot convert string to DECIMAL for column " + name + ": " + v.String())
 				}
 			}
+			// A scale-zero integer is already normalized. Passing it through
+			// float64 would discard low bits before either storage or WAL sees it.
+			if len(dims) >= 2 && dims[1] == 0 && v.IsInt() {
+				return v
+			}
 			f := v.Float()
 			if len(dims) >= 2 && dims[1] == 0 {
 				// DECIMAL(n,0) → round to integer
@@ -2740,13 +3112,17 @@ func (c *column) UpdateSanitizer() {
 				if ts, err := strconv.ParseInt(v.String(), 10, 64); err == nil {
 					return scm.NewDate(ts)
 				}
-				if ts, ok := scm.ParseDateString(v.String()); ok {
-					return scm.NewDate(ts)
+				if value, ok := scm.ParseDateValue(v.String()); ok {
+					return value
 				}
 				panic("cannot parse date string for column " + name + ": " + v.String())
 			}
 			return scm.NewDate(v.Int())
 		}
+		// Historical calendar WAL used public JSON text. Restore only its
+		// native scalar representation; recovery never reruns defaults,
+		// identities, triggers, string limits or other assignment policies.
+		c.recoverPersisted = inner
 	case "ENUM":
 		if len(c.EnumValues) == 0 || len(c.EnumValues) > 65535 {
 			panic("ENUM requires between 1 and 65535 labels for column " + name)
@@ -2854,11 +3230,13 @@ func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 	case "default":
 		c.Default = val
 		c.DefaultExpression = ""
+		c.DefaultDeferred = false
 		c.DefaultName = ""
 		return c.Default
 	case "default_expression":
 		c.Default = scm.NewNil()
 		c.DefaultExpression = scm.String(val)
+		c.DefaultDeferred = false
 		c.DefaultName = ""
 		return scm.NewString(c.DefaultExpression)
 	case "add_default", "default_declaration":
@@ -2866,13 +3244,17 @@ func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 			panic("column already has a default")
 		}
 		parts := mustScmerSlice(val, "default declaration")
-		if len(parts) != 3 || !parts[1].IsString() || !parts[2].IsString() {
-			panic("default declaration requires value, expression and name")
+		if (len(parts) != 3 && len(parts) != 4) || !parts[1].IsString() || !parts[2].IsString() || len(parts) == 4 && !parts[3].IsBool() {
+			panic("default declaration requires value, expression, name and optional deferred flag")
 		}
-		c.Default, c.DefaultExpression, c.DefaultName = parts[0], parts[1].String(), parts[2].String()
+		deferred := len(parts) == 4 && parts[3].Bool()
+		if deferred && (!parts[0].IsNil() || parts[1].String() == "") {
+			panic("deferred default requires an opaque source and no constant value")
+		}
+		c.Default, c.DefaultExpression, c.DefaultName, c.DefaultDeferred = parts[0], parts[1].String(), parts[2].String(), deferred
 		return c.Default
 	case "drop_default":
-		c.Default, c.DefaultExpression, c.DefaultName = scm.NewNil(), "", ""
+		c.Default, c.DefaultExpression, c.DefaultName, c.DefaultDeferred = scm.NewNil(), "", "", false
 		return scm.NewBool(true)
 	case "null":
 		c.AllowNull = scm.ToBool(val)
@@ -2885,6 +3267,20 @@ func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 		c.Collation = scm.String(val)
 		c.UpdateSanitizer()
 		return scm.NewString(c.Collation)
+	case "properties":
+		c.DeclarationProperties = columnPropertiesFromValue(val)
+		return scm.NewBool(true)
+	case "drop_property":
+		if !val.IsString() || val.String() == "" {
+			panic("column property removal requires a nonempty key")
+		}
+		if _, found := c.DeclarationProperties[val.String()]; !found {
+			return scm.NewBool(false)
+		}
+		properties := maps.Clone(c.DeclarationProperties)
+		delete(properties, val.String())
+		c.DeclarationProperties = properties
+		return scm.NewBool(true)
 	case "comment":
 		c.Comment = scm.String(val)
 		return scm.NewString(c.Comment)
@@ -2936,7 +3332,7 @@ func (t *table) columnDeclarations() []*column {
 // requires revalidation against the prepared output. INSERT IGNORE cannot skip it.
 func validateInsertColumns(columns []string, declarations []*column) {
 	for _, c := range declarations {
-		if c.AllowNull || c.AutoIncrement || c.hasDefault() {
+		if c.ComputorDefinition != nil || c.AllowNull || c.AutoIncrement || c.hasDefault() {
 			continue
 		}
 		found := false
@@ -2960,6 +3356,9 @@ func validateInsertColumns(columns []string, declarations []*column) {
 func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique, nullsNotDistinct bool) (release func()) {
 	value := scm.NewNil()
 	if c.hasDefault() {
+		if c.DefaultDeferred {
+			panic("deferred default requires explicit historical column initialization")
+		}
 		declared := c.defaultValue()
 		if c.sanitizer != nil {
 			declared = c.sanitizer(declared)
@@ -3072,23 +3471,21 @@ func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique, null
 	return release
 }
 
-// createColumnLocked mutates table metadata while the database schemalock is
-// held. It does not persist schema.json yet; callers must follow up with a
-// single saveLockedAndUnlock once the whole DDL mutation is complete.
-func (t *table) createColumnLocked(name string, typ string, typdimensions []int, extrainfo []scm.Scmer, initializeExisting bool) (*column, bool) {
-	ignoreCase := false
-	for i := 0; i+1 < len(extrainfo); i += 2 {
-		if scm.String(extrainfo[i]) == "name_ignorecase" {
-			ignoreCase = scm.ToBool(extrainfo[i+1])
-		}
-	}
-	for _, c := range t.Columns {
-		if c.Name == name || (ignoreCase && strings.EqualFold(c.Name, name)) {
-			return nil, false // column already exists
-		}
-	}
+type decodedColumnDefinition struct {
+	column           *column
+	unique           []uniqueKey
+	fillExisting     bool
+	hasDefault       bool
+	nullsNotDistinct bool
+}
 
-	var c column
+// Decode declaration data before either immediate or original-T publication.
+// This owner performs no table, shard, catalog or row mutation.
+func decodeColumnDefinition(name, typ string, typdimensions []int, extrainfo []scm.Scmer) decodedColumnDefinition {
+	if len(extrainfo)%2 != 0 {
+		panic("column attributes must be key/value pairs")
+	}
+	c := new(column)
 	var uniqueKeys []uniqueKey
 	constraintName := ""
 	nullsNotDistinct := false
@@ -3125,6 +3522,11 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.Default = extrainfo[i+1]
 		case "default_expression":
 			c.DefaultExpression = scm.String(extrainfo[i+1])
+		case "default_deferred":
+			if !extrainfo[i+1].IsBool() {
+				panic("deferred default flag must be Boolean")
+			}
+			c.DefaultDeferred = extrainfo[i+1].Bool()
 		case "default_name":
 			c.DefaultName = scm.String(extrainfo[i+1])
 		case "update":
@@ -3134,6 +3536,8 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			for i, label := range c.EnumValues {
 				c.EnumValues[i] = strings.TrimRight(label, " ")
 			}
+		case "properties":
+			c.DeclarationProperties = columnPropertiesFromValue(extrainfo[i+1])
 		case "comment":
 			c.Comment = scm.String(extrainfo[i+1])
 		case "collate":
@@ -3152,6 +3556,35 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		uniqueKeys[i].NullsNotDistinct = nullsNotDistinct
 		uniqueKeys[i].ConstraintName = constraintName
 	}
+	if strings.EqualFold(c.Typ, "ENUM") && !c.AllowNull && !hasDefault && len(c.EnumValues) > 0 {
+		c.Default = scm.NewString(c.EnumValues[0])
+	}
+	if c.DefaultDeferred && (!c.Default.IsNil() || c.DefaultExpression == "") {
+		panic("deferred default requires an opaque source and no constant value")
+	}
+	c.UpdateSanitizer()
+	return decodedColumnDefinition{c, uniqueKeys, fillExisting, hasDefault, nullsNotDistinct}
+}
+
+// createColumnLocked mutates table metadata while the database schemalock is
+// held. It does not persist schema.json yet; callers must follow up with a
+// single saveLockedAndUnlock once the whole DDL mutation is complete.
+func (t *table) createColumnLocked(name string, typ string, typdimensions []int, extrainfo []scm.Scmer, initializeExisting bool) (*column, bool) {
+	ignoreCase := false
+	for i := 0; i+1 < len(extrainfo); i += 2 {
+		if scm.String(extrainfo[i]) == "name_ignorecase" {
+			ignoreCase = scm.ToBool(extrainfo[i+1])
+		}
+	}
+	for _, c := range t.Columns {
+		if c.Name == name || (ignoreCase && strings.EqualFold(c.Name, name)) {
+			return nil, false // column already exists
+		}
+	}
+
+	definition := decodeColumnDefinition(name, typ, typdimensions, extrainfo)
+	c, uniqueKeys, fillExisting := definition.column, definition.unique, definition.fillExisting
+	nullsNotDistinct := definition.nullsNotDistinct
 	if len(uniqueKeys) != 0 {
 		validateUniqueConstraintNames(append(append([]uniqueKey(nil), t.Unique...), uniqueKeys...))
 	}
@@ -3169,11 +3602,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			panic("declaration name already exists: " + c.DefaultName)
 		}
 	}
-	if strings.EqualFold(c.Typ, "ENUM") && !c.AllowNull && !hasDefault && len(c.EnumValues) > 0 {
-		c.Default = scm.NewString(c.EnumValues[0])
-	}
-	c.UpdateSanitizer()
-	if !initializeExisting && !c.IsTemp && c.hasDefault() {
+	if !initializeExisting && !c.IsTemp && c.hasDefault() && !c.DefaultDeferred {
 		declared := c.defaultValue()
 		if c.sanitizer != nil {
 			declared = c.sanitizer(declared)
@@ -3182,7 +3611,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.Default = declared
 		}
 	}
-	cp := &c
+	cp := c
 	if initializeExisting && !c.IsTemp && !c.AutoIncrement {
 		release := t.initializeColumnRowsLocked(cp, fillExisting, len(uniqueKeys) != 0, nullsNotDistinct)
 		defer release()
@@ -3300,6 +3729,7 @@ func (col *column) evict(_ evictionMode, currentSize int64, freedByType *[numEvi
 }
 
 func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []int, extrainfo []scm.Scmer, queryTx *TxContext) bool {
+	t.requireCatalogDataVisibility(queryTx)
 	// Ordinary DDL retains its existing fast path. Statement preparation must
 	// find and pin the current definition atomically with cache eviction.
 	if queryTx == nil {
@@ -3411,6 +3841,7 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 	if !temporary {
 		t, schemaAccess = t.schemaWrite()
 		defer schemaAccess.Release()
+		defer t.admitNativeMaintenance()()
 	}
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
@@ -3426,12 +3857,13 @@ func cloneStoredColumnDeclaration(current *column) *column {
 		EnumValues:        append([]string(nil), current.EnumValues...),
 		PartitioningScore: current.PartitioningScore,
 		AutoIncrement:     current.AutoIncrement, Default: current.Default,
-		DefaultExpression: current.DefaultExpression,
-		DefaultName:       current.DefaultName,
-		InitialValue:      current.InitialValue, InitialValues: current.InitialValues,
+		DefaultExpression: current.DefaultExpression, DefaultDeferred: current.DefaultDeferred,
+		DefaultName:  current.DefaultName,
+		InitialValue: current.InitialValue, InitialValues: current.InitialValues,
 		OnUpdate: current.OnUpdate, AllowNull: current.AllowNull,
 		Collation: current.Collation, Comment: current.Comment,
-		sanitizer: current.sanitizer,
+		DeclarationProperties: maps.Clone(current.DeclarationProperties),
+		sanitizer:             current.sanitizer,
 	}
 	replacement.partitioningTraffic.Store(current.partitioningTraffic.Load())
 	replacement.partitioningRangeTraffic.Store(current.partitioningRangeTraffic.Load())
@@ -3445,12 +3877,23 @@ func cloneStoredColumnDeclaration(current *column) *column {
 // schema owner and immutable stored-column publication as complete declarations.
 // Cache/computed columns retain their existing descriptor/lifecycle identity.
 func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
+	if operation == "auto_increment" && scm.ToInt(value) > 1 {
+		t.prepareAllocatorRecovery()
+	}
 	if operation == "drop" {
 		return scm.NewBool(t.DropColumn(name))
+	}
+	if operation == "drop_default" {
+		requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+		t.schema.GetRead(nil).Release()
+		if !t.mayHaveDefaultDeclaration(name, nil) {
+			return scm.NewBool(false)
+		}
 	}
 	t, schemaAccess := t.schemaWrite()
 	defer schemaAccess.Release()
 	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+	defer t.admitNativeMaintenance()()
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
 	t.schema.schemalock.Lock()
@@ -3466,9 +3909,20 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 			continue
 		}
 		result := scm.NewBool(true)
+		t.requireDeclaredColumnAlter(current, operation, value)
 		if operation == "auto_increment" && scm.ToInt(value) > 1 {
-			// This is the existing allocator update; no column clone owns it.
-			atomic.StoreUint64(&t.Auto_increment, uint64(scm.ToInt(value)))
+			// The actual schema access, maintenance admission and ddlMu retain
+			// this generation and declaration. Reservation may checkpoint the
+			// shared schema owner, which takes schemalock.RLock itself.
+			metadataLocked = false
+			t.schema.schemalock.Unlock()
+			func() {
+				defer func() {
+					t.schema.schemalock.Lock()
+					metadataLocked = true
+				}()
+				t.reserveAutoIncrement(uint64(scm.ToInt(value)), 0, false)
+			}()
 		} else {
 			replacement := current
 			if !current.IsTemp && !isRuntimeComputedColumn(current) {
@@ -3477,7 +3931,9 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 				}
 				replacement = cloneStoredColumnDeclaration(current)
 			}
-			if operation == "auto_increment" {
+			if operation == "claim_property" {
+				replacement = t.claimColumnProperty(t.Columns, index, decodeColumnPropertyClaim(value))
+			} else if operation == "auto_increment" {
 				replacement.AutoIncrement = scm.ToBool(value)
 			} else {
 				if replacement != current && (operation == "type" || operation == "dimensions" || operation == "null") {
@@ -3522,26 +3978,30 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 func (t *table) AlterColumnDeclaration(name string, declaration, expected scm.Scmer) bool {
 	t, schemaAccess := t.schemaWrite()
 	defer schemaAccess.Release()
-	decode := func(value scm.Scmer) (string, []int, bool, string) {
-		if !value.IsSlice() || len(value.Slice()) != 4 {
-			panic("column declaration requires type, dimensions, nullability and collation")
-		}
-		parts := value.Slice()
-		if !parts[0].IsString() || !parts[1].IsSlice() || !parts[2].IsBool() || !parts[3].IsString() {
-			panic("invalid column declaration shape")
-		}
-		dimensions := make([]int, len(parts[1].Slice()))
-		for i, dimension := range parts[1].Slice() {
-			if !dimension.IsInt() {
-				panic("column declaration dimensions must be integers")
-			}
-			dimensions[i] = int(dimension.Int())
-		}
-		return parts[0].String(), dimensions, parts[2].Bool(), parts[3].String()
-	}
-	typ, dimensions, nullable, collation := decode(declaration)
-	previousType, previousDimensions, previousNullable, previousCollation := decode(expected)
 	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+	return t.alterColumnDeclarationOwned(name, declaration, expected)
+}
+
+// Startup migrations use the same current schema authority, expected declaration
+// and publication kernel. Public ALTER keeps its separate maintenance policy.
+func (t *table) migrateColumnDeclaration(name string, declaration, expected scm.Scmer) bool {
+	t, schemaAccess := t.schemaWrite()
+	defer schemaAccess.Release()
+	if !t.committedAt(t.schema.catalogView().version) {
+		panic("column migration requires a published table")
+	}
+	return t.alterColumnDeclarationOwned(name, declaration, expected)
+}
+
+// The caller owns the resolved table's schema write capability throughout.
+func (t *table) alterColumnDeclarationOwned(name string, declaration, expected scm.Scmer) bool {
+	declared, predecessor := decodeStoredColumnType(declaration), decodeStoredColumnType(expected)
+	typ, dimensions, nullable, collation := declared.Type, declared.Dimensions, declared.Nullable, declared.Collation
+	previousType, previousDimensions, previousNullable, previousCollation := predecessor.Type, predecessor.Dimensions, predecessor.Nullable, predecessor.Collation
+	defer t.admitNativeMaintenance()()
+	if previousNullable && !nullable {
+		validateColumnNotNull(nil, t, name)
+	}
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
 	t.schema.schemalock.Lock()
@@ -3563,9 +4023,12 @@ func (t *table) AlterColumnDeclaration(name string, declaration, expected scm.Sc
 		if current.Typ == typ && current.AllowNull == nullable && current.Collation == collation && slices.Equal(current.Typdimensions, dimensions) {
 			return true
 		}
+		t.requireNoConstraintColumnChange(name)
+		t.requireNoDeclaredComputationInput(name)
 		if current.Typ != previousType || current.AllowNull != previousNullable || current.Collation != previousCollation || !slices.Equal(current.Typdimensions, previousDimensions) {
 			panic("column declaration changed before ALTER publication")
 		}
+		t.requireColumnCollationChange(current, collation)
 		if nullable {
 			for _, key := range t.Unique {
 				if key.Id == "PRIMARY" && slices.Contains(key.Cols, name) {
@@ -3597,7 +4060,16 @@ func (t *table) AlterColumnDeclaration(name string, declaration, expected scm.Sc
 }
 
 func (t *table) dropColumnDDLLocked(name string) bool {
+	t.requireNoDeclaredComputationInput(name)
 	t.schema.schemalock.Lock()
+	if dependency := t.checkColumnDependency(name); dependency != nil {
+		t.schema.schemalock.Unlock()
+		panic("column declaration is required by check constraint " + dependency.Id + ": " + name)
+	}
+	if dependency := t.foreignColumnDependency(name); dependency != nil {
+		t.schema.schemalock.Unlock()
+		panic("column declaration is required by foreign key " + dependency.Id + ": " + name)
+	}
 	var removedCol *column
 	for i, c := range t.Columns {
 		if c.Name == name {
@@ -3639,6 +4111,7 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 
 func (t *table) DropColumn(name string) bool {
 	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+	defer t.admitNativeMaintenance()()
 	return t.dropColumnForMigration(name)
 }
 
@@ -3712,6 +4185,19 @@ func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *sto
 	sourceIndex := newIndex - 1
 	t.mu.Unlock()
 
+	// A private native catalog generation has no durable directory yet. Keep
+	// every appended lane in the same transaction-owned topology; its complete
+	// declaration and WAL identities are published by the catalog decision.
+	// Rebuilding here would prematurely externalize uncommitted blobs and rows.
+	if !t.committedAt(t.schema.catalogView().version) {
+		t.mu.Lock()
+		published := t.publishTopologyLocked()
+		t.maintenanceKind = 0
+		t.mu.Unlock()
+		t.maintenanceMu.Unlock()
+		return published, newShard
+	}
+
 	var savePanic any
 	func() {
 		defer func() { savePanic = recover() }()
@@ -3781,6 +4267,7 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 	}()
 
 	rebuilt := source.rebuild(false)
+	source.flushRebuildSuccessor(rebuilt)
 	source.mu.Lock()
 	t.mu.Lock()
 	if t.ShardMode != ShardModeFree || index >= len(t.Shards) || t.Shards[index] != source {
@@ -3817,37 +4304,63 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 
 // Reserve one generated-ID range per batch without taking the topology mutex
 // from inside a shard writer. Explicit IDs advance the same monotonic counter.
-func (t *table) reserveAutoIncrement(explicit, generated uint64) uint64 {
+func (t *table) reserveAutoIncrement(explicit, generated uint64, observedExplicit bool) uint64 {
 	if sharedClusterSource(t) {
-		return activeNodeCluster().reserveInsertIDs(t, explicit, generated)
+		return activeNodeCluster().reserveInsertIDs(t, explicit, generated, observedExplicit)
 	}
-	return t.reserveLocalAutoIncrement(explicit, generated)
-}
-
-func (t *table) reserveLocalAutoIncrement(explicit, generated uint64) uint64 {
-	for {
-		previous := atomic.LoadUint64(&t.Auto_increment)
-		base := max(previous, explicit)
-		// Generated values use the runtime's signed integer carrier. Recovery of
-		// old explicit counters remains unchanged when no IDs are requested.
-		if generated > 0 && (base > math.MaxInt64 || generated > math.MaxInt64-base) {
-			panic("generated ID block exceeds native integer capacity")
-		}
-		if base == previous && generated == 0 {
-			return base
-		}
-		if atomic.CompareAndSwapUint64(&t.Auto_increment, previous, base+generated) {
-			return base
-		}
-	}
+	return t.reserveLocalAutoIncrement(explicit, generated, observedExplicit)
 }
 
 // Insert chooses the native execution site before evaluating defaults, allocating
 // IDs or taking UNIQUE guards. A delegated command is never replayed after send.
 func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64), currentTxArgs ...*TxContext) int {
+	if snapshot := t.columnNamesSnapshot.Load(); snapshot != nil && snapshot.hasDeclaredComputations {
+		for _, name := range columns {
+			if snapshot.exact[name].computed {
+				panic("cannot write declared computed column: " + name)
+			}
+		}
+	}
 	var tx *TxContext
 	if len(currentTxArgs) != 0 {
 		tx = currentTxArgs[0]
+	}
+	tx, finishData := t.insertDataContext(tx)
+	defer finishData()
+
+	if tx != nil && tx.mutationOperation != nil {
+		release := tx.mutationOperation.borrowMutation(tx)
+		defer func() {
+			failure := recover()
+			release(failure)
+			if failure != nil {
+				panic(failure)
+			}
+		}()
+	}
+	if input := tx.mutationInputFor(t); input != nil {
+		if input.event != nativeMutationInsert || !onCollision.IsNil() {
+			panic("private declaration input requires its checked INSERT producer without collision callbacks")
+		}
+	}
+	t.requireStatementTriggerMutation(tx, nativeMutationInsert)
+	t.admitCheckMutation(tx, "INSERT")
+	if tx != nil {
+		tx.admitCatalogMutation(t)
+		tx.noteNativeRowAccess(t)
+	}
+	admit := t.admitNativeWrite
+	if !onCollision.IsNil() && slices.Contains(onCollisionCols, "$update") {
+		admit = t.admitNativeMutationCallbacks
+	}
+	releaseAdmission := admit(tx)
+	defer releaseAdmission()
+	// Whole-statement undo also protects ordinary synchronous row callbacks.
+	// Collision support depends on this admitted target's declarations, not
+	// on whether an enclosing producer owns that same undo boundary.
+	if tx.hasStatementUndo() && !onCollision.IsNil() &&
+		(t.hasCheckConstraints.Load() || t.statementTriggerEvents.Load() != 0) {
+		panic("checked statement does not support INSERT collision handlers")
 	}
 	replicationCheckWriteTable(t, tx)
 	if count, handled := t.placeInsert(columns, values, onCollisionCols, onCollision, mergeNull, onFirstInsertId, tx); handled {
@@ -3861,6 +4374,25 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 	if len(currentTxArgs) > 0 {
 		currentTx = currentTxArgs[0]
 	}
+	input := currentTx.mutationInputFor(t)
+	if input != nil && (input.event != nativeMutationInsert || !onCollision.IsNil()) {
+		panic("private declaration input requires its checked INSERT producer without collision callbacks")
+	}
+	keys := mutationUniqueKeys(t, input)
+	// Insert has already resolved and borrowed its exact writer invocation.
+	// Remote callers supply their public invocation; private data views are
+	// nonserializable. Resolving again here adds a lease to every streaming row.
+	t.admitCheckMutation(currentTx, "INSERT")
+	if currentTx != nil {
+		currentTx.admitCatalogMutation(t)
+		currentTx.noteNativeRowAccess(t)
+	}
+	admit := t.admitNativeWrite
+	if !onCollision.IsNil() && slices.Contains(onCollisionCols, "$update") {
+		admit = t.admitNativeMutationCallbacks
+	}
+	releaseAdmission := admit(currentTx)
+	defer releaseAdmission()
 	replicationCheckWriteTable(t, currentTx)
 	// A blocked request must not retain UNIQUE guards or routing reservations
 	// needed by the SQL LOCK TABLES owner. Shard mutation still rechecks races.
@@ -3874,29 +4406,32 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 
 	// Bind validation once to the existing declaration publication. A shard
 	// rechecks only if DDL replaces it while this INSERT is in flight.
-	validatedSchema := t.columnNamesSnapshot.Load()
+	validatedSchema := t.columnNamesForTx(currentTx)
 	if validatedSchema == nil {
-		validatedSchema = t.buildColumnNamesSnapshot()
+		validatedSchema = t.buildColumnNamesSnapshot(t.Columns)
 	}
 
 	t.beginContributionMutation()
 	defer t.endContributionMutation()
 
-	columns, values = t.prepareInsertDefaults(columns, values)
-	if len(t.Triggers) != 0 {
-		columns, values = t.ExecuteBeforeInsertTriggers(columns, values, isIgnore, currentTx)
-	}
+	columns, values = t.prepareInsertDefaults(columns, values, validatedSchema.declarations)
+	earlyTriggers, finalValidators := splitBeforeInsertTriggers(t.mutationTriggers(BeforeInsert, input))
+	columns, values = t.ExecuteBeforeInsertTriggers(columns, values, earlyTriggers, isIgnore, currentTx, validatedSchema.declarations)
 	validateInsertColumns(columns, validatedSchema.declarations)
 	// sanitize values (per-row recovery for INSERT IGNORE)
-	values = t.sanitizeInsertRows(columns, values, isIgnore)
+	values = t.sanitizeInsertRows(columns, values, isIgnore, validatedSchema.declarations)
 	if len(values) == 0 {
 		return 0
 	}
 
 	var idsPrepared bool
-	columns, values, idsPrepared = t.prepareInsertIDs(columns, values, onFirstInsertId, t.activeTopology().dimensions)
+	columns, values, idsPrepared = t.prepareInsertIDs(columns, values, onFirstInsertId, validatedSchema.declarations)
 	if idsPrepared {
 		onFirstInsertId = nil
+	}
+	values = t.validateFinalInsertRows(columns, values, finalValidators, isIgnore, currentTx)
+	if len(values) == 0 {
+		return 0
 	}
 
 	topology := t.pinActiveTopology()
@@ -3978,7 +4513,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 				}
 
 				// check unique constraints in a thread safe manner
-				if len(t.Unique) > 0 {
+				if len(keys) > 0 {
 					t.ProcessUniqueCollision(columns, chunk, mergeNull, func(chunk [][]scm.Scmer, validate *uniqueWriteGuard) {
 						insertRows(chunk, validate)
 					}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
@@ -4005,7 +4540,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 						} else {
 							panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
 						}
-					}, 0, currentTx, nil, []*storageShard{shard})
+					}, 0, currentTx, nil, []*storageShard{shard}, input)
 				} else {
 					// physically insert (no unique constraints)
 					insertRows(chunk, nil)
@@ -4024,7 +4559,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 		// Free routing may have switched to a newly published hash topology.
 		// Bind generated routing values to that retained publication as well.
 		if !idsPrepared {
-			columns, values, idsPrepared = t.prepareInsertIDs(columns, values, onFirstInsertId, dims)
+			columns, values, idsPrepared = t.prepareInsertIDs(columns, values, onFirstInsertId, validatedSchema.declarations)
 			if idsPrepared {
 				onFirstInsertId = nil
 			}
@@ -4044,7 +4579,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 				continue
 			}
 			defaultValue := scm.NewNil()
-			for _, col := range t.columnDeclarations() {
+			for _, col := range validatedSchema.declarations {
 				if cd.Column == col.Name {
 					defaultValue = col.defaultValue()
 					if col.AutoIncrement {
@@ -4150,7 +4685,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 					start = end
 				}
 			}
-			if len(t.Unique) > 0 {
+			if len(keys) > 0 {
 				t.ProcessUniqueCollision(columns, values, mergeNull, insertRows, onCollisionCols, func(errmsg string, data []scm.Scmer) {
 					if onCollision.IsNil() {
 						panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
@@ -4170,7 +4705,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 					default:
 						result++
 					}
-				}, 0, currentTx, nil, targets)
+				}, 0, currentTx, nil, targets, input)
 			} else {
 				insertRows(values, nil)
 			}
@@ -4184,7 +4719,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 			s = writeAccess.shard
 			defer rel()
 			// check unique constraints in a thread safe manner
-			if len(t.Unique) > 0 {
+			if len(keys) > 0 {
 				// this function will do the locking for us
 				t.ProcessUniqueCollision(columns, values, mergeNull, func(values [][]scm.Scmer, validate *uniqueWriteGuard) {
 					if !validate.validReads() {
@@ -4215,7 +4750,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 					} else {
 						panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
 					}
-				}, 0, currentTx, nil, []*storageShard{s})
+				}, 0, currentTx, nil, []*storageShard{s}, input)
 			} else {
 				// physically insert (parallel)
 				s.Insert(columns, values, false, validatedSchema, onFirstInsertId, isIgnore, currentTx, nil)
@@ -4245,14 +4780,13 @@ insertDone:
 	return result
 }
 
-func (t *table) sanitizeInsertRows(columns []string, values [][]scm.Scmer, isIgnore bool) [][]scm.Scmer {
+func (t *table) sanitizeInsertRows(columns []string, values [][]scm.Scmer, isIgnore bool, schemaColumns []*column) [][]scm.Scmer {
 	type sanitizerAt struct {
 		index         int
 		autoIncrement bool
 		apply         func(scm.Scmer) scm.Scmer
 	}
 	sanitizers := make([]sanitizerAt, 0, len(columns))
-	schemaColumns := t.columnDeclarations()
 	for i, col := range columns {
 		for _, colDesc := range schemaColumns {
 			if col == colDesc.Name && colDesc.sanitizer != nil {
@@ -4394,10 +4928,11 @@ checks a number of datasets for unique collisions.
 For each block of datasets that pass, success is called.
 For each single unique collision that fails, failure is called.
 */
-func (t *table) nextUniqueConstraint(columns []string, idx int) int {
-	for ; idx < len(t.Unique); idx++ {
+func (t *table) nextUniqueConstraint(columns []string, idx int, input *nativeMutationInput) int {
+	keys := mutationUniqueKeys(t, input)
+	for ; idx < len(keys); idx++ {
 		autoAssigned := false
-		for _, keyCol := range t.Unique[idx].Cols {
+		for _, keyCol := range keys[idx].Cols {
 			provided := false
 			for _, col := range columns {
 				if col == keyCol {
@@ -4408,7 +4943,13 @@ func (t *table) nextUniqueConstraint(columns []string, idx int) int {
 			if provided {
 				continue
 			}
-			for _, col := range t.columnDeclarations() {
+			var declarations []*column
+			if input != nil {
+				declarations = input.columns
+			} else {
+				declarations = t.columnDeclarations()
+			}
+			for _, col := range declarations {
 				if col.Name == keyCol && (col.AutoIncrement || col.hasDefault()) {
 					autoAssigned = true
 					break
@@ -4550,9 +5091,12 @@ func (t *table) uniqueUsesMOSI() bool {
 	return activeReplication(t.schema) != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable()
 }
 
-func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, *uniqueWriteGuard), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, borrowed *uniqueWriteGuard, targets []*storageShard) {
-	guard := t.guardUniqueWrites(columns, values, mergeNull, idx, currentTx)
+func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, *uniqueWriteGuard), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, borrowed *uniqueWriteGuard, targets []*storageShard, input *nativeMutationInput) {
+	guard := t.guardUniqueWrites(columns, values, mergeNull, idx, currentTx, input)
 	if borrowed != nil {
+		if borrowed.input != input {
+			panic("UNIQUE check lost its actual declaration input")
+		}
 		if t.uniqueUsesMOSI() && borrowed.ownedShard != nil && borrowed.reservations == nil {
 			t.processReservedUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, borrowed, []*storageShard{borrowed.ownedShard})
 			return
@@ -4642,16 +5186,17 @@ func (t *table) processReservedUniqueCollision(columns []string, values [][]scm.
 }
 
 func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, *uniqueWriteGuard), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, guard *uniqueWriteGuard) {
+	keys := mutationUniqueKeys(t, guard.input)
 	// An omitted generated key skips only its own constraint. Keep the outer
 	// invocation's lock ownership when the first checked key is a later UNIQUE.
 	checkedVersion := guard.version
-	idx = t.nextUniqueConstraint(columns, idx)
+	idx = t.nextUniqueConstraint(columns, idx, guard.input)
 	// check for duplicates
-	if idx >= len(t.Unique) {
+	if idx >= len(keys) {
 		success(values, guard) // we finally made it, these values have passed all unique checks
 		return
 	}
-	uniq := t.Unique[idx]
+	uniq := keys[idx]
 	compareNulls := mergeNull || uniq.NullsNotDistinct
 	accessSchema := newExactScanAccessSchema(uniq.Cols)
 	t.AddPartitioningScore(uniq.Cols, false) // increases partitioning score, so partitioning is improved
@@ -4841,7 +5386,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 							}
 						}
 						if mutating {
-							if activeReplication(t.schema) == nil && len(t.Triggers) != 0 && len(t.GetTriggers(BeforeUpdate)) != 0 {
+							if activeReplication(t.schema) == nil && len(t.Triggers) != 0 && len(t.mutationTriggers(BeforeUpdate, guard.input)) != 0 {
 								batchMask := guard.mask
 								// Never wait for a native writer while retaining a stripe.
 								guard.releaseKeys()
@@ -4882,13 +5427,13 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 									panic(uniqueReadRetry{})
 								}
 							}
-							if callbackGuard != nil && len(t.Unique) > 1 && (len(t.Triggers) == 0 || len(t.GetTriggers(BeforeUpdate)) == 0) {
+							if callbackGuard != nil && len(keys) > 1 && (len(t.Triggers) == 0 || len(t.mutationTriggers(BeforeUpdate, guard.input)) == 0) {
 								// Different constraints can collide with the same stored
 								// row. Include that row's canonical keys before reading
 								// callback values, not just this INSERT's proposed keys.
 								for {
 									var cols []string
-									for _, constraint := range t.Unique {
+									for _, constraint := range keys {
 										for _, name := range constraint.Cols {
 											if !slices.Contains(cols, name) {
 												cols = append(cols, name)
@@ -4901,7 +5446,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 										row[i] = reader.GetValue(uid)
 										ReleaseColumnReader(reader)
 									}
-									needed := t.guardUniqueWrites(cols, [][]scm.Scmer{row}, mergeNull, 0, currentTx)
+									needed := t.guardUniqueWrites(cols, [][]scm.Scmer{row}, mergeNull, 0, currentTx, guard.input)
 									if guard.mask.contains(needed.mask) {
 										break
 									}

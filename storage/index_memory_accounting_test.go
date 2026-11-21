@@ -206,7 +206,7 @@ func TestComputedIndexDeltaDoesNotInvokeComparator(t *testing.T) {
 
 func TestIndexInvocationRetainsOrderingAfterOwnerEviction(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_index_snapshot_eviction", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 		{scm.NewInt(1000), scm.NewString("delta")},
 		{scm.NewInt(2), scm.NewString("duplicate")},

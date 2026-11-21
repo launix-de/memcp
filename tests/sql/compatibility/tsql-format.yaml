@@ -1,0 +1,142 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Generic SQL Server 2022 references:
+# https://dbfiddle.uk/qSgfks7W
+# https://dbfiddle.uk/S50HaVnQ
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: FORMAT custom numeric zero masks and culture-aware calendar tokens
+setup:
+- sql: DROP TABLE IF EXISTS format_inputs
+- sql: CREATE TABLE format_inputs(id INT,whole BIGINT,amount DECIMAL(8,2),moment DATETIME2(0),mask NVARCHAR(30),culture NVARCHAR(10))
+- sql: INSERT INTO format_inputs VALUES(1,123,12.50,'2024-03-09','00000','en-US'),(2,-7,-0.40,'2025-12-31','000','de-DE'),(3,NULL,NULL,NULL,'00','en-US')
+cleanup:
+- sql: DROP TABLE IF EXISTS format_inputs
+test_cases:
+- name: Numeric zero placeholders pad to arbitrary minimum widths
+  sql: SELECT FORMAT(7,'0') AS narrow_value,FORMAT(7,'00000') AS padded_value,FORMAT(123456,'000') AS wide_value,FORMAT(0,'0000') AS zero_value
+  expect: {rows: 1,data: [{narrow_value: '7',padded_value: '00007',wide_value: '123456',zero_value: '0000'}]}
+- name: Negative sign precedes the padded magnitude
+  sql: SELECT FORMAT(-7,'00000') AS value
+  expect: {rows: 1,data: [{value: '-00007'}]}
+- name: BIGINT endpoints retain every digit without floating point conversion
+  sql: SELECT FORMAT(CAST(9223372036854775807 AS BIGINT),'000000000000000000000') AS maximum_value,FORMAT(CAST(-9223372036854775808 AS BIGINT),'000000000000000000000') AS minimum_value
+  expect: {rows: 1,data: [{maximum_value: '009223372036854775807',minimum_value: '-009223372036854775808'}]}
+- name: Declared integral decimals retain digits above floating point precision
+  sql: SELECT FORMAT(CAST(9007199254740993 AS DECIMAL(18,0)),'00000000000000000000') AS value
+  expect: {rows: 1,data: [{value: '00009007199254740993'}]}
+- name: Decimal zero masks round halves away from zero
+  sql: SELECT FORMAT(CAST(12.5 AS DECIMAL(4,1)),'000') AS positive_value,FORMAT(CAST(-12.5 AS DECIMAL(4,1)),'000') AS negative_value,FORMAT(CAST(-0.4 AS DECIMAL(2,1)),'000') AS zero_value,FORMAT(CAST(999.5 AS DECIMAL(4,1)),'00') AS carry_value
+  expect: {rows: 1,data: [{positive_value: '013',negative_value: '-013',zero_value: '000',carry_value: '1000'}]}
+- name: FLOAT uses the same half-away rounding convention
+  sql: SELECT FORMAT(CAST(2.5 AS FLOAT),'000') AS positive_value,FORMAT(CAST(-2.5 AS FLOAT),'000') AS negative_value
+  expect: {rows: 1,data: [{positive_value: '003',negative_value: '-003'}]}
+- name: Numeric patterns and cultures may come from declared columns
+  sql: SELECT id,FORMAT(whole,mask,culture) AS integer_value,FORMAT(amount,mask,culture) AS decimal_value FROM format_inputs ORDER BY id
+  expect: {rows: 3,data: [{id: 1,integer_value: '00123',decimal_value: '00013'},{id: 2,integer_value: '-007',decimal_value: '000'},{id: 3,integer_value: null,decimal_value: null}]}
+- name: Calendar masks compose independent month year and day tokens
+  sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'yyyy-MM-dd','en-US') AS full_value,FORMAT(CAST('2024-03-09' AS DATETIME),'M/d/yy','en-US') AS short_value
+  expect: {rows: 1,data: [{full_value: '2024-03-09',short_value: '3/9/24'}]}
+- name: Calendar year token widths retain their custom semantics
+  sql: SELECT FORMAT(CAST('0009-03-09' AS DATE),'y yy yyy yyyy yyyyy','en-US') AS value
+  expect: {rows: 1,data: [{value: '9 09 009 0009 00009'}]}
+- name: Percent selects a single custom calendar token
+  sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'%M','en-US') AS month_value,FORMAT(CAST('2024-03-09' AS DATE),'%d','en-US') AS day_value
+  expect: {rows: 1,data: [{month_value: '3',day_value: '9'}]}
+- name: Calendar date separator follows the explicit culture
+  sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'MM/yyyy','en-US') AS english_value,FORMAT(CAST('2024-03-09' AS DATE),'MM/yyyy','de-DE') AS german_value
+  expect: {rows: 1,data: [{english_value: '03/2024',german_value: '03.2024'}]}
+- name: Escaped separator is a literal in every culture
+  sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'MM\/yyyy','de-DE') AS value,ASCII(SUBSTRING(FORMAT(CAST('2024-03-09' AS DATE),'MM\/yyyy','de-DE'),3,1)) AS separator_code
+  expect: {rows: 1,data: [{value: '03/2024',separator_code: 47}]}
+- name: Escaped letters and quoted text remain literals
+  sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'yyyy \y M \M d \d','en-US') AS escaped_value,FORMAT(CAST('2024-03-09' AS DATE),'yyyy ''year'' MM','en-US') AS quoted_value
+  expect: {rows: 1,data: [{escaped_value: '2024 y 3 M 9 d',quoted_value: '2024 year 03'}]}
+- name: Full month and weekday names use the requested language
+  sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'dddd, dd MMMM yyyy','en-US') AS english_value,FORMAT(CAST('2024-03-09' AS DATE),'dddd, dd MMMM yyyy','de-DE') AS german_value
+  expect: {rows: 1,data: [{english_value: 'Saturday, 09 March 2024',german_value: 'Samstag, 09 März 2024'}]}
+- name: Abbreviated FORMAT names retain the NET German spelling
+  sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'ddd MMM','en-US') AS english_value,FORMAT(CAST('2024-03-09' AS DATE),'ddd MMM','de-DE') AS german_value
+  expect: {rows: 1,data: [{english_value: 'Sat Mar',german_value: 'Sa Mrz'}]}
+- name: Calendar formats execute against nullable native date columns
+  sql: SELECT id,FORMAT(moment,'yyyy-MM-dd',culture) AS value FROM format_inputs ORDER BY id
+  expect: {rows: 3,data: [{id: 1,value: '2024-03-09'},{id: 2,value: '2025-12-31'},{id: 3,value: null}]}
+- name: Typed NULL input propagates for numeric and date declarations
+  sql: SELECT FORMAT(CAST(NULL AS INT),'000') AS integer_value,FORMAT(CAST(NULL AS DECIMAL(8,2)),'000') AS decimal_value,FORMAT(CAST(NULL AS DATE),'MM/yyyy') AS date_value
+  expect: {rows: 1,data: [{integer_value: null,decimal_value: null,date_value: null}]}
+- name: Invalid calendar escapes and unterminated quotes return SQL NULL
+  sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'yyyy\','en-US') AS escape_value,FORMAT(CAST('2024-03-09' AS DATE),'yyyy ''oops','en-US') AS quote_value
+  expect: {rows: 1,data: [{escape_value: null,quote_value: null}]}
+- name: Untyped NULL input has no supported FORMAT declaration
+  sql: SELECT FORMAT(NULL,'000') AS value
+  expect: {error: true}
+- name: Text input is rejected instead of selecting numeric formatting by carrier
+  sql: SELECT FORMAT(CAST('123' AS VARCHAR(10)),'000') AS value
+  expect: {error: true}
+- name: BIT is outside the supported SQL Server FORMAT input types
+  sql: SELECT FORMAT(CAST(1 AS BIT),'000') AS value
+  expect: {error: true}
+- name: Explicit NULL culture is an error even with typed NULL input
+  sql: SELECT FORMAT(CAST(NULL AS INT),'000',NULL) AS value
+  expect: {error: true}
+- name: Empty culture is rejected by SQL Server
+  sql: SELECT FORMAT(1,'000','') AS value
+  expect: {error: true}
+- name: TDS FORMAT metadata is NVARCHAR 4000 independently of current row values
+  tds:
+    statements:
+    - sql: SELECT FORMAT(CAST(7 AS BIGINT),'00000','en-US') AS value
+      expect:
+        rows: 1
+        data: [{value: '00007'}]
+        column_types: [{name: value,type: NVARCHAR,length: 4000}]
+    - sql: SELECT TOP(0) FORMAT(whole,mask,culture) AS value FROM format_inputs
+      expect:
+        rows: 0
+        column_types: [{name: value,type: NVARCHAR,length: 4000}]
+- name: Default culture remains bound to the invoking session language
+  tds:
+    statements:
+    - {sql: SET LANGUAGE Deutsch}
+    - sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'MM/yyyy') AS value
+      expect: {rows: 1,data: [{value: '03.2024'}]}
+    - {sql: SET LANGUAGE us_english}
+    - sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'MM/yyyy') AS value
+      expect: {rows: 1,data: [{value: '03/2024'}]}
+- name: Batch expressions bind numeric value and pattern as ordinary operands
+  tds:
+    statements:
+    - sql: DECLARE @n BIGINT=123,@mask NVARCHAR(30)='000000'; SELECT FORMAT(@n,@mask,'en-US') AS value
+      expect: {rows: 1,data: [{value: '000123'}]}
+# These valid SQL Server shapes remain positive result targets while their
+# distinct standard, clock, numeric-pattern and locale contracts are missing.
+- name: Standard numeric grouping format
+  noncritical: true
+  sql: SELECT FORMAT(CAST(1234.5 AS DECIMAL(6,1)),'N2','en-US') AS value
+  expect: {rows: 1,data: [{value: '1,234.50'}]}
+- name: Literal numeric custom pattern is not an invalid format
+  noncritical: true
+  sql: SELECT FORMAT(123,'bogus') AS positive_value,FORMAT(-123,'bogus') AS negative_value
+  expect: {rows: 1,data: [{positive_value: bogus,negative_value: '-bogus'}]}
+- name: Single-letter standard date format
+  noncritical: true
+  sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'d','en-US') AS value
+  expect: {rows: 1,data: [{value: '3/9/2024'}]}
+- name: Calendar clock custom pattern
+  noncritical: true
+  sql: SELECT FORMAT(CAST('2024-03-09 14:05:06' AS DATETIME2),'HH:mm:ss','en-US') AS value
+  expect: {rows: 1,data: [{value: '14:05:06'}]}
+- name: French month locale
+  noncritical: true
+  sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),'MMMM','fr-FR') AS value
+  expect: {rows: 1,data: [{value: mars}]}
+- name: NULL numeric pattern selects general formatting
+  noncritical: true
+  sql: SELECT FORMAT(1,CAST(NULL AS NVARCHAR(20))) AS value
+  expect: {rows: 1,data: [{value: '1'}]}
+- name: NULL date pattern selects general formatting
+  noncritical: true
+  sql: SELECT FORMAT(CAST('2024-03-09' AS DATE),CAST(NULL AS NVARCHAR(20))) AS value
+  expect: {rows: 1,data: [{value: '3/9/2024 12:00:00 AM'}]}

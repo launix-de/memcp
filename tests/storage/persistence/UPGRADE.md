@@ -49,7 +49,9 @@ The predecessor binary creates the complete fixture and supplies two oracles:
   stored value;
 - results from a public SQL workload, including repeated grouping, aggregate
   ordering, expression group keys, correlated equality/range lookups and
-  windows with opposing order directions.
+  windows with opposing order directions, and native calendar values with
+  constant/varying whole seconds, NULLs, duplicate grouping, comparisons,
+  indexed gathers and ordered pages.
 
 The same SQL workload runs on the predecessor, after a predecessor restart,
 after opening the data with the candidate, after cold and warm source-table
@@ -57,6 +59,12 @@ updates, and after a candidate restart. Each execution must return the declared
 result and the candidate's unchanged executions must equal the predecessor's
 saved query oracle. The updates are restored before the full data snapshot is
 compared.
+
+Calendar snapshots use public `DATE_FORMAT` expressions for DATE, DATETIME and
+TIMESTAMP rather than a predecessor's integer or text wire carrier. The same
+canonical expressions run on both writers and readers. These fixtures contain
+whole seconds understood by every pin; they do not assert fractional precision
+that an old writer could never produce.
 
 Queries which can create adaptive caches run repeatedly. This is deliberate:
 the workload must cross normal admission thresholds through public SQL rather
@@ -100,3 +108,39 @@ GITHUB_WORKSPACE="$PWD" bash candidate/tests/storage/persistence/upgrade-run.sh
 
 Optional `UPGRADE_API_PORT` and `UPGRADE_MYSQL_PORT` values select isolated
 ports. Full-suite validation remains a CI responsibility.
+
+
+## Table allocator provenance
+
+The native table allocator now persists a version 1 `allocator` schema member
+and checksummed `allocator-v1` database-authority WAL records. The state binds
+the table UUID, actual configured start, known/unknown issued state, highwater
+as monotone UUID-bound facts. No second counter infers issue order.
+SAFE reservations are flushed before acknowledgement;
+LOGGED retains process-crash durability. Unused accepted intervals survive row
+rollback and savepoint rewind. MEMORY and SLOPPY keep their existing durability
+contracts. Checkpoint and storage MOVE preserve the same authority records.
+
+Historical `Auto_increment` fields remain readable. They prove only a
+highwater, not the original start or whether that start has been issued. The
+reader does not assign a guessed seed. Native `table_id_state` exposes unknown
+facts explicitly; TSQL `IDENT_CURRENT` reports unsupported provenance rather
+than confusing it with SQL NULL for a missing or inaccessible object. A later
+real reservation can establish its actual current value without claiming the
+unknown historical start. New constructors persist their real start.
+
+This is a new writer format; older binaries are not supported writers of data
+containing the new allocator authority. The UUID-bound cluster allocator uses
+the distinct `cluster.table_ids` operation with explicit request/reply version
+2. The previous `cluster.reserve_ids` operation is no longer registered, so an
+older unversioned request cannot be mistaken for a version marker. Within the
+new protocol, an empty identity is accepted only for an actual UUID-less,
+provenance-free predecessor table and only for reservation. Its response has
+an explicitly empty provenance payload and preserves the old highwater-only
+allocation contract; it cannot reserve against a UUID-backed replacement or
+support the new current-value observation. The historical row/WAL readers
+remain unchanged. Independent noncluster replication writers retain
+their existing highwater merge; this does not establish a global current-value
+owner, so the new observation API rejects that scope explicitly.
+`table-id-allocator.yaml` supplies current-writer value, rollback, crash, checkpoint and name-reuse controls; predecessor-writer
+provenance coverage remains a separate qualification obligation.

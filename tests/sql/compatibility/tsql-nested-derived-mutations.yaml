@@ -1,0 +1,49 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Nested derived queries retain their outer mutation bindings during compilation and execution
+cleanup:
+  - sql: DROP PROCEDURE IF EXISTS nested_mutation_compile
+test_cases:
+  - name: A scalar grouped derived query retains its ancestor binding
+    sql: |
+      DECLARE @metrics TABLE(id INT,grp INT,flag INT,n INT);
+      INSERT @metrics VALUES(1,10,0,0),(1,10,0,0),(2,10,0,0),(3,20,0,0),(4,20,1,0);
+      SELECT target.id,(SELECT COUNT(id) FROM
+        (SELECT id FROM @metrics source WHERE source.flag=0 AND target.grp=source.grp GROUP BY id) grouped) AS n
+        FROM @metrics target ORDER BY target.id;
+    expect:
+      rows: 5
+      data: [{id: 1, n: 2}, {id: 1, n: 2}, {id: 2, n: 2}, {id: 3, n: 1}, {id: 4, n: 1}]
+  - name: NOEXEC binds an outer UPDATE alias through a grouped derived query
+    tds:
+      statements:
+        - sql: SET NOEXEC ON
+        - sql: |
+            CREATE PROCEDURE nested_mutation_compile AS BEGIN
+              DECLARE @metrics TABLE(id INT,grp INT,flag INT,n INT);
+              UPDATE target SET n=(SELECT COUNT(id) FROM
+                (SELECT id FROM @metrics source WHERE source.flag=0 AND target.grp=source.grp GROUP BY id) grouped)
+                FROM @metrics target WHERE flag=0;
+            END;
+        - sql: SET NOEXEC OFF; SELECT OBJECT_ID(N'nested_mutation_compile',N'P') AS module_id
+          expect: {rows: 1, data: [{module_id: null}]}
+  - name: Correlated grouped UPDATE preserves duplicate targets and counts distinct source groups
+    sql: |
+      DECLARE @metrics TABLE(id INT,grp INT,flag INT,n INT);
+      INSERT @metrics VALUES(1,10,0,0),(1,10,0,0),(2,10,0,0),(3,20,0,0),(4,20,1,0);
+      UPDATE target SET n=(SELECT COUNT(id) FROM
+        (SELECT id FROM @metrics source WHERE source.flag=0 AND target.grp=source.grp GROUP BY id) grouped)
+        FROM @metrics target WHERE flag=0;
+      SELECT id,grp,flag,n FROM @metrics ORDER BY id,flag;
+    expect:
+      rows: 5
+      data:
+        - {id: 1, grp: 10, flag: 0, n: 2}
+        - {id: 1, grp: 10, flag: 0, n: 2}
+        - {id: 2, grp: 10, flag: 0, n: 2}
+        - {id: 3, grp: 20, flag: 0, n: 1}
+        - {id: 4, grp: 20, flag: 1, n: 0}

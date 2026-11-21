@@ -1,0 +1,76 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/queries/from-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  description: PIVOT composes typed conditional aggregates with ordinary logical sources
+setup:
+- sql: CREATE TABLE pivot_input(grp INT,category VARCHAR(8),value INT)
+- sql: INSERT INTO pivot_input VALUES(1,'a',5),(1,'a',7),(1,'b',NULL),(1,'other',11),(2,'a',NULL),(2,'b',3),(NULL,'b',4)
+- sql: CREATE TABLE pivot_names(grp INT PRIMARY KEY,label VARCHAR(8))
+- sql: INSERT INTO pivot_names VALUES(1,'first'),(2,'second')
+- sql: CREATE TABLE pivot_invalid_type(discriminator IMAGE,value INT)
+test_cases:
+- name: SUM retains duplicate contributions NULL grouping and missing categories
+  sql: SELECT grp,[a],[b],[absent] FROM pivot_input PIVOT(SUM(value) FOR category IN([a],[b],[absent])) AS p ORDER BY grp
+  expect: {rows: 3,data: [{grp: null,a: null,b: 4,absent: null},{grp: 1,a: 12,b: null,absent: null},{grp: 2,a: null,b: 3,absent: null}]}
+- name: COUNT counts nonnull values and returns zero for missing categories
+  sql: SELECT grp,[a],[b],[absent] FROM pivot_input PIVOT(COUNT(value) FOR category IN([a],[b],[absent])) AS p WHERE grp=1
+  expect: {rows: 1,data: [{grp: 1,a: 2,b: 0,absent: 0}]}
+- name: COUNT BIG preserves the complete same value contract
+  sql: SELECT grp,[a],[b] FROM pivot_input PIVOT(COUNT_BIG(value) FOR category IN([a],[b])) p WHERE grp=2
+  expect: {rows: 1,data: [{grp: 2,a: 0,b: 1}]}
+- name: AVG uses the declared integer aggregate contract
+  sql: SELECT grp,[a],[b] FROM pivot_input PIVOT(AVG(value) FOR category IN([a],[b])) AS p WHERE grp=1
+  expect: {rows: 1,data: [{grp: 1,a: 6,b: null}]}
+- name: MIN preserves the typed input and NULL for absent values
+  sql: SELECT grp,[a],[b] FROM pivot_input PIVOT(MIN(value) FOR category IN([a],[b])) AS p WHERE grp=1
+  expect: {rows: 1,data: [{grp: 1,a: 5,b: null}]}
+- name: MAX preserves the typed input and NULL for absent values
+  sql: SELECT grp,[a],[b] FROM pivot_input PIVOT(MAX(value) FOR category IN([a],[b])) AS p WHERE grp=1
+  expect: {rows: 1,data: [{grp: 1,a: 7,b: null}]}
+- name: Numeric discriminators convert output names to their declared type
+  sql: SELECT [1],[01],[2] FROM (SELECT grp,value FROM pivot_input WHERE category='a') AS s PIVOT(SUM(value) FOR grp IN([1],[01],[2])) AS p
+  expect: {rows: 1,data: [{'1': 12,'01': 12,'2': null}]}
+- name: Every remaining input column participates in grouping
+  sql: SELECT grp,[a],[b] FROM (SELECT grp,category,value,CASE WHEN value=5 THEN 1 ELSE 0 END AS extra FROM pivot_input WHERE grp=1) AS s PIVOT(SUM(value) FOR category IN([a],[b])) AS p ORDER BY extra
+  expect: {rows: 2,data: [{grp: 1,a: 7,b: null},{grp: 1,a: 5,b: null}]}
+- name: A pivot remains an ordinary joined source
+  sql: SELECT n.label,p.[a],p.[b] FROM pivot_input PIVOT(SUM(value) FOR category IN([a],[b])) AS p INNER JOIN pivot_names AS n ON p.grp=n.grp ORDER BY n.grp
+  expect: {rows: 2,data: [{label: first,a: 12,b: null},{label: second,a: null,b: 3}]}
+- name: A view declaration composes CTE windows and pivot without materializing the view
+  sql: CREATE VIEW pivot_result AS WITH values_cte AS(SELECT grp,category,value,SUM(value) OVER(PARTITION BY grp) AS total FROM pivot_input), pivot_cte AS(SELECT grp,total,[a],[b] FROM values_cte PIVOT(SUM(value) FOR category IN([a],[b])) AS p) SELECT grp,total,[a],[b] FROM pivot_cte
+- name: The complete stored view result retains its input window values
+  sql: SELECT grp,total,[a],[b] FROM pivot_result ORDER BY grp
+  expect: {rows: 3,data: [{grp: null,total: 4,a: null,b: 4},{grp: 1,total: 23,a: 12,b: null},{grp: 2,total: 3,a: null,b: 3}]}
+- name: A consuming query sees current source rows through the view
+  sql: INSERT INTO pivot_input VALUES(2,'a',9)
+- name: View consumption recomputes the complete logical values
+  sql: SELECT grp,total,[a],[b] FROM pivot_result WHERE grp=2
+  expect: {rows: 1,data: [{grp: 2,total: 12,a: 9,b: 3}]}
+- name: ALTER VIEW supports the same pivot source grammar
+  sql: ALTER VIEW pivot_result AS WITH values_cte AS(SELECT grp,category,value FROM pivot_input) SELECT grp,[a],[b] FROM values_cte PIVOT(MAX(value) FOR category IN([a],[b])) AS p
+- name: The altered definition exposes the exact new aggregate result
+  sql: SELECT grp,[a],[b] FROM pivot_result WHERE grp=1
+  expect: {rows: 1,data: [{grp: 1,a: 7,b: null}]}
+- name: Output names cannot duplicate a grouping column
+  sql: SELECT * FROM pivot_input PIVOT(SUM(value) FOR category IN([grp])) AS p
+  expect: {error: true,contains: duplicate PIVOT output}
+- name: The pivot discriminator must exist in the actual input
+  sql: SELECT * FROM pivot_input PIVOT(SUM(value) FOR missing IN([a])) AS p
+  expect: {error: true,contains: PIVOT requires one input column}
+- name: Folded source spellings resolve to their actual exported titles
+  sql: SELECT grp,[a] FROM pivot_input PIVOT(SUM(VALUE) FOR CATEGORY IN([a])) AS p WHERE grp=1
+  expect: {rows: 1,data: [{grp: 1,a: 12}]}
+- name: Unicode folded output names cannot collide with grouping exports
+  sql: SELECT * FROM (SELECT grp AS S,category,value FROM pivot_input) AS s PIVOT(SUM(value) FOR category IN([ſ])) AS p
+  expect: {error: true,contains: duplicate PIVOT output}
+- name: IMAGE is an invalid discriminator even when the source is empty
+  sql: SELECT [a] FROM pivot_invalid_type PIVOT(SUM(value) FOR discriminator IN([a])) AS p
+  expect: {error: true,contains: PIVOT discriminator cannot be image or rowversion}
+cleanup:
+- sql: DROP VIEW IF EXISTS pivot_result
+- sql: DROP TABLE IF EXISTS pivot_names
+- sql: DROP TABLE IF EXISTS pivot_input
+- sql: DROP TABLE IF EXISTS pivot_invalid_type

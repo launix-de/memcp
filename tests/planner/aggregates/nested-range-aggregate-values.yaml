@@ -1,0 +1,48 @@
+# Copyright (C) 2026 MemCP Contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Nested aggregate payloads preserve each caller range
+  isolated: true
+setup:
+- sql: CREATE TABLE nra_offer (id INT PRIMARY KEY, created INT)
+- sql: CREATE TABLE nra_item (offer_id INT, quantity INT, unit_price INT)
+- sql: INSERT INTO nra_offer VALUES (1,5),(2,15),(3,25)
+- sql: INSERT INTO nra_item VALUES (1,1,10),(1,2,5),(2,3,10),(3,1,40)
+test_cases:
+- name: Nested range SUM and AVG retain item payloads and empty periods
+  sql: |
+    SELECT history.period,
+      (SELECT COUNT(1) FROM nra_offer counted
+        WHERE counted.created BETWEEN history.start_time AND history.end_time LIMIT 1) AS offer_count,
+      COALESCE((SELECT SUM((SELECT SUM(item.quantity*item.unit_price)
+        FROM nra_item item WHERE item.offer_id=summed.id LIMIT 1))
+        FROM nra_offer summed
+        WHERE summed.created BETWEEN history.start_time AND history.end_time LIMIT 1),0) AS offer_sum,
+      COALESCE((SELECT AVG((SELECT SUM(item.quantity*item.unit_price)
+        FROM nra_item item WHERE item.offer_id=averaged.id LIMIT 1))
+        FROM nra_offer averaged
+        WHERE averaged.created BETWEEN history.start_time AND history.end_time LIMIT 1),0) AS offer_average
+    FROM (SELECT 0 AS period,0 AS start_time,19 AS end_time
+      UNION SELECT 1,20,29 UNION SELECT 2,90,99 UNION SELECT 3,0,29) history
+    ORDER BY history.period
+  expect:
+    rows: 4
+    data:
+    - {period: 0, offer_count: 2, offer_sum: 50, offer_average: 25}
+    - {period: 1, offer_count: 1, offer_sum: 40, offer_average: 40}
+    - {period: 2, offer_count: 0, offer_sum: 0, offer_average: 0}
+    - {period: 3, offer_count: 3, offer_sum: 90, offer_average: 30}
+- name: Each inner aggregate retains its equality key and numeric value
+  sql: |
+    SELECT o.id,(SELECT SUM(i.quantity*i.unit_price) FROM nra_item i
+      WHERE i.offer_id=o.id LIMIT 1) AS amount FROM nra_offer o ORDER BY o.id
+  expect: {rows: 3, data: [{id: 1, amount: 20}, {id: 2, amount: 30}, {id: 3, amount: 40}]}
+- name: Nested aggregate payloads work without an outer range predicate
+  sql: |
+    SELECT SUM((SELECT SUM(i.quantity*i.unit_price) FROM nra_item i
+      WHERE i.offer_id=o.id LIMIT 1)) AS amount FROM nra_offer o
+  expect: {rows: 1, data: [{amount: 90}]}
+cleanup:
+- sql: DROP TABLE IF EXISTS nra_item
+- sql: DROP TABLE IF EXISTS nra_offer

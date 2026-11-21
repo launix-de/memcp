@@ -1,0 +1,92 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Forgetting a dynamic cursor's optimization cache preserves its bound declaration and position
+setup:
+- sql: CREATE TABLE cursor_cache_recovery_values(id INT PRIMARY KEY,value INT)
+cleanup:
+- sql: DROP TABLE IF EXISTS cursor_cache_recovery_values
+test_cases:
+- name: A real dynamic cursor resumes after a cache miss and observes current rows
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define out (newsession))
+      (define request (lambda (text) (begin
+        (out "row" nil)
+        (tsql_execute_request "memcp-tests" text s nil 0
+          (lambda (row) (out "row" row)) (lambda args true))
+        (out "row"))))
+      (request "DELETE FROM cursor_cache_recovery_values; INSERT cursor_cache_recovery_values VALUES(1,10),(3,30);")
+      (define first (request "DECLARE c CURSOR GLOBAL FOR SELECT id,value FROM cursor_cache_recovery_values ORDER BY id; OPEN c; DECLARE @id INT,@value INT; FETCH NEXT FROM c INTO @id,@value; SELECT @id AS id,@value AS value;"))
+      (define cursor (tsql_cursor_lookup s "c" true))
+      (define empty (newcachemap))
+      (cursor "dynamic_cache" empty)
+      (define missed (nil? (empty "cursor")))
+      (request "INSERT cursor_cache_recovery_values VALUES(2,20); UPDATE cursor_cache_recovery_values SET value=300 WHERE id=3;")
+      (define remaining (request "DECLARE @a INT,@av INT,@b INT,@bv INT; FETCH NEXT FROM c INTO @a,@av; FETCH NEXT FROM c INTO @b,@bv; FETCH NEXT FROM c INTO @b,@bv; SELECT @a AS next_id,@av AS next_value,@b AS last_id,@bv AS last_value,@@FETCH_STATUS AS status; DEALLOCATE c;"))
+      (and missed (expression_equal? first '("id" 1 "value" 10))
+        (expression_equal? remaining '("next_id" 2 "next_value" 20 "last_id" 3 "last_value" 300 "status" -1))))
+  expect: {result: true}
+- name: Cache recovery consumes the OPEN-bound declaration rather than parsing SQL again
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define out (newsession))
+      (define request (lambda (text) (begin
+        (out "row" nil)
+        (tsql_execute_request "memcp-tests" text s nil 0
+          (lambda (row) (out "row" row)) (lambda args true))
+        (out "row"))))
+      (request "DELETE FROM cursor_cache_recovery_values; INSERT cursor_cache_recovery_values VALUES(1,10),(3,30); DECLARE c CURSOR GLOBAL FOR SELECT id,value FROM cursor_cache_recovery_values ORDER BY id; OPEN c;")
+      (define cursor (tsql_cursor_lookup s "c" true))
+      (cursor "dynamic_cache" (newcachemap))
+      (cursor "text" "not a SQL declaration")
+      (define row (request "DECLARE @id INT,@value INT; FETCH NEXT FROM c INTO @id,@value; SELECT @id AS id,@value AS value; DEALLOCATE c;"))
+      (expression_equal? row '("id" 1 "value" 10)))
+  expect: {result: true}
+- name: A forgotten cache cannot reopen sticky EOF and CLOSE releases the factory
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define out (newsession))
+      (tsql_execute_request "memcp-tests"
+        "DELETE FROM cursor_cache_recovery_values; INSERT cursor_cache_recovery_values VALUES(1,10); DECLARE c CURSOR GLOBAL FOR SELECT id,value FROM cursor_cache_recovery_values ORDER BY id; OPEN c; DECLARE @opened_id INT,@opened_value INT; FETCH NEXT FROM c INTO @opened_id,@opened_value; FETCH NEXT FROM c INTO @opened_id,@opened_value; SELECT 'forget' AS phase; INSERT cursor_cache_recovery_values VALUES(2,20); DECLARE @id INT=99,@value INT=88; FETCH NEXT FROM c INTO @id,@value; SELECT 'ended' AS phase,@id AS id,@value AS value,@@FETCH_STATUS AS status,@@CURSOR_ROWS AS cursor_rows; CLOSE c; SELECT 'closed' AS phase; OPEN c; DECLARE @again_id INT,@again_value INT; FETCH NEXT FROM c INTO @again_id,@again_value; SELECT 'reopened' AS phase,@again_id AS id,@again_value AS value; DEALLOCATE c;"
+        s nil 0
+        (lambda (row) (begin
+          (define phase (get_assoc row "phase"))
+          (if (equal? phase "forget") (begin
+            (define cursor (tsql_cursor_lookup s "c" true))
+            (define empty (newcachemap))
+            (cursor "dynamic_cache" empty)
+            (out "cursor" cursor) (out "missed" (nil? (empty "cursor"))))
+            (equal? phase "ended") (out "ended" (cdr (cdr row)))
+            (equal? phase "closed") (begin
+              (define cursor (out "cursor"))
+              (out "released" (and (nil? (cursor "dynamic_cache")) (nil? (cursor "dynamic_factory")))))
+            (equal? phase "reopened") (out "reopened" (cdr (cdr row)))
+            (error "unexpected cursor recovery phase"))))
+        (lambda args true))
+      (and (out "missed") (out "released")
+        (expression_equal? (out "ended") '("id" 99 "value" 88 "status" -1 "cursor_rows" -1))
+        (expression_equal? (out "reopened") '("id" 1 "value" 10))
+        (nil? ((out "cursor") "dynamic_factory"))))
+  expect: {result: true}
+- name: Source incarnation validation still precedes recovery of a missing plan
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (define out (newsession))
+      (define request (lambda (text) (begin
+        (out "row" nil)
+        (tsql_execute_request "memcp-tests" text s nil 0
+          (lambda (row) (out "row" row)) (lambda args true))
+        (out "row"))))
+      (request "DELETE FROM cursor_cache_recovery_values; INSERT cursor_cache_recovery_values VALUES(1,10); DECLARE c CURSOR GLOBAL FOR SELECT id,value FROM cursor_cache_recovery_values ORDER BY id; OPEN c;")
+      (define cursor (tsql_cursor_lookup s "c" true))
+      (cursor "dynamic_cache" (newcachemap))
+      (define row (request "DROP TABLE cursor_cache_recovery_values; CREATE TABLE cursor_cache_recovery_values(id INT PRIMARY KEY,value INT); INSERT cursor_cache_recovery_values VALUES(9,90); BEGIN TRY FETCH NEXT FROM c; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number; END CATCH; DEALLOCATE c;"))
+      (expression_equal? row '("error_number" 16943)))
+  expect: {result: true}

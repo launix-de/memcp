@@ -255,7 +255,13 @@ test_cases:
   - name: "TX: create table for tx test"
     sql: "CREATE TABLE ai_tx (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: TX: create table for tx test"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE ai_tx"
+    expect: {rows: 1,data: [{Table: "ai_tx"}]}
 
   - name: "TX: start transaction"
     sql: "START TRANSACTION"
@@ -294,14 +300,14 @@ test_cases:
       - sql: "CREATE TABLE ai_partitioned (id INT AUTO_INCREMENT PRIMARY KEY, tenant INT, name TEXT)"
     scm: |
       (begin
-        (insert (table "memcp-tests" false "ai_partitioned" false) '("id" "tenant" "name")
+        (insert (table "memcp-tests" false "ai_partitioned" false nil) '("id" "tenant" "name")
           (map (produceN 21) (lambda (i) (list (+ i 1) (mod i 2) (concat "main-" i)))))
         true)
 
   - name: "Partitioned auto ID: repartition by ID"
     scm: |
       (partitiontable
-        (table "memcp-tests" false "ai_partitioned" false)
+        (table "memcp-tests" false "ai_partitioned" false nil)
         (list (list "id" (list 3 6 9 12 15 18))))
 
   - name: "Partitioned auto ID: insert without partition key"
@@ -350,7 +356,13 @@ test_cases:
   - name: "Explicit AUTO_INCREMENT next value is accepted"
     sql: "CREATE TABLE ai_seeded (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT) ENGINE=InnoDB AUTO_INCREMENT=42"
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: Explicit AUTO_INCREMENT next value is accepted"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE ai_seeded"
+    expect: {rows: 1,data: [{Table: "ai_seeded"}]}
 
   - name: "SHOW CREATE preserves explicit AUTO_INCREMENT next value"
     sql: "SHOW CREATE TABLE ai_seeded"
@@ -479,25 +491,25 @@ test_cases:
 
   - name: "Native ID reservation returns the invocation's inclusive block"
     scm: |
-      (if (equal? (reserve_ids (table "memcp-tests" false "ai_blocks" false) 3) (list 1 3))
+      (if (equal? (reserve_ids (table "memcp-tests" false "ai_blocks" false nil) 3) (list 1 3))
         true (error "unexpected reserved block"))
 
   - name: "Native zero ID reservation returns no block"
     scm: |
-      (if (equal? (reserve_ids (table "memcp-tests" false "ai_blocks" false) 0) (list))
+      (if (equal? (reserve_ids (table "memcp-tests" false "ai_blocks" false nil) 0) (list))
         true (error "zero reservation changed state"))
 
   - name: "Native negative ID reservation is rejected"
-    scm: '(reserve_ids (table "memcp-tests" false "ai_blocks" false) -1)'
+    scm: '(reserve_ids (table "memcp-tests" false "ai_blocks" false nil) -1)'
     expect: {error: true}
 
   - name: "Native fractional ID reservation is rejected"
-    scm: '(reserve_ids (table "memcp-tests" false "ai_blocks" false) 1.5)'
+    scm: '(reserve_ids (table "memcp-tests" false "ai_blocks" false nil) 1.5)'
     expect: {error: true}
 
   - name: "Reserved IDs can be fed to the existing native insert"
     scm: |
-      (insert (table "memcp-tests" false "ai_blocks" false) '("id" "name")
+      (insert (table "memcp-tests" false "ai_blocks" false nil) '("id" "name")
         (list (list 3 "reserved-last") (list 1 "reserved-first")))
 
   - name: "Implicit insert after explicit reserved IDs consumes the next ID once"
@@ -515,5 +527,5 @@ test_cases:
 
   - name: "Failed and zero reservations did not consume another block"
     scm: |
-      (if (equal? (reserve_ids (table "memcp-tests" false "ai_blocks" false) 2) (list 5 6))
+      (if (equal? (reserve_ids (table "memcp-tests" false "ai_blocks" false nil) 2) (list 5 6))
         true (error "reservation counter advanced unexpectedly"))

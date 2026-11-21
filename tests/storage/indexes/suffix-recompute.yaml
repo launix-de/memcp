@@ -26,7 +26,7 @@ test_cases:
 
   - name: "Create running SUM ORC column"
     scm: |
-      (createcolumn (table "memcp-tests" false "suf_sum" false) "running" "INT" '()
+      (createcolumn (table "memcp-tests" false "suf_sum" false nil) "running" "INT" '()
         (list
           "sortcols"  '("day")
           "sortdirs"  (list false)

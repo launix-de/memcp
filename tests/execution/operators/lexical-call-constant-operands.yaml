@@ -1,0 +1,67 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Native spelling never supplies folding or ownership rules for a lexical callable
+setup: []
+cleanup: []
+test_cases:
+- name: A named callback keeps constant operands in its actual invocation
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (toUpper) (begin (eval (symbol \"toUpper\")) (toUpper \"ab\")))"))
+      (define callback (lambda (value) (concat "#" value)))
+      (define run (lambda (value) (value callback)))
+      (list (run (eval (clone_optimizer_expression syntax)))
+        (run (eval (optimize (clone_optimizer_expression syntax))))
+        (run (jit (eval (optimize (clone_optimizer_expression syntax)))))))
+  expect: {result: ["#ab", "#ab", "#ab"]}
+- name: A same-spelled list callback retains its scalar result
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (list) (begin (eval (symbol \"list\")) (list \"ab\")))"))
+      (define callback (lambda (value) (concat "#" value)))
+      (define run (lambda (value) (value callback)))
+      (list (run (eval (clone_optimizer_expression syntax)))
+        (run (eval (optimize (clone_optimizer_expression syntax))))
+        (run (jit (eval (optimize (clone_optimizer_expression syntax)))))))
+  expect: {result: ["#ab", "#ab", "#ab"]}
+- name: A captured native-name callback runs once after its enclosing invocation returns
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (toUpper) (begin (eval (symbol \"toUpper\")) (lambda () (toUpper \"ab\"))))"))
+      (define state (newsession))
+      (define callback (lambda (value) (begin
+        (state "calls" (+ (coalesce (state "calls") 0) 1)) (concat "#" value))))
+      (define factory (eval (optimize (clone_optimizer_expression syntax))))
+      (define deferred (factory callback))
+      (define before (coalesce (state "calls") 0))
+      (list before (deferred) (state "calls")))
+  expect: {result: [0, "#ab", 1]}
+- name: Repeated optimization preserves callback effects and their exact count
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (toUpper) (begin (eval (symbol \"toUpper\")) (toUpper \"ab\") (toUpper \"cd\")))"))
+      (define state (newsession))
+      (define callback (lambda (value) (begin
+        (state "calls" (+ (coalesce (state "calls") 0) 1)) (concat "#" value))))
+      (define function (eval (optimize (optimize (clone_optimizer_expression syntax)))))
+      (list (coalesce (state "calls") 0) (function callback) (state "calls")))
+  expect: {result: [0, "#cd", 2]}
+- name: A lexical arithmetic name uses its callback result rather than native numeric folding
+  scm: |
+    (begin
+      (define syntax (scheme "(lambda (+) (begin (eval (symbol \"+\")) (+ 2 3)))"))
+      (define callback (lambda (a b) (concat a ":" b)))
+      (list ((eval (clone_optimizer_expression syntax)) callback)
+        ((eval (optimize (clone_optimizer_expression syntax))) callback)))
+  expect: {result: ["2:3", "2:3"]}
+- name: Explicit native callable values retain folding under a same-spelled lexical parameter
+  scm: |
+    (begin
+      (define syntax (list 'lambda (list 'toUpper)
+        (list 'begin (list 'eval (list 'symbol "toUpper"))
+          (list toUpper "ab"))))
+      (define callback (lambda (_value) (error "native value called its lexical namesake")))
+      (list ((eval (clone_optimizer_expression syntax)) callback)
+        ((eval (optimize (clone_optimizer_expression syntax))) callback)))
+  expect: {result: ["AB", "AB"]}

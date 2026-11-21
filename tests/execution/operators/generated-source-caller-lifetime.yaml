@@ -1,0 +1,145 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Generated source scratch retains actual caller visibility and retires after native transaction decisions
+setup:
+- sql: CREATE TABLE source_lifetime_auto(id INT)
+- sql: CREATE TABLE source_lifetime_commit(id INT)
+- sql: CREATE TABLE source_lifetime_rollback(id INT)
+- sql: CREATE TABLE source_lifetime_failure(id INT)
+- sql: CREATE TABLE source_lifetime_doomed(id INT)
+- scm: "(begin\n  (define generated_source_lifetime_case (lambda (name mode) (begin\n    (define owner (newsession))\
+    \ (owner \"username\" \"root\") (owner \"schema\" \"memcp-tests\")\n    (define events (newsession))\n    (define\
+    \ target (table \"memcp-tests\" false name false nil))\n    (define values (lambda (tx source)\n      (scan\
+    \ tx source '() '() '() (lambda () true) '(\"value\")\n        (lambda (acc value) (append acc value)) (lambda\
+    \ () '())\n        (lambda (left right) (merge (list left right))) false)))\n    (define public_values (lambda\
+    \ (tx)\n      (scan tx target '() '() '() (lambda () true) '(\"id\")\n        (lambda (acc id) (append acc id))\
+    \ (lambda () '())\n        (lambda (left right) (merge (list left right))) false)))\n    (define request (lambda\
+    \ (text body)\n      (with_query_request owner nil 0 text \"acid\" (lambda (statement)\n        (statement text\
+    \ false body)))))\n    (define explicit (not (equal? mode \"autocommit\")))\n    (if explicit (tx_begin_acid\
+    \ owner) true)\n    (if explicit (request \"earlier public data\" (lambda (tx)\n      (with_table_mutation (list\
+    \ target) (list \"insert\" '()) tx owner\n        (lambda (bound) (insert target '(\"id\") (list (list 7)) '()\
+    \ nil false nil bound))))) true)\n    (define doomed (if (equal? mode \"rollback-only\")\n      (try (lambda\
+    \ ()\n        (with_query_request owner nil 0 \"controlled scalar failure\" \"acid\" (lambda (statement)\n \
+    \         (statement \"controlled scalar failure\" false (lambda (_tx) (error \"source-doom\"))\n          \
+    \  (lambda (_cause _completion) \"rollback-only\")))) false)\n        (lambda (cause) (expression_equal? (failure_value\
+    \ cause) \"source-doom\"))) false))\n    (define result (try (lambda ()\n      (request \"generated input read\"\
+    \ (lambda (tx) (begin\n        (define source (runtime_generated_source \"memcp-tests\" '(\"value\") (list nil)\n\
+    \          (list (list 11) (list nil) (list 11)) owner tx (newsession)))\n        (events \"source_name\" (show\
+    \ source \"name\"))\n        (define read (values tx source))\n        (if (equal? mode \"failure\") (error\
+    \ \"source-consumer-failed\") read)))))\n      (lambda (cause) (failure_value cause))))\n    (define state (tx_state\
+    \ (owner \"__memcp_tx\")))\n    (define retained (not (nil? (table \"memcp-tests\" false (events \"source_name\"\
+    ) false nil))))\n    (define later (if (and explicit (not (equal? mode \"failure\")))\n      (request \"read\
+    \ same generated input\" (lambda (tx)\n        (values tx (table \"memcp-tests\" false (events \"source_name\"\
+    ) false tx)))) '()))\n    (define own (if (and explicit (not (equal? mode \"failure\")))\n      (public_values\
+    \ (owner \"__memcp_tx\")) '()))\n    (define observer (public_values nil))\n    (define source_observer (if\
+    \ retained\n      (values nil (table \"memcp-tests\" false (events \"source_name\") false nil)) '()))\n    (if\
+    \ (and explicit (not (equal? mode \"failure\")))\n      (if (equal? mode \"commit\") (tx_commit owner) (tx_rollback\
+    \ owner)) true)\n    (list result state retained later own observer source_observer doomed\n      (nil? (table\
+    \ \"memcp-tests\" false (events \"source_name\") false nil))\n      (public_values nil)))))\n  (globalvars \"\
+    __generated_source_lifetime_case\" (close_procedure generated_source_lifetime_case))\n  true)"
+cleanup:
+- scm: (globalvars "__generated_source_lifetime_case" nil)
+- sql: DROP TABLE source_lifetime_auto
+- sql: DROP TABLE source_lifetime_commit
+- sql: DROP TABLE source_lifetime_rollback
+- sql: DROP TABLE source_lifetime_failure
+- sql: DROP TABLE source_lifetime_doomed
+test_cases:
+- name: Autocommit read preserves duplicates and NULL then retires its generated declaration
+  scm: ((globalvars "__generated_source_lifetime_case") "source_lifetime_auto" "autocommit")
+  expect:
+    result:
+    - - 11
+      - null
+      - 11
+    - committed
+    - false
+    - []
+    - []
+    - []
+    - []
+    - false
+    - true
+    - []
+- name: Explicit commit publishes earlier public writes and retires its retained generated source
+  scm: ((globalvars "__generated_source_lifetime_case") "source_lifetime_commit" "commit")
+  expect:
+    result:
+    - - 11
+      - null
+      - 11
+    - active
+    - true
+    - - 11
+      - null
+      - 11
+    - - 7
+    - []
+    - []
+    - false
+    - true
+    - - 7
+- name: Explicit rollback removes original private writes and its generated declaration
+  scm: ((globalvars "__generated_source_lifetime_case") "source_lifetime_rollback" "rollback")
+  expect:
+    result:
+    - - 11
+      - null
+      - 11
+    - active
+    - true
+    - - 11
+      - null
+      - 11
+    - - 7
+    - []
+    - []
+    - false
+    - true
+    - []
+- name: Failed source consumption aborts earlier public writes and retires scratch after drain
+  scm: ((globalvars "__generated_source_lifetime_case") "source_lifetime_failure" "failure")
+  expect:
+    result:
+    - source-consumer-failed
+    - aborted
+    - false
+    - []
+    - []
+    - []
+    - []
+    - false
+    - true
+    - []
+- name: Rollback-only transaction can read generated scratch without publishing public writes
+  scm: ((globalvars "__generated_source_lifetime_case") "source_lifetime_doomed" "rollback-only")
+  expect:
+    result:
+    - - 11
+      - null
+      - 11
+    - rollback-only
+    - true
+    - - 11
+      - null
+      - 11
+    - - 7
+    - []
+    - []
+    - true
+    - true
+    - []
+- name: Nil transaction source lifetime closes its exact native declaration
+  scm: "(begin\n  (define owner (newsession)) (owner \"username\" \"root\")\n  (define scopes (newsession))\n  (define\
+    \ source (runtime_generated_source \"memcp-tests\" '(\"value\") (list nil)\n    (list (list 3) (list 3)) owner\
+    \ nil scopes))\n  (define name (show source \"name\"))\n  (define result (scan nil source '() '() '() (lambda\
+    \ () true) '(\"value\")\n    (lambda (acc value) (append acc value)) (lambda () '())\n    (lambda (left right)\
+    \ (merge (list left right))) false))\n  (close_relation_scope (scopes name))\n  (close_relation_scope (scopes\
+    \ name))\n  (list result (nil? (table \"memcp-tests\" false name false nil))))"
+  expect:
+    result:
+    - - 3
+      - 3
+    - true

@@ -1,0 +1,444 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/language-elements/null-and-unknown-transact-sql
+metadata:
+  isolated: true
+  description: Grouped scalar predicates preserve SQL UNKNOWN during literal folding
+setup:
+- sql: CREATE TABLE boolean_group_inputs(id INT,flag INT)
+- sql: INSERT INTO boolean_group_inputs VALUES(1,1),(2,0),(3,NULL),(4,0),(5,1)
+cleanup:
+- sql: DROP TABLE boolean_group_inputs
+test_cases:
+- name: sql Residual OR
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE id=2 OR id=7) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: sql Row-dependent CASE
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN id=2 THEN 1 ELSE 0 END=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: sql Row-dependent nullable CASE
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN flag=1 THEN id ELSE 0 END>0) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: sql Negated OR
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NOT(flag=1 OR flag IS NULL)) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: sql Negated OR with UNKNOWN
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NOT(flag=1 OR NULL=1)) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: sql OR with UNKNOWN
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE flag=1 OR NULL=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: sql AND with UNKNOWN
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE flag=1 AND NULL=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: sql CASE with UNKNOWN branch
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN flag=1 OR NULL=1 THEN 1 ELSE 0 END=0) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 3
+- name: sql Literal NULL CASE predicate
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN NULL=1 THEN 1 ELSE 0 END=0) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 5
+- name: tsql Residual OR
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE id=2 OR id=7) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: tsql Row-dependent CASE
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN id=2 THEN 1 ELSE 0 END=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: tsql Row-dependent nullable CASE
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN flag=1 THEN id ELSE 0 END>0) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: tsql Negated OR
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NOT(flag=1 OR flag IS NULL)) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: tsql Negated OR with UNKNOWN
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NOT(flag=1 OR NULL=1)) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: tsql OR with UNKNOWN
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE flag=1 OR NULL=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: tsql AND with UNKNOWN
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE flag=1 AND NULL=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: tsql CASE with UNKNOWN branch
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN flag=1 OR NULL=1 THEN 1 ELSE 0 END=0) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 3
+- name: tsql Literal NULL CASE predicate
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN NULL=1 THEN 1 ELSE 0 END=0) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 5
+- name: postgresql Residual OR
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE id=2 OR id=7) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: postgresql Row-dependent CASE
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN id=2 THEN 1 ELSE 0 END=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: postgresql Row-dependent nullable CASE
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN flag=1 THEN id ELSE 0 END>0) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: postgresql Negated OR
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NOT(flag=1 OR flag IS NULL)) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: postgresql Negated OR with UNKNOWN
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NOT(flag=1 OR NULL=1)) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: postgresql OR with UNKNOWN
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE flag=1 OR NULL=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: postgresql AND with UNKNOWN
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE flag=1 AND NULL=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: postgresql CASE with UNKNOWN branch
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN flag=1 OR NULL=1 THEN 1 ELSE 0 END=0) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 3
+- name: postgresql Literal NULL CASE predicate
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN NULL=1 THEN 1 ELSE 0 END=0) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 5
+- name: sql Negated AND with UNKNOWN
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NOT(flag=1 AND NULL=1)) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: tsql Negated AND with UNKNOWN
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NOT(flag=1 AND NULL=1)) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: postgresql Negated AND with UNKNOWN
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NOT(flag=1 AND NULL=1)) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 2
+- name: sql Constant UNKNOWN comparison
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NULL=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: sql Negated constant UNKNOWN
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NOT(NULL=1)) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: tsql Constant UNKNOWN comparison
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NULL=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: tsql Negated constant UNKNOWN
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NOT(NULL=1)) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: postgresql Constant UNKNOWN comparison
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NULL=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: postgresql Negated constant UNKNOWN
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE NOT(NULL=1)) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: sql HAVING UNKNOWN rejects every completed group
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT flag FROM boolean_group_inputs GROUP BY flag HAVING NULL=1)
+    grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: sql CASE negated nullable OR retains ELSE rows
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN NOT(flag=1 OR NULL=1) THEN 0 ELSE 1 END=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 5
+- name: sql Literal cross source preserves UNKNOWN clause
+  syntax: sql
+  sql: SELECT COUNT(*) AS n FROM boolean_group_inputs CROSS JOIN (SELECT 1 AS unit) constants WHERE
+    NULL=1
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: tsql HAVING UNKNOWN rejects every completed group
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT flag FROM boolean_group_inputs GROUP BY flag HAVING NULL=1)
+    grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: tsql CASE negated nullable OR retains ELSE rows
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN NOT(flag=1 OR NULL=1) THEN 0 ELSE 1 END=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 5
+- name: tsql Literal cross source preserves UNKNOWN clause
+  syntax: tsql
+  sql: SELECT COUNT(*) AS n FROM boolean_group_inputs CROSS JOIN (SELECT 1 AS unit) constants WHERE
+    NULL=1
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: postgresql HAVING UNKNOWN rejects every completed group
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT flag FROM boolean_group_inputs GROUP BY flag HAVING NULL=1)
+    grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: postgresql CASE negated nullable OR retains ELSE rows
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT id,flag FROM boolean_group_inputs GROUP BY id,flag) grouped
+    WHERE CASE WHEN NOT(flag=1 OR NULL=1) THEN 0 ELSE 1 END=1) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 5
+- name: postgresql Literal cross source preserves UNKNOWN clause
+  syntax: postgresql
+  sql: SELECT COUNT(*) AS n FROM boolean_group_inputs CROSS JOIN (SELECT 1 AS unit) constants WHERE
+    NULL=1
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: sql Folded projection retains nullable value
+  syntax: sql
+  sql: SELECT (SELECT COUNT(value) FROM (SELECT CASE WHEN 1=1 THEN NULL ELSE 1 END AS value FROM
+    boolean_group_inputs) projected) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: sql Folded ON retains UNKNOWN rather than absent join
+  syntax: sql
+  sql: SELECT COUNT(constants.unit) AS n FROM boolean_group_inputs driver LEFT JOIN (SELECT 1 AS
+    unit) constants ON NULL=1
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: sql Folded group coordinate remains a single NULL domain
+  syntax: sql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT CASE WHEN 1=1 THEN NULL ELSE 1 END AS value FROM boolean_group_inputs
+    GROUP BY CASE WHEN 1=1 THEN NULL ELSE 1 END) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: tsql Folded projection retains nullable value
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(value) FROM (SELECT CASE WHEN 1=1 THEN NULL ELSE 1 END AS value FROM
+    boolean_group_inputs) projected) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: tsql Folded ON retains UNKNOWN rather than absent join
+  syntax: tsql
+  sql: SELECT COUNT(constants.unit) AS n FROM boolean_group_inputs driver LEFT JOIN (SELECT 1 AS
+    unit) constants ON NULL=1
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: tsql Folded group coordinate remains a single NULL domain
+  syntax: tsql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT CASE WHEN 1=1 THEN NULL ELSE 1 END AS value FROM boolean_group_inputs
+    GROUP BY CASE WHEN 1=1 THEN NULL ELSE 1 END) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 1
+- name: postgresql Folded projection retains nullable value
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(value) FROM (SELECT CASE WHEN 1=1 THEN NULL ELSE 1 END AS value FROM
+    boolean_group_inputs) projected) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: postgresql Folded ON retains UNKNOWN rather than absent join
+  syntax: postgresql
+  sql: SELECT COUNT(constants.unit) AS n FROM boolean_group_inputs driver LEFT JOIN (SELECT 1 AS
+    unit) constants ON NULL=1
+  expect:
+    rows: 1
+    data:
+    - n: 0
+- name: postgresql Folded group coordinate remains a single NULL domain
+  syntax: postgresql
+  sql: SELECT (SELECT COUNT(*) FROM (SELECT CASE WHEN 1=1 THEN NULL ELSE 1 END AS value FROM boolean_group_inputs
+    GROUP BY CASE WHEN 1=1 THEN NULL ELSE 1 END) grouped) AS n
+  expect:
+    rows: 1
+    data:
+    - n: 1

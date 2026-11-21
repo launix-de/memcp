@@ -1719,15 +1719,15 @@ func registerJITRegexBuiltins() {
 			if len(arguments) != 3 || !arguments[0].IsRegex() {
 				panic("jit constant regexp replace expects a precompiled regex, a replacement and a value")
 			}
-			return jitConstantRegexpReplaceFunc(arguments[0], arguments[1], arguments[2])
+			return jitConstantRegexpReplaceFunc(arguments[0], arguments[2], arguments[1])
 		},
 		Type: &TypeDescriptor{
 			Kind:      "func",
 			Forbidden: true,
 			Params: []*TypeDescriptor{
 				{Kind: "any", Label: "pattern"},
-				{Kind: "any", Label: "replacement"},
 				{Kind: "string", Label: "value"},
+				{Kind: "func|any", Label: "replacement"},
 			},
 			Return:         &TypeDescriptor{Kind: "string"},
 			Const:          true,
@@ -1740,7 +1740,7 @@ func registerJITRegexBuiltins() {
 				if !pattern.IsRegex() {
 					panic("jit: constant regexp replace requires a precompiled regex")
 				}
-				return jitEmitConstantRegexpReplaceViaHelper(ctx, pattern.Regex(), sourceArgs[1].WithoutSourceInfo(), args, result)
+				return jitEmitConstantRegexpReplaceViaHelper(ctx, pattern.Regex(), sourceArgs[2].WithoutSourceInfo(), args, result)
 			},
 		},
 	})
@@ -1751,15 +1751,15 @@ func registerJITRegexBuiltins() {
 			if len(arguments) != 3 || !arguments[0].IsRegex() {
 				panic("jit constant regexp replace (inline) expects a precompiled regex, a replacement and a value")
 			}
-			return jitConstantRegexpReplaceFunc(arguments[0], arguments[1], arguments[2])
+			return jitConstantRegexpReplaceFunc(arguments[0], arguments[2], arguments[1])
 		},
 		Type: &TypeDescriptor{
 			Kind:      "func",
 			Forbidden: true,
 			Params: []*TypeDescriptor{
 				{Kind: "any", Label: "pattern"},
-				{Kind: "any", Label: "replacement"},
 				{Kind: "string", Label: "value"},
+				{Kind: "func|any", Label: "replacement"},
 			},
 			Return:         &TypeDescriptor{Kind: "string"},
 			Const:          true,
@@ -1772,7 +1772,7 @@ func registerJITRegexBuiltins() {
 				if !pattern.IsRegex() {
 					panic("jit: constant regexp replace (inline) requires a precompiled regex")
 				}
-				return jitEmitConstantRegexpReplaceFunc(ctx, pattern.Regex(), sourceArgs[1].WithoutSourceInfo(), args, result)
+				return jitEmitConstantRegexpReplaceFunc(ctx, pattern.Regex(), sourceArgs[2].WithoutSourceInfo(), args, result)
 			},
 		},
 	})
@@ -1784,9 +1784,9 @@ func serializeRegexCall(name string, arity int) func([]Scmer) (Scmer, error) {
 		if len(args) != arity || !args[0].IsRegex() {
 			return NewNil(), fmt.Errorf("invalid optimized regex call")
 		}
-		result := []Scmer{NewSymbol(name), args[len(args)-1], NewString(args[0].Regex().String())}
+		result := []Scmer{NewSymbol(name), args[1], NewString(args[0].Regex().String())}
 		if arity == 3 {
-			result = append(result, args[1])
+			result = append(result, args[2])
 		}
 		return NewSlice(result), nil
 	}

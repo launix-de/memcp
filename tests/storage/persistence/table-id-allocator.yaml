@@ -1,0 +1,333 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: UUID-owned native ID allocation and authenticated IDENT_CURRENT observations
+setup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS allocator_metadata_reader" nil))
+- scm: (dropdatabase "memcp-tests-allocator-authority" true)
+- sql: DROP PROCEDURE IF EXISTS allocator_read_current
+- sql: DROP FUNCTION IF EXISTS allocator_current_function
+- sql: DROP FUNCTION IF EXISTS allocator_current_local
+- sql: DROP FUNCTION IF EXISTS allocator_current_wrapper
+- sql: DROP VIEW IF EXISTS allocator_joined_view
+- sql: DROP TABLE IF EXISTS allocator_seeded
+- sql: DROP TABLE IF EXISTS allocator_unused
+- sql: DROP TABLE IF EXISTS allocator_failure
+- sql: DROP TABLE IF EXISTS allocator_plain
+- sql: DROP TABLE IF EXISTS allocator_prepared
+- sql: DROP TABLE IF EXISTS allocator_native
+- sql: DROP TABLE IF EXISTS allocator_recreated
+- sql: CREATE TABLE allocator_seeded(id BIGINT IDENTITY(55,1) PRIMARY KEY,value INT UNIQUE)
+- sql: CREATE TABLE allocator_unused(id INT IDENTITY(9,1) PRIMARY KEY,value INT)
+- sql: CREATE TABLE allocator_failure(id INT IDENTITY PRIMARY KEY,value INT UNIQUE)
+- sql: CREATE TABLE allocator_plain(value INT)
+- sql: CREATE TABLE allocator_prepared(id INT IDENTITY(201,1) PRIMARY KEY,value INT)
+- sql: CREATE TABLE allocator_native(id INT IDENTITY PRIMARY KEY,value INT)
+- sql: CREATE TABLE allocator_recreated(id INT IDENTITY(400,1) PRIMARY KEY,value INT)
+- sql: CREATE VIEW allocator_joined_view AS SELECT a.id,a.value FROM allocator_seeded a JOIN allocator_plain p ON a.value=p.value
+cleanup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS allocator_metadata_reader" nil))
+- scm: (dropdatabase "memcp-tests-allocator-authority" true)
+- sql: DROP PROCEDURE IF EXISTS allocator_read_current
+- sql: DROP FUNCTION IF EXISTS allocator_current_function
+- sql: DROP FUNCTION IF EXISTS allocator_current_local
+- sql: DROP FUNCTION IF EXISTS allocator_current_wrapper
+- sql: DROP VIEW IF EXISTS allocator_joined_view
+- sql: DROP TABLE IF EXISTS allocator_seeded
+- sql: DROP TABLE IF EXISTS allocator_unused
+- sql: DROP TABLE IF EXISTS allocator_failure
+- sql: DROP TABLE IF EXISTS allocator_plain
+- sql: DROP TABLE IF EXISTS allocator_prepared
+- sql: DROP TABLE IF EXISTS allocator_native
+- sql: DROP TABLE IF EXISTS allocator_recreated
+test_cases:
+- name: Native counter ALTER preserves its configured seed and advances future IDs
+  setup:
+  - sql: DROP TABLE IF EXISTS allocator_adjusted
+  - sql: CREATE TABLE allocator_adjusted(id INT IDENTITY(21,1) PRIMARY KEY,value INT)
+  steps:
+  - scm: |
+      (begin
+        (define target (table "memcp-tests" false "allocator_adjusted" false nil))
+        (define changed (altercolumn target "id" "auto_increment" 200))
+        (define state (table_id_state target nil))
+        (list changed (state "start") (state "issued") (state "high") (state "high_allocated")))
+    expect: {result: [true,'21',true,'200',true]}
+  - sql: INSERT allocator_adjusted(value) VALUES(9)
+  - sql: SELECT id,value,IDENT_CURRENT('allocator_adjusted') AS current_value FROM allocator_adjusted
+    expect: {rows: 1, data: [{id: 201,value: 9,current_value: 201}]}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS allocator_adjusted
+- name: Virgin native identities expose their actual seed and NUMERIC declaration
+  tds:
+    statements:
+    - sql: SELECT IDENT_CURRENT(N'dbo.allocator_seeded') AS current_value
+      expect:
+        rows: 1
+        data: [{current_value: 55}]
+        column_types: [{name: current_value, type: DECIMAL, precision: 38, scale: 0}]
+- name: Allocated table values are independent of the reading session
+  session_id: allocator-writer
+  steps:
+  - sql: INSERT allocator_seeded(value) VALUES(1),(2)
+  - sql: SELECT id,value FROM allocator_seeded ORDER BY id
+    expect: {rows: 2, data: [{id: 55,value: 1},{id: 56,value: 2}]}
+- name: Another session observes the native table value without a session identity
+  session_id: allocator-observer
+  sql: SELECT IDENT_CURRENT('ALLOCATOR_SEEDED') AS current_value,@@IDENTITY AS session_value
+  expect: {rows: 1, data: [{current_value: 56,session_value: null}]}
+- name: Rollback restores rows without restoring the table allocator
+  session_id: allocator-rollback
+  steps:
+  - sql: BEGIN TRANSACTION
+    session_id: allocator-rollback
+  - sql: INSERT allocator_seeded(value) VALUES(3)
+    session_id: allocator-rollback
+  - sql: SELECT IDENT_CURRENT('allocator_seeded') AS current_value,COUNT(*) AS n FROM allocator_seeded
+    session_id: allocator-rollback
+    expect: {rows: 1, data: [{current_value: 57,n: 3}]}
+  - sql: ROLLBACK
+    session_id: allocator-rollback
+  - sql: SELECT IDENT_CURRENT('allocator_seeded') AS current_value,COUNT(*) AS n FROM allocator_seeded
+    session_id: allocator-rollback
+    expect: {rows: 1, data: [{current_value: 57,n: 2}]}
+- name: Savepoint rewind retains consumed IDs and complete row values
+  session_id: allocator-savepoint
+  steps:
+  - sql: BEGIN TRANSACTION
+    session_id: allocator-savepoint
+  - sql: INSERT allocator_seeded(value) VALUES(4)
+    session_id: allocator-savepoint
+  - sql: SAVE TRANSACTION allocator_point
+    session_id: allocator-savepoint
+  - sql: INSERT allocator_seeded(value) VALUES(5)
+    session_id: allocator-savepoint
+  - sql: ROLLBACK TRANSACTION allocator_point
+    session_id: allocator-savepoint
+  - sql: INSERT allocator_seeded(value) VALUES(6)
+    session_id: allocator-savepoint
+  - sql: COMMIT
+    session_id: allocator-savepoint
+  - sql: SELECT id,value FROM allocator_seeded ORDER BY id
+    session_id: allocator-savepoint
+    expect: {rows: 4, data: [{id: 55,value: 1},{id: 56,value: 2},{id: 58,value: 4},{id: 60,value: 6}]}
+  - sql: SELECT IDENT_CURRENT('allocator_seeded') AS current_value
+    session_id: allocator-savepoint
+    expect: {rows: 1, data: [{current_value: 60}]}
+- name: Failed UNIQUE insert consumes the identity before rejecting the row
+  session_id: allocator-failure
+  steps:
+  - sql: INSERT allocator_failure(value) VALUES(7)
+  - sql: INSERT allocator_failure(value) VALUES(7)
+    expect: {error: true, contains: [Duplicate]}
+  - sql: SELECT id,value FROM allocator_failure ORDER BY id
+    expect: {rows: 1, data: [{id: 1,value: 7}]}
+  - sql: SELECT IDENT_CURRENT('allocator_failure') AS current_value
+    expect: {rows: 1, data: [{current_value: 2}]}
+- name: Missing nonidentity NULL and joined view addresses retain SQL NULL
+  sql: SELECT IDENT_CURRENT('allocator_absent') AS absent_value,IDENT_CURRENT('allocator_plain') AS plain_value,IDENT_CURRENT(NULL) AS null_value,IDENT_CURRENT('allocator_joined_view') AS joined_value
+  expect: {rows: 1, data: [{absent_value: null,plain_value: null,null_value: null,joined_value: null}]}
+- name: Native unused reservations expose truthful start issued and high values
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "allocator_unused" false nil))
+      (define before (table_id_state target nil))
+      (define block (reserve_ids target 3 nil))
+      (define after (table_id_state target nil))
+      (list (before "start") (before "issued") (before "high") (before "high_allocated")
+        block (after "start") (after "issued") (after "high") (after "high_allocated")))
+  expect: {result: ['9',false,'8',false,[9,11],'9',true,'11',true]}
+- name: Crash before any inserted row does not erase an accepted unused interval
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart after the unused reservation crash
+  action: restart
+- name: Unused interval and rolled back allocations survive cold recovery
+  sql: SELECT IDENT_CURRENT('allocator_unused') AS unused_current,IDENT_CURRENT('allocator_seeded') AS seeded_current,IDENT_CURRENT('allocator_failure') AS failure_current
+  expect: {rows: 1, data: [{unused_current: 11,seeded_current: 60,failure_current: 2}]}
+- name: The first postcrash row follows the unused interval
+  steps:
+  - sql: SELECT COUNT(*) AS n FROM allocator_unused
+    expect: {rows: 1, data: [{n: 0}]}
+  - sql: INSERT allocator_unused(value) VALUES(12)
+  - sql: SELECT id,value FROM allocator_unused ORDER BY id
+    expect: {rows: 1, data: [{id: 12,value: 12}]}
+- name: Prepared repeated reads remain fresh after independent statement allocations
+  tds:
+    statements:
+    - sql: SELECT IDENT_CURRENT(@target) AS current_value
+      prepare: true
+      parameters: [{name: target,value: allocator_prepared}]
+      expect: {rows: 1, data: [{current_value: 201}]}
+    - sql: INSERT allocator_prepared(value) VALUES(1),(2)
+    - sql: SELECT IDENT_CURRENT(@target) AS current_value
+      prepare: true
+      parameters: [{name: target,value: allocator_prepared}]
+      expect: {rows: 1, data: [{current_value: 202}]}
+- name: Recreated names do not inherit an old UUID allocator
+  steps:
+  - sql: INSERT allocator_recreated(value) VALUES(1)
+  - sql: SELECT IDENT_CURRENT('allocator_recreated') AS current_value
+    expect: {rows: 1, data: [{current_value: 400}]}
+  - sql: DROP TABLE allocator_recreated
+  - sql: CREATE TABLE allocator_recreated(id INT IDENTITY(7,1) PRIMARY KEY,value INT)
+  - sql: SELECT IDENT_CURRENT('allocator_recreated') AS current_value
+    expect: {rows: 1, data: [{current_value: 7}]}
+  - sql: INSERT allocator_recreated(value) VALUES(2)
+  - sql: SELECT id,value FROM allocator_recreated
+    expect: {rows: 1, data: [{id: 7,value: 2}]}
+- name: DELETE empties the rows without making an issued allocator virgin
+  steps:
+  - sql: DELETE FROM allocator_recreated
+  - sql: SELECT IDENT_CURRENT('allocator_recreated') AS current_value,COUNT(*) AS n FROM allocator_recreated
+    expect: {rows: 1, data: [{current_value: 7,n: 0}]}
+
+- name: Database visibility is rechecked for every metadata invocation
+  scm: |
+    (begin
+      (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS allocator_metadata_reader" nil))
+      (eval (parse_sql "memcp-tests" "CREATE USER allocator_metadata_reader IDENTIFIED BY 'allocator-pw'" nil))
+      (define admin (newsession)) (admin "username" "root")
+      (define run (lambda (session database text) (begin
+        (define out (newsession))
+        (tsql_execute_request database text session nil 0 (lambda (row) (out "row" row)) (lambda fields true))
+        (out "row"))))
+      (createdatabase "memcp-tests-allocator-authority" true)
+      (run admin "memcp-tests-allocator-authority" "DROP TABLE IF EXISTS allocator_secured")
+      (run admin "memcp-tests-allocator-authority" "CREATE TABLE allocator_secured(id INT IDENTITY(501,1),value INT)")
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO allocator_metadata_reader" nil))
+      (define reader (newsession))
+      (reader "username" "allocator_metadata_reader")
+      (reader "__tsql_principal_id" (tsql_account_id "allocator_metadata_reader"))
+      (define first (run reader "memcp-tests" "SELECT IDENT_CURRENT('[memcp-tests-allocator-authority].dbo.allocator_secured') AS current_value"))
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests-allocator-authority`.* TO allocator_metadata_reader" nil))
+      (define allowed (run reader "memcp-tests" "SELECT IDENT_CURRENT('[memcp-tests-allocator-authority].dbo.allocator_secured') AS current_value"))
+      (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests-allocator-authority`.* FROM allocator_metadata_reader" nil))
+      (define revoked (run reader "memcp-tests" "SELECT IDENT_CURRENT('[memcp-tests-allocator-authority].dbo.allocator_secured') AS current_value"))
+      (list (first "current_value") (allowed "current_value") (revoked "current_value")))
+  expect: {result: [null,501,null]}
+- name: A replacement login cannot lend metadata authority to an old actor incarnation
+  scm: |
+    (begin
+      (define old (list "allocator_metadata_reader" (tsql_account_id "allocator_metadata_reader")))
+      (eval (parse_sql "memcp-tests" "DROP USER allocator_metadata_reader" nil))
+      (eval (parse_sql "memcp-tests" "CREATE USER allocator_metadata_reader IDENTIFIED BY 'new-allocator-pw'" nil))
+      (define admin (newsession)) (admin "username" "root")
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests-allocator-authority`.* TO allocator_metadata_reader" nil))
+      (define fresh (list "allocator_metadata_reader" (tsql_account_id "allocator_metadata_reader")))
+      (define old_result (tsql_ident_current_rows "memcp-tests-allocator-authority" old "allocator_secured" nil '()))
+      (define new_result (tsql_ident_current_rows "memcp-tests-allocator-authority" fresh "allocator_secured" nil '()))
+      (eval (parse_sql "memcp-tests" "DROP USER allocator_metadata_reader" nil))
+      (tsql_execute_request "memcp-tests-allocator-authority" "DROP TABLE allocator_secured"
+        admin nil 0 (lambda (row) true) (lambda fields true))
+      (dropdatabase "memcp-tests-allocator-authority" true)
+      (list old_result new_result))
+  expect: {result: [[[null]],[[501]]]}
+
+- name: Native identity assignments and subsequent INSERT share one allocator
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root")
+      (tx_begin_acid session)
+      (define tx (session "__memcp_tx"))
+      (define target (table "memcp-tests" false "allocator_native" false tx))
+      (define first (insert target '("value") (list (list 31)) '() nil false nil tx))
+      (define updated (scan tx target '() '() '() (lambda () true) '("$update")
+        (lambda (count update) (begin (update (list "id" 100)) (+ count 1))) 0 +))
+      (define second (insert target '("value") (list (list 32)) '() nil false nil tx))
+      (define state (table_id_state target tx))
+      (tx_commit session)
+      (list first updated second (state "start") (state "issued") (state "high")))
+  expect: {result: [1,1,1,'1',true,'101']}
+- name: Native identity assignments retain complete stored values
+  sql: SELECT id,value FROM allocator_native ORDER BY id
+  expect: {rows: 2, data: [{id: 100,value: 31},{id: 101,value: 32}]}
+- name: A checkpoint retains a further unused block without rewriting public rows
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "allocator_native" false nil))
+      (define interval (reserve_ids target 2 nil))
+      (rebuild target true false nil true)
+      (list interval ((table_id_state target nil) "high")))
+  expect: {result: [[102,103],'103']}
+- name: Crash after allocator checkpoint
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart after allocator checkpoint
+  action: restart
+- name: Recovered checkpoint retains rows unused IDs and the replacement generation
+  steps:
+  - sql: SELECT IDENT_CURRENT('allocator_native') AS native_current,IDENT_CURRENT('allocator_recreated') AS recreated_current
+    expect: {rows: 1, data: [{native_current: 103,recreated_current: 7}]}
+  - sql: INSERT allocator_native(value) VALUES(33)
+  - sql: SELECT id,value FROM allocator_native ORDER BY id
+    expect: {rows: 3, data: [{id: 100,value: 31},{id: 101,value: 32},{id: 104,value: 33}]}
+- name: Truncated identity state requires the separate native clear owner
+  noncritical: true
+  setup:
+  - sql: DROP TABLE IF EXISTS allocator_truncated
+  - sql: CREATE TABLE allocator_truncated(id INT IDENTITY(71,1),value INT)
+  - sql: INSERT allocator_truncated(value) VALUES(1),(2)
+  steps:
+  - sql: TRUNCATE TABLE allocator_truncated
+  - sql: SELECT IDENT_CURRENT('allocator_truncated') AS current_value,COUNT(*) AS n FROM allocator_truncated
+    expect: {rows: 1, data: [{current_value: 71,n: 0}]}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS allocator_truncated
+
+- name: Stored procedure execution reads the current module database allocator
+  steps:
+  - sql: CREATE PROCEDURE allocator_read_current AS BEGIN SELECT IDENT_CURRENT('dbo.allocator_native') AS current_value; END
+  - sql: EXEC allocator_read_current
+    expect: {rows: 1, data: [{current_value: 104}]}
+- name: A scalar function keeps the declared NUMERIC boundary and current native value
+  steps:
+  - sql: CREATE FUNCTION allocator_current_function() RETURNS NUMERIC(38,0) AS BEGIN RETURN IDENT_CURRENT('dbo.allocator_native'); END
+  - sql: SELECT dbo.allocator_current_function() AS current_value
+    expect: {rows: 1, data: [{current_value: 104}]}
+- name: A scalar initializer retains its relational intrinsic and declared local value
+  steps:
+  - sql: CREATE FUNCTION allocator_current_local() RETURNS NUMERIC(38,0) AS BEGIN DECLARE @current NUMERIC(38,0)=IDENT_CURRENT('dbo.allocator_native'); RETURN @current; END
+  - sql: SELECT dbo.allocator_current_local() AS current_value
+    expect: {rows: 1, data: [{current_value: 104}]}
+- name: A scalar wrapper keeps the relational dependency of its guarded callee
+  steps:
+  - sql: CREATE FUNCTION allocator_current_wrapper() RETURNS NUMERIC(38,0) AS BEGIN RETURN dbo.allocator_current_function(); END
+  - sql: SELECT dbo.allocator_current_wrapper() AS current_value
+    expect: {rows: 1, data: [{current_value: 104}]}
+
+- name: Invalid native observation capabilities fail before any allocator or row change
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "allocator_native" false nil))
+      (define before (table_id_state target nil))
+      (define rejected (try (lambda () (begin (table_id_state target false) false))
+        (lambda (cause) (equal? (failure_value cause) "table_id_state requires a native transaction capability or nil"))))
+      (list rejected (before "high") ((table_id_state target nil) "high")))
+  expect: {result: [true,'104','104']}
+- name: A stale native handle cannot observe a same-name replacement allocator
+  setup:
+  - sql: DROP TABLE IF EXISTS allocator_handle
+  - sql: CREATE TABLE allocator_handle(id INT IDENTITY(81,1),value INT)
+  scm: |
+    (begin
+      (define old (table "memcp-tests" false "allocator_handle" false nil))
+      (define admin (newsession)) (admin "username" "root")
+      (define run (lambda (text) (begin
+        (define result (newsession))
+        (tsql_execute_request "memcp-tests" text admin nil 0
+          (lambda (row) (result "row" row)) (lambda fields true))
+        (result "row"))))
+      (run "DROP TABLE allocator_handle")
+      (run "CREATE TABLE allocator_handle(id INT IDENTITY(91,1),value INT)")
+      (define rejected (try (lambda () (begin (table_id_state old nil) false))
+        (lambda (cause) (equal? (failure_value cause) "table allocator handle is outside its visible native generation"))))
+      (define visible (run "SELECT IDENT_CURRENT('allocator_handle') AS current_value,COUNT(*) AS n FROM allocator_handle"))
+      (list rejected (visible "current_value") (visible "n")))
+  expect: {result: [true,91,0]}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS allocator_handle

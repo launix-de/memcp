@@ -85,7 +85,7 @@ func TestClusterUniqueProbeUsesAcquiredSuccessor(t *testing.T) {
 		}()
 		tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false,
 			func(rows [][]scm.Scmer, _ *uniqueWriteGuard) { result.accepted += len(rows) }, nil,
-			func(string, []scm.Scmer) { result.collisions++ }, 0, nil, nil, nil)
+			func(string, []scm.Scmer) { result.collisions++ }, 0, nil, nil, nil, nil)
 	}()
 	deadline := time.Now().Add(time.Second)
 	for topology.operations.Load() == 0 {
@@ -439,7 +439,7 @@ func TestClusterInvalidationFollowsRebuiltOwnerUUID(t *testing.T) {
 
 func TestClusterReferenceAcknowledgesInstalledGrant(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tclustergrantack", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
 	cluster.initializeManager()
@@ -499,7 +499,7 @@ func TestClusterCounterReservationKeepsSharedSchemaOwner(t *testing.T) {
 	defer sharedClusterMounts.Store(mounts)
 	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
 	defer nodeScans.Store(service)
-	reply, err := cluster.reserveIDs(context.Background(), clusterIDRequest{Database: tbl.schema.Name, Table: tbl.Name, Count: 8})
+	reply, err := cluster.reserveIDs(context.Background(), clusterIDRequest{Database: tbl.schema.Name, Table: tbl.Name, Identity: tbl.RuntimeIdentity, Count: 8})
 	if err != nil || reply.Base != 0 {
 		t.Fatalf("reserve: %+v %v", reply, err)
 	}
@@ -542,7 +542,7 @@ func TestClusterCounterCheckpointDuringLocalSchemaUpgrade(t *testing.T) {
 	defer nodeScans.Store(service)
 	releaseCoordination := cell.coordinate(context.Background())
 	defer releaseCoordination()
-	tbl.reserveLocalAutoIncrement(0, 8)
+	tbl.reserveLocalAutoIncrement(0, 8, false)
 	pending, action := cell.ownstate.Request(mosi.M)
 	if action != mosi.Send || pending.Retained() != mosi.O {
 		t.Fatal("fixture did not start an O-to-M upgrade")
@@ -578,7 +578,7 @@ func TestClusterCounterCheckpointDuringLocalSchemaUpgrade(t *testing.T) {
 
 func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tclusterhandovernewgrant", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}, ctx: context.Background(), service: &nodeScanService{}}
 	cluster.initializeManager()
 	r := cluster.manager
@@ -694,10 +694,10 @@ func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 
 func TestClusterReferenceGrantSurvivesInvalidSuccessor(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tclusterreferencependinguuid", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	remote := "memcp://11111111-1111-4111-8111-111111111111"
-	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://22222222-2222-4222-8222-222222222222"}}
 	cluster.initializeManager()
 	peer := &mosiPeer{outgoing: newMosiMailbox(), done: make(chan struct{})}
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: remote}, peer: peer}}})
@@ -1214,7 +1214,7 @@ func TestClusterNativeUniqueUpdateReleasesBorrowedReservation(t *testing.T) {
 		if cell.ownstate.Writing() {
 			t.Fatal("native UPDATE retained its MOSI writer")
 		}
-		guard := tbl.guardUniqueWrites([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}, false, 0, nil)
+		guard := tbl.guardUniqueWrites([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}, false, 0, nil, nil)
 		if !guard.tryLock() {
 			t.Fatal("native UPDATE retained a UNIQUE stripe after publishing")
 		}
@@ -1244,7 +1244,7 @@ func TestClusterUniqueCallbackReleasesMOnPanic(t *testing.T) {
 					t.Fatal("callback executed without active M")
 				}
 				panic("callback failure")
-			}, 0, nil, nil, nil)
+			}, 0, nil, nil, nil, nil)
 	}()
 	if failure != "callback failure" || cell.ownstate.Writing() {
 		t.Fatalf("callback failure=%v retained writer=%v", failure, cell.ownstate.Writing())
@@ -1289,7 +1289,7 @@ func TestClusterUniquePreflightUsesMutationAdmissionAndKeepsNodeLimit(t *testing
 			}
 			accepted += len(rows)
 		}, nil,
-		func(string, []scm.Scmer) { t.Fatal("unrelated key collided") }, 0, nil, nil, nil)
+		func(string, []scm.Scmer) { t.Fatal("unrelated key collided") }, 0, nil, nil, nil, nil)
 	if accepted != 1 {
 		t.Fatal("fitting mutation preflight was refused at the read reserve")
 	}
@@ -1538,7 +1538,7 @@ func TestClusterUniqueCoordinatorRetriesAfterLaneAppend(t *testing.T) {
 		cluster.declareShard(shard, true)
 	}
 	columns, rows := []string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}
-	guard := tbl.guardUniqueWrites(columns, rows, false, 0, nil)
+	guard := tbl.guardUniqueWrites(columns, rows, false, 0, nil, nil)
 	defer guard.release()
 	set := tbl.reserveUniqueDomain(columns, rows, false, nil, nil, &guard)
 	defer set.close(false)
@@ -1637,7 +1637,7 @@ func TestClusterUniqueUnreservedReadNeedsHeldParticipant(t *testing.T) {
 	cluster.declareShard(left, true)
 	cluster.declareShard(middle, true)
 	columns := []string{"id"}
-	guard := tbl.guardUniqueWrites(columns, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0, nil)
+	guard := tbl.guardUniqueWrites(columns, [][]scm.Scmer{{scm.NewInt(7)}}, false, 0, nil, nil)
 	defer guard.release()
 	set := tbl.reserveUniqueDomain(columns, [][]scm.Scmer{{scm.NewInt(7)}}, false, nil, nil, &guard)
 	defer set.close(false)
@@ -1645,7 +1645,7 @@ func TestClusterUniqueUnreservedReadNeedsHeldParticipant(t *testing.T) {
 	tbl.ShardMode, tbl.PShards = ShardModePartition, []*storageShard{left, middle, right}
 	tbl.PDimensions = []shardDimension{{Column: "id", NumPartitions: 3, Pivots: []scm.Scmer{scm.NewInt(10), scm.NewInt(20)}}}
 	tbl.publishTopologyLocked()
-	additional := tbl.guardUniqueWrites(columns, [][]scm.Scmer{{scm.NewInt(99)}}, false, 0, nil)
+	additional := tbl.guardUniqueWrites(columns, [][]scm.Scmer{{scm.NewInt(99)}}, false, 0, nil, nil)
 	guard.extend(additional.mask)
 	defer func() {
 		if _, retry := recover().(uniqueReadRetry); !retry {
@@ -1671,7 +1671,7 @@ func TestClusterUniqueContentionDoesNotMoveOwnership(t *testing.T) {
 			cell.current.Store(shard)
 			cell.ownstate.Initialize(mosi.M)
 			rows := [][]scm.Scmer{{scm.NewInt(7)}}
-			guard := tbl.guardUniqueWrites([]string{"id"}, rows, false, 0, nil)
+			guard := tbl.guardUniqueWrites([]string{"id"}, rows, false, 0, nil, nil)
 			if kind == "stripe" {
 				guard.lock()
 				defer guard.unlock()
@@ -1728,7 +1728,7 @@ func TestClusterLiveReferencePublishesEpochBeforePayloadCanMergeCells(t *testing
 	tbl, _ := createDurabilityTestTable(t, "t_live_reference_epoch", 4)
 	peer, client, _ := setupRemoteScanConnection(t)
 	owner := nodeScans.Load()
-	cluster := &nodeCluster{self: clusterMember{ID: client.authNodeID(), Boot: client.id}, ctx: context.Background(), service: client}
+	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + client.authNodeID(), Boot: client.id}, ctx: context.Background(), service: client}
 	cluster.initializeManager()
 	remote := peer.objectPeer.ID
 	cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: remote}, peer: peer}}})
@@ -1805,7 +1805,7 @@ func TestClusterUniqueReservationRegroupsInsteadOfFollowingOwner(t *testing.T) {
 	done := make(chan any, 1)
 	go func() {
 		defer func() { done <- recover() }()
-		guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, 0, nil)
+		guard := tbl.guardUniqueWrites([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, 0, nil, nil)
 		client := tbl.startUniqueReservation(ctx, links[0].member.ID, shard, []string{shard.uuid.String()}, []string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, &guard)
 		client.cancel()
 	}()

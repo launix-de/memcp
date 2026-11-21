@@ -327,7 +327,7 @@ func TestQueryRequestPreservesCancellationAndReusesStatementContext(t *testing.T
 	var original *TxContext
 	var firstGeneration uint64
 	tbl, col := &table{}, &column{IsTemp: true}
-	WithQueryRequest(session, ss, seq, "several statements", scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+	WithQueryRequest(session, ss, seq, "several statements", TxCursorStability, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		statement := a[0]
 		for i := 0; i < 2; i++ {
 			scm.Apply(statement, scm.NewString("statement"), scm.NewBool(false), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
@@ -379,7 +379,7 @@ func TestQueryRequestCancellationStopsFollowingStatementAndRejectsEscapedExecuto
 				t.Fatal("cancelled request executed its following statement")
 			}
 		}()
-		WithQueryRequest(session, ss, seq, "cancelled request", scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		WithQueryRequest(session, ss, seq, "cancelled request", TxCursorStability, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 			escaped = a[0]
 			scm.Apply(escaped, scm.NewString("first"), scm.NewBool(false), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return scm.NewNil() }))
 			cancel()
@@ -406,7 +406,7 @@ func TestQueryRequestRecoveryCapabilityAndGlobalStatementScopes(t *testing.T) {
 	var previous uint64
 	for i := 0; i < 2; i++ {
 		session := scm.NewSession()
-		WithQueryRequest(session, nil, 0, "request", scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		WithQueryRequest(session, nil, 0, "request", TxCursorStability, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 			return scm.Apply(a[0], scm.NewString("statement"), scm.NewBool(false), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 				tx := scmerToTxContext(values[0])
 				if generation := tx.statementGeneration.Load(); generation == 0 || generation == previous {
@@ -429,7 +429,7 @@ func TestQueryRequestRecoveryCapabilityAndGlobalStatementScopes(t *testing.T) {
 					t.Fatalf("recovery=%v unexpected outcome: %v", recovery, got)
 				}
 			}()
-			WithQueryRequest(session, nil, 0, "request", scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			WithQueryRequest(session, nil, 0, "request", TxCursorStability, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 				return scm.Apply(a[0], scm.NewString("opaque statement text"), scm.NewBool(recovery), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 					tx.Rollback()
 					session.Func()(scm.NewString("transaction"), scm.NewNil())

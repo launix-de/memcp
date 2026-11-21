@@ -1,0 +1,174 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Constant-pattern replacement preserves source operand order and callback effects
+setup: []
+cleanup: []
+test_cases:
+- name: Input failure precedes a replacement failure in ordinary and optimized code
+  scm: |
+    (begin
+      (define source "(lambda () (regexp_replace (error \"input-first\") \"a\" (error \"replacement-second\")))")
+      (define raw (eval (scheme source)))
+      (define raw_cause (try (lambda () (begin (raw) false))
+        (lambda (cause) (failure_value cause))))
+      (define optimized (eval (optimize (scheme source))))
+      (define optimized_cause (try (lambda () (begin (optimized) false))
+        (lambda (cause) (failure_value cause))))
+      (and (equal? raw_cause "input-first") (equal? optimized_cause "input-first")))
+  expect: {result: true}
+- name: Input and replacement construction precede each actual match callback
+  scm: |
+    (begin
+      (define source "(lambda (input replacement) (regexp_replace (input) \"[a-z]\" (replacement)))")
+      (define raw (eval (scheme source)))
+      (define optimized (eval (optimize (scheme source))))
+      (define state (newsession))
+      (define input (lambda () (begin (state "trace" (concat (state "trace") "I")) "ab")))
+      (define replacement (lambda () (begin
+        (state "trace" (concat (state "trace") "R"))
+        (lambda (word) (begin (state "trace" (concat (state "trace") "C")) (concat word "!"))))))
+      (define run (lambda (function) (begin
+        (state "trace" "")
+        (define value (function input replacement))
+        (list value (state "trace")))))
+      (and (expression_equal? (run raw) '("a!b!" "IRCC"))
+        (expression_equal? (run optimized) '("a!b!" "IRCC"))
+        (expression_equal? (run optimized) '("a!b!" "IRCC"))))
+  expect: {result: true}
+- name: NULL input still evaluates the replacement expression without invoking its callback
+  scm: |
+    (begin
+      (define source "(lambda (input replacement) (regexp_replace (input) \"[a-z]\" (replacement)))")
+      (define raw (eval (scheme source)))
+      (define optimized (eval (optimize (scheme source))))
+      (define state (newsession))
+      (define input (lambda () (begin (state "trace" (concat (state "trace") "I")) nil)))
+      (define replacement (lambda () (begin
+        (state "trace" (concat (state "trace") "R"))
+        (lambda (_word) (error "NULL input invoked a replacement callback")))))
+      (define run (lambda (function) (begin
+        (state "trace" "")
+        (define value (function input replacement))
+        (list value (state "trace")))))
+      (and (expression_equal? (run raw) (list nil "IR"))
+        (expression_equal? (run optimized) (list nil "IR"))))
+  expect: {result: true}
+- name: A stateful constant replacement callback runs only at invocation
+  scm: |
+    (begin
+      (define state (newsession)) (state "calls" 0)
+      (define replacement (lambda (word) (begin
+        (state "calls" (+ (state "calls") 1)) (concat word "!"))))
+      (define code (list 'lambda '()
+        (list 'regexp_replace "a" "a" (list 'quote replacement))))
+      (define optimized_code (optimize code))
+      (define inert (equal? (state "calls") 0))
+      (define compiled (eval optimized_code))
+      (define first (compiled))
+      (define first_calls (state "calls"))
+      (define second (compiled))
+      (and inert (equal? first "a!") (equal? first_calls 1)
+        (equal? second "a!") (equal? (state "calls") 2)))
+  expect: {result: true}
+- name: String replacements retain complete capture expansion across repeated inputs
+  scm: |
+    (begin
+      (define source "(lambda (value replacement) (regexp_replace value \"([a-z])([0-9])\" replacement))")
+      (define raw (eval (scheme source)))
+      (define optimized (eval (optimize (scheme source))))
+      (and (equal? (raw "a1 b2" "$2$1") "1a 2b")
+        (equal? (optimized "a1 b2" "$2$1") "1a 2b")
+        (equal? (optimized "c3" "$2$1") "3c")
+        (equal? (optimized "123" "$2$1") "123")))
+  expect: {result: true}
+- name: Portable procedure source restores the same input and replacement positions
+  scm: |
+    (begin
+      (define original (close_procedure (eval (optimize (scheme
+        "(lambda (value) (regexp_replace value \"([a-z])([0-9])\" \"$2$1\"))")))))
+      (define restored (eval (scheme (serialize original))))
+      (and (equal? (original "a1 b2") "1a 2b")
+        (equal? (restored "a1 b2") "1a 2b")
+        (equal? (restored "c3") "3c")
+        (nil? (restored nil))))
+  expect: {result: true}
+- name: A named replacement parameter shadows the native callable with the same spelling
+  scm: |
+    (begin
+      (define source "(lambda (toUpper value) (list ((eval (symbol \"toUpper\")) \"x\") (regexp_replace value \"[ab]\" toUpper)))")
+      (define raw (eval (scheme source)))
+      (define optimized (eval (optimize (scheme source))))
+      (define state (newsession))
+      (define replacement (lambda (word) (begin
+        (state "calls" (+ (state "calls") 1)) (concat "#" word))))
+      (define run (lambda (function) (begin
+        (state "calls" 0)
+        (define result (function replacement "ab"))
+        (list result (state "calls")))))
+      (define expected (list (list "#x" "#a#b") 3))
+      (and (expression_equal? (run raw) expected)
+        (expression_equal? (run optimized) expected)
+        (expression_equal? (run (jit optimized)) expected)))
+  expect: {result: true}
+- name: A named replacement parameter shadows a global SCM procedure and retains its effects
+  scm: |
+    (begin
+      (define source "(lambda (sql_metadata_identity value) (list ((eval (symbol \"sql_metadata_identity\")) \"x\") (regexp_replace value \"[ab]\" sql_metadata_identity)))")
+      (define raw (eval (scheme source)))
+      (define optimized (eval (optimize (scheme source))))
+      (define state (newsession))
+      (define replacement (lambda (word) (begin
+        (state "calls" (+ (state "calls") 1)) (concat "<" word ">"))))
+      (define run (lambda (function) (begin
+        (state "calls" 0)
+        (define result (function replacement "ab"))
+        (list result (state "calls")))))
+      (define expected (list (list "<x>" "<a><b>") 3))
+      (and (expression_equal? (run raw) expected)
+        (expression_equal? (run optimized) expected)
+        (expression_equal? (run (jit optimized)) expected)))
+  expect: {result: true}
+- name: A local replacement definition keeps the earlier native binding separate
+  scm: |
+    (begin
+      (define source "(lambda (value state) (begin (define previous toUpper) (define toUpper (lambda (word) (begin (state \"calls\" (+ (state \"calls\") 1)) (concat \"[\" word \"]\")))) (list (previous \"ab\") ((eval (symbol \"toUpper\")) \"x\") (regexp_replace value \"[ab]\" toUpper))))")
+      (define raw (eval (scheme source)))
+      (define optimized (eval (optimize (scheme source))))
+      (define state (newsession))
+      (define run (lambda (function) (begin
+        (state "calls" 0)
+        (define result (function "ab" state))
+        (list result (state "calls")))))
+      (define expected (list (list "AB" "[x]" "[a][b]") 3))
+      (and (expression_equal? (run raw) expected)
+        (expression_equal? (run optimized) expected)
+        (expression_equal? (run (jit optimized)) expected)))
+  expect: {result: true}
+- name: A string replacement parameter does not become a same-spelled native function
+  scm: |
+    (begin
+      (define source "(lambda (toUpper value) (list (eval (symbol \"toUpper\")) (regexp_replace value \"([ab])\" toUpper)))")
+      (define raw (eval (scheme source)))
+      (define optimized (eval (optimize (scheme source))))
+      (define expected (list "$1!" "a!b!"))
+      (and (expression_equal? (raw "$1!" "ab") expected)
+        (expression_equal? (optimized "$1!" "ab") expected)
+        (expression_equal? ((jit optimized) "$1!" "ab") expected)))
+  expect: {result: true}
+- name: Unshadowed native and SCM replacements retain their ordinary values
+  scm: |
+    (begin
+      (define native_source "(lambda (value) (regexp_replace value \"[a-z]\" toUpper))")
+      (define scm_source "(lambda (value) (regexp_replace value \"[a-z]\" sql_metadata_identity))")
+      (define native_raw (eval (scheme native_source)))
+      (define native_optimized (eval (optimize (scheme native_source))))
+      (define scm_raw (eval (scheme scm_source)))
+      (define scm_optimized (eval (optimize (scheme scm_source))))
+      (and (equal? (native_raw "ab12") "AB12")
+        (equal? (native_optimized "ab12") "AB12")
+        (equal? ((jit native_optimized) "ab12") "AB12")
+        (equal? (scm_raw "ab12") "ab12")
+        (equal? (scm_optimized "ab12") "ab12")
+        (equal? ((jit scm_optimized) "ab12") "ab12")))
+  expect: {result: true}

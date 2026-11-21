@@ -28,6 +28,11 @@ NULL on an empty group (count 0) or all-NULL input (sum nil) comes from div_null
 	(div_null sum count)))
 (define sql_nonnull_count_expr (lambda (expr)
 	(list (quote if) (list (quote nil?) expr) 0 1)))
+/* DISTINCT qualifies the aggregate input, independently of the reducer.
+The shared physical group owner consumes this logical modifier using native
+unique value relations; it is never an executable accumulator factory. */
+(define sql_distinct_aggregate_expr (lambda (expr descriptor)
+	(list 'aggregate expr (list 'distinct_reduce (car descriptor)) (cadr descriptor))))
 (define sql_avg_expr (lambda (expr sum_descriptor count_descriptor)
 	(list (quote sql_avg_divide)
 		(list (quote aggregate) expr (car sum_descriptor) (cadr sum_descriptor))
@@ -168,7 +173,7 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 /* Account creation is emitted as part of the same statement as GRANT. */
 (define sql_grant_account_plan (lambda (username identified)
 	(if identified
-		'('insert '('table "system" false "user" false) '('list "username" "password" "admin")
+		'('insert '('table "system" false "user" false (quote tx)) '('list "username" "password" "admin")
 			'('list '('list username '('password (car identified)) false))
 			'('list "$update")
 			'('lambda '('$update) '('$update '('list "password" '('password (car identified))))))
@@ -184,9 +189,10 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 )))
 
 /* Recovery admission uses the SQL grammar, including SQL comments.
-Only a complete transaction rollback may execute after a statement abort. */
+The native transaction owner decides whether parsed COMMIT or ROLLBACK may
+recover its parked decision; arbitrary statements receive no such capability. */
 (define sql_recovery_statement? (parser (define recovery (or
-	(parser '((atom "ROLLBACK" true) (? (atom "WORK" true)) (? ";") (regex "$")) true)
+	(parser '((or (atom "ROLLBACK" true) (atom "COMMIT" true)) (? (atom "WORK" true)) (? ";") (regex "$")) true)
 	(parser (regex "(?s:.*)") false))) recovery "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+"))
 
 (define sql_int (parser (define x (regex "-?[0-9]+")) (simplify x)))
@@ -279,9 +285,59 @@ arithmetic; leave expressions containing columns or functions untouched. */
 /* SET accepts unquoted names such as character_set_client=utf8mb4. Compile
 frontend expression contracts before publishing executable assignment code. */
 (define sql_set_value (lambda (value)
-	(sql_type_lower_annotations (match value
+	(sql_type_lower_annotations '() (match value
 		'('get_column nil _ name _) name
 		_ value))))
+
+/* MySQL PRIMARY KEY declarations imply NOT NULL, including an explicit NULL
+spelling. Normalize only newly parsed MySQL declarations; native schemas and
+other dialect owners retain their own contracts.
+https://dev.mysql.com/doc/refman/8.4/en/create-table.html */
+(define mysql_primary_column_attributes (lambda (attributes primary)
+	(if primary
+		(merge (list (filter_assoc attributes (lambda (key _value) (not (equal? key "null"))))
+			(list "null" false))) attributes)))
+(define mysql_primary_columns (lambda (definitions) (begin
+	/* Work on parser data before DDL executes. The actual PRIMARY KEY node
+	has no ordinary UNIQUE options, even if a UNIQUE name is PRIMARY. */
+	(define primary_columns (merge (map definitions (lambda (definition) (match definition
+		'((symbol list) "unique" "PRIMARY" (cons (symbol list) columns)) columns
+		_ '())))))
+	(map definitions (lambda (definition) (match definition
+		'((symbol list) "column" name typ dimensions (cons (symbol list) attributes))
+		(list (quote list) "column" name typ dimensions
+			(cons (quote list) (mysql_primary_column_attributes attributes
+				(or (attributes "primary")
+					(not (nil? (find primary_columns (lambda (key) (equal?? key name)) nil)))))))
+		_ definition))))))
+
+/* Omitted FOREIGN KEY symbols need real declaration names, never the textual
+representation of SQL/parser NULL. Reserve explicit symbols before numbering
+so later declarations cannot collide with an earlier generated name. Native
+publication still owns schema-wide duplicate admission.
+https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
+(define mysql_foreign_columns (lambda (table_name definitions) (begin
+	(define prefix (concat table_name "_ibfk_"))
+	(define reserved (newsession))
+	(map definitions (lambda (definition) (match definition
+		((symbol list) "foreign" name _columns _parent _references _update _delete)
+		(if (string? name) (match name
+			(regex "(?is)^(.*)_ibfk_([1-9][0-9]*)$" _ table number)
+			(if (equal?? table table_name) (reserved number true) nil)
+			_ nil) nil)
+		_ nil)))
+	(define available (lambda (number)
+		(if (reserved (concat number)) (available (+ number 1)) number)))
+	(define result (reduce definitions (lambda (state definition) (match definition
+		((symbol list) "foreign" name columns parent references update_mode delete_mode)
+		(if (nil? name) (begin
+			(define number (available (car state)))
+			(list (+ number 1) (cons
+				(list 'list "foreign" (concat prefix number) columns parent references update_mode delete_mode)
+				(cadr state))))
+			(list (car state) (cons definition (cadr state))))
+		_ (list (car state) (cons definition (cadr state))))) (list 1 '())))
+	(reverse (cadr result)))))
 
 (define parse_sql (lambda (schema s policy planning_session tx) (begin
 	(define parse_started_ns (nanotime))
@@ -363,7 +419,9 @@ frontend expression contracts before publishing executable assignment code. */
 			_ expr)))
 	(define show_index_plan (lambda (target_schema target_table where)
 		(list (quote map)
-			(list (quote show) target_schema target_table "indexes")
+			(list (quote show) (list (quote coalesceNil)
+				(list (quote table) target_schema false target_table false (quote tx))
+				(list (quote error) (concat "table " target_schema "." target_table " does not exist"))) "indexes" (quote tx))
 			(list (quote lambda) (list (quote row))
 				(if (nil? where)
 					(list (quote resultrow) (quote row))
@@ -406,9 +464,9 @@ frontend expression contracts before publishing executable assignment code. */
 					(list (symbol "set") _psym (list (symbol "newpromise")))
 					(list (symbol "set") _rrsym
 						(list (symbol "lambda") (list (symbol "row"))
-							(list _psym "once" (list (symbol "nth") (symbol "row") 1) "scalar subselect returned more than one row")))
+							(list _psym "once" (list (symbol "nth") (symbol "row") 1) (scalar_cardinality_failure_expr))))
 					(list (symbol "set") (symbol "resultrow") _rrsym)
-					(build_queryplan_term (sql_expand_views transformed_subquery policy) planning_session tx)
+					(build_queryplan_term (sql_expand_views transformed_subquery policy planning_session tx) planning_session tx)
 					(list _psym "value")))
 				expr)
 			(if (or (equal?? head "inner_select_in") (equal?? head (quote inner_select_in))
@@ -439,6 +497,19 @@ frontend expression contracts before publishing executable assignment code. */
 		(define params (list (symbol "OLD") (symbol "NEW") (symbol "session") (symbol "tx")))
 		(define is_after (or (equal? timing "after_insert") (equal? timing "after_update") (equal? timing "after_delete")))
 		(define changed_rows_sym (symbol "changed_rows"))
+		/* AFTER row images are immutable native invocation inputs. Declare
+		their reads before relational planning; each statement's existing scalar
+		binding owner evaluates them in this trigger frame. BEFORE keeps its
+		sequential changed_rows reads and is deliberately not adapted here. */
+		(define mark_after_row_inputs (lambda (expression) (match expression
+			((symbol quote) _datum) expression
+			((symbol get_column) "NEW" _column_ic column _name_ic)
+			(list relational_iteration_parameter (list 'get_assoc 'NEW column))
+			((symbol get_column) "OLD" _column_ic column _name_ic)
+			(list relational_iteration_parameter (list 'get_assoc 'OLD column))
+			(cons head tail) (cons (mark_after_row_inputs head) (map tail mark_after_row_inputs))
+			_ expression)))
+		(define body (if is_after (mark_after_row_inputs body) body))
 
 		/* Helper to compile SET assignments into (set changed_rows ...) statements */
 		/* Returns a list of set statements for each assignment */
@@ -490,10 +561,10 @@ frontend expression contracts before publishing executable assignment code. */
 						(define cols (car (cdr (cdr stmt))))
 						(define vals (car (cdr (cdr (cdr stmt)))))
 						(define ignore (car (cdr (cdr (cdr (cdr stmt))))))
-						(list (list (symbol "insert") (list (symbol "table") schema false tbl false)
+						(list (physical_insert_producer (list (symbol "insert") (list (symbol "table") schema false tbl false (symbol "tx"))
 							(cons (symbol "list") cols)
 							(cons (symbol "list") (map vals (lambda (row) (cons (symbol "list") (map row transform_trigger_expr)))))
-							(list (symbol "list")) (if ignore (list (symbol "lambda") '() 0) nil) false nil (symbol "tx"))))
+							(list (symbol "list")) (if ignore (list (symbol "lambda") '() 0) nil) false nil (symbol "tx")))))
 
 					/* INSERT INTO tbl (cols) <full SELECT> - stmt is (!insert_select tbl cols inner_select ignore) */
 					/* Reuses sql_select + build_queryplan_term (same as top-level INSERT...SELECT) */
@@ -527,18 +598,22 @@ frontend expression contracts before publishing executable assignment code. */
 						/* Use the relational plan for every SELECT shape, including
 						SELECT literals without FROM. It alone owns whether zero, one,
 						or many rows are emitted. */
-						(list (list (symbol "begin")
-							(list (symbol "set") (symbol "resultrow")
-								(list (symbol "lambda") (list (symbol "item"))
-									(list (symbol "insert") (list (symbol "table") schema false tbl false)
-										(cons (symbol "list") cols)
-										(list (symbol "list")
-											(cons (symbol "list")
-												(map select_names (lambda (name) (list (symbol "get_assoc") (symbol "item") name)))))
-										(list (symbol "list"))
-										(if ignore (list (symbol "lambda") '() 0) nil)
-										false nil (symbol "tx"))))
-							(build_queryplan_term (sql_expand_views inner_t policy) planning_session tx))))
+						(list (physical_mutation_producer
+							(list (list 'table schema false tbl false 'tx)) (list "insert" '())
+							(list (symbol "begin")
+								(list (symbol "set") (symbol "resultrow")
+									(list (symbol "lambda") (list (symbol "item"))
+										(list (symbol "insert") (list (symbol "table") schema false tbl false (symbol "tx"))
+											(cons (symbol "list") cols)
+											(list (symbol "list")
+												(cons (symbol "list")
+													/* INSERT SELECT maps positions, including repeated output titles. */
+													(mapIndex select_names (lambda (index _name)
+														(list 'nth 'item (+ (* index 2) 1))))))
+											(list (symbol "list"))
+											(if ignore (list (symbol "lambda") '() 0) nil)
+											false nil (symbol "tx"))))
+								(build_queryplan_term (sql_expand_views inner_t policy planning_session tx) planning_session tx)))))
 
 					/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
 					'!update
@@ -555,8 +630,8 @@ frontend expression contracts before publishing executable assignment code. */
 						(define t_cond (if (nil? where_raw) true (fix_expr where_raw)))
 						(define t_cols (map_assoc assignments (lambda (col expr) (fix_expr expr))))
 						(list (build_dml_plan tbl nil
-				(make_query_block schema (list (list tbl schema tbl false nil)) t_cols t_cond
-					nil nil nil nil nil nil nil nil) planning_session tx)))
+							(make_query_block schema (list (list tbl schema tbl false nil nil)) t_cols t_cond
+								nil nil nil nil nil nil nil nil) planning_session tx)))
 
 					/* DELETE FROM table WHERE ... - stmt is (!delete tbl where) */
 					'!delete
@@ -570,8 +645,8 @@ frontend expression contracts before publishing executable assignment code. */
 							expr)))
 						(define t_cond (if (nil? where_raw) true (fix_expr where_raw)))
 						(list (build_dml_plan tbl nil
-				(make_query_block schema (list (list tbl schema tbl false nil)) nil t_cond
-					nil nil nil nil nil nil nil nil) planning_session tx)))
+							(make_query_block schema (list (list tbl schema tbl false nil nil)) nil t_cond
+								nil nil nil nil nil nil nil nil) planning_session tx)))
 
 					/* DELETE FROM target USING target, other [AS alias] WHERE condition */
 					/* stmt is (!delete_using target tabledefs where) */
@@ -588,14 +663,14 @@ frontend expression contracts before publishing executable assignment code. */
 						)))
 						(define all_defs (transform_dml raw_defs))
 						(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
-							'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
+							'(id _ tbl _ _ _declarations) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
 							acc)) nil))
-						(define target_alias (match target_def '(id _ _ _ _) id))
-						(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
+						(define target_alias (match target_def '(id _ _ _ _ _declarations) id))
+						(define target_tbl (match target_def '(_ _ tbl _ _ _declarations) tbl))
 						(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
 						(list (build_dml_plan target_tbl target_alias
-				(make_query_block schema all_defs nil t_where
-					nil nil nil nil nil nil nil nil) planning_session tx)))
+							(make_query_block schema all_defs nil t_where
+								nil nil nil nil nil nil nil nil) planning_session tx)))
 
 					/* UPDATE tbl1, tbl2 [AS alias], ... SET tbl1.col = expr WHERE condition; */
 					/* stmt is (!update_multi tbls assignments where) */
@@ -612,13 +687,13 @@ frontend expression contracts before publishing executable assignment code. */
 						)))
 						(define all_defs (transform_dml raw_defs))
 						(define target_def (car all_defs))
-						(define target_alias (match target_def '(id _ _ _ _) id))
-						(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
+						(define target_alias (match target_def '(id _ _ _ _ _declarations) id))
+						(define target_tbl (match target_def '(_ _ tbl _ _ _declarations) tbl))
 						(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
 						(define t_cols (map_assoc assignments_raw (lambda (col expr) (transform_dml expr))))
 						(list (build_dml_plan target_tbl target_alias
-				(make_query_block schema all_defs t_cols t_where
-					nil nil nil nil nil nil nil nil) planning_session tx)))
+							(make_query_block schema all_defs t_cols t_where
+								nil nil nil nil nil nil nil nil) planning_session tx)))
 
 					/* No-op statement (e.g. SET @var) - return empty list */
 					'!nop
@@ -727,7 +802,7 @@ frontend expression contracts before publishing executable assignment code. */
 				(define defs (merge tbldefs))
 				(if (> (count defs) 1)
 					(list '!update_multi defs assignments where)
-					(list '!update (match (car defs) '(alias _ _ _ _) alias) assignments where))))
+					(list '!update (match (car defs) '(alias _ _ _ _ declarations) alias) assignments where))))
 		/* DELETE FROM table USING table, table2 [AS alias] WHERE condition[;] (multi-table in trigger) */
 		/* Must be before simple DELETE FROM — otherwise the simple variant greedily matches the table name */
 		(parser '(
@@ -965,7 +1040,9 @@ frontend expression contracts before publishing executable assignment code. */
 		(parser '((atom "COUNT" true) "(" (atom "DISTINCT" true) (define e sql_expression) ")") '('count_distinct e))
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
 		(parser '((atom "COUNT" true) "(" (define e sql_expression) ")") '('aggregate '((quote if) '((quote nil?) e) 0 1) (quote +) 0))
-		(parser '((atom "SUM" true) "(" (define s sql_expression) ")") (begin (define d (sql_aggregates "SUM")) '('aggregate s (car d) (cadr d))))
+		(parser '((atom "SUM" true) "(" (atom "DISTINCT" true) (define s sql_expression) ")")
+			(sql_distinct_aggregate_expr s (sql_aggregates "SUM")))
+		(parser '((atom "SUM" true) "(" (? (atom "ALL" true)) (define s sql_expression) ")") (begin (define d (sql_aggregates "SUM")) '('aggregate s (car d) (cadr d))))
 		(parser '((atom "AVG" true) "(" (define s sql_expression) ")")
 			(sql_avg_expr s (sql_aggregates "SUM") (sql_aggregates "COUNT")))
 		(parser '((atom "MIN" true) "(" (define s sql_expression) ")") (begin (define d (sql_aggregates "MIN")) '('aggregate s (car d) (cadr d))))
@@ -1065,7 +1142,7 @@ frontend expression contracts before publishing executable assignment code. */
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_quoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
 		(parser '((atom "pg_catalog" true) "." (atom "set_config" true) "(" sql_expression "," sql_expression "," sql_expression ")") nil) /* ignore */
-		(parser '((atom "pg_catalog" true) "." (atom "setval" true) "(" "'" sql_identifier "." (define key sql_identifier) "'" "," (define val sql_expression) "," sql_expression ")") (match key (regex "(.*)_(.*?)_seq" _ tbl col) '('altercolumn '('table schema false tbl false) col "auto_increment" val) (error "unknown pg_catalog key: " key)))
+		(parser '((atom "pg_catalog" true) "." (atom "setval" true) "(" "'" sql_identifier "." (define key sql_identifier) "'" "," (define val sql_expression) "," sql_expression ")") (match key (regex "(.*)_(.*?)_seq" _ tbl col) '('altercolumn '('table schema false tbl false (quote tx)) col "auto_increment" val) (error "unknown pg_catalog key: " key)))
 
 		(parser (atom "NULL" true) (sql_null_literal))
 		(parser (atom "TRUE" true) true)
@@ -1135,16 +1212,16 @@ frontend expression contracts before publishing executable assignment code. */
 		(parser (atom "DUAL" true) '())
 		/* TODO: left [outer] join, right [outer] join recursive buildup */
 		(parser '((define l tabledefs) (define x (or
-			(parser '((atom "LEFT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e sql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl true e))))
-			(parser '((? (atom "INNER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e sql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl false e))))
+			(parser '((atom "LEFT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e sql_expression)) (match r '(id schema tbl _ nil declarations) '('(id schema tbl true e declarations))))
+			(parser '((? (atom "INNER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e sql_expression)) (match r '(id schema tbl _ nil declarations) '('(id schema tbl false e declarations))))
 			(parser '((? (atom "CROSS" true)) (atom "JOIN" true) (define r tabledefs)) r)
 		))) (merge l x))
 		/* Normalize RIGHT JOIN to the existing LEFT JOIN execution contract:
 		the preserved row stream must come first, and the nullable side is marked
 		as outer on the right. */
 		(parser '((define l tabledef) (atom "RIGHT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledefs) (atom "ON" true) (define e sql_expression))
-			(match l '(id schema tbl _ nil)
-				(merge r '('(id schema tbl true e)))))
+			(match l '(id schema tbl _ nil declarations)
+				(merge r '('(id schema tbl true e declarations)))))
 		(parser (define t tabledef) '(t))
 	)))
 	/* Index hints name physical indexes; MemCP chooses automatic indexes. */
@@ -1163,20 +1240,20 @@ frontend expression contracts before publishing executable assignment code. */
 			(begin
 				(define columns (map definitions (lambda (definition) (car definition))))
 				(list id schema (list (quote table-function) "json_table"
-					(list doc row_path (list (quote quote) definitions)) columns) false nil)))
+					(list doc row_path (list (quote quote) definitions)) columns) false nil nil)))
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier) "(" (define aliases (+ sql_identifier ",")) ")")
-			(list id schema (sql_apply_derived_column_aliases query aliases) false nil)) /* inner select with relation and column aliases */
+			(list id schema (sql_apply_derived_column_aliases query aliases) false nil nil)) /* inner select with relation and column aliases */
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (define id sql_identifier) "(" (define aliases (+ sql_identifier ",")) ")")
-			(list id schema (sql_apply_derived_column_aliases query aliases) false nil)) /* AS is optional */
-		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */
-		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (define id sql_identifier)) '(id schema query false nil)) /* inner select as from */
+			(list id schema (sql_apply_derived_column_aliases query aliases) false nil nil)) /* AS is optional */
+		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier)) '(id schema query false nil nil)) /* inner select as from */
+		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (define id sql_identifier)) '(id schema query false nil nil)) /* inner select as from */
 		/* TODO: case insensititive table search */
-		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
-		(parser '((define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define tbl sql_identifier) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil)))
-		(parser '((define tbl sql_identifier)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil)))
+		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil nil)))
+		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil nil)))
+		(parser '((define schema sql_identifier) (atom "." true) (define tbl sql_identifier)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil nil)))
+		(parser '((define tbl sql_identifier) (atom "AS" true) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil nil)))
+		(parser '((define tbl sql_identifier) (define id sql_identifier)) (begin (if policy (policy schema tbl false) true) '(id schema tbl false nil nil)))
+		(parser '((define tbl sql_identifier)) (begin (if policy (policy schema tbl false) true) '(tbl schema tbl false nil nil)))
 	)) (* sql_index_hint)) relation))
 
 	/* bring those variables into a defined state */
@@ -1204,7 +1281,10 @@ frontend expression contracts before publishing executable assignment code. */
 	)))
 	(define sql_select_clear_stage (lambda (query) (match query
 		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts)
-		(list (quote query-block) schema tables fields condition group having nil nil nil '() '() '())
+		(list (quote query-block) schema tables fields condition group having nil nil nil '() '()
+			/* Clearing a window must retain the newly separate semantic dedup. */
+			(if (qassoc_get facts 'distinct_after_group false)
+				(list (list 'distinct_after_group true)) '()))
 		'(schema tables fields condition group having order limit offset) (list schema tables fields condition group having nil nil nil)
 		_ query
 	)))
@@ -1226,11 +1306,11 @@ frontend expression contracts before publishing executable assignment code. */
 				(list "found_rows" (list (quote if) (coalesceNil (qb_where query) true) 1 0))
 				true nil nil nil nil nil '() '() '())
 			(make_query_block schema2
-				(list (list "__found_rows_source" schema2 (sql_select_clear_stage query) false nil))
+				(list (list "__found_rows_source" schema2 (sql_select_clear_stage query) false nil nil))
 				(list "found_rows" (list (quote aggregate) 1 (quote +) 0))
 				true nil nil nil nil nil '() '() '())))))
 	(define sql_build_select_plan (lambda (query) (begin
-		(define expanded_query (sql_expand_views query policy))
+		(define expanded_query (sql_expand_views query policy planning_session tx))
 		(define actual_plan (build_queryplan_term expanded_query planning_session tx))
 		(define execution_plan (if (and (sql_select_calc_found_rows? query)
 			(not (equal? (car actual_plan) (quote found_rows_result))))
@@ -1331,33 +1411,27 @@ frontend expression contracts before publishing executable assignment code. */
 		)
 	))
 	(define sql_insert_select_plan (lambda (schema2 tbl coldesc inner ignoreexists updaterows updaterows2 updatecols) (begin
-		(define count_var (symbol "__insert_select_count"))
+		(define emit_count (symbol "__insert_select_emit_count"))
 		(define inserted_var (symbol "__insert_select_inserted"))
-		(define insert_expr '('insert '('table schema2 false tbl false) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols)
+		(define insert_expr '('insert '('table schema2 false tbl false (quote tx)) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols)
 			(if (and ignoreexists (nil? updaterows))
 				'((quote lambda) '() 0)
 				(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
 			nil '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))
-		(define plan (build_queryplan_term (sql_expand_views inner policy) planning_session tx))
-		(define ordered (or
-			(and (query_block? inner) (not (empty_list? (coalesceNil (qb_order inner) '()))))
-			(and (union_block? inner) (not (empty_list? (coalesceNil (union_order inner) '()))))))
-		(if ordered
-			(list (quote begin)
-				(list (quote set) count_var (list (quote newsession)))
-				(list count_var "count" 0)
-				(list (quote set) (quote resultrow)
-					(list (quote lambda) (list (quote item))
-						(list (quote begin)
-							(list (quote set) inserted_var insert_expr)
-							(list count_var "count" (list (quote +) (list count_var "count") inserted_var))
-							inserted_var)))
-				plan
-				(list count_var "count"))
-			(list (quote begin)
-				(list (quote set) (quote resultrow)
-					(list (quote lambda) (list (quote item)) insert_expr))
-				plan))
+		(define plan (build_queryplan_term (sql_expand_views inner policy planning_session tx) planning_session tx))
+		/* SELECT owns row production, not an affected-row reduction. Consume the
+		actual INSERT count once after each mutation, outside the stream reducer's
+		serial boundary. Preserve that row callback's value for its producer, and
+		ignore the producer's independent completion value. No session RMW is safe
+		for an unordered producer which fans out across shards. */
+		(physical_mutation_producer (list (list (quote table) schema2 false tbl false (quote tx))) (list "insert" '())
+			(list (quote stream_window_reduce) 0 -1 (quote +)
+				(list (quote lambda) '() 0)
+				(list (quote lambda) (list emit_count)
+					(list (list (quote lambda) (list (quote resultrow)) plan)
+						(list (quote lambda) (list (quote item))
+							(list (quote match) insert_expr inserted_var
+								(list (quote begin) (list emit_count inserted_var) inserted_var)))))))
 	)))
 	(define sql_select_core (parser '(
 		(atom "SELECT" true)
@@ -1435,8 +1509,11 @@ frontend expression contracts before publishing executable assignment code. */
 					(and (not (empty_list? group))
 						(reduce group (lambda (preserved expr)
 							(and preserved (contains? projected_exprs expr))) true)))))
+			(define grouped_distinct (and distinct (not distinct_preserved_by_group)
+				(or (not (empty_list? group))
+					(reduce projected_exprs (lambda (found expr) (or found (expr_has_local_aggregates? expr))) false))))
 			(list (quote query-block) schema sources (merge cols) condition
-				(if (and distinct (not distinct_preserved_by_group)) projected_exprs group)
+				(if (and distinct (empty_list? group) (not grouped_distinct)) projected_exprs group)
 				having order limit offset '() '()
 				(merge (list
 					/* Relaxed grouping is relevant only to an aggregating block.
@@ -1447,7 +1524,9 @@ frontend expression contracts before publishing executable assignment code. */
 						(list (list (quote group_projection_mode) (quote representative)))
 						'())
 					(if calc_found_rows (list (list (quote sql_calc_found_rows) true)) '())
-					(if distinct (list (list (quote select_distinct) true)) '())))))))
+					(if distinct (list (list (quote select_distinct) true)) '())
+					(if grouped_distinct
+						(list (list (quote distinct_after_group) true)) '())))))))
 	(define sql_select (parser (or
 		(parser '(
 			(define left sql_select_core)
@@ -1503,8 +1582,8 @@ frontend expression contracts before publishing executable assignment code. */
 	) (begin
 			(define all_defs (merge tbldefs))
 			(define first_def (car all_defs))
-			(define tbl (match first_def '(_ _ t _ _) t))
-			(define tblalias (match first_def '(id _ _ _ _) id))
+			(define tbl (match first_def '(_ _ t _ _ _declarations) t))
+			(define tblalias (match first_def '(id _ _ _ _ _declarations) id))
 			/* policy: write access check */
 			(if policy (policy schema tbl true) true)
 			/* Route ALL UPDATE (single + multi-table) through the query planner.
@@ -1554,7 +1633,7 @@ frontend expression contracts before publishing executable assignment code. */
 			/* Route single-table DELETE through the query planner pipeline.
 			cols = nil signals DELETE mode. */
 			(define del_schema (coalesce schema2 schema))
-			(define del_defs (list (list tbl del_schema tbl false nil)))
+			(define del_defs (list (list tbl del_schema tbl false nil nil)))
 			(build_dml_plan tbl nil
 				(make_query_block del_schema del_defs nil (coalesceNil condition true)
 					nil nil order limit offset nil nil nil) planning_session tx)
@@ -1571,19 +1650,19 @@ frontend expression contracts before publishing executable assignment code. */
 			(cons '!begin (list
 				(list (quote checktablemaintenance) trunc_schema tbl "truncate")
 				(build_dml_plan tbl nil
-				(make_query_block trunc_schema (list (list tbl trunc_schema tbl false nil)) nil true
-					nil nil nil nil nil nil nil nil) planning_session tx)))
+					(make_query_block trunc_schema (list (list tbl trunc_schema tbl false nil nil)) nil true
+						nil nil nil nil nil nil nil nil) planning_session tx)))
 	)))
 
 	/* Multi-table DELETE: retain every target alias through physical lowering. */
 	(define gen_multi_delete (lambda (targets all_defs condition) (begin
 		(define target_specs (map targets (lambda (target) (begin
 			(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
-				'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
+				'(id _ tbl _ _ _declarations) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
 				acc)) nil))
 			(if (nil? target_def)
 				(error (concat "DELETE target not found: " target))
-				(match target_def '(id target_schema target_tbl _ _)
+				(match target_def '(id target_schema target_tbl _ _ _declarations)
 					(list id target_schema target_tbl)))))))
 		(build_multi_delete_plan schema target_specs all_defs condition planning_session tx)
 	)))
@@ -1604,11 +1683,11 @@ frontend expression contracts before publishing executable assignment code. */
 				/* policy: write access check */
 				(map targets (lambda (target) (begin
 					(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
-						'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
+						'(id _ tbl _ _ _declarations) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
 						acc)) nil))
 					(if (nil? target_def)
 						(error (concat "DELETE target not found: " target))
-						(match target_def '(_ target_schema target_tbl _ _)
+						(match target_def '(_ target_schema target_tbl _ _ _declarations)
 							(if policy (policy target_schema target_tbl true) true))))))
 				(gen_multi_delete targets all_defs condition)
 		))
@@ -1628,11 +1707,11 @@ frontend expression contracts before publishing executable assignment code. */
 				(set condition (coalesceNil condition true))
 				(map targets (lambda (target) (begin
 					(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
-						'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
+						'(id _ tbl _ _ _declarations) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
 						acc)) nil))
 					(if (nil? target_def)
 						(error (concat "DELETE target not found: " target))
-						(match target_def '(_ target_schema target_tbl _ _)
+						(match target_def '(_ target_schema target_tbl _ _ _declarations)
 							(if policy (policy target_schema target_tbl true) true))))))
 				(gen_multi_delete targets all_defs condition)
 		))
@@ -1681,9 +1760,9 @@ frontend expression contracts before publishing executable assignment code. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil
 				(map_assoc (merge updaterows) (lambda (col value)
-					(sql_type_formula (list (list tbl (coalesce schema2 schema) tbl false nil)) value)))))
+					(sql_type_formula (list (list tbl (coalesce schema2 schema) tbl false nil nil)) value)))))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)))
 			/* Validate the complete statement before evaluating or inserting rows.
 			Both literal templates and general expression rows obey SQL arity. */
 			(if (reduce datasets (lambda (valid row)
@@ -1694,11 +1773,11 @@ frontend expression contracts before publishing executable assignment code. */
 				(begin
 					(define inner (sql_values_to_select_query (coalesce schema2 schema) coldesc datasets))
 					(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols))
-				'('insert '('table (coalesce schema2 schema) false tbl false) (cons list coldesc) (sql_insert_values_expr datasets) (cons list updatecols)
+				(physical_insert_producer '('insert '('table (coalesce schema2 schema) false tbl false (quote tx)) (cons list coldesc) (sql_insert_values_expr datasets) (cons list updatecols)
 					(if (and ignoreexists (nil? updaterows))
 						'((quote lambda) '() 0)
 						(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
-					false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))
+					false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx))))
 	)))
 
 	/* MySQL REPLACE has INSERT syntax and overwrites every supplied column when
@@ -1715,17 +1794,17 @@ frontend expression contracts before publishing executable assignment code. */
 		(define datasets (* (parser '("(" (define dataset (* sql_expression ",")) ")") dataset) ","))
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)))
 			(define updaterows2 (merge (map coldesc (lambda (col)
 				(list col (list (quote get_column) "VALUES" true col true))))))
 			(define updatecols (cons "$update" (map coldesc (lambda (col) (concat "NEW." col)))))
-			'('insert '('table (coalesce schema2 schema) false tbl false) (cons list coldesc)
+			(physical_insert_producer '('insert '('table (coalesce schema2 schema) false tbl false (quote tx)) (cons list coldesc)
 				(cons list (map datasets (lambda (dataset) (cons list dataset))))
 				(cons list updatecols)
 				'('lambda (map updatecols (lambda (c) (symbol c)))
 					'('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v))))))
 				false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)
-	))))
+	)))))
 
 	(define sql_insert_values_select (parser '(
 		(atom "INSERT" true)
@@ -1751,9 +1830,9 @@ frontend expression contracts before publishing executable assignment code. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil
 				(map_assoc (merge updaterows) (lambda (col value)
-					(sql_type_formula (list (list tbl (coalesce schema2 schema) tbl false nil)) value)))))
+					(sql_type_formula (list (list tbl (coalesce schema2 schema) tbl false nil nil)) value)))))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)))
 			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
 
@@ -1787,9 +1866,9 @@ frontend expression contracts before publishing executable assignment code. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(set updaterows2 (if (nil? updaterows) nil
 				(map_assoc (merge updaterows) (lambda (col value)
-					(sql_type_formula (list (list tbl (coalesce schema2 schema) tbl false nil)) value)))))
+					(sql_type_formula (list (list tbl (coalesce schema2 schema) tbl false nil nil)) value)))))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
+			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)))
 			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
 
@@ -1806,9 +1885,9 @@ frontend expression contracts before publishing executable assignment code. */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(define coldesc (map assignments (lambda (a) (match a '(col _) col))))
 			(define dataset (map assignments (lambda (a) (match a '(_ value) value))))
-			'('insert '('table (coalesce schema2 schema) false tbl false) (cons list coldesc) '(list (cons list dataset)) '(list)
+			(physical_insert_producer '('insert '('table (coalesce schema2 schema) false tbl false (quote tx)) (cons list coldesc) '(list (cons list dataset)) '(list)
 				(if ignoreexists '('lambda '() true) nil)
-				false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))))
+				false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx))))))
 
 	(define sql_foreign_key_mode (parser (or
 		(parser (atom "RESTRICT" true) "restrict")
@@ -1836,10 +1915,14 @@ frontend expression contracts before publishing executable assignment code. */
 				view_schema id "sql" (nth captured 0) (list (quote quote) query)
 				(if replace "replace" (if ifnotexists "ignore" "error")))))))
 
+	/* Ordinary MySQL table/trigger DDL completes with zero affected rows,
+	even when it changes a declaration. Native errors still propagate before
+	the numeric completion. Both HTTP and MySQL execute these same formulas.
+	https://dev.mysql.com/doc/refman/8.0/en/information-functions.html#function_row-count */
 	(define sql_create_table (parser '(
 		(atom "CREATE" true)
 		(atom "TABLE" true)
-		(define ifnotexists (parser (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)) true))
+		(define ifnotexists (? (parser '((atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)) true)))
 		(define id (or (parser '((define schema2 sql_identifier) "." (define id sql_identifier)) id) sql_identifier))
 		"("
 		(define cols (* (or
@@ -1887,7 +1970,9 @@ frontend expression contracts before publishing executable assignment code. */
 			(parser '((atom "COLLATE" true) (define collation (regex "[a-zA-Z0-9_]+"))) '("collation" collation))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define collation (regex "[0-9]+"))) '("auto_increment" collation))
 		) (? ",")))
-	) '((quote sql_create_table) (coalesce schema2 schema) id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists (quote tx))))
+	) '((quote !begin) '((quote sql_create_table) (coalesce schema2 schema) id
+			(cons (quote list) (mysql_primary_columns (mysql_foreign_columns id cols)))
+			(cons (quote list) (merge options)) ifnotexists (quote tx)) 0)))
 
 	(define sql_alter_table (parser '(
 		(atom "ALTER" true)
@@ -1900,12 +1985,12 @@ frontend expression contracts before publishing executable assignment code. */
 			(parser '((atom "ADD" true) (atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2))) */
 			(parser '((atom "ADD" true) (or (atom "KEY" true) (atom "INDEX" true)) sql_identifier "(" (+ (parser '((define col sql_identifier) (? "(" sql_int ")")) col) ",") ")" (? (atom "USING" true) (atom "BTREE" true))) (lambda (id) true)) /* ignore index definitions */
 			(parser '((atom "ADD" true) (atom "FULLTEXT" true) (? (atom "INDEX" true)) (? sql_identifier) "(" (+ sql_identifier ",") ")") (lambda (id) true)) /* ignore fulltext index */
-			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define cname (? sql_identifier))) (atom "FOREIGN" true) (atom "KEY" true) (? (define fkname sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode))) (lambda (id) '('createforeignkey '('table schema false id false) (coalesce cname fkname (concat id "_" (car cols1) "_fk")) (cons (quote list) cols1) '('table schema false tbl2 false) (cons (quote list) cols2) updatemode deletemode)))
-			(parser '((atom "DROP" true) (atom "FOREIGN" true) (atom "KEY" true) (define fk sql_identifier)) (lambda (id) '('dropforeignkey '('table schema false id false) fk)))
-			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define fk sql_identifier)) (lambda (id) '('or '('dropforeignkey '('table schema false id false) fk) '('dropkey '('table schema false id false) fk))))
+			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define cname (? sql_identifier))) (atom "FOREIGN" true) (atom "KEY" true) (? (define fkname sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode))) (lambda (id) '('createforeignkey '('table schema false id false (quote tx)) (coalesce cname fkname (concat id "_" (car cols1) "_fk")) (cons (quote list) cols1) '('table schema false tbl2 false (quote tx)) (cons (quote list) cols2) updatemode deletemode (quote tx))))
+			(parser '((atom "DROP" true) (atom "FOREIGN" true) (atom "KEY" true) (define fk sql_identifier)) (lambda (id) '('dropforeignkey '('table schema false id false (quote tx)) fk (quote tx))))
+			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define fk sql_identifier)) (lambda (id) '('or '('dropforeignkey '('table schema false id false (quote tx)) fk (quote tx)) '('dropkey '('table schema false id false (quote tx)) fk (quote tx)))))
 			(parser '((atom "DROP" true) (atom "PRIMARY" true) (atom "KEY" true)) (lambda (id) true))
 			(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier))
-				(lambda (id) (list (quote dropkey) (list (quote table) schema false id false) idx)))
+				(lambda (id) (list (quote dropkey) (list (quote table) schema false id false (quote tx)) idx)))
 			(parser '((atom "ADD" true) (?(atom "COLUMN" true))
 				(define col sql_identifier)
 				(define type sql_column_type)
@@ -1915,7 +2000,8 @@ frontend expression contracts before publishing executable assignment code. */
 					(parser empty '((quote list)))
 				))
 				(define typeparams sql_column_attributes)
-			) (lambda (id) '((quote sql_create_column) '((quote table) schema false id false) col type dimensions (cons 'list (sql_add_column_attributes typeparams)))))
+			) (lambda (id) '((quote sql_create_column) '((quote table) schema false id false (quote tx)) col type dimensions
+					(cons 'list (mysql_primary_column_attributes (sql_add_column_attributes typeparams) (if (typeparams "primary") true false))) nil)))
 			(parser '((atom "MODIFY" true) (?(atom "COLUMN" true))
 				(define col sql_identifier)
 				(define type sql_column_type)
@@ -1925,7 +2011,7 @@ frontend expression contracts before publishing executable assignment code. */
 					(parser empty '((quote list)))
 				))
 				(define typeparams sql_column_attributes)
-			) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema false id false) col "type" type) '((quote altercolumn) '((quote table) schema false id false) col "dimensions" dimensions) 1)))
+			) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "type" type) '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "dimensions" dimensions) 1)))
 			(parser '((atom "CHANGE" true)
 				(define oldcol sql_identifier)
 				(define col sql_identifier)
@@ -1936,32 +2022,32 @@ frontend expression contracts before publishing executable assignment code. */
 					(parser empty '((quote list)))
 				))
 				(define typeparams sql_column_attributes)
-			) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema false id false) col "type" type) '((quote altercolumn) '((quote table) schema false id false) col "dimensions" dimensions) 1)))
+			) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "type" type) '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "dimensions" dimensions) 1)))
 			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "TYPE" true) (define type sql_column_type) (define dimensions (or
 				(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
 				(parser '("(" (define a sql_int) ")") '((quote list) a))
 				(parser empty '((quote list)))
-			))) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema false id false) col "type" type) '((quote altercolumn) '((quote table) schema false id false) col "dimensions" dimensions) 1)))
+			))) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "type" type) '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "dimensions" dimensions) 1)))
 			(parser '((atom "CONVERT" true) (atom "TO" true) (atom "CHARACTER" true) (atom "SET" true) (define charset sql_identifier) (? (atom "COLLATE" true) (define coll sql_identifier))) (lambda (id) true))
-			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (atom "IF" true) (atom "EXISTS" true) (define col sql_identifier)) (lambda (id) '((quote altertable) '((quote table) schema false id false) "drop_if_exists" col)))
-			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col sql_identifier)) (lambda (id) '((quote altertable) '((quote table) schema false id false) "drop" col)))
-			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false) "engine" "memory")))
-			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false) "engine" "sloppy")))
-			(parser '((atom "ENGINE" true) "=" (atom "CACHE" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false) "engine" "cache")))
-			(parser '((atom "ENGINE" true) "=" (atom "LOGGING" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false) "engine" "logged")))
-			(parser '((atom "ENGINE" true) "=" (atom "LOGGED" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false) "engine" "logged")))
-			(parser '((atom "ENGINE" true) "=" (atom "CSV" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false) "engine" "safe")))
-			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false) "engine" "safe")))
-			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false) "engine" "safe")))
-			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false) "engine" "safe")))
-			(parser '((atom "ENGINE" true) "=" (atom "CSV" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false) "engine" "safe")))
-			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) '((quote table) schema false id false) "collation" collation)))
-			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) '((quote table) schema false id false) "auto_increment" ai)))
+			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (atom "IF" true) (atom "EXISTS" true) (define col sql_identifier)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "drop_if_exists" col)))
+			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col sql_identifier)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "drop" col)))
+			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "engine" "memory")))
+			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "engine" "sloppy")))
+			(parser '((atom "ENGINE" true) "=" (atom "CACHE" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "engine" "cache")))
+			(parser '((atom "ENGINE" true) "=" (atom "LOGGING" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "engine" "logged")))
+			(parser '((atom "ENGINE" true) "=" (atom "LOGGED" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "engine" "logged")))
+			(parser '((atom "ENGINE" true) "=" (atom "CSV" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "engine" "safe")))
+			(parser '((atom "ENGINE" true) "=" (atom "SAFE" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "engine" "safe")))
+			(parser '((atom "ENGINE" true) "=" (atom "MyISAM" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "engine" "safe")))
+			(parser '((atom "ENGINE" true) "=" (atom "InnoDB" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "engine" "safe")))
+			(parser '((atom "ENGINE" true) "=" (atom "CSV" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "engine" "safe")))
+			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "collation" collation)))
+			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "auto_increment" ai)))
 			/* ALTER COLUMN operations for defaults */
-			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "SET" true) (atom "DEFAULT" true) (define def sql_uuid_default)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false) col "default_expression" def)))
-			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "SET" true) (atom "DEFAULT" true) (define def sql_expression)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false) col "default" def)))
-			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "DROP" true) (atom "DEFAULT" true)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false) col "default" nil)))
-			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "COLLATE" true) (define coll sql_identifier)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false) col "collation" coll)))
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "SET" true) (atom "DEFAULT" true) (define def sql_uuid_default)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "default_expression" def (quote tx))))
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "SET" true) (atom "DEFAULT" true) (define def sql_expression)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "default" def (quote tx))))
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "DROP" true) (atom "DEFAULT" true)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "default" nil (quote tx))))
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "COLLATE" true) (define coll sql_identifier)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "collation" coll)))
 		) ","))
 	) (cons '!begin (map alters (lambda (alter) (alter id))))))
 
@@ -1969,14 +2055,14 @@ frontend expression contracts before publishing executable assignment code. */
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
 		(parser (define query sql_select) (sql_build_select_plan query))
-		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir (sql_expand_views query policy)))
-		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder (sql_expand_views query policy) planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query sql_select)) (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s) planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "DISCOVER" true) (define query sql_select)) (explain_queryplan_physical_calibrate_discover (sql_expand_views query policy) planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "VARIANT" true) (define decision_id sql_string) (define variant sql_string) (define query sql_select)) (explain_queryplan_physical_calibrate_variant (sql_expand_views query policy) decision_id variant planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (define query sql_select)) (explain_queryplan_physical_calibrate (sql_expand_views query policy) planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query sql_select)) (explain_queryplan_physical (sql_expand_views query policy) planning_session))
-		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy) planning_session tx)) (settings "ExplainWidth")))))
+		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir (sql_expand_views query policy planning_session tx)))
+		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder (sql_expand_views query policy planning_session tx) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query sql_select)) (explain_queryplan_compile (sql_expand_views query policy planning_session tx) parse_started_ns (strlen s) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "DISCOVER" true) (define query sql_select)) (explain_queryplan_physical_calibrate_discover (sql_expand_views query policy planning_session tx) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "VARIANT" true) (define decision_id sql_string) (define variant sql_string) (define query sql_select)) (explain_queryplan_physical_calibrate_variant (sql_expand_views query policy planning_session tx) decision_id variant planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (define query sql_select)) (explain_queryplan_physical_calibrate (sql_expand_views query policy planning_session tx) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query sql_select)) (explain_queryplan_physical (sql_expand_views query policy planning_session tx) planning_session))
+		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy planning_session tx) planning_session tx)) (settings "ExplainWidth")))))
 		sql_insert_set
 		sql_insert_values_select
 		sql_insert_into
@@ -2013,17 +2099,17 @@ frontend expression contracts before publishing executable assignment code. */
 				'((quote alterdatabase_storage) id nil (coalesce source_schema schema) source_table (list (quote session) "__memcp_tx")))))
 
 		/* CREATE {DATABASE | SCHEMA} name FROM source_db */
-		(parser '((atom "CREATE" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (atom "FROM" true) (define from_db sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote create_sql_database) (quote tx) id (if ifnot true false) nil from_db)))
+		(parser '((atom "CREATE" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (atom "FROM" true) (define from_db sql_identifier)) '((quote create_sql_database) (quote tx) id (if ifnot true false) nil from_db (list (quote quote) (sql_database_create_authorization policy id (if ifnot true false)))))
 		/* CREATE {DATABASE | SCHEMA} name [DEFAULT] CHARACTER SET charset [COLLATE collation] — charset/collation ignored */
-		(parser '((atom "CREATE" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (? (atom "DEFAULT" true)) (atom "CHARACTER" true) (atom "SET" true) sql_identifier (? (atom "COLLATE" true) sql_identifier)) (begin (if policy (policy "system" true true) true) '((quote create_sql_database) (quote tx) id (if ifnot true false) nil nil)))
+		(parser '((atom "CREATE" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (? (atom "DEFAULT" true)) (atom "CHARACTER" true) (atom "SET" true) sql_identifier (? (atom "COLLATE" true) sql_identifier)) '((quote create_sql_database) (quote tx) id (if ifnot true false) nil nil (list (quote quote) (sql_database_create_authorization policy id (if ifnot true false)))))
 		/* CREATE {DATABASE | SCHEMA} name [SET key=val, ...] */
-		(parser '((atom "CREATE" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (? (atom "SET" true) (define opts (+ (parser '((define k sql_identifier) "=" (define v sql_literal)) '(k v)) ",")))) (begin (if policy (policy "system" true true) true) '((quote create_sql_database) (quote tx) id (if ifnot true false) (if opts (cons (quote list) (merge opts)) nil) nil)))
+		(parser '((atom "CREATE" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define ifnot (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true))) (define id sql_identifier) (? (atom "SET" true) (define opts (+ (parser '((define k sql_identifier) "=" (define v sql_literal)) '(k v)) ",")))) '((quote create_sql_database) (quote tx) id (if ifnot true false) (if opts (cons (quote list) (merge opts)) nil) nil (list (quote quote) (sql_database_create_authorization policy id (if ifnot true false)))))
 		/* DROP USER [IF EXISTS] user — deletes from system.user and cascades to system.access */
 		(parser '((atom "DROP" true) (atom "USER" true) (? (atom "IF" true) (atom "EXISTS" true)) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				(cons '!begin (list
 					'((quote protect_sql_root_admin) username "drop")
-					(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "access" false)
+					(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "access" false (quote tx))
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
@@ -2031,7 +2117,7 @@ frontend expression contracts before publishing executable assignment code. */
 						0
 						(quote +)
 						false)
-					(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false)
+					(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false (quote tx))
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
@@ -2044,12 +2130,12 @@ frontend expression contracts before publishing executable assignment code. */
 		(parser '((atom "CREATE" true) (atom "USER" true) (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)) (define username sql_user_ident)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
 			(begin (if policy (policy "system" true true) true)
-				'('insert '('table "system" false "user" false) '(list "username" "password" "admin") '(list '(list username '('password password) false)) '(list) '((quote lambda) '() '((quote error) "user already exists")))
+				'('insert '('table "system" false "user" false (quote tx)) '(list "username" "password" "admin") '(list '(list username '('password password) false)) '(list) '((quote lambda) '() '((quote error) "user already exists")))
 		))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username sql_user_ident)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
 			(begin (if policy (policy "system" true true) true)
-				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false) '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "password" '('password password))) '__scan_acc)) nil nil false)
+				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false (quote tx)) '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "password" '('password password))) '__scan_acc)) nil nil false)
 		))
 
 		/* FLUSH PRIVILEGES / FLUSH TABLES / FLUSH ... — no-op in memcp */
@@ -2062,26 +2148,26 @@ frontend expression contracts before publishing executable assignment code. */
 			(define identified (? (parser '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression)) (list password)))))
 			(begin (if policy (policy "system" true true) true)
 				(cons '!begin (list (sql_grant_account_plan username identified)
-					(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false) '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" true)) '__scan_acc)) nil nil false)))))
+					(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false (quote tx)) '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" true)) '__scan_acc)) nil nil false)))))
 		/* Existing MemCP grants are database-wide, including db.table syntax. */
 		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "TO" true) (define username sql_user_ident)
 			(define identified (? (parser '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression)) (list password)))))
 			(begin (if policy (policy "system" true true) true)
 				(cons '!begin (list (sql_grant_account_plan username identified)
-					'('insert '('table "system" false "access" false) '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))))))
+					'('insert '('table "system" false "access" false (quote tx)) '('list "username" "database") '('list '('list username db)) '(list) '((quote lambda) '() false))))))
 
 		/* REVOKE syntax (MySQL-style) -> mirror GRANT behavior */
 		/* REVOKE ALL [PRIVILEGES] ON *.* FROM user -> set admin false */
 		(parser '((atom "REVOKE" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false) '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" '('protected_sql_admin_revoke_value username))) '__scan_acc)) nil nil false)
+				(compile_scan_plan (quote scan) '(session "__memcp_tx") '('table "system" false "user" false (quote tx)) '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" '('protected_sql_admin_revoke_value username))) '__scan_acc)) nil nil false)
 		))
 		/* REVOKE <anything> ON db.* FROM user -> delete access entry */
 		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				(compile_scan_plan (quote scan)
 					'(session "__memcp_tx")
-					'('table "system" false "access" false)
+					'('table "system" false "access" false (quote tx))
 					'(list "username" "database")
 					'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 					'(list "$update")
@@ -2095,7 +2181,7 @@ frontend expression contracts before publishing executable assignment code. */
 			(begin (if policy (policy "system" true true) true)
 				(compile_scan_plan (quote scan)
 					'(session "__memcp_tx")
-					'('table "system" false "access" false)
+					'('table "system" false "access" false (quote tx))
 					'(list "username" "database")
 					'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 					'(list "$update")
@@ -2247,8 +2333,8 @@ frontend expression contracts before publishing executable assignment code. */
 		(parser '((atom "DROP" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				(list (quote drop_sql_database) (list (quote session) "__memcp_tx") id (if if_exists true false))))
-		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema sql_identifier) (atom "." true) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
-		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
+		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema sql_identifier) (atom "." true) (define id sql_identifier)) '((quote !begin) '((quote droptable) schema id (if if_exists true false)) 0))
+		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote !begin) '((quote droptable) schema id (if if_exists true false)) 0))
 		(parser '((atom "DROP" true) (atom "VIEW" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true)))
 			(define target (or
 				(parser '((define schema2 sql_identifier) "." (define id sql_identifier)) '(schema2 id))
@@ -2287,7 +2373,7 @@ frontend expression contracts before publishing executable assignment code. */
 			))
 			"(" (define cols (+ sql_index_column ",")) ")"
 			(? (atom "USING" true) (atom "BTREE" true))
-		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) false t false) idx true (cons (quote list) cols) '(session "__memcp_tx") '('list "nulls_not_distinct" false))))
+		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) false t false (quote tx)) idx true (cons (quote list) cols) '(session "__memcp_tx") '('list "nulls_not_distinct" false))))
 		(parser '((atom "CREATE" true)
 			(atom "INDEX" true)
 			(define idx sql_identifier)
@@ -2309,14 +2395,14 @@ frontend expression contracts before publishing executable assignment code. */
 			))
 			(atom "USING" true) (atom "BTREE" true)
 			"(" (define cols (+ sql_index_column ",")) ")"
-		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) false t false) idx true (cons (quote list) cols) '(session "__memcp_tx") '('list "nulls_not_distinct" false))))
+		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) false t false (quote tx)) idx true (cons (quote list) cols) '(session "__memcp_tx") '('list "nulls_not_distinct" false))))
 		(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier)
 			(atom "ON" true)
 			(define target (or
 				(parser '((define schema2 sql_identifier) "." (define tbl sql_identifier)) '(schema2 tbl))
 				(parser (define tbl sql_identifier) '(nil tbl)))))
 			(match target '(schema2 tbl)
-				(list (quote dropkey) (list (quote table) (coalesce schema2 schema) false tbl false) idx)))
+				(list (quote dropkey) (list (quote table) (coalesce schema2 schema) false tbl false (quote tx)) idx)))
 
 		/* CREATE TRIGGER syntax */
 		/* body from sql_trigger_body is (raw_sql parsed_body) due to capture wrapper */
@@ -2344,16 +2430,17 @@ frontend expression contracts before publishing executable assignment code. */
 					(lambda (err) (if (and
 						(not (and planning_session (planning_session "__compile_trigger_source")))
 						(or (equal? err "table does not exist")
-							(match err (regex "^bind_query_names: (unknown relation alias:|Column does not exist:)" _ _) true _ false)))
+							(match err '("sql-binding-error" kind _message)
+								(has? '("missing-relation" "missing-column") kind) _ false)))
 						/* The source compiler returns (quote (deferred_trigger plan)). */
 						'('eval '('nth '('nth '('sql_trigger_source_compile (car body)
 							'('list "schema" schema "table" tbl "name" name "timing" timing)) 1) 1))
 						(error err)))))
-				(list 'createtrigger (list 'table schema false tbl false) name timing (car body) "sql" (list 'quote (list 'deferred_trigger compiled)) true)
+				(list '!begin (list 'createtrigger (list 'table schema false tbl false (quote tx)) name timing (car body) "sql" (list 'quote (list 'deferred_trigger compiled)) true) 0)
 		))
 		/* DROP TRIGGER syntax */
 		(parser '((atom "DROP" true) (atom "TRIGGER" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define name sql_identifier))
-			'((quote droptrigger) schema name (if if_exists true false)))
+			'((quote !begin) '((quote droptrigger) schema name (if if_exists true false)) 0))
 
 		/* USE database - change current schema */
 		(parser '((atom "USE" true) (define db sql_identifier)) (list (quote session) "schema" db))
@@ -2403,7 +2490,11 @@ different frontend (for example RDF) is used. */
 		(if (or (not (context "schema_only")) (equal? schema (context "schema"))) true
 			(error "replicated trigger may only access its own schema"))))
 	(define plan (parse_sql (context "schema") sql source_policy compile_session nil))
-	(nth plan 6))))
+	/* DDL completion wraps the declaration; it is not part of the persisted
+	trigger recipe. Extract the registered declaration structurally. */
+	(match plan
+		((symbol !begin) ((symbol createtrigger) _target _name _timing _source _language recipe _replace) 0) recipe
+		_ (error "SQL trigger source did not produce a trigger declaration")))))
 (registertriggerlanguage "sql" sql_trigger_source_compile true)
 
 (define load_sql (lambda (schema stream) (begin

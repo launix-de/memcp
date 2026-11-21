@@ -1,0 +1,213 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Scmer JSON uses existing portable operator source only in executable procedure bodies
+setup: []
+cleanup: []
+test_cases:
+- name: Reserved runtime callable envelopes reject malformed versions payloads and local counts
+  scm: |
+    (begin
+      (define malformed (list
+        "{\"scmer_custom\":10,\"value\":[2,[{\"symbol\":\"lambda\"},[],7]]}"
+        "{\"scmer_custom\":10,\"value\":[{},[{\"symbol\":\"lambda\"},[],7]]}"
+        "{\"scmer_custom\":10,\"value\":[1,[]]}"
+        "{\"scmer_custom\":10,\"value\":[1,[{\"symbol\":\"lambda\"},[],7,-1]]}"
+        "{\"scmer_custom\":10,\"value\":[1,[{\"symbol\":\"lambda\"},[],7,0.5]]}"
+        "{\"scmer_custom\":10,\"value\":[1,[{\"symbol\":\"lambda\"},[],7,\"1\"]]}"
+        "{\"scmer_custom\":10,\"value\":[1,[{\"symbol\":\"lambda\"},[],7,{}]]}"
+        "{\"scmer_custom\":8,\"value\":[1,17]}"
+        "{\"scmer_custom\":8,\"value\":[1,\"not_a_native_declaration\"]}"))
+      (define rejected (map malformed (lambda (wire)
+        (try (lambda () (begin (json_decode_scmer wire) false)) (lambda (_cause) true)))))
+      (define valid (json_decode_scmer
+        "{\"scmer_custom\":10,\"value\":[1,[{\"symbol\":\"lambda\"},[],7,0]]}"))
+      (list rejected (valid))))
+  expect: {result: [[true, true, true, true, true, true, true, true, true], 7]}
+- name: A quoted callable vector preserves the complete callback result
+  scm: |
+    (begin
+      (define operation (close_procedure (lambda (left right) (> left right))))
+      (define original (close_procedure ((lambda (operations started cutoff)
+        (lambda (value) (or (not started) ((nth operations 0) value cutoff))))
+        (list operation) true 1)))
+      (define restored (json_decode_scmer (json_encode original)))
+      (list (map '(0 1 2 3) original) (map '(0 1 2 3) restored)))
+  expect: {result: [[false, false, true, true], [false, false, true, true]]}
+- name: Quoted procedure factories preserve unrelated callback constructor names
+  scm: |
+    (begin
+      (define operation (close_procedure (lambda (value) (+ value 1))))
+      (define callback (list 'lambda (list 'value 'list 'quote 'lambda)
+        (list (list 'nth 'operations 0) 'value)))
+      (define factory (eval (list 'lambda '()
+        (list (list 'lambda (list 'operations) callback) (list 'quote (list operation))))))
+      (define restored_factory (json_decode_scmer (json_encode (close_procedure factory))))
+      (define original (factory))
+      (define restored (restored_factory))
+      (define hostile (lambda args 999))
+      (list (original 10 hostile hostile hostile) (restored 10 hostile hostile hostile)))
+  expect: {result: [11, 11]}
+- name: Quoted declared native functions ignore a same-named callback parameter
+  scm: |
+    (begin
+      (define original (close_procedure ((lambda (operations)
+        (lambda (value +) ((nth operations 0) value 2))) (list +))))
+      (define restored (json_decode_scmer (json_encode original)))
+      (define hostile (lambda args 999))
+      (list (original 10 hostile) (restored 10 hostile)))
+  expect: {result: [12, 12]}
+- name: A first parameter named lambda remains parameter data
+  scm: |
+    (begin
+      (define original (eval (scheme "(lambda (lambda quote list) (+ quote list))")))
+      (define restored (json_decode_scmer (json_encode original)))
+      (list (original 99 7 9) (restored 99 7 9)))
+  expect: {result: [16, 16]}
+- name: Mixed quoted callable values preserve inert lambda data NULL false and order
+  scm: |
+    (begin
+      (define operation (close_procedure (lambda (value) (+ value 1))))
+      (define raw (scheme "(lambda (item) (error \"raw lambda data was executed\"))"))
+      (define values (list operation + raw nil false (list 'list 'quote 'lambda)))
+      (define original (close_procedure ((lambda (values)
+        (lambda (value) (list ((nth values 0) value) ((nth values 1) value 2)
+          (nth values 2) (nth values 3) (nth values 4) (nth values 5)))) values)))
+      (define restored (json_decode_scmer (json_encode original)))
+      (list (original 10) (restored 10)))
+  expect:
+    result:
+    - &mixed_values
+      - 11
+      - 12
+      - [{symbol: lambda}, [{symbol: item}], [{symbol: error}, raw lambda data was executed]]
+      - null
+      - false
+      - [{symbol: list}, {symbol: quote}, {symbol: lambda}]
+    - *mixed_values
+- name: Quoted native dictionary values retain callable and data entries
+  scm: |
+    (begin
+      (define operation (close_procedure (lambda (value) (+ value 1))))
+      (define raw (scheme "(lambda (item) (error \"raw dictionary data was executed\"))"))
+      (define values (set_assoc '() "operation" operation "native" + "raw" raw "nil" nil "flag" false))
+      (define original (close_procedure ((lambda (values)
+        (lambda (value) (list ((get_assoc values "operation") value)
+          ((get_assoc values "native") value 2) (expression_equal? (get_assoc values "raw") raw)
+          (get_assoc values "nil") (get_assoc values "flag")))) values)))
+      (define restored (json_decode_scmer (json_encode original)))
+      (list (original 10) (restored 10)))
+  expect: {result: [[11, 12, true, null, false], [11, 12, true, null, false]]}
+- name: Optimized replacement retains its complete ordinary and JSON values
+  scm: |
+    (begin
+      (define original (close_procedure (eval (optimize (scheme
+        "(lambda (value) (regexp_replace value \"[a-z]+\" \"X\"))")))))
+      (define restored (json_decode_scmer (json_encode original)))
+      (and (equal? (original "abc 123 def") "X 123 X")
+        (equal? (restored "abc 123 def") "X 123 X")
+        (equal? (restored "123") "123")))
+  expect: {result: true}
+- name: Replacement callback captures remain explicit through JSON
+  scm: |
+    (begin
+      (define original (close_procedure ((lambda (suffix)
+        (eval (optimize (scheme
+          "(lambda (value) (regexp_replace value \"[a-z]+\" (lambda (word) (concat word suffix))))")))) "!")))
+      (define restored (json_decode_scmer (json_encode original)))
+      (and (equal? (original "a 1 bc") "a! 1 bc!")
+        (equal? (restored "a 1 bc") "a! 1 bc!")))
+  expect: {result: true}
+- name: Optimized regex predicates retain true and false results
+  scm: |
+    (begin
+      (define original (close_procedure (eval (optimize (scheme
+        "(lambda (value) (regexp_test value \"^[a-z]+$\"))")))))
+      (define restored (json_decode_scmer (json_encode original)))
+      (and (equal? (restored "abc") true) (equal? (restored "123") false)))
+  expect: {result: true}
+- name: Optimized match collections retain the complete result
+  scm: |
+    (begin
+      (define original (close_procedure (eval (optimize (scheme
+        "(lambda (value) (regexp_matches value \"([a-z]+)\"))")))))
+      (define restored (json_decode_scmer (json_encode original)))
+      (and (expression_equal? (restored "a 1 bc") (original "a 1 bc"))
+        (expression_equal? (restored "123") (original "123"))))
+  expect: {result: true}
+- name: A quoted optimized operator name is data
+  scm: |
+    (begin
+      (define data (list 'jit-constant-regexp-replace "literal-pattern" "literal-replacement" 'value))
+      (define original (eval (list 'lambda '() (list 'quote data))))
+      (define restored (json_decode_scmer (json_encode original)))
+      (expression_equal? (restored) data))
+  expect: {result: true}
+- name: Ordinary JSON lists do not enter the executable operator path
+  scm: |
+    (begin
+      (define data (list 'jit-constant-regexp-replace "literal-pattern" "literal-replacement" 'value))
+      (expression_equal? (json_decode_scmer (json_encode data)) data))
+  expect: {result: true}
+- name: A same-named local callable is not a registered optimized operator
+  scm: |
+    (begin
+      (define original (eval (scheme
+        "(lambda (jit-constant-regexp-replace) (jit-constant-regexp-replace 2))")))
+      (define restored (json_decode_scmer (json_encode original)))
+      (equal? (restored (lambda (value) (+ value 5))) 7))
+  expect: {result: true}
+- name: A match pattern owns its same-named callable binding
+  scm: |
+    (begin
+      (define original (eval (scheme
+        "(lambda (callback) (match callback jit-constant-regexp-replace (jit-constant-regexp-replace 2)))")))
+      (define restored (json_decode_scmer (json_encode original)))
+      (equal? (restored (lambda (value) (+ value 5))) 7))
+  expect: {result: true}
+- name: A locally bound quote name remains an ordinary call
+  scm: |
+    (begin
+      (define original (eval (scheme "(lambda (quote) (quote 3))")))
+      (define restored (json_decode_scmer (json_encode original)))
+      (equal? (restored (lambda (value) (+ value 8))) 11))
+  expect: {result: true}
+- name: A portable source callee must not silently resolve to another local callable
+  scm: |
+    (begin
+      (define original (close_procedure (eval (optimize (list 'lambda (list 'regexp_replace 'value)
+        (list regexp_replace 'value "[a-z]+" "X"))))))
+      (define hostile (lambda args "incorrect local callable"))
+      (and (equal? (original hostile "abc 123") "X 123")
+        (try (lambda ()
+          (equal? ((json_decode_scmer (json_encode original)) hostile "abc 123") "X 123"))
+          (lambda (cause) true))))
+  expect: {result: true}
+- name: A compiled regex match pattern restores its own source and captures
+  scm: |
+    (begin
+      (define original (close_procedure (eval (optimize (scheme
+        "(lambda (value) (match value (regex \"^([a-z]+)$\" full captured) (concat full \"-\" captured) _ \"none\"))")))))
+      (define restored (json_decode_scmer (json_encode original)))
+      (and (equal? (original "abc") "abc-abc")
+        (equal? (restored "abc") "abc-abc") (equal? (restored "123") "none")))
+  expect: {result: true}
+- name: An opaque lexical alias is reconstructed by its actual receiving invocation
+  scm: |
+    (begin
+      (define original ((lambda (alias)
+        (lambda (value) (alias "pattern" "replacement" value))) jit-constant-regexp-replace))
+      (define factory (json_decode_scmer (json_encode (list 'lambda (list 'alias) original))))
+      (define restored (factory (lambda args 19)))
+      (equal? (restored "value") 19))
+  expect: {result: true}
+- name: Optimized window reducers preserve the full step and flush result through JSON
+  scm: |
+    (begin
+      (define original (close_procedure (eval (optimize (scheme
+        "(lambda () (begin (define window (list 1 0 1 nil nil)) (define emit (lambda (oldest _latest) (coalesceNil oldest 0))) (define first (window_reduce window emit (list 2) + 100)) (define second (window_reduce (car first) emit (list 3) + (cadr first))) (define final (window_flush_reduce (car second) emit 2 + (cadr second))) (list (cadr first) (cadr second) (cadr final) (nth (car final) 1))))")))))
+      (define restored (json_decode_scmer (json_encode original)))
+      (and (expression_equal? (original) (list 100 102 105 4))
+        (expression_equal? (restored) (list 100 102 105 4))
+        (expression_equal? (restored) (list 100 102 105 4))))
+  expect: {result: true}
