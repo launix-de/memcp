@@ -276,9 +276,9 @@ test_cases:
 - name: A recreated nullable declaration retains its duplicate rows under the same explicit plan cache
   scm: "(begin\n  (define cache (newcachemap))\n  (define input (newsession))\n  (input \"username\" \"root\") (input\
     \ \"schema\" \"memcp-tests\")\n  (define run (lambda (query) (begin\n    (define answer (newsession)) (answer\
-    \ \"rows\" (list))\n    (sql_execute_formula input nil\n      (cached_parse cache (list parse_sql) \"memcp-tests\"\
-    \ query nil \"root\" input true nil)\n      (lambda (row) (answer \"rows\" (append (answer \"rows\") row)))\
-    \ (lambda args true))\n    (answer \"rows\"))))\n  (define query \"SELECT d.id,d.key_a,d.key_b FROM ordered_anti_driver\
+    \ \"rows\" (list))\n    (sql_execute_formula input nil\n      (cached_parse cache \"sql\" (list parse_sql) \"\
+    memcp-tests\" query nil \"root\" input true nil)\n      (lambda (row) (answer \"rows\" (append (answer \"rows\"\
+    ) row))) (lambda args true))\n    (answer \"rows\"))))\n  (define query \"SELECT d.id,d.key_a,d.key_b FROM ordered_anti_driver\
     \ d\\nLEFT JOIN ordered_anti_lookup r ON d.key_a=r.key_a AND d.key_b=r.key_b AND r.enabled=1\\nWHERE r.marker\
     \ IS NULL ORDER BY d.id LIMIT 4\")\n  (define before (run query))\n  (run \"DROP TABLE IF EXISTS ordered_anti_lookup\"\
     )\n  (run \"CREATE TABLE ordered_anti_lookup(marker INT,key_a VARCHAR(20) COLLATE utf8mb4_general_ci,key_b INT,enabled\
