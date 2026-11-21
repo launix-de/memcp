@@ -769,6 +769,21 @@ DDL still owns dependency/key admission under the publication lock. */
 					(tsql_character_encoding (sql_info nil type (list collation 2)))))))))
 /* Historical conversion and tightening require native admission/validation.
 The frontend accepts value-compatible declarations without frontend row scans. */
+(define tsql_float_precision_class (lambda (dimensions)
+	(if (empty_list? dimensions) 53
+		(and (equal? (count dimensions) 1) (int? (car dimensions))
+			(>= (car dimensions) 1) (<= (car dimensions) 53))
+		(if (<= (car dimensions) 24) 24 53) nil)))
+/* FLOAT defaults to 53 and admits only the 24/53 precision classes. Preserve
+the actual native header when the requested SQL contract is identical: native
+DDL must not learn dialect-specific precision equivalence or widen its proof.
+https://learn.microsoft.com/sql/t-sql/data-types/float-and-real-transact-sql */
+(define tsql_native_column_dimensions (lambda (previous type dimensions) (begin
+	(define native (coalesceNil (previous "Dimensions") '()))
+	(define old_class (if (equal? type "FLOAT") (tsql_float_precision_class native) nil))
+	(if (and (equal? type "FLOAT") (equal? (toUpper (previous "RawType")) "FLOAT")
+		(not (nil? old_class)) (equal? old_class (tsql_float_precision_class dimensions)))
+		native dimensions))))
 (define tsql_compatible_column_declaration? (lambda (previous type dimensions nullable collation) (begin
 	(define previous_type (toUpper (previous "RawType")))
 	(define previous_dimensions (coalesceNil (previous "Dimensions") '()))
@@ -7022,6 +7037,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(define builtin (tsql_builtin_type_declaration type))
 					(define dimensions (if builtin (builtin "dimensions") dimensions))
 					(define type (tsql_storage_type type))
+					(define dimensions (tsql_native_column_dimensions previous type dimensions))
 					(define collation (coalesceNil (tsql_resolve_collation collation) (coalesceNil (previous "Collation") "")))
 					(if (tsql_compatible_column_declaration? previous type dimensions nullable collation) true
 						(error "ALTER COLUMN requires native validation or conversion"))
