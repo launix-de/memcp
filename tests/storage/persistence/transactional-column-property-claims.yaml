@@ -7,6 +7,12 @@ metadata:
   requires_tds: true
   description: Atomic column property claims retain original transactions ordered history and scalar predecessors
 setup:
+- sql: DROP TABLE IF EXISTS property_comp_reverse_b
+- sql: DROP TABLE IF EXISTS property_comp_reverse_a
+- sql: DROP TABLE IF EXISTS property_comp_commit_b
+- sql: DROP TABLE IF EXISTS property_comp_commit_a
+- sql: DROP TABLE IF EXISTS property_comp_rollback_b
+- sql: DROP TABLE IF EXISTS property_comp_rollback_a
 - sql: DROP TABLE IF EXISTS property_claim_cross_a4
 - sql: DROP TABLE IF EXISTS property_claim_cross_b4
 - sql: DROP TABLE IF EXISTS property_claim_cross_a3
@@ -44,7 +50,25 @@ setup:
 - sql: CREATE TABLE property_claim_mix_append(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
 - sql: INSERT property_claim_mix_append VALUES(1,'00000000-0000-0000-0000-000000000001')
 - scm: (altercolumn (table "memcp-tests" false "property_claim_rows" false nil) "guid_a" "properties" '("client.marker" 7 "client.label" "unchanged"))
+- sql: CREATE TABLE property_comp_rollback_a(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+- sql: INSERT property_comp_rollback_a VALUES(1,11)
+- sql: CREATE TABLE property_comp_rollback_b(id INT NOT NULL PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+- sql: INSERT property_comp_rollback_b VALUES(1,NULL)
+- sql: CREATE TABLE property_comp_commit_a(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+- sql: INSERT property_comp_commit_a VALUES(1,11)
+- sql: CREATE TABLE property_comp_commit_b(id INT NOT NULL PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+- sql: INSERT property_comp_commit_b VALUES(1,NULL)
+- sql: CREATE TABLE property_comp_reverse_a(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+- sql: INSERT property_comp_reverse_a VALUES(1,11)
+- sql: CREATE TABLE property_comp_reverse_b(id INT NOT NULL PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+- sql: INSERT property_comp_reverse_b VALUES(1,NULL)
 cleanup:
+- sql: DROP TABLE IF EXISTS property_comp_reverse_b
+- sql: DROP TABLE IF EXISTS property_comp_reverse_a
+- sql: DROP TABLE IF EXISTS property_comp_commit_b
+- sql: DROP TABLE IF EXISTS property_comp_commit_a
+- sql: DROP TABLE IF EXISTS property_comp_rollback_b
+- sql: DROP TABLE IF EXISTS property_comp_rollback_a
 - sql: DROP TABLE IF EXISTS property_claim_cross_a4
 - sql: DROP TABLE IF EXISTS property_claim_cross_b4
 - sql: DROP TABLE IF EXISTS property_claim_cross_a3
@@ -412,3 +436,190 @@ test_cases:
     - connection: cross_property_owner_4
       sql: SELECT OBJECT_ID(N'property_claim_cross_b4',N'U') AS removed_table
       expect: {data: [{removed_table: null}]}
+- name: Rollback composed constant append and other endpoint claim preserve original transaction visibility and defaults
+  tds:
+    statements:
+    - connection: property_comp_rollback_owner
+      sql: BEGIN TRANSACTION; ALTER TABLE property_comp_rollback_a ADD amount FLOAT NOT NULL DEFAULT(5); ALTER TABLE property_comp_rollback_b ALTER COLUMN guid ADD ROWGUIDCOL; ALTER
+        TABLE property_comp_rollback_b ADD CONSTRAINT property_comp_rollback_b_default DEFAULT('00000000-0000-0000-0000-000000000007') FOR guid
+    - connection: property_comp_rollback_owner
+      sql: SELECT a.id,a.value,a.amount,b.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_comp_rollback_a a CROSS JOIN property_comp_rollback_b b CROSS JOIN sys.columns c WHERE
+        c.object_id=OBJECT_ID(N'property_comp_rollback_b') AND c.name=N'guid'
+      expect:
+        data:
+        - id: 1
+          value: 11
+          amount: 5
+          guid: null
+          marked: 1
+    - connection: property_comp_rollback_owner_observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_rollback_b') AND name=N'guid'
+      expect:
+        data:
+        - marked: 0
+    - connection: property_comp_rollback_owner_observer
+      sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_rollback_a') ORDER BY column_id
+      expect:
+        data:
+        - name: id
+        - name: value
+    - connection: property_comp_rollback_owner
+      sql: ROLLBACK TRANSACTION
+    - connection: property_comp_rollback_owner_observer
+      sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_rollback_a') ORDER BY column_id
+      expect:
+        data:
+        - name: id
+        - name: value
+    - connection: property_comp_rollback_owner_observer
+      sql: SELECT id,value FROM property_comp_rollback_a
+      expect:
+        data:
+        - id: 1
+          value: 11
+    - connection: property_comp_rollback_owner_observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_rollback_b') AND name=N'guid'
+      expect:
+        data:
+        - marked: 0
+- name: Commit composed constant append and other endpoint claim preserve original transaction visibility and defaults
+  tds:
+    statements:
+    - connection: property_comp_commit_owner
+      sql: BEGIN TRANSACTION; ALTER TABLE property_comp_commit_a ADD amount FLOAT NOT NULL DEFAULT(5); ALTER TABLE property_comp_commit_b ALTER COLUMN guid ADD ROWGUIDCOL; ALTER TABLE
+        property_comp_commit_b ADD CONSTRAINT property_comp_commit_b_default DEFAULT('00000000-0000-0000-0000-000000000007') FOR guid
+    - connection: property_comp_commit_owner
+      sql: SELECT a.id,a.value,a.amount,b.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_comp_commit_a a CROSS JOIN property_comp_commit_b b CROSS JOIN sys.columns c WHERE
+        c.object_id=OBJECT_ID(N'property_comp_commit_b') AND c.name=N'guid'
+      expect:
+        data:
+        - id: 1
+          value: 11
+          amount: 5
+          guid: null
+          marked: 1
+    - connection: property_comp_commit_owner_observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_commit_b') AND name=N'guid'
+      expect:
+        data:
+        - marked: 0
+    - connection: property_comp_commit_owner_observer
+      sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_commit_a') ORDER BY column_id
+      expect:
+        data:
+        - name: id
+        - name: value
+    - connection: property_comp_commit_owner
+      sql: COMMIT TRANSACTION
+    - connection: property_comp_commit_owner_observer
+      sql: SELECT a.id,a.value,a.amount,b.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_comp_commit_a a CROSS JOIN property_comp_commit_b b CROSS JOIN sys.columns c WHERE
+        c.object_id=OBJECT_ID(N'property_comp_commit_b') AND c.name=N'guid'
+      expect:
+        data: [{id: 1, value: 11, amount: 5, guid: null, marked: 1}]
+- name: Reverse composed constant append and other endpoint claim preserve original transaction visibility and defaults
+  tds:
+    statements:
+    - connection: property_comp_reverse_owner
+      sql: BEGIN TRANSACTION; ALTER TABLE property_comp_reverse_b ADD CONSTRAINT property_comp_reverse_b_default DEFAULT('00000000-0000-0000-0000-000000000007') FOR guid; ALTER TABLE
+        property_comp_reverse_b ALTER COLUMN guid ADD ROWGUIDCOL; ALTER TABLE property_comp_reverse_a ADD amount FLOAT NOT NULL DEFAULT(5)
+    - connection: property_comp_reverse_owner
+      sql: SELECT a.id,a.value,a.amount,b.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_comp_reverse_a a CROSS JOIN property_comp_reverse_b b CROSS JOIN sys.columns c WHERE
+        c.object_id=OBJECT_ID(N'property_comp_reverse_b') AND c.name=N'guid'
+      expect:
+        data:
+        - id: 1
+          value: 11
+          amount: 5
+          guid: null
+          marked: 1
+    - connection: property_comp_reverse_owner_observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_reverse_b') AND name=N'guid'
+      expect:
+        data:
+        - marked: 0
+    - connection: property_comp_reverse_owner_observer
+      sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_reverse_a') ORDER BY column_id
+      expect:
+        data:
+        - name: id
+        - name: value
+    - connection: property_comp_reverse_owner
+      sql: COMMIT TRANSACTION
+    - connection: property_comp_reverse_owner_observer
+      sql: SELECT a.id,a.value,a.amount,b.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_comp_reverse_a a CROSS JOIN property_comp_reverse_b b CROSS JOIN sys.columns c WHERE
+        c.object_id=OBJECT_ID(N'property_comp_reverse_b') AND c.name=N'guid'
+      expect:
+        data: [{id: 1, value: 11, amount: 5, guid: null, marked: 1}]
+- name: Interrupt after composed initialization and property decisions
+  scm: (crash)
+  restart_timeout: 60
+  expect:
+    interrupted_ok: true
+- name: Restart composed initial values property flags and default declarations
+  action: restart
+- name: Recovered commit composition preserves historical values and independently applies future defaults
+  steps:
+  - sql: SELECT a.id,a.value,a.amount,b.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_comp_commit_a a CROSS JOIN property_comp_commit_b b CROSS JOIN sys.columns c WHERE c.object_id=OBJECT_ID(N'property_comp_commit_b')
+      AND c.name=N'guid'
+    expect:
+      data:
+      - id: 1
+        value: 11
+        amount: 5
+        guid: null
+        marked: 1
+  - sql: INSERT property_comp_commit_a(id,value) VALUES(2,22)
+  - sql: INSERT property_comp_commit_b(id) VALUES(2)
+  - sql: SELECT id,value,amount FROM property_comp_commit_a ORDER BY id
+    expect:
+      data:
+      - id: 1
+        value: 11
+        amount: 5
+      - id: 2
+        value: 22
+        amount: 5
+  - sql: SELECT id,guid FROM property_comp_commit_b ORDER BY id
+    expect:
+      data:
+      - id: 1
+        guid: null
+      - id: 2
+        guid: 00000000-0000-0000-0000-000000000007
+  - sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_commit_b') AND name=N'guid'
+    expect:
+      data:
+      - marked: 1
+- name: Recovered reverse composition preserves historical values and independently applies future defaults
+  steps:
+  - sql: SELECT a.id,a.value,a.amount,b.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_comp_reverse_a a CROSS JOIN property_comp_reverse_b b CROSS JOIN sys.columns c WHERE
+      c.object_id=OBJECT_ID(N'property_comp_reverse_b') AND c.name=N'guid'
+    expect:
+      data:
+      - id: 1
+        value: 11
+        amount: 5
+        guid: null
+        marked: 1
+  - sql: INSERT property_comp_reverse_a(id,value) VALUES(2,22)
+  - sql: INSERT property_comp_reverse_b(id) VALUES(2)
+  - sql: SELECT id,value,amount FROM property_comp_reverse_a ORDER BY id
+    expect:
+      data:
+      - id: 1
+        value: 11
+        amount: 5
+      - id: 2
+        value: 22
+        amount: 5
+  - sql: SELECT id,guid FROM property_comp_reverse_b ORDER BY id
+    expect:
+      data:
+      - id: 1
+        guid: null
+      - id: 2
+        guid: 00000000-0000-0000-0000-000000000007
+  - sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_reverse_b') AND name=N'guid'
+    expect:
+      data:
+      - marked: 1
