@@ -550,15 +550,19 @@ Only the consuming compilation creates callbacks; SQL operands stay separate. */
 	Do not lose its contract when a postfix annotation lowers to a literal. */
 	(define explicit (and (not (nil? collation)) (equal? (cadr collation) 0)))
 	/* Only character equality uses space padding in this slice. Keep binary
-	payloads and range comparisons on their existing contracts. The opaque
-	scalar residual cannot supply an incompatible raw column/index bound. */
+	payloads and range comparisons on their existing contracts. Any index
+	bound must consume the normalized operands and their equality relation. */
 	(define padded (and (has? '("eq" "ne") op)
 		(tsql_character_type? left_type) (tsql_character_type? right_type)
 		(not (and (equal? left_type "NULL") (equal? right_type "NULL")))))
 	(define comparison (if (or (equal? left_type "SQL_VARIANT") (equal? right_type "SQL_VARIANT"))
 		(tsql_variant_comparison_info head left_info right_info)
 		padded
-		(sql_info (list tsql_padded_text_equal (sql_info_formula left_info) (sql_info_formula right_info)
+		/* Expose ordinary pure operands to common scan/index lowering. Native
+		text replacement preserves NULL and removes only trailing U+0020. */
+		(sql_info (list (quote equal_collate)
+			(list (quote regexp_replace) (sql_info_formula left_info) " +$" "")
+			(list (quote regexp_replace) (sql_info_formula right_info) " +$" "")
 			(if (nil? collation) "bin" (car collation))) "BOOLEAN" collation)
 		(or binary explicit)
 		(sql_info (if (has? '("eq" "ne") op)

@@ -1,0 +1,54 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Collated composite anti joins retain bounded ordered traversal for matching keys
+setup:
+- sql: DROP TABLE IF EXISTS anti_walk_left
+- sql: DROP TABLE IF EXISTS anti_walk_right
+- sql: CREATE TABLE anti_walk_left(object_name VARCHAR(100) NOT NULL,permission_name VARCHAR(100) NOT NULL,PRIMARY KEY(object_name,permission_name))
+- sql: CREATE TABLE anti_walk_right(object_name VARCHAR(100) NOT NULL,permission_name VARCHAR(100) NOT NULL,PRIMARY KEY(object_name,permission_name))
+- scm: |
+    (begin
+      (define rows (map (produceN 1000) (lambda (i) (list (concat "object_" i) "SELECT"))))
+      (insert (table "memcp-tests" false "anti_walk_left" false nil) '("object_name" "permission_name") rows)
+      (insert (table "memcp-tests" false "anti_walk_right" false nil) '("object_name" "permission_name") rows))
+cleanup:
+- sql: DROP TABLE IF EXISTS anti_walk_left
+- sql: DROP TABLE IF EXISTS anti_walk_right
+test_cases:
+- name: Matching composite text keys produce no missing ordered row
+  sql: |
+    SELECT TOP(1) l.object_name,l.permission_name FROM anti_walk_left l
+    LEFT JOIN anti_walk_right r ON l.object_name COLLATE Latin1_General_CI_AS=r.object_name
+      AND l.permission_name COLLATE Latin1_General_CI_AS=r.permission_name
+    WHERE r.object_name IS NULL ORDER BY l.object_name,l.permission_name;
+  expect: {rows: 0, data: []}
+  threshold_ms: 5000
+  performance_rows: 1000
+  warmup: 0
+  timing_samples: 3
+  timing_aggregation: total
+- name: Transaction owned sources produce the same empty ordered anti join
+  session_id: collated_anti_walk
+  setup:
+  - sql: |
+      BEGIN TRANSACTION;
+      CREATE TABLE #left(object_name VARCHAR(100) NOT NULL,permission_name VARCHAR(100) NOT NULL,PRIMARY KEY(object_name,permission_name));
+      CREATE TABLE #right(object_name VARCHAR(100) NOT NULL,permission_name VARCHAR(100) NOT NULL,PRIMARY KEY(object_name,permission_name));
+      INSERT #left SELECT object_name,permission_name FROM anti_walk_left;
+      INSERT #right SELECT object_name,permission_name FROM anti_walk_right;
+  sql: |
+    SELECT TOP(1) l.object_name,l.permission_name FROM #left l
+    LEFT JOIN #right r ON l.object_name COLLATE Latin1_General_CI_AS=r.object_name
+      AND l.permission_name COLLATE Latin1_General_CI_AS=r.permission_name
+    WHERE r.object_name IS NULL ORDER BY l.object_name,l.permission_name;
+  expect: {rows: 0, data: []}
+  cleanup:
+  - sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  threshold_ms: 5000
+  performance_rows: 1000
+  warmup: 0
+  timing_samples: 3
+  timing_aggregation: total

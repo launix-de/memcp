@@ -436,6 +436,11 @@ request state can become part of the persisted function. */
 			"Collation" (coalesceNil (attributes "collate") "utf8mb4")))
 		_ '())))) "constraints" '("Unique" () "ForeignKeys" ())))))
 (define tsql_computed_formula_safe? (lambda (formula) (match formula
+	/* Only the compiler's literal ASCII-space trim is admitted here;
+	regexp callbacks and dynamic patterns retain their existing rejection. */
+	((symbol regexp_replace) value " +$" "") (tsql_computed_formula_safe? value)
+	((symbol equal_collate) left right (string? _collation))
+	(and (tsql_computed_formula_safe? left) (tsql_computed_formula_safe? right))
 	((symbol get_column) _alias _alias_ic _name _name_ic) true
 	((symbol quote) value) (begin (sql_declaration_data value) true)
 	(list head enabled ((symbol lambda) '() body))

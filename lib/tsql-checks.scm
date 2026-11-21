@@ -12,6 +12,11 @@ scalars remain rejected. No creator session is retained in the program. */
 		"constraints" '("Unique" () "ForeignKeys" ())))))
 
 (define tsql_check_formula_safe? (lambda (formula) (match formula
+	/* Only the compiler's literal ASCII-space trim is admitted here;
+	regexp callbacks and dynamic patterns retain their existing rejection. */
+	((symbol regexp_replace) value " +$" "") (tsql_check_formula_safe? value)
+	((symbol equal_collate) left right (string? _collation))
+	(and (tsql_check_formula_safe? left) (tsql_check_formula_safe? right))
 	((symbol get_column) _alias _alias_ic _name _name_ic) true
 	((symbol quote) value) (begin (sql_declaration_data value) true)
 	((symbol sql_compare) left right _comparison _operation)

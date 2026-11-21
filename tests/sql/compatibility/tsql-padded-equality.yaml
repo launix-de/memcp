@@ -208,15 +208,13 @@ test_cases:
       (define params (list 'value))
       (define columns (list "label"))
       (define predicate (list 'lambda params formula))
-      (define bounds (coalesceNil (scan_plan_collect formula params columns (list)) (list)))
-      (define compiled (scan_plan_compile_filter (list 'quote columns) predicate))
       (define target (table "memcp-tests" false "pad_eq_rows" false nil))
       (define plan (compile_scan_plan 'scan nil target (list 'quote columns) predicate
-        (list 'quote (list "id")) (list 'lambda (list 'acc 'id) (list '+ 'acc 'id)) 0 + false))
-      (and (empty_list? bounds) (not (scan_plan_covered (nth compiled 3)))
-        (equal? (eval plan) 6)))
+        (list 'quote (list "id")) (list 'lambda (list 'acc 'id) (list 'cons 'id 'acc)) '()
+        (list 'lambda (list 'left 'right) (list 'merge (list 'list 'left 'right))) false))
+      (sort (eval plan) <))
   expect:
-    result: true
+    result: [1, 2, 3]
 - name: CHECK equality and IN reuse only the admitted pure character owners
   tds:
     statements:
