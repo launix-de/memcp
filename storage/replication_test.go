@@ -1141,6 +1141,26 @@ func TestReplicationImportDefersCleanup(t *testing.T) {
 	if err := transfer.packet(packet); err != nil {
 		t.Fatal(err)
 	}
+	// A completed column is visible before its enclosing shard transfer ends.
+	// The receiver keeps its GC lease until the whole transfer is admitted or
+	// aborted; an opened, still-private writer is not a published column.
+	var incoming, packed bytes.Buffer
+	(&StorageSCMER{values: []scm.Scmer{scm.NewString("incoming")}}).Serialize(&incoming)
+	writer := gzip.NewWriter(&packed)
+	if _, err := writer.Write(incoming.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	packet.Kind, packet.Payload = "chunk", packed.Bytes()
+	if err := transfer.packet(packet); err != nil {
+		t.Fatal(err)
+	}
+	packet.Kind, packet.Payload = "object_end", nil
+	if err := transfer.packet(packet); err != nil {
+		t.Fatal(err)
+	}
 	if blobs, shards, complete := CleanDatabase(table.schema); blobs != 0 || shards != 0 || complete {
 		t.Fatalf("cleanup ran through a private transfer: %d blobs, %d shards, complete=%v", blobs, shards, complete)
 	}
@@ -1148,6 +1168,9 @@ func TestReplicationImportDefersCleanup(t *testing.T) {
 	if missing, ok := reader.(interface{ Missing() bool }); ok && missing.Missing() {
 		reader.Close()
 		t.Fatal("cleanup deleted the incoming content")
+	}
+	if got, err := io.ReadAll(reader); err != nil || !bytes.Equal(got, incoming.Bytes()) {
+		t.Fatal("cleanup changed the completed incoming column", err)
 	}
 	reader.Close()
 	transfer.abort()
