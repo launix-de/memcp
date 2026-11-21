@@ -501,14 +501,14 @@ func RebuildTable(tbl *table, all bool, repartition bool) string {
 	if len(errs) == 0 {
 		if err := func() (err error) {
 			defer func() { err = recoverAsError("save failed for database " + tbl.schema.Name) }()
-			tbl.schema.save()
+			tbl.schema.save(nil, tbl)
 			return nil
 		}(); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}
 	if len(errs) == 0 {
-		// tbl.schema.save() committed all replacement UUIDs. Only this success
+		// tbl.schema.save(nil) committed all replacement UUIDs. Only this success
 		// path may remove files belonging to the previous generation.
 		errs = append(errs, cleanupReplacedShardGenerations(result.replaced, "table "+tbl.schema.Name+"."+tbl.Name)...)
 	}
@@ -561,12 +561,12 @@ func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, include
 	}
 	if err := func() (err error) {
 		defer func() { err = recoverAsError("save failed for database " + db.Name) }()
-		db.save()
+		db.save(nil)
 		return nil
 	}(); err != nil {
 		return []string{err.Error()}, false
 	}
-	// db.save() committed all replacement UUIDs. A save failure returns above
+	// db.save(nil) committed all replacement UUIDs. A save failure returns above
 	// and deliberately retains every old generation.
 	errs := cleanupReplacedShardGenerations(result.replaced, "database "+db.Name)
 	if len(errs) != 0 || !result.complete || !hasTransactions {
@@ -752,12 +752,9 @@ func (db *database) commitSchemaSnapshot(jsonbytes []byte, durable bool, release
 	}
 }
 
-func (db *database) save(counterOwner ...*replicaCell) {
+func (db *database) save(counterOwner *replicaCell, tables ...*table) {
 	if db == systemSchemaDB {
 		return // fixed, never persisted
-	}
-	if len(counterOwner) > 1 {
-		panic("invalid counter checkpoint ownership")
 	}
 	if sharedClusterDatabase(db.Name) {
 		cluster := activeNodeCluster()
@@ -766,7 +763,7 @@ func (db *database) save(counterOwner ...*replicaCell) {
 		}
 		cell := cluster.manager.resourceCell(mosiResource{Database: db.Name})
 		phase := cell.ownstate.Phase()
-		if len(counterOwner) != 0 {
+		if counterOwner != nil {
 			// The allocator holds this existing directory mutex through the
 			// checkpoint. O owns the unchanged declarations and may persist its
 			// runtime counter without recalling every S reader. A local M
@@ -777,7 +774,7 @@ func (db *database) save(counterOwner ...*replicaCell) {
 			cluster.manager.mu.Lock()
 			owner := cluster.manager.directory.Records[cluster.manager.resourceKey(mosiResource{Database: db.Name})].Owner
 			cluster.manager.mu.Unlock()
-			if counterOwner[0] != cell || owner != cluster.self.ID {
+			if counterOwner != cell || owner != cluster.self.ID {
 				panic("counter checkpoint lost its owner")
 			}
 		} else if phase != mosi.M {
@@ -795,7 +792,7 @@ func (db *database) save(counterOwner ...*replicaCell) {
 			db.schemalock.Unlock()
 		}
 	}()
-	db.checkpointCatalogLocked()
+	db.checkpointCatalogLocked(tables...)
 	owned = false
 	db.commitSchemaLocked(true, db.schemalock.Unlock)
 	// shards are written while rebuild
@@ -1594,7 +1591,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 			if durablePublication {
 				func() {
 					defer func() { publicationPanic = recover() }()
-					db.save()
+					db.save(nil, t)
 				}()
 			}
 			if publicationPanic != nil {
@@ -1749,7 +1746,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 	done.Wait()
 
 	// Return replaced shards to the caller (Rebuild) so it can delete their
-	// on-disk files AFTER db.save() has written the new schema.json.
+	// on-disk files AFTER db.save(nil) has written the new schema.json.
 	// Deleting old column files before saving the schema creates a window
 	// where a crash/kill leaves schema.json pointing at already-deleted UUIDs.
 	// Failed schema publication intentionally retains the old generation: it is
@@ -1810,7 +1807,7 @@ func CreateDatabase(schema string, ignoreexists bool /*, persistence Persistence
 	}
 
 	db.initializeEmptyCatalog()
-	db.save()
+	db.save(nil)
 	return true
 }
 
@@ -1865,7 +1862,7 @@ func CreateDatabaseWithBackend(schema string, ignoreexists bool, options map[str
 	}
 
 	db.initializeEmptyCatalog()
-	db.save()
+	db.save(nil)
 	return true
 }
 
@@ -2000,7 +1997,7 @@ func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool 
 	}
 
 	db.initializeEmptyCatalog()
-	db.save()
+	db.save(nil)
 	return true
 }
 

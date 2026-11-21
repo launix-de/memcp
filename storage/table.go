@@ -1628,8 +1628,14 @@ func (t *table) schemaSaveMode() schemaSaveMode {
 	return schemaSaveModeForDurability(t.PersistencyMode == Safe)
 }
 
-func (t *table) finishSchemaMutationLocked(mode schemaSaveMode) {
-	t.schema.saveLockedAndUnlock(mode, t)
+func (t *table) finishSchemaMutationLocked(mode schemaSaveMode, definitionChanged bool) {
+	if definitionChanged {
+		t.schema.saveLockedAndUnlock(mode, t)
+	} else {
+		// Physical query columns and their programs stay runtime-local. Preserve
+		// buffered checkpoint bookkeeping without opening a catalog transaction.
+		t.schema.saveLockedAndUnlock(mode)
+	}
 }
 
 // isHiddenFromShowTables implements the SQL metadata contract for internal
@@ -3419,7 +3425,7 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 		mode = schemaSaveBuffered
 	}
 	metadataLocked = false // finishSchemaMutationLocked always releases ownership.
-	t.finishSchemaMutationLocked(mode)
+	t.finishSchemaMutationLocked(mode, !cp.IsTemp)
 	if cp.IsTemp {
 		t.registerTempColumn(cp)
 	}
@@ -3529,7 +3535,7 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 		}
 		t.publishShowColumnsSnapshot(true)
 		metadataLocked = false
-		t.finishSchemaMutationLocked(t.schemaSaveMode())
+		t.finishSchemaMutationLocked(t.schemaSaveMode(), !current.IsTemp)
 		return result
 	}
 	if operation == "drop_default" {
@@ -3616,7 +3622,7 @@ func (t *table) AlterColumnDeclaration(name string, declaration, expected scm.Sc
 		t.Columns = columns
 		t.publishShowColumnsSnapshot(true)
 		metadataLocked = false // finishSchemaMutationLocked releases schema ownership.
-		t.finishSchemaMutationLocked(t.schemaSaveMode())
+		t.finishSchemaMutationLocked(t.schemaSaveMode(), !replacement.IsTemp)
 		return true
 	}
 	panic("column " + t.schema.Name + "." + t.Name + "." + name + " does not exist")
@@ -3651,7 +3657,7 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 			} else {
 				t.publishShowColumnsSnapshot(true)
 			}
-			t.finishSchemaMutationLocked(t.schemaSaveMode())
+			t.finishSchemaMutationLocked(t.schemaSaveMode(), !c.IsTemp)
 			// deregister temp column AFTER releasing schemalock
 			if removedCol.IsTemp {
 				GlobalCache.Remove(removedCol)
@@ -3741,7 +3747,7 @@ func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *sto
 	var savePanic any
 	func() {
 		defer func() { savePanic = recover() }()
-		t.schema.save()
+		t.schema.save(nil, t)
 	}()
 	if savePanic != nil {
 		t.mu.Lock()
@@ -3821,7 +3827,7 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 	var savePanic any
 	func() {
 		defer func() { savePanic = recover() }()
-		t.schema.save()
+		t.schema.save(nil, t)
 	}()
 	if savePanic != nil {
 		t.mu.Lock()

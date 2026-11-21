@@ -319,7 +319,7 @@ func (r *replicationManager) prepareResource(resource mosiResource) (content str
 				db.prepareReplicaCatalog()
 			}
 		}
-		db.save()
+		db.save(nil)
 		return r.schemaDigest(db.persistence.ReadSchema())
 	}
 	c := r.resourceCell(resource)
@@ -431,7 +431,7 @@ func (r *replicationManager) replaceShard(resource mosiResource, previous, repla
 	table.Shards, table.PShards = replace(table.Shards), replace(table.PShards)
 	table.publishTopologyLocked()
 	table.mu.Unlock()
-	db.save()
+	db.save(nil)
 	return nil
 }
 
