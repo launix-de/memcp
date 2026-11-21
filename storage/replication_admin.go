@@ -187,6 +187,8 @@ func (r *replicationManager) retire(id string) error {
 		}
 	}
 	r.mu.Unlock()
+	var completed []mosiResource
+	checkpoint := make(map[string]bool)
 	for _, resource := range resources {
 		c := r.resourceCell(resource)
 		releaseCoordination := c.coordinate(context.Background())
@@ -214,7 +216,6 @@ func (r *replicationManager) retire(id string) error {
 			r.confirmed[r.resourceKey(record.Resource)] = record.Owner
 			return true
 		})
-		err = nil
 		if record.Owner == r.id {
 			foreign := false
 			for reader := range record.Readers {
@@ -223,18 +224,27 @@ func (r *replicationManager) retire(id string) error {
 				}
 			}
 			if !foreign {
-				err = r.clearBackup(record.Resource)
+				completed = append(completed, record.Resource)
+				checkpoint[record.Resource.Database] = true
 			}
 		}
-		if err == nil {
-			// Explicit, fenced promotion can establish root-domain authority that was
-			// unknown during recovery. It is not a timeout or a backend-existence proof.
-			c.clusterstate.Publish(mosi.M)
-			c.ownstate.Publish(mosi.ParsePhase(record.State))
-		}
+		// Explicit, fenced promotion can establish root-domain authority that was
+		// unknown during recovery. It is not a timeout or a backend-existence proof.
+		c.clusterstate.Publish(mosi.M)
+		c.ownstate.Publish(mosi.ParsePhase(record.State))
 		handover.Release()
 		releaseCoordination()
-		if err != nil {
+	}
+	// Promoted payloads are runtime publications until their native table
+	// topology and compatibility root are durable. Keep completed-copy markers
+	// across this checkpoint, so a crash cannot reopen the pre-promotion UUIDs.
+	for name := range checkpoint {
+		if db := databases.Get(name); db != nil {
+			db.save(nil)
+		}
+	}
+	for _, resource := range completed {
+		if err := r.clearBackup(resource); err != nil {
 			return err
 		}
 	}

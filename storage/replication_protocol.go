@@ -120,7 +120,17 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 		}
 		return r.acceptGrant(*packet)
 	case "begin":
+		discardBackup := func() error {
+			key := source + "/" + packet.ID
+			if _, duplicate := r.imports.LoadOrStore(key, &replicaImport{header: *packet, discard: true, superseded: true}); duplicate {
+				return fmt.Errorf("duplicate transfer")
+			}
+			return nil
+		}
 		if err := r.validateForwards(source, *packet); err != nil {
+			if err == errObsoleteReplicaBackup {
+				return discardBackup()
+			}
 			return err
 		}
 		if r.master {
@@ -131,6 +141,12 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 				}
 			} else {
 				record := r.transferOwnerRecord(source, *packet)
+				if packet.Epoch < record.Epoch {
+					if err := r.authorizePacket(*packet); err != nil {
+						return err
+					}
+					return discardBackup()
+				}
 				if record.Owner != source || record.Epoch != packet.Epoch {
 					return fmt.Errorf("backup from non-owner: %s epoch %d, directory epoch %d, owner matches %t", packet.Resource.key(), packet.Epoch, record.Epoch, record.Owner == source)
 				}
@@ -182,6 +198,12 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 		if packet.Resource != transfer.header.Resource || packet.Epoch != transfer.header.Epoch || packet.Content != transfer.header.Content {
 			return fmt.Errorf("transfer header changed")
 		}
+		if transfer.discard {
+			if packet.Kind == "end" {
+				r.imports.Delete(key)
+			}
+			return nil
+		}
 		if packet.Kind != "end" {
 			return transfer.packet(*packet)
 		}
@@ -190,6 +212,10 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 			defer transfer.abort()
 			if r.master {
 				record := r.transferOwnerRecord(source, transfer.header)
+				if _, solicited := r.steps.Load(packet.ID); !solicited && packet.Epoch < record.Epoch {
+					transfer.superseded = true
+					return nil
+				}
 				if record.Owner != source || record.Epoch != packet.Epoch {
 					return fmt.Errorf("stale transfer epoch")
 				}

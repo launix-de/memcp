@@ -557,6 +557,28 @@ func (r *replicationManager) backupDatabase(name, user string) {
 	if err != nil {
 		return
 	}
+	prepareSchema := func() bool {
+		if guard.ownstate.Phase() != mosi.M {
+			return true
+		}
+		// Freeze the native roots before enumerating their resources. Catalog
+		// files must reach the backup before its schema can decode those roots;
+		// backup admission must not acquire S and remove our offline M rights.
+		handover := guard.ownstate.TryHandover(guard.writesDrained)
+		if handover == nil {
+			return false
+		}
+		_, err := r.prepareResource(mosiResource{Database: name})
+		handover.Release()
+		if err != nil {
+			scm.PrintError(err)
+			return false
+		}
+		return true
+	}
+	if !prepareSchema() {
+		return
+	}
 	r.mu.Lock()
 	resources := make([]mosiResource, 0)
 	for _, record := range r.directory.Records {
@@ -565,15 +587,43 @@ func (r *replicationManager) backupDatabase(name, user string) {
 		}
 	}
 	r.mu.Unlock()
-	sort.Slice(resources, func(i, j int) bool { return resources[i].key() < resources[j].key() })
+	sort.Slice(resources, func(i, j int) bool {
+		if isCatalogResource(resources[i]) != isCatalogResource(resources[j]) {
+			return isCatalogResource(resources[i])
+		}
+		return resources[i].key() < resources[j].key()
+	})
 	if guard.ownstate.Phase() == mosi.M {
 		// Recovery may restore live schema rights before its RAM directory
 		// record. Always introduce new tables before sending their data.
 		schema := mosiResource{Database: name}
-		resources = append([]mosiResource{schema}, resources...)
+		catalogEnd := 0
+		for catalogEnd < len(resources) && isCatalogResource(resources[catalogEnd]) {
+			catalogEnd++
+		}
+		resources = append(resources[:catalogEnd], append([]mosiResource{schema}, resources[catalogEnd:]...)...)
 		resources = append(resources, schema)
 	}
-	for index, resource := range resources {
+	finalCatalogsPrepared := false
+	for index := 0; index < len(resources); index++ {
+		resource := resources[index]
+		if index == len(resources)-1 && resource.Shard == "" && !finalCatalogsPrepared {
+			// Data preparation may have rebuilt a generation. Freeze the final
+			// topology and send its catalog files before its final root as well.
+			if !prepareSchema() {
+				return
+			}
+			var catalogs []mosiResource
+			for _, shard := range databases.Get(name).replicationShards() {
+				if shard.catalogOwner != "" {
+					catalogs = append(catalogs, shard.replicationResource())
+				}
+			}
+			resources = append(resources[:index], append(catalogs, resource)...)
+			finalCatalogsPrepared = true
+			index--
+			continue
+		}
 		cell := r.resourceCell(resource)
 		resource = *cell.resource.Load() // schema publication may have renamed its table
 		sent := func() bool {
@@ -604,7 +654,14 @@ func (r *replicationManager) backupDatabase(name, user string) {
 			if cell.ownstate.Phase() != mosi.M {
 				return false
 			}
-			content, err := r.prepareResource(resource)
+			var content string
+			if resource.Shard == "" {
+				// prepareSchema already froze these roots before their native
+				// files were sent. Rebuilding here would advertise unsent UUIDs.
+				content, err = r.schemaDigest(databases.Get(name).persistence.ReadSchema())
+			} else {
+				content, err = r.prepareResource(resource)
+			}
 			if err != nil {
 				scm.PrintError(err)
 				return false
@@ -627,7 +684,7 @@ func (r *replicationManager) backupDatabase(name, user string) {
 			}
 			return true
 		}()
-		if index == 0 && resource.Shard == "" && !sent {
+		if resource.Shard == "" && !sent {
 			return
 		}
 	}

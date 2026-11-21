@@ -828,7 +828,7 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 	if packet.Resource == globalResource {
 		// The immutable native payload was installed before granting rights.
 	} else if packet.Resource.Shard == "" {
-		if err := r.installSchema(source, db.Name, db.persistence, data); err != nil {
+		if err := r.installSchema(source, db.Name, db.persistence, data, false); err != nil {
 			return err
 		}
 	} else if packet.Capture == nil {

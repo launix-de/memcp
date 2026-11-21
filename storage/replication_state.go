@@ -275,6 +275,8 @@ func (r *replicationManager) shardRoutes(resource mosiResource) []shardForward {
 	return routes
 }
 
+var errObsoleteReplicaBackup = fmt.Errorf("obsolete replica backup epoch")
+
 // Incoming transfers may introduce a rebuild successor before its column bytes.
 // Only the authenticated current modifier may redirect a known resource. The
 // wire request keeps its original UUID so in-flight ACK matching stays exact.
@@ -305,6 +307,12 @@ func (r *replicationManager) validateForwards(source string, packet mosiPacket) 
 		// alias. The current resource's owner/epoch is the same authority proof
 		// used for an ordinary transfer; historical routes are an alternative.
 		current := r.transferOwnerRecord(source, packet)
+		if _, solicited := r.steps.Load(packet.ID); !solicited && packet.Epoch < current.Epoch {
+			// Syntax and client authorization were checked above. An immutable
+			// background copy may outlive its owner's handover; it supplies no
+			// authority and must be consumed without publishing its old routes.
+			return errObsoleteReplicaBackup
+		}
 		if current.Owner != source || current.Epoch != packet.Epoch {
 			return fmt.Errorf("forwarding from non-owner for %s table %s (epoch %d, directory epoch %d, routes %v)", packet.Resource.key(), packet.Resource.Table, packet.Epoch, current.Epoch, packet.Forwards)
 		}

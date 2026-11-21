@@ -570,6 +570,73 @@ func TestCatalogRuntimeCacheRebuildDoesNotPublishLegacyMigration(t *testing.T) {
 	}
 }
 
+func TestCatalogReplicaSchemaBackupPreservesRemoteAuthority(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog_passive_schema_backup", 0)
+	db := tbl.schema
+	data := db.persistence.ReadSchema()
+	r := replicaRecoveryFixture()
+	owner := uuid.NewString()
+	for _, shard := range db.catalog.committed {
+		cell := r.declareShard(shard, owner, false)
+		cell.ownstate.Publish(mosi.IO)
+		cell.clusterstate.Publish(mosi.M)
+		r.updateRecord(shard.replicationResource(), func(record *replicaRecord) bool {
+			record.State, record.Epoch = "IO", 7
+			return true
+		})
+	}
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	// There is deliberately no connection for recalling M. Saving admitted
+	// immutable files must not acquire query permissions for a safety copy.
+	if err := r.installSchema(owner, db.Name, db.persistence, data, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, shard := range db.catalog.live {
+		cell := r.shardCell(shard)
+		record := r.directory.Records[r.resourceKey(shard.replicationResource())]
+		if cell.ownstate.Phase() != mosi.IO || record.Owner != owner || record.Epoch != 7 {
+			t.Fatalf("backup changed native authority: %+v", record)
+		}
+	}
+	if readCatalogRoot(db.persistence.ReadSchema()) == nil {
+		t.Fatal("passive backup lost the native root")
+	}
+}
+
+func TestCatalogDataPublicationDoesNotCheckpointDefinitions(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog_passive_data_publication", 3)
+	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+		t.Fatal(result)
+	}
+	original := tbl.ActiveShards()[0]
+	received := original.rebuild(true)
+	before := string(tbl.schema.persistence.ReadSchema())
+	r := replicaRecoveryFixture()
+	owner := uuid.NewString()
+	r.schemaShards(tbl.schema, owner, false)
+	cell := r.shardCell(original)
+	cell.ownstate.Publish(mosi.S)
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	// Catalog authority is remote and cannot be recalled without a connection.
+	// Receiving one data generation is still a legal runtime publication.
+	if err := r.replaceShard(original.replicationResource(), original, received); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(tbl.schema.persistence.ReadSchema()); got != before {
+		t.Fatal("data receipt changed the independent catalog checkpoint")
+	}
+	if current := tbl.ActiveShards()[0]; current != received {
+		t.Fatal("data receipt did not publish the accepted native generation")
+	}
+	for _, shard := range tbl.schema.replicationShards() {
+		if shard.catalogOwner != "" && r.shardCell(shard).ownstate.Phase() != mosi.IO {
+			t.Fatal("data receipt acquired independent catalog rights")
+		}
+	}
+}
+
 func TestCatalogReplicaTablesIntroduceDataAuthority(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "catalog-new-data-authority", 0)
 	db := tbl.schema
@@ -874,6 +941,33 @@ func TestCatalogRoutingOpensOnlySelectedAnchor(t *testing.T) {
 	}
 }
 
+func TestCatalogCleanupRetainsAnchorBeforeSnapshotPublication(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "catalog-private-snapshot-cleanup", 0)
+	db := tbl.schema
+	root := readCatalogRoot(engine.ReadSchema())
+	cold := newDatabase()
+	cold.Name, cold.persistence, cold.srState = db.Name, engine, COLD
+	// Snapshot decoding has consumed the bootstrap slot but has not published
+	// its Go descriptors. Only the durable anchor currently owns these files.
+	cold.catalogBootstrap.Do(func() {})
+	databases.Set(cold.Name, cold)
+	publishCatalogShards(db.Name, nil)
+	defer func() {
+		databases.Set(db.Name, db)
+		publishCatalogShards(db.Name, &db.catalog.live)
+	}()
+	cleanShards(catalogBackendDatabase())
+	for relation, id := range root.Shards {
+		reader := catalogBackendDatabase().persistence.ReadColumn(id, "schema_name")
+		missing, ok := reader.(interface{ Missing() bool })
+		absent := ok && missing.Missing()
+		reader.Close()
+		if absent {
+			t.Fatalf("cleanup deleted anchored %s before snapshot publication", relation)
+		}
+	}
+}
+
 func TestCatalogCleanupRetainsPinnedGeneration(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "catalog-generation-reader", 0)
 	db := tbl.schema
@@ -1041,7 +1135,7 @@ func TestCatalogPeerPublicationInitializesColdForeignAnchor(t *testing.T) {
 	defer databases.Set(tbl.schema.Name, tbl.schema)
 	r := replicaRecoveryFixture()
 	r.cluster = &nodeCluster{manager: r, self: clusterMember{ID: r.id}}
-	if err := r.installSchema(uuid.NewString(), cold.Name, engine, accepted); err != nil {
+	if err := r.installSchema(uuid.NewString(), cold.Name, engine, accepted, false); err != nil {
 		t.Fatal(err)
 	}
 	if cold.GetTable(tbl.Name) == nil {
