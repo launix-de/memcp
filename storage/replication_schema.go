@@ -331,6 +331,25 @@ func (check *replicaColumnAdmission) write(data []byte) error {
 // document. Two legacy documents remain readable; a new nonempty incarnation
 // denotes an explicit new generation and follows the existing replacement path.
 func validateIncomingCatalogAuthority(current, incoming *database) error {
+	if current != nil {
+		// Constructor provenance is immutable for the native UUID, including a
+		// rename. Reject its removal/change before any received schema bytes
+		// replace persistence; dynamic high/issued facts still merge normally.
+		known := make(map[string]*tableAllocatorState)
+		for _, t := range current.tables.GetAll() {
+			if state := t.allocatorSnapshot(); state != nil && state.StartKnown {
+				known[t.RuntimeIdentity] = state
+			}
+		}
+		for _, t := range incoming.tables.GetAll() {
+			if previous := known[t.RuntimeIdentity]; previous != nil {
+				next := t.allocatorSnapshot()
+				if next == nil || !next.StartKnown || next.Start != previous.Start {
+					return fmt.Errorf("replicated schema changes immutable table allocator start provenance")
+				}
+			}
+		}
+	}
 	if incoming.catalogVersion != 0 && incoming.incarnationID() == "" {
 		return fmt.Errorf("replicated catalog watermark requires a database incarnation")
 	}
