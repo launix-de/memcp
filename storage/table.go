@@ -3876,8 +3876,18 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 		result := scm.NewBool(true)
 		t.requireDeclaredColumnAlter(current, operation, value)
 		if operation == "auto_increment" && scm.ToInt(value) > 1 {
-			// This is the existing allocator update; no column clone owns it.
-			t.reserveAutoIncrement(uint64(scm.ToInt(value)), 0, false)
+			// The actual schema access, maintenance admission and ddlMu retain
+			// this generation and declaration. Reservation may checkpoint the
+			// shared schema owner, which takes schemalock.RLock itself.
+			metadataLocked = false
+			t.schema.schemalock.Unlock()
+			func() {
+				defer func() {
+					t.schema.schemalock.Lock()
+					metadataLocked = true
+				}()
+				t.reserveAutoIncrement(uint64(scm.ToInt(value)), 0, false)
+			}()
 		} else {
 			replacement := current
 			if !current.IsTemp && !isRuntimeComputedColumn(current) {

@@ -286,6 +286,7 @@ test_cases:
   setup:
   - sql: DROP TABLE IF EXISTS operator_allocator_probe
   - sql: CREATE TABLE operator_allocator_probe(id INT IDENTITY(100,1) PRIMARY KEY,value INT)
+  - scm: (altercolumn (table "replica_test" false "operator_allocator_probe" false nil) "id" "auto_increment" 400)
   - sql: INSERT operator_allocator_probe(value) VALUES(1),(2)
   sql: |
     SELECT id,IDENT_CURRENT(CASE WHEN id%2=0 THEN N'dbo.operator_allocator_probe'
@@ -293,7 +294,7 @@ test_cases:
     FROM big_items WHERE id IN(245000,245001) ORDER BY id
   expect:
     rows: 2
-    data: [{id: 245000,current_value: 101},{id: 245001,current_value: 101}]
+    data: [{id: 245000,current_value: 402},{id: 245001,current_value: 402}]
     cluster: {min_remote_shards: 1}
   cleanup:
   - sql: DROP TABLE IF EXISTS operator_allocator_probe
