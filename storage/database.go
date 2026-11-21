@@ -84,6 +84,13 @@ type database struct {
 
 	// lazy-loading/shared-resource state (not serialized)
 	srState SharedState `json:"-"`
+
+	// catalog is this database's system_schema partition. catalogMu orders
+	// catalog generations; it is taken after schemalock. Catalog rows are the
+	// definition authority; runtime metadata is never refreshed into them.
+	catalogBootstrap sync.Once       `json:"-"`
+	catalogMu        sync.Mutex      `json:"-"`
+	catalog          databaseCatalog `json:"-"`
 }
 
 // blobRefLock occupies one cache line so unrelated hash stripes do not
@@ -478,24 +485,30 @@ func RebuildTable(tbl *table, all bool, repartition bool) string {
 		panic("cannot rebuild a stale table handle")
 	}
 
+	if tbl.schema == systemSchemaDB {
+		// system_schema partitions are memory shards owned by their databases'
+		// catalogs, which compact them after each change; there is no storage
+		// generation, blob store or schema.json to rebuild here.
+		return fmt.Sprint(time.Since(start))
+	}
 	tbl.schema.persistenceLifecycle.RLock()
 	defer tbl.schema.persistenceLifecycle.RUnlock()
 	result := tbl.schema.rebuildWithLifecycle(all, repartition, true, tbl)
-	if r := replication.Load(); r != nil && !r.master && validReplicaDatabase(tbl.schema.Name) {
+	if r := replication.Load(); !tbl.RuntimeOnly && r != nil && !r.master && validReplicaDatabase(tbl.schema.Name) {
 		defer func() { go replicationCheckpoint(tbl.schema.Name, "") }()
 	}
 	errs := append([]string(nil), result.errors...)
-	if len(errs) == 0 {
+	if len(errs) == 0 && !tbl.RuntimeOnly {
 		if err := func() (err error) {
 			defer func() { err = recoverAsError("save failed for database " + tbl.schema.Name) }()
-			tbl.schema.save()
+			tbl.schema.save(nil, tbl)
 			return nil
 		}(); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}
 	if len(errs) == 0 {
-		// tbl.schema.save() committed all replacement UUIDs. Only this success
+		// tbl.schema.save(nil) committed all replacement UUIDs. Only this success
 		// path may remove files belonging to the previous generation.
 		errs = append(errs, cleanupReplacedShardGenerations(result.replaced, "table "+tbl.schema.Name+"."+tbl.Name)...)
 	}
@@ -548,12 +561,12 @@ func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, include
 	}
 	if err := func() (err error) {
 		defer func() { err = recoverAsError("save failed for database " + db.Name) }()
-		db.save()
+		db.save(nil)
 		return nil
 	}(); err != nil {
 		return []string{err.Error()}, false
 	}
-	// db.save() committed all replacement UUIDs. A save failure returns above
+	// db.save(nil) committed all replacement UUIDs. A save failure returns above
 	// and deliberately retains every old generation.
 	errs := cleanupReplacedShardGenerations(result.replaced, "database "+db.Name)
 	if len(errs) != 0 || !result.complete || !hasTransactions {
@@ -652,6 +665,12 @@ func LoadDatabases() {
 		}
 	}
 
+	// Register database keys only. The first selected catalog scan opens
+	// that database's anchor; unrelated tenant schemas remain untouched.
+	for _, db := range databases.GetAll() {
+		publishCatalogDatabaseName(db.Name)
+	}
+
 	// Ensure system_statistic.scans exists for scan logging
 	ensureSystemStatistic()
 }
@@ -733,9 +752,9 @@ func (db *database) commitSchemaSnapshot(jsonbytes []byte, durable bool, release
 	}
 }
 
-func (db *database) save(counterOwner ...*replicaCell) {
-	if len(counterOwner) > 1 {
-		panic("invalid counter checkpoint ownership")
+func (db *database) save(counterOwner *replicaCell, tables ...*table) {
+	if db == systemSchemaDB {
+		return // fixed, never persisted
 	}
 	if sharedClusterDatabase(db.Name) {
 		cluster := activeNodeCluster()
@@ -744,7 +763,7 @@ func (db *database) save(counterOwner ...*replicaCell) {
 		}
 		cell := cluster.manager.resourceCell(mosiResource{Database: db.Name})
 		phase := cell.ownstate.Phase()
-		if len(counterOwner) != 0 {
+		if counterOwner != nil {
 			// The allocator holds this existing directory mutex through the
 			// checkpoint. O owns the unchanged declarations and may persist its
 			// runtime counter without recalling every S reader. A local M
@@ -755,7 +774,7 @@ func (db *database) save(counterOwner ...*replicaCell) {
 			cluster.manager.mu.Lock()
 			owner := cluster.manager.directory.Records[cluster.manager.resourceKey(mosiResource{Database: db.Name})].Owner
 			cluster.manager.mu.Unlock()
-			if counterOwner[0] != cell || owner != cluster.self.ID {
+			if counterOwner != cell || owner != cluster.self.ID {
 				panic("counter checkpoint lost its owner")
 			}
 		} else if phase != mosi.M {
@@ -766,130 +785,178 @@ func (db *database) save(counterOwner ...*replicaCell) {
 		// Do not serialize a cold database; keep existing schema.json intact
 		return
 	}
-	db.schemalock.RLock()
-	jsonbytes, _ := db.marshalSchemaSnapshot()
-	// Buffered mutations after this snapshot must leave the catalog dirty.
-	// They need the exclusive schema lock and therefore cannot race this store.
-	db.schemaDirty.Store(false)
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				db.schemaDirty.Store(true)
-				panic(r)
-			}
-		}()
-		db.commitSchemaSnapshot(jsonbytes, true, db.schemalock.RUnlock)
+	db.schemalock.Lock()
+	owned := true
+	defer func() {
+		if owned {
+			db.schemalock.Unlock()
+		}
 	}()
+	db.checkpointCatalogLocked(tables...)
+	owned = false
+	db.commitSchemaLocked(true, db.schemalock.Unlock)
 	// shards are written while rebuild
 }
 
 // saveLockedAndUnlock publishes according to mode and always releases
 // schemalock. Buffered temp metadata is immediately visible in memory; a later
 // synchronous schema save or rebuild includes it in its complete snapshot.
-func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
+func (db *database) saveLockedAndUnlock(mode schemaSaveMode, proposals ...*table) {
+	owned := true
+	defer func() {
+		if owned {
+			db.schemalock.Unlock()
+		}
+	}()
+	if db == systemSchemaDB {
+		owned = false
+		db.schemalock.Unlock()
+		return // fixed, never persisted; its cache triggers are runtime state
+	}
 	if sharedClusterDatabase(db.Name) {
 		cluster := activeNodeCluster()
 		if cluster == nil || cluster.manager.resourceCell(mosiResource{Database: db.Name}).ownstate.Phase() != mosi.M {
+			owned = false
 			db.schemalock.Unlock()
 			return
 		}
 	}
 	if db.srState == COLD {
+		owned = false
 		db.schemalock.Unlock()
 		return
 	}
+	db.proposeCatalogTablesLocked(proposals...)
 	if mode == schemaSaveBuffered {
 		db.schemaDirty.Store(true)
+		owned = false
 		db.schemalock.Unlock()
 		return
 	}
-	jsonbytes, _ := db.marshalSchemaSnapshot()
-	// Clear while the snapshot is protected. A later buffered mutation takes
-	// schemalock exclusively and sets dirty again after this generation.
-	db.schemaDirty.Store(false)
-	defer func() {
-		if r := recover(); r != nil {
-			db.schemaDirty.Store(true)
-			panic(r)
-		}
-	}()
-	db.commitSchemaSnapshot(jsonbytes, mode == schemaSaveFsync, db.schemalock.Unlock)
+	db.checkpointCatalogLocked()
+	owned = false
+	db.commitSchemaLocked(mode == schemaSaveFsync, db.schemalock.Unlock)
 }
 
 // ensureLoaded loads schema.json into the database struct exactly once.
 func (db *database) ensureLoaded() {
-	db.loadOnce.Do(func() {
-		defer db.publishTableNamesLocked()
-		db.initializeTransactionLog()
-		if db.srState != COLD {
-			return
-		}
-		jsonbytes := db.persistence.ReadSchema()
-		if len(jsonbytes) == 0 {
-			// fresh/empty database
-			db.tables = NonLockingReadMap.NewReadMap[string, *table]()
-			db.srState = SHARED
-			return
-		}
-		tmp := new(database)
-		if err := json.Unmarshal(jsonbytes, tmp); err != nil {
-			panic(err)
-		}
-		db.tables = tmp.tables
-		db.procedures = tmp.procedures
-		// restore back-references; do not touch on-disk columns yet
-		for _, t := range db.tables.GetAll() {
-			t.schema = db
-			invalidatePersistedPlannerCodeAfterLoad(t)
-			if t.Name == ".blobs" {
-				db.blobRefState().table.Store(t)
-			}
-			for _, col := range t.Columns {
-				col.UpdateSanitizer()
-			}
-			// attach table pointer to existing shard stubs without loading them
-			if t.Shards != nil {
-				for _, s := range t.Shards {
-					if s != nil {
-						s.t = t
-					}
-				}
-			}
-			if t.PShards != nil {
-				for _, s := range t.PShards {
-					if s != nil {
-						s.t = t
-					}
-				}
-			}
-			// Derive ShardMode from shard presence for backward compatibility
-			// with schemas that don't yet have ShardMode persisted.
-			if t.PShards != nil && t.Shards == nil {
-				t.ShardMode = ShardModePartition
-			} else {
-				t.ShardMode = ShardModeFree
-			}
-			t.publishTopologyLocked()
-			t.initializeLegacyPlannerRowEstimate()
-			t.publishShowColumnsSnapshot(true)
-			t.restoreKeyFrequencies()
-			t.restoreFilterFeedback()
-		}
-		// FK declarations are authoritative, while their system triggers are
-		// generated code. Rebuild that code at the persistence boundary so schema
-		// files written by older binaries cannot retain an obsolete builtin ABI.
-		rebuildFKTriggersAfterLoad(db)
+	db.loadOnce.Do(func() { db.initializeSchemaSnapshot(nil) })
+}
+
+// initializeSchemaSnapshot owns the unpublished database behind loadOnce.
+// A non-nil document is an accepted peer handover; nil opens the local anchor.
+func (db *database) initializeSchemaSnapshot(document []byte) {
+	defer db.publishTableNamesLocked()
+	db.initializeTransactionLog()
+	if db.srState != COLD {
+		return
+	}
+	jsonbytes := document
+	if jsonbytes == nil {
+		jsonbytes = db.persistence.ReadSchema()
+	}
+	if len(jsonbytes) == 0 {
+		// fresh/empty database
+		db.tables = NonLockingReadMap.NewReadMap[string, *table]()
 		db.srState = SHARED
-		// Dot-prefixed cache tables are planner-owned and persisted only so a
-		// warm query cache can survive restart. Re-register their table-level
-		// owner after loading; durable internal tables such as .blobs remain
-		// ordinary shard-owned storage.
-		for _, table := range db.tables.GetAll() {
-			if table.isEphemeralQueryTable() {
-				registerCreatedTable(table)
+		return
+	}
+	if document != nil && readCatalogRoot(document) == nil {
+		// A cold cluster receiver initializes from the owner's accepted schema
+		// handover, rather than opening a foreign node's anchor/root first.
+		// This is an explicit protocol publication, never a JSON fallback for
+		// an unreadable locally authoritative root.
+		db.catalogBootstrap.Do(func() {})
+		systemSchema()
+		rows := catalogRowsFromDocument(jsonbytes)
+		var live [catalogRelationCount]*storageShard
+		var fingerprints [catalogRelationCount][32]byte
+		for i := range catalogRelations {
+			live[i] = newCatalogShard(db, catalogRelationID(i), rows[i])
+			fingerprints[i] = catalogFingerprint(catalogRelationID(i), rows[i])
+		}
+		db.catalogMu.Lock()
+		db.catalog.live, db.catalog.liveFP = live, fingerprints
+		db.catalog.liveVersion.Add(1)
+		publishCatalogShards(db.Name, &live)
+		db.catalogMu.Unlock()
+		jsonbytes = catalogDocumentFromRows(db.Name, &rows)
+	} else {
+		db.bootstrapCatalog(jsonbytes)
+		// The system_schema catalog takes precedence over the legacy document
+		// stored next to its root. A recognized root must be readable.
+		if root := readCatalogRoot(jsonbytes); root != nil {
+			if document, err := db.loadCatalogDocument(root); err == nil {
+				jsonbytes = document
+			} else {
+				panic(fmt.Errorf("authoritative catalog of database %s is unreadable: %w", db.Name, err))
 			}
 		}
-	})
+		// Legacy import occurs once, before runtime definitions are materialized.
+		if db.catalog.live[0] == nil {
+			rows := catalogRowsFromDocument(jsonbytes)
+			db.editCatalogLocked(&rows, catalogAllRelations, nil)
+		}
+	}
+
+	tmp := new(database)
+	if err := json.Unmarshal(jsonbytes, tmp); err != nil {
+		panic(err)
+	}
+	db.tables = tmp.tables
+	db.procedures = tmp.procedures
+	// restore back-references; do not touch on-disk columns yet
+	for _, t := range db.tables.GetAll() {
+		db.initializeTableAfterLoad(t)
+		if t.Name == ".blobs" {
+			db.blobRefState().table.Store(t)
+		}
+	}
+	// FK declarations are authoritative, while their system triggers are
+	// generated code. Rebuild that code at the persistence boundary so schema
+	// files written by older binaries cannot retain an obsolete builtin ABI.
+	rebuildFKTriggersAfterLoad(db)
+	db.srState = SHARED
+	// Dot-prefixed cache tables are planner-owned and persisted only so a
+	// warm query cache can survive restart. Re-register their table-level
+	// owner after loading; durable internal tables such as .blobs remain
+	// ordinary shard-owned storage.
+	for _, table := range db.tables.GetAll() {
+		if table.isEphemeralQueryTable() {
+			registerCreatedTable(table)
+		}
+	}
+}
+
+// initializeTableAfterLoad prepares one unpublished runtime descriptor from its
+// admitted declaration. Both whole-database startup and lazy catalog loading
+// use this path; neither needs to load the table's data columns.
+func (db *database) initializeTableAfterLoad(t *table) {
+	t.schema = db
+	invalidatePersistedPlannerCodeAfterLoad(t)
+	for _, col := range t.Columns {
+		col.UpdateSanitizer()
+	}
+	attach := func(shards []*storageShard) {
+		for _, shard := range shards {
+			if shard != nil {
+				shard.t = t
+			}
+		}
+	}
+	attach(t.Shards)
+	attach(t.PShards)
+	// Older declarations do not persist ShardMode.
+	if t.PShards != nil && t.Shards == nil {
+		t.ShardMode = ShardModePartition
+	} else {
+		t.ShardMode = ShardModeFree
+	}
+	t.publishTopologyLocked()
+	t.initializeLegacyPlannerRowEstimate()
+	t.publishShowColumnsSnapshot(true)
+	t.restoreKeyFrequencies()
+	t.restoreFilterFeedback()
 }
 
 // publishTableNamesLocked owns schema membership (or an unpublished database).
@@ -1154,6 +1221,9 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 // SharedResource impl for database
 func (db *database) GetState() SharedState { return db.srState }
 func (db *database) GetRead(tx *TxContext) ReadAccess {
+	if db == systemSchemaDB {
+		return ReadAccess{}
+	}
 	if r := activeReplication(db); r != nil && validReplicaDatabase(db.Name) {
 		resource := mosiResource{Database: db.Name}
 		// An authorized schema read only samples its local permission. User
@@ -1261,7 +1331,11 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 	}
 	// Blob-producing table rebuilds run in parallel. Publish their shared
 	// refcount table before workers start so no worker mutates the catalog.
-	db.ensureBlobTable()
+	// Memory/cache compaction never writes external blob payloads. A focused
+	// rebuild of such a table needs no durable blob catalog as a side effect.
+	if len(only) == 0 || only[0].PersistencyMode != Memory && only[0].PersistencyMode != Cache {
+		db.ensureBlobTable()
+	}
 	var done sync.WaitGroup
 	// Collect pre-rebuild shards that were superseded. Their cleanup
 	// (RemoveFromDisk → ReleaseBlobs → DecrBlobRefcount) must run after
@@ -1517,7 +1591,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 			if durablePublication {
 				func() {
 					defer func() { publicationPanic = recover() }()
-					db.save()
+					db.save(nil, t)
 				}()
 			}
 			if publicationPanic != nil {
@@ -1672,7 +1746,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 	done.Wait()
 
 	// Return replaced shards to the caller (Rebuild) so it can delete their
-	// on-disk files AFTER db.save() has written the new schema.json.
+	// on-disk files AFTER db.save(nil) has written the new schema.json.
 	// Deleting old column files before saving the schema creates a window
 	// where a crash/kill leaves schema.json pointing at already-deleted UUIDs.
 	// Failed schema publication intentionally retains the old generation: it is
@@ -1685,6 +1759,9 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 }
 
 func GetDatabase(schema string, ignoreCase ...bool) *database {
+	if isSystemSchemaName(schema, len(ignoreCase) != 0 && ignoreCase[0]) {
+		return systemSchema()
+	}
 	if len(ignoreCase) != 0 && ignoreCase[0] {
 		names := databases.folded.Load()
 		if names == nil {
@@ -1703,6 +1780,9 @@ func GetDatabase(schema string, ignoreCase ...bool) *database {
 }
 
 func CreateDatabase(schema string, ignoreexists bool /*, persistence PersistenceFactory*/) bool {
+	if isSystemSchemaName(schema, true) {
+		panic("Database " + schema + " is reserved for the system catalog")
+	}
 	db := databases.Get(schema)
 	if db != nil {
 		if ignoreexists {
@@ -1726,7 +1806,8 @@ func CreateDatabase(schema string, ignoreexists bool /*, persistence Persistence
 		panic("Database " + schema + " already exists")
 	}
 
-	db.save()
+	db.initializeEmptyCatalog()
+	db.save(nil)
 	return true
 }
 
@@ -1780,7 +1861,8 @@ func CreateDatabaseWithBackend(schema string, ignoreexists bool, options map[str
 		panic("Database " + schema + " already exists")
 	}
 
-	db.save()
+	db.initializeEmptyCatalog()
+	db.save(nil)
 	return true
 }
 
@@ -1914,7 +1996,8 @@ func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool 
 		panic("Database " + schema + " already exists")
 	}
 
-	db.save()
+	db.initializeEmptyCatalog()
+	db.save(nil)
 	return true
 }
 
@@ -2075,6 +2158,7 @@ func publishStorageMoveGenerations(db *database, dst PersistenceEngine, generati
 	}
 	writeDatabaseBackendConfig(db.Name, targetConfig)
 	db.persistence = dst
+	db.resetCatalogPersistence()
 
 	for _, generation := range generations {
 		generation.table.mu.Lock()
@@ -2172,6 +2256,7 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 		defer db.schemalock.Unlock()
 		writeDatabaseBackendConfig(schema, targetConfig)
 		db.persistence = dst
+		db.resetCatalogPersistence()
 		return true
 	}
 
@@ -2253,6 +2338,7 @@ func DropDatabase(schema string, ifexists bool) bool {
 		panic("database has active replication transfers; retry DROP DATABASE")
 	}
 	requireDatabaseMaintenance(schema, maintenanceDrop)
+	db.ensureLoaded()
 	db = databases.Remove(schema)
 	if db == nil {
 		if ifexists {
@@ -2260,6 +2346,7 @@ func DropDatabase(schema string, ifexists bool) bool {
 		}
 		panic("Database " + schema + " does not exist")
 	}
+	db.detachCatalog()
 
 	// clean up shards/indexes/temp columns from GlobalCache
 	db.ensureLoaded()
@@ -2315,7 +2402,7 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 	if t.isEphemeralQueryTable() {
 		mode = schemaSaveBuffered
 	}
-	db.saveLockedAndUnlock(mode)
+	db.saveLockedAndUnlock(mode, t)
 	registerCreatedTable(t)
 	return t, true
 }
@@ -2344,6 +2431,9 @@ func (db *database) createTableLocked(name string, pm PersistencyMode, ifnotexis
 // newTable builds a complete table object without publishing it in db.tables.
 // Callers may add internal columns before publication while holding schemalock.
 func (db *database) newTable(name string, pm PersistencyMode) *table {
+	if db == systemSchemaDB && !(pm == Cache && strings.HasPrefix(name, ".")) {
+		panic("schema catalog namespace is read-only")
+	}
 	t := new(table)
 	t.DroppedColumns = make(map[string]bool)
 	t.schema = db
@@ -2404,6 +2494,9 @@ func DropTable(schema, name string, ifexists bool) {
 		db.schemalock.Unlock()
 		requireTableMaintenance(schema, name, maintenanceDrop)
 	}
+	if !t.RuntimeOnly {
+		db.dropCatalogTableLocked(name)
+	}
 	db.tables.Remove(name)
 	if !t.isHiddenFromShowTables() {
 		db.publishTableNamesLocked()
@@ -2411,7 +2504,11 @@ func DropTable(schema, name string, ifexists bool) {
 	if name == ".blobs" {
 		db.blobRefState().table.Store(nil)
 	}
-	db.saveLockedAndUnlock(t.schemaSaveMode())
+	if t.RuntimeOnly {
+		db.schemalock.Unlock()
+	} else {
+		db.saveLockedAndUnlock(t.schemaSaveMode())
+	}
 
 	// deregister temp keytable from CacheManager (no-op if not registered or already evicted)
 	// Must be AFTER schemalock.Unlock to avoid deadlock: Remove → run() → evict → keytableCleanup → TryLock
@@ -2478,12 +2575,13 @@ func RenameTable(schema, oldname, newname string) {
 		db.schemalock.Unlock()
 		panic("Table " + schema + "." + newname + " already exists")
 	}
+	db.dropCatalogTableLocked(oldname)
 	db.tables.Remove(oldname)
 	t.Name = newname
 	t.publishedName.Store(&newname)
 	db.tables.Set(newname, t)
 	db.publishTableNamesLocked()
-	db.saveLockedAndUnlock(t.schemaSaveMode())
+	db.saveLockedAndUnlock(t.schemaSaveMode(), t)
 }
 
 // keytableCleanup retires a planner-owned in-memory cache on the manager

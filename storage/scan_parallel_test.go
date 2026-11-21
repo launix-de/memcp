@@ -1148,9 +1148,7 @@ func TestReserveIDsExplicitInsertAndCallback(t *testing.T) {
 
 func TestReserveIDsRestartContract(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "treserveidrestart", 0)
-	tbl.Columns[0].AutoIncrement = true
-	tbl.publishShowColumnsSnapshot(false)
-	tbl.schema.save()
+	tbl.AlterColumn("id", "auto_increment", scm.NewBool(true))
 	reserve := scm.Globalenv.Vars["reserve_ids"]
 	block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(3)).Slice()
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{block[1], scm.NewString("durable reserved ID")}}, nil, scm.NewNil(), false, nil)
@@ -1166,9 +1164,9 @@ func TestReserveIDsRestartContract(t *testing.T) {
 	if atomic.LoadUint64(&crashed.Auto_increment) != 3 {
 		t.Fatal("pure reservation unexpectedly changed persistent state")
 	}
-	crashed.schema.save()
+	crashed.schema.save(nil)
 	scm.Apply(reserve, NewTableScmer(crashed), scm.NewInt(2))
-	crashed.schema.save()
+	crashed.schema.save(nil)
 	checkpointed := reloadTableFromPersistence(t, "treserveidrestart", persistence)
 	if atomic.LoadUint64(&checkpointed.Auto_increment) != 5 {
 		t.Fatal("existing schema checkpoint did not retain the reserved counter")
@@ -1222,9 +1220,7 @@ func TestReserveIDsConcurrentWithNativeInsert(t *testing.T) {
 
 func TestReserveIDsPersistedPrefixRecovery(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "treserveidprefix", 0)
-	tbl.Columns[0].AutoIncrement = true
-	tbl.publishShowColumnsSnapshot(false)
-	tbl.schema.save()
+	tbl.AlterColumn("id", "auto_increment", scm.NewBool(true))
 	reserve := scm.Globalenv.Vars["reserve_ids"]
 	block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(100)).Slice()
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{block[0], scm.NewString("only first ID persisted")}}, nil, scm.NewNil(), false, nil)

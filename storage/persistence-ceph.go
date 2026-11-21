@@ -358,6 +358,9 @@ func (s *CephStorage) BackendName() string {
 	return "ceph"
 }
 
+// Completed RADOS object writes already include their namespace publication.
+func (s *CephStorage) SyncNamespace() {}
+
 func (s *CephStorage) StorageIdentity() string {
 	return "ceph:" + s.factory.ClusterName + ":" + s.factory.Pool + ":" + s.prefix
 }

@@ -60,13 +60,14 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int, complete bool
 	db.ensureLoaded()
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
-	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
+	if r := replication.Load(); r != nil && (validReplicaDatabase(db.Name) || db.Name == "system") {
 		publication := r.resourceCell(mosiResource{Database: db.Name})
 		publication.importPublication.Lock()
 		defer publication.importPublication.Unlock()
 		pending := false
 		r.imports.Range(func(_, value any) bool {
-			pending = value.(*replicaImport).header.Resource.Database == db.Name
+			transfer := value.(*replicaImport)
+			pending = transfer.home == db || transfer.home == nil && transfer.header.Resource.Database == db.Name
 			return !pending
 		})
 		if pending {
@@ -255,7 +256,7 @@ func backfillBlobManifest(shard *storageShard, persistManifest bool) (references
 		if column.IsTemp {
 			continue
 		}
-		reader := shard.t.schema.persistence.ReadColumn(shard.uuid.String(), column.Name)
+		reader := shard.home().persistence.ReadColumn(shard.uuid.String(), column.Name)
 		if readErr, failed := reader.(ErrorReader); failed {
 			reader.Close()
 			if readErr.Missing() {
@@ -357,7 +358,7 @@ func writeBlobManifestReferences(shard *storageShard, references map[string]stru
 		body = strings.Join(hashes, "\n") + "\n"
 	}
 	checksum := sha256.Sum256([]byte(body))
-	writer := shard.t.schema.persistence.WriteColumn(shard.uuid.String(), blobManifestColumn)
+	writer := shard.home().persistence.WriteColumn(shard.uuid.String(), blobManifestColumn)
 	manifest := blobManifestHeader + hex.EncodeToString(checksum[:]) + "\n" + body
 	if _, err := writer.Write([]byte(manifest)); err != nil {
 		_ = writer.Close()
@@ -370,8 +371,12 @@ func writeBlobManifestReferences(shard *storageShard, references map[string]stru
 // Reads the active UUID set from in-memory table structures (always current),
 // under schemalock.RLock to prevent concurrent DDL from modifying the table map.
 func cleanShards(db *database) int {
-	// Collect active UUIDs from in-memory shards under read-lock.
+	// Checkpoint capture owns schema before the catalog publication gate.
+	// Acquire in that same order, never hold the gate waiting for schema.
 	db.schemalock.RLock()
+	catalogPersistenceMu.Lock()
+	defer catalogPersistenceMu.Unlock()
+	// Collect active UUIDs from in-memory shards under read-lock.
 	activeUUIDs := map[string]bool{}
 	for _, t := range db.tables.GetAll() {
 		for _, s := range t.ActiveShards() {
@@ -385,6 +390,9 @@ func cleanShards(db *database) int {
 	}
 	for _, shard := range registeredClusterShards(db.Name) {
 		activeUUIDs[shard.uuid.String()] = true
+	}
+	for _, id := range db.catalogShardIDs() {
+		activeUUIDs[id] = true
 	}
 	db.schemalock.RUnlock()
 

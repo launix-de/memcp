@@ -1268,7 +1268,7 @@ cache scan for every output row. */
 									(range_cache_state_init_expr stage ag)
 									(list (quote createcolumn) (source_table_expr target)
 										column_name "any" (quoted_runtime_list '())
-										(quoted_runtime_list '("temp" true))
+										(quoted_runtime_list '("temp" true "runtime_only" true))
 										(cons (quote list) input_cols)
 										(list (quote lambda)
 											(map input_cols (lambda (col)
@@ -1990,9 +1990,9 @@ outer joins. */
 					base_group_fill
 					(list (quote lambda) (list (symbol "__group_finalize_tx")) finalize_group_fill))))
 			(define create_options (if (nil? initial_fill_expr)
-				(quoted_runtime_list '("engine" "cache"))
+				(quoted_runtime_list '("engine" "cache" "runtime_only" true))
 				(list (quote list)
-					"engine" "cache"
+					"engine" "cache" "runtime_only" true
 					"oninit" (list (quote lambda) (list (quote tx)) initial_fill_expr))))
 			/* Every use must seed its own session-domain keys, even when another
 			stage owns creation of the shared physical carrier. */
@@ -2095,7 +2095,7 @@ outer joins. */
 			"any"
 			(quoted_runtime_list '())
 			(list (quote list)
-				"temp" true
+				"temp" true "runtime_only" true
 				"sortcols" (quoted_runtime_list (os_sortcols stage))
 				"sortdirs" (cons (quote list) (os_sortdirs stage))
 				"partitioncount" (os_partitioncount stage)
@@ -2123,7 +2123,7 @@ outer joins. */
 				"any"
 				(quoted_runtime_list '())
 				(list (quote list)
-					"temp" true
+					"temp" true "runtime_only" true
 					"sortcols" (quoted_runtime_list sortcols)
 					"sortdirs" (cons (quote list) sortdirs)
 					"partitioncount" partitioncount
@@ -3387,7 +3387,7 @@ cached plan is recompiled when data growth crosses the carrier boundary. */
 												(source_table_expr target)
 												column_name "any"
 												(quoted_runtime_list '())
-												(quoted_runtime_list '("temp" true))
+												(quoted_runtime_list '("temp" true "runtime_only" true))
 												(cons (quote list) input_cols)
 												(list (quote lambda) params lookup_expr)
 												(physical_query_tx_symbol)))
@@ -11009,7 +11009,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(prejoin_column_name sources alias col)
 			"any"
 			(quoted_runtime_list '())
-			(quoted_runtime_list (list "temp" true "collate" (source_column_order_collation src col)))
+			(quoted_runtime_list (list "temp" true "runtime_only" true "collate" (source_column_order_collation src col)))
 			(cons (quote list) input_cols)
 			computor))))
 
@@ -11064,7 +11064,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define prepare_plan (list (quote !begin)
 			(list (quote group_cache_create) (qb_schema block) table_name
 				(prejoin_create_columns sources)
-				(list (quote list) "engine" "cache" "oninit"
+				(list (quote list) "engine" "cache" "runtime_only" true "oninit"
 					(list (quote lambda) (list (physical_query_tx_symbol)) initialize))
 				true (physical_query_tx_symbol))
 			(cons (quote !begin) (prejoin_computed_column_plans block fields table_name))))
@@ -12218,10 +12218,10 @@ stars through the same catalog-aware path used by physical lowering. */
 		(queryplan_result_titles (normalize_query_ast query))
 		((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
 		(projection_titles (expand_query_block_fields sources fields))
-		((symbol union-block) _mode branches _order _limit _offset _facts)
-		(match branches
+		((symbol union-block) _mode branches _order _limit _offset facts)
+		(qassoc_get facts (quote result_titles) (match branches
 			(cons first_branch _rest) (queryplan_result_titles first_branch)
-			_ '())
+			_ '()))
 		_ '())))
 
 (define projection_exprs (lambda (fields)
@@ -12730,7 +12730,8 @@ while result-only callbacks may return nil instead of an affected-row count. */
 (define lower_union_all_successive (lambda (block) (begin
 	(define branches (union_branches block))
 	(if (empty_list? branches) nil (begin
-		(define titles (queryplan_result_titles block))
+		(define titles (if (nil? (qassoc_get (union_facts block) (quote result_titles) nil))
+			(queryplan_result_titles block) (projection_titles (union_canonical_fields block))))
 		(define width (* 2 (count titles)))
 		(if (or (not (empty_list? (union_order block)))
 			(not (nil? (union_limit block))) (not (nil? (union_offset block))))
@@ -12762,7 +12763,17 @@ while result-only callbacks may return nil instead of an affected-row count. */
 					(list (quote if) (list seen key) nil
 						(list (quote begin) (list seen key true) (list emit row))))))))))
 
-(define lower_union_block (lambda (block)
+(define lower_union_block (lambda (block) (begin
+	(define plan (lower_union_block_core block))
+	(define visible (qassoc_get (union_facts block) (quote result_titles) nil))
+	(if (nil? visible) plan
+		(list (list (quote lambda) (list (quote resultrow)) plan)
+			(list (quote lambda) (list (quote __union_visible_row))
+				(list (quote resultrow) (cons (quote list)
+					(merge (map visible (lambda (title)
+						(list title (list (quote get_assoc) (quote __union_visible_row) title)))))))))))))
+
+(define lower_union_block_core (lambda (block)
 	(if (equal? (union_mode block) (quote all))
 		(lower_union_all_successive block)
 		(if (or (equal? (union_mode block) (quote distinct)) (equal? (union_mode block) (quote union_distinct)))
@@ -14529,7 +14540,7 @@ existing scan and expression primitives. No predicate is discarded. */
 		(define body (unqualify qualified_body))
 		(define name (concat ".predicate:" (stable_structural_hash (list (source_schema driver) (source_relation driver) (source_schema lookup) (source_relation lookup) columns body) true)))
 		(list name
-			(list (quote createcolumn) (source_table_expr driver) name "any" (quoted_runtime_list '()) (quoted_runtime_list '("temp" true))
+			(list (quote createcolumn) (source_table_expr driver) name "any" (quoted_runtime_list '()) (quoted_runtime_list '("temp" true "runtime_only" true))
 				(quoted_runtime_list columns)
 				(list (quote lambda) (map columns symbol) body))
 			(compile_scan_plan (quote scan) (physical_query_tx_symbol) (source_table_expr driver)

@@ -164,7 +164,7 @@ func (r *replicationManager) forwardResource(from, to mosiResource) {
 		return
 	}
 	if !from.valid() || !to.valid() || from.Shard == "" || to.Shard == "" || from.Database != to.Database {
-		panic("invalid shard forwarding")
+		panic(fmt.Sprintf("invalid shard forwarding: %+v -> %+v", from, to))
 	}
 	cell := r.resourceCell(from)
 	r.mu.Lock()
@@ -284,7 +284,7 @@ func (r *replicationManager) validateForwards(source string, packet mosiPacket) 
 	}
 	for _, route := range packet.Forwards {
 		if !route.From.valid() || !route.To.valid() || route.From.Shard == "" || route.To.Shard == "" || route.From.Database != packet.Resource.Database || route.From.Table != packet.Resource.Table || route.To.Database != packet.Resource.Database || route.To.Table != packet.Resource.Table || route.To.Shard != packet.Content {
-			return fmt.Errorf("invalid transfer forwarding")
+			return fmt.Errorf("invalid transfer forwarding for %s table %s content %s: %v", packet.Resource.key(), packet.Resource.Table, packet.Content, route)
 		}
 	}
 	// Cluster references validate their pending flight/owner in installReference;
@@ -301,26 +301,36 @@ func (r *replicationManager) validateForwards(source string, packet mosiPacket) 
 			}
 		}
 		r.restoreResourceRoutes(packet.Resource)
-		r.mu.Lock()
 		// A receiver can know the current UUID without retaining every older
 		// alias. The current resource's owner/epoch is the same authority proof
 		// used for an ordinary transfer; historical routes are an alternative.
-		current := r.directory.Records[r.resourceKey(packet.Resource)]
-		allowed := current.Owner == source && current.Epoch == packet.Epoch
-		for _, route := range packet.Forwards {
-			record := r.directory.Records[r.resourceKey(route.From)]
-			if record.Owner == source && record.Epoch == packet.Epoch {
-				allowed = true
-			}
-		}
-		r.mu.Unlock()
-		if !allowed {
-			return fmt.Errorf("forwarding from non-owner")
+		current := r.transferOwnerRecord(source, packet)
+		if current.Owner != source || current.Epoch != packet.Epoch {
+			return fmt.Errorf("forwarding from non-owner for %s table %s (epoch %d, directory epoch %d, routes %v)", packet.Resource.key(), packet.Resource.Table, packet.Epoch, current.Epoch, packet.Forwards)
 		}
 	} else if r.cluster == nil && source != "" {
 		return fmt.Errorf("forwarding from non-master")
 	}
 	return nil
+}
+
+// After forwarding syntax has been validated, either the current UUID or an
+// advertised predecessor proves ownership. Keep these checks inert: native
+// catalog routes cannot publish until their declarations have been admitted.
+func (r *replicationManager) transferOwnerRecord(source string, packet mosiPacket) replicaRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current := r.directory.Records[r.resourceKey(packet.Resource)]
+	if current.Owner == source && current.Epoch == packet.Epoch {
+		return current
+	}
+	for _, route := range packet.Forwards {
+		record := r.directory.Records[r.resourceKey(route.From)]
+		if record.Owner == source && record.Epoch == packet.Epoch {
+			return record
+		}
+	}
+	return current
 }
 
 func authorityRank(phase mosi.Phase) int {
@@ -339,7 +349,7 @@ func authorityRank(phase mosi.Phase) int {
 }
 
 func (r *replicationManager) shardResource(shard *storageShard) mosiResource {
-	return mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.uuid.String()}
+	return shard.replicationResource()
 }
 func (r *replicationManager) lookupCell(resource mosiResource) *replicaCell {
 	if snapshot := r.cellSnapshot.Load(); snapshot != nil {
@@ -365,13 +375,15 @@ func (r *replicationManager) restoreTableRoutes(table *table) {
 	})
 }
 func (r *replicationManager) restoreResourceRoutes(resource mosiResource) {
+	// Schema and fixed catalog identities exist before runtime tables can be
+	// loaded. Asking for Go table routes here would recursively load the very
+	// catalog shard whose authority is being acquired.
+	if resource.Shard == "" || isCatalogResource(resource) {
+		return
+	}
 	if db := databases.Get(resource.Database); db != nil {
 		db.ensureLoaded()
-		if resource.Shard == "" {
-			for _, table := range db.tables.GetAll() {
-				r.restoreTableRoutes(table)
-			}
-		} else if table := db.tables.Get(resource.Table); table != nil {
+		if table := db.loadCatalogTable(resource.Table); table != nil {
 			r.restoreTableRoutes(table)
 		}
 	}

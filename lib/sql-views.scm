@@ -75,8 +75,9 @@ derived SELECT before untangle_query sees the complete query. */
 					(match source
 						'(alias source_schema relation outer join_condition)
 						(begin
+							(define catalog_view (if (string? relation) (sql_catalog_view source_schema relation) nil))
 							(define expanded_relation
-								(if (string? relation)
+								(if (not (nil? catalog_view)) catalog_view (string? relation)
 									(begin
 										(if policy (policy source_schema relation false) true)
 										(if (table source_schema false relation false)
@@ -114,7 +115,7 @@ derived SELECT before untangle_query sees the complete query. */
 			(cons (expand_node head stack)
 				(map tail (lambda (item) (expand_node item stack))))
 			_ node)))
-	(if (> (sql_view_catalog_state "count") 0)
+	(if (or (> (sql_view_catalog_state "count") 0) (sql_catalog_query? query))
 		(expand_node query '())
 		query))))
 

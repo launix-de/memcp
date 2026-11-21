@@ -627,26 +627,50 @@ func (r *replicationManager) acceptRequestRoutes(source string, packet mosiPacke
 	}
 	r.mu.Lock()
 	target := r.canonicalResource(packet.Resource)
-	known := r.directory.Records[target.key()].Owner != ""
+	targetRecord := r.directory.Records[target.key()]
+	known := targetRecord.Owner != ""
+	targetCell := r.lookupCell(target)
 	var authority *replicaCell
-	if !known {
+	var retained *replicaCell
+	if !known || targetRecord.Owner == source {
 		for _, route := range packet.Forwards {
 			from := r.canonicalResource(route.From)
-			if record := r.directory.Records[from.key()]; record.Owner == source {
+			record := r.directory.Records[from.key()]
+			if from != route.From && record.Owner == r.id {
+				if candidate := r.lookupCell(from); retained != nil && retained != candidate {
+					r.mu.Unlock()
+					return fmt.Errorf("request forwarding crosses retained shard authorities")
+				} else {
+					retained = candidate
+				}
+			}
+			if record.Owner == source {
 				authority = r.lookupCell(from)
 				break
 			}
 		}
 	}
 	r.mu.Unlock()
-	if known {
+	if known && authority == nil {
 		return nil // an old request cannot reverse an already learned successor
 	}
 	if authority == nil {
-		return fmt.Errorf("request forwarding from non-owner")
+		if retained != nil {
+			// A former owner can request a private checkpoint UUID after its
+			// predecessor has already advanced here. Its known historical edge
+			// identifies our current authority; the request cannot reverse it.
+			for _, route := range packet.Forwards {
+				if cell := r.lookupCell(route.From); cell != nil && cell != retained {
+					return fmt.Errorf("request forwarding crosses shard authorities")
+				}
+			}
+			r.forwardResource(packet.Resource, *retained.resource.Load())
+			return nil
+		}
+		return fmt.Errorf("request forwarding from non-owner: %s table %s, routes %v, canonical %v", packet.Resource.key(), packet.Resource.Table, packet.Forwards, target)
 	}
 	for _, route := range packet.Forwards {
-		if cell := r.lookupCell(route.From); cell != nil && cell != authority {
+		if cell := r.lookupCell(route.From); cell != nil && cell != authority && cell != targetCell {
 			return fmt.Errorf("request forwarding crosses shard authorities")
 		}
 	}

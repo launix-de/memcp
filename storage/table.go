@@ -132,6 +132,7 @@ type column struct {
 	OnUpdate          scm.Scmer
 	AllowNull         bool
 	IsTemp            bool // cache-owned storage; computed recipes remain table metadata
+	RuntimeOnly       bool `json:"-"` // physical planner program, not a user declaration
 	cacheOwner        *table
 	cachePayloadEmpty atomic.Bool
 	Collation         string
@@ -355,6 +356,7 @@ type tableShardTopology struct {
 	retired            atomic.Bool
 	operationsDrained  chan struct{}
 	drained            chan struct{}
+	previousDrained    <-chan struct{}
 	operationDrainOnce sync.Once
 	drainOnce          sync.Once
 }
@@ -399,7 +401,20 @@ func (topology *tableShardTopology) closeDrains() {
 	if topology.operations.Load() == 0 {
 		topology.operationDrainOnce.Do(func() { close(topology.operationsDrained) })
 		if topology.transactions.Load() == 0 {
-			topology.drainOnce.Do(func() { close(topology.drained) })
+			topology.drainOnce.Do(func() {
+				// A publication can retain shards from older generations. Its
+				// retirement proof includes those readers, even after a retained
+				// shard's generation pointer advances to this newer publication.
+				if previous := topology.previousDrained; previous != nil {
+					select {
+					case <-previous:
+					default:
+						go func() { <-previous; close(topology.drained) }()
+						return
+					}
+				}
+				close(topology.drained)
+			})
 		}
 	}
 }
@@ -629,6 +644,7 @@ type table struct {
 	Foreign         []foreignKey           // foreign keys
 	Triggers        []TriggerDescription   // triggers on this table
 	PersistencyMode PersistencyMode        /* 0 = safe (default), 1 = sloppy, 2 = memory */
+	RuntimeOnly     bool                   `json:"-"`                // physical query workspace; no durable declaration
 	OnInit          atomicTableInitializer `json:"oninit,omitempty"` // immutable closed callback, atomically published
 	cacheUsers      int64                  // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
 	// Immutable reverse dependency list, published by registration with CAS.
@@ -950,6 +966,9 @@ func (t *table) publishTopologyLocked() *tableShardTopology {
 		operationsDrained: make(chan struct{}),
 		drained:           make(chan struct{}),
 	}
+	if previous := t.topology.Load(); previous != nil {
+		topology.previousDrained = previous.drained
+	}
 	for _, shard := range topology.shards {
 		if shard != nil {
 			shard.generation.Store(topology)
@@ -1065,9 +1084,46 @@ func (t *table) publishSchemaTopology(mode ShardMode, shards []*storageShard, di
 	return t.schemaTopology.Swap(next)
 }
 
+// persistedColumn and persistedTable are the declaration records of the
+// legacy schema.json format. The system_schema catalog derives its columns
+// from exactly these records, so every persisted field has a catalog cell.
+type persistedColumn struct {
+	*column
+	PartitioningScore int
+	InitialValue      *scm.Scmer                     `json:"initial_value,omitempty"`
+	InitialValues     map[string]columnInitialExtent `json:"initial_values,omitempty"`
+}
+
+type persistedTable struct {
+	ShardForwards      map[string]string `json:"shard_forwards,omitempty"`
+	Name               string
+	Columns            []persistedColumn
+	DroppedColumns     map[string]bool `json:"dropped_columns"`
+	Unique             []uniqueKey
+	Foreign            []foreignKey
+	Triggers           []TriggerDescription
+	PersistencyMode    PersistencyMode
+	OnInit             *scm.Scmer `json:"oninit,omitempty"`
+	AutoIncrement      uint64     `json:"Auto_increment"`
+	Collation          string
+	Charset            string
+	Comment            string
+	PlannerRowEstimate uint64                   `json:"planner_row_estimate"`
+	KeyFrequencies     *persistedKeyFrequencies `json:"key_frequencies,omitempty"`
+	FilterFeedback     *persistedFilterFeedback `json:"filter_feedback,omitempty"`
+	ShardMode          ShardMode
+	Shards             []*storageShard
+	PShards            []*storageShard
+	PDimensions        []shardDimension
+}
+
 // MarshalJSON reads topology only from an immutable, atomically published
 // generation. Database schema locking keeps the remaining DDL fields stable.
 func (t *table) MarshalJSON() ([]byte, error) {
+	return json.Marshal(t.persistedDeclaration())
+}
+
+func (t *table) persistedDeclaration() *persistedTable {
 	// Reservations publish once per batch; snapshot the same counter without
 	// acquiring the topology mutex during schema persistence.
 	autoIncrement := atomic.LoadUint64(&t.Auto_increment)
@@ -1094,12 +1150,6 @@ func (t *table) MarshalJSON() ([]byte, error) {
 	// topology. A rebuilt generation has materialized its column values before
 	// publication. Filter only the serialized view: failed schema publication
 	// can restore its previous topology without losing the original extents.
-	type persistedColumn struct {
-		*column
-		PartitioningScore int
-		InitialValue      *scm.Scmer                     `json:"initial_value,omitempty"`
-		InitialValues     map[string]columnInitialExtent `json:"initial_values,omitempty"`
-	}
 	columns := make([]persistedColumn, len(t.Columns))
 	for i, c := range t.Columns {
 		columns[i].column = c
@@ -1121,28 +1171,6 @@ func (t *table) MarshalJSON() ([]byte, error) {
 			}
 		}
 	}
-	type persistedTable struct {
-		ShardForwards      map[string]string `json:"shard_forwards,omitempty"`
-		Name               string
-		Columns            []persistedColumn
-		DroppedColumns     map[string]bool `json:"dropped_columns"`
-		Unique             []uniqueKey
-		Foreign            []foreignKey
-		Triggers           []TriggerDescription
-		PersistencyMode    PersistencyMode
-		OnInit             *scm.Scmer `json:"oninit,omitempty"`
-		AutoIncrement      uint64     `json:"Auto_increment"`
-		Collation          string
-		Charset            string
-		Comment            string
-		PlannerRowEstimate uint64                   `json:"planner_row_estimate"`
-		KeyFrequencies     *persistedKeyFrequencies `json:"key_frequencies,omitempty"`
-		FilterFeedback     *persistedFilterFeedback `json:"filter_feedback,omitempty"`
-		ShardMode          ShardMode
-		Shards             []*storageShard
-		PShards            []*storageShard
-		PDimensions        []shardDimension
-	}
 	// Lazy compilation updates runtime trigger fields under t.mu, independently
 	// of schema ownership. Copy the declarations before encoding outside the lock.
 	t.mu.Lock()
@@ -1160,7 +1188,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 			}
 		}
 	}
-	return json.Marshal(&persistedTable{
+	return &persistedTable{
 		ShardForwards:      topology.forwards,
 		Name:               t.Name,
 		Columns:            columns,
@@ -1181,7 +1209,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		Shards:             shards,
 		PShards:            partitionedShards,
 		PDimensions:        topology.dimensions,
-	})
+	}
 }
 
 // contributionTableID distinguishes replacement tables with the same SQL name.
@@ -1602,8 +1630,14 @@ func (t *table) schemaSaveMode() schemaSaveMode {
 	return schemaSaveModeForDurability(t.PersistencyMode == Safe)
 }
 
-func (t *table) finishSchemaMutationLocked(mode schemaSaveMode) {
-	t.schema.saveLockedAndUnlock(mode)
+func (t *table) finishSchemaMutationLocked(mode schemaSaveMode, definitionChanged bool) {
+	if definitionChanged && !t.RuntimeOnly {
+		t.schema.saveLockedAndUnlock(mode, t)
+	} else {
+		// A physical program does not dirty logical schema metadata. A later
+		// user checkpoint still retains any independently buffered declarations.
+		t.schema.schemalock.Unlock()
+	}
 }
 
 // isHiddenFromShowTables implements the SQL metadata contract for internal
@@ -3140,6 +3174,8 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.Collation = scm.String(extrainfo[i+1])
 		case "temp":
 			c.IsTemp = scm.ToBool(extrainfo[i+1])
+		case "runtime_only":
+			c.RuntimeOnly = scm.ToBool(extrainfo[i+1])
 		case "filtercols", "filter", "dependencies":
 			// handled by createcolumn builtin, not a column property
 		case "sortcols", "sortdirs", "partitioncount", "mapcols", "mapreducefn", "reduceinit":
@@ -3147,6 +3183,9 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		default:
 			panic("unknown column attribute: " + key)
 		}
+	}
+	if c.RuntimeOnly && !c.IsTemp {
+		panic("runtime-only columns must be temporary")
 	}
 	for i := range uniqueKeys {
 		uniqueKeys[i].NullsNotDistinct = nullsNotDistinct
@@ -3393,7 +3432,7 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 		mode = schemaSaveBuffered
 	}
 	metadataLocked = false // finishSchemaMutationLocked always releases ownership.
-	t.finishSchemaMutationLocked(mode)
+	t.finishSchemaMutationLocked(mode, !cp.RuntimeOnly)
 	if cp.IsTemp {
 		t.registerTempColumn(cp)
 	}
@@ -3503,7 +3542,7 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 		}
 		t.publishShowColumnsSnapshot(true)
 		metadataLocked = false
-		t.finishSchemaMutationLocked(t.schemaSaveMode())
+		t.finishSchemaMutationLocked(t.schemaSaveMode(), !current.RuntimeOnly)
 		return result
 	}
 	if operation == "drop_default" {
@@ -3590,7 +3629,7 @@ func (t *table) AlterColumnDeclaration(name string, declaration, expected scm.Sc
 		t.Columns = columns
 		t.publishShowColumnsSnapshot(true)
 		metadataLocked = false // finishSchemaMutationLocked releases schema ownership.
-		t.finishSchemaMutationLocked(t.schemaSaveMode())
+		t.finishSchemaMutationLocked(t.schemaSaveMode(), !replacement.RuntimeOnly)
 		return true
 	}
 	panic("column " + t.schema.Name + "." + t.Name + "." + name + " does not exist")
@@ -3625,7 +3664,7 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 			} else {
 				t.publishShowColumnsSnapshot(true)
 			}
-			t.finishSchemaMutationLocked(t.schemaSaveMode())
+			t.finishSchemaMutationLocked(t.schemaSaveMode(), !c.RuntimeOnly)
 			// deregister temp column AFTER releasing schemalock
 			if removedCol.IsTemp {
 				GlobalCache.Remove(removedCol)
@@ -3715,7 +3754,7 @@ func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *sto
 	var savePanic any
 	func() {
 		defer func() { savePanic = recover() }()
-		t.schema.save()
+		t.schema.save(nil, t)
 	}()
 	if savePanic != nil {
 		t.mu.Lock()
@@ -3795,7 +3834,7 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 	var savePanic any
 	func() {
 		defer func() { savePanic = recover() }()
-		t.schema.save()
+		t.schema.save(nil, t)
 	}()
 	if savePanic != nil {
 		t.mu.Lock()
@@ -3845,6 +3884,7 @@ func (t *table) reserveLocalAutoIncrement(explicit, generated uint64) uint64 {
 // Insert chooses the native execution site before evaluating defaults, allocating
 // IDs or taking UNIQUE guards. A delegated command is never replayed after send.
 func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64), currentTxArgs ...*TxContext) int {
+	requireCatalogDML(t)
 	var tx *TxContext
 	if len(currentTxArgs) != 0 {
 		tx = currentTxArgs[0]

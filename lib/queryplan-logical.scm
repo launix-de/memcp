@@ -7059,6 +7059,23 @@ output slots; the UNION order belongs to that projection, not the old source. */
 			(list (if (nil? title) expr (list (quote get_column) nil false title false)) direction))
 		_ item)))))
 
+/* A SELECT over UNION ALL may order by an unselected source column. Keep
+that expression as a logical output slot of each branch until the merge has
+consumed it; the union's result_titles fact retains the public projection. */
+(define union_wrapper_with_sort_outputs (lambda (block) (begin
+	(define fields (reduce (coalesceNil (qb_order block) '()) (lambda (fields item)
+		(match item '(expr _direction) (begin
+			(define present (or (number? expr) (reduce (map (projection_exprs fields) (lambda (projected)
+				(expression_equal? (sql_type_lower_annotations expr) (sql_type_lower_annotations projected)))) (lambda (a b) (or a b)) false)))
+			(if present fields (begin
+				(define names (map (projection_titles fields) (lambda (title) (list title true))))
+				(define title (binding_fresh_alias (merge names) (concat "__union_order:" (count fields))))
+				(merge fields (list title expr))))) _ fields)) (qb_fields block)))
+	(if (equal? (count fields) (count (qb_fields block))) block
+		(make_query_block (qb_schema block) (qb_sources block) fields (qb_where block)
+			(qb_group block) (qb_having block) (qb_order block) (qb_limit block) (qb_offset block)
+			(qb_hidden block) (qb_stages block) (qb_facts block))))))
+
 (define rewrite_query_block_over_union_source (lambda (block src)
 	(begin
 		(if (not (union_wrapper_rewrite_allowed? block))
@@ -7066,18 +7083,24 @@ output slots; the UNION order belongs to that projection, not the old source. */
 			(begin
 				(define relation (normalize_query_ast (source_relation src)))
 				(define canonical_fields (union_canonical_fields relation))
+				(define output_block (if (equal? (union_mode relation) (quote all)) (union_wrapper_with_sort_outputs block) block))
+				(define output_facts (if (and (equal? (count (qb_fields output_block)) (count (qb_fields block)))
+					(nil? (qassoc_get (union_facts relation) (quote result_titles) nil)))
+					(union_facts relation)
+					(qassoc_set (union_facts relation) (quote result_titles)
+						(projection_titles (qb_fields block)))))
 				(make_union_block
 					(union_mode relation)
 					(map (union_branches relation) (lambda (branch)
-						(wrap_union_branch_query block (source_alias src) branch canonical_fields)))
+						(wrap_union_branch_query output_block (source_alias src) branch canonical_fields)))
 					(if (empty_list? (qb_order block)) (union_order relation)
-						(equal? (union_mode relation) (quote all)) (union_wrapper_output_order block)
+						(equal? (union_mode relation) (quote all)) (union_wrapper_output_order output_block)
 						/* DISTINCT lowering does not yet preserve these computed output
 						order slots. Retain its explicit unsupported-shape rejection. */
 						(qb_order block))
 					(coalesceNil (qb_limit block) (union_limit relation))
 					(coalesceNil (qb_offset block) (union_offset relation))
-					(union_facts relation)))))))
+					output_facts))))))
 
 (define replace_union_source_branch (lambda (sources union_src branch)
 	(map (coalesceNil sources '()) (lambda (src)

@@ -380,7 +380,7 @@ func TestReplicationRecoveredSharedBindsCompletedGeneration(t *testing.T) {
 	table.Shards = []*storageShard{placeholder}
 	table.publishTopologyLocked()
 	table.mu.Unlock()
-	table.schema.save()
+	table.schema.save(nil)
 	owner := uuid.NewString()
 	report := replicaRecord{Resource: resource, Owner: owner, State: "O", Epoch: 7, Content: placeholder.uuid.String(), Readers: map[string]bool{r.id: true}}
 	if _, err := r.recoverPeer(context.Background(), owner, replicaRequest{Boot: uuid.NewString(), Resources: []replicaRecord{report}}, replicaAuth{Admin: true}); err != nil {
@@ -475,7 +475,7 @@ func TestReplicationSchemaTransferPreservesLocalPhysicalGeneration(t *testing.T)
 	r.resourceCell(mosiResource{Database: table.schema.Name}).ownstate.Initialize(mosi.M)
 	r.schemaShards(table.schema, r.id, true)
 	table.schema.rebuild(true, false, false, table)
-	table.schema.save()
+	table.schema.save(nil)
 	remoteSchema := append([]byte(nil), engine.ReadSchema()...)
 	table.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("newer-master-main")}}, nil, scm.NewNil(), false, nil)
 	table.schema.rebuild(true, false, false, table)
@@ -497,7 +497,7 @@ func TestReplicationSchemaTransferPreservesLocalPhysicalGeneration(t *testing.T)
 	}
 	localGeneration, err := r.schemaDigest(engine.ReadSchema())
 	if err != nil || localGeneration != remoteGeneration {
-		t.Fatal("local physical UUID mapping changed semantic schema identity", err)
+		t.Fatalf("local physical UUID mapping changed semantic schema identity: %v\nremote %s\nlocal %s", err, remoteSchema, engine.ReadSchema())
 	}
 }
 
@@ -1026,6 +1026,45 @@ func TestReplicationRecoveryInventoryReportsOutwardAuthority(t *testing.T) {
 	}
 }
 
+func TestReplicationRecoveryInventoryIncludesTenantCatalogAuthority(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog_recovery_inventory", 0)
+	db := tbl.schema
+	r := replicaRecoveryFixture()
+	r.master = false
+	r.schemaShards(db, r.id, true)
+	want := make(map[string]mosiResource)
+	for _, shard := range db.replicationShards() {
+		if shard.catalogOwner == "" {
+			continue
+		}
+		resource := shard.replicationResource()
+		want[resource.key()] = resource
+		r.updateRecord(resource, func(record *replicaRecord) bool {
+			record.Epoch = 7
+			return true
+		})
+	}
+	if len(want) != int(catalogRelationCount) {
+		t.Fatalf("fixture has %d catalog partitions", len(want))
+	}
+	for _, record := range r.recoveryInventory(replicaAuth{Databases: map[string]bool{db.Name: true}}) {
+		if resource, exists := want[record.Resource.key()]; exists {
+			if record.Resource != resource || record.Owner != r.id || record.State != "M" || record.Epoch != 7 {
+				t.Fatalf("lost tenant catalog authority: %+v", record)
+			}
+			delete(want, resource.key())
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("reconnect omitted tenant catalog partitions: %v", want)
+	}
+	for _, record := range r.recoveryInventory(replicaAuth{Databases: map[string]bool{"other_tenant": true}}) {
+		if record.Resource.Database == db.Name {
+			t.Fatal("catalog inventory escaped its tenant authorization")
+		}
+	}
+}
+
 func TestReplicationUnconfirmedReaderCannotRaiseOwnAuthority(t *testing.T) {
 	r := replicaRecoveryFixture()
 	resource := mosiResource{Database: "tenant"}
@@ -1457,5 +1496,29 @@ func TestReplicationConnectionReadyAfterAllCachedBindings(t *testing.T) {
 		if peer.outgoing.len() != 0 {
 			t.Fatal("completed binding was sent again")
 		}
+	}
+}
+
+func TestReplicationSchemaDigestPreservesJSONDefaultValues(t *testing.T) {
+	r := replicaRecoveryFixture()
+	absent := []byte(`{"name":"tenant","tables":{"items":{"Columns":[{"Name":"value"}]}}}`)
+	explicitNull := []byte(`{"name":"tenant","tables":{"items":{"PShards":null,"Columns":[{"Name":"value","Default":null}]}}}`)
+	first, err := r.schemaDigest(absent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := r.schemaDigest(explicitNull)
+	if err != nil || first != second {
+		t.Fatal("equivalent legacy and native declarations have different identities", err)
+	}
+	objectNull := []byte(`{"name":"tenant","tables":{"items":{"Columns":[{"Name":"value","Default":{"member":null}}]}}}`)
+	emptyObject := []byte(`{"name":"tenant","tables":{"items":{"Columns":[{"Name":"value","Default":{}}]}}}`)
+	first, err = r.schemaDigest(objectNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = r.schemaDigest(emptyObject)
+	if err != nil || first == second {
+		t.Fatal("different JSON defaults lost their schema identity", err)
 	}
 }

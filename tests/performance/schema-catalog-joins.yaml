@@ -1,0 +1,289 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixed workload: one cold execution and 128 further executions, no warmup.
+metadata:
+  version: '1.0'
+  description: Cold plus 128 repeated catalog joins over 128 table declarations
+  isolated: true
+  max_regression_pct: 20
+setup:
+- scm: |-
+    (begin
+     (map (produceN 128) (lambda (i) (begin
+      (define name (concat "catalog_perf_" i))
+      (droptable "memcp-tests" name true)
+      (createtable "memcp-tests" name
+       (map '("id" "v1" "v2" "v3") (lambda (col) (list "column" col "int" '() '())))
+       '("engine" "memory") false))))
+     true)
+test_cases:
+- name: Catalog table-column join includes cold planning and repeated indexed execution
+  sql: SELECT t.table_name, COUNT(c.column_name) AS n FROM information_schema.tables t JOIN information_schema.columns
+    c ON c.table_schema=t.table_schema AND c.table_name=t.table_name WHERE t.table_schema='memcp-tests' AND t.table_name
+    LIKE 'catalog_perf_%' GROUP BY t.table_name ORDER BY t.table_name
+  warmup: 0
+  timing_samples: 129
+  timing_aggregation: total
+  threshold_ms: 30000
+  expect:
+    rows: 128
+    data:
+    - table_name: catalog_perf_0
+      n: 4
+    - table_name: catalog_perf_1
+      n: 4
+    - table_name: catalog_perf_10
+      n: 4
+    - table_name: catalog_perf_100
+      n: 4
+    - table_name: catalog_perf_101
+      n: 4
+    - table_name: catalog_perf_102
+      n: 4
+    - table_name: catalog_perf_103
+      n: 4
+    - table_name: catalog_perf_104
+      n: 4
+    - table_name: catalog_perf_105
+      n: 4
+    - table_name: catalog_perf_106
+      n: 4
+    - table_name: catalog_perf_107
+      n: 4
+    - table_name: catalog_perf_108
+      n: 4
+    - table_name: catalog_perf_109
+      n: 4
+    - table_name: catalog_perf_11
+      n: 4
+    - table_name: catalog_perf_110
+      n: 4
+    - table_name: catalog_perf_111
+      n: 4
+    - table_name: catalog_perf_112
+      n: 4
+    - table_name: catalog_perf_113
+      n: 4
+    - table_name: catalog_perf_114
+      n: 4
+    - table_name: catalog_perf_115
+      n: 4
+    - table_name: catalog_perf_116
+      n: 4
+    - table_name: catalog_perf_117
+      n: 4
+    - table_name: catalog_perf_118
+      n: 4
+    - table_name: catalog_perf_119
+      n: 4
+    - table_name: catalog_perf_12
+      n: 4
+    - table_name: catalog_perf_120
+      n: 4
+    - table_name: catalog_perf_121
+      n: 4
+    - table_name: catalog_perf_122
+      n: 4
+    - table_name: catalog_perf_123
+      n: 4
+    - table_name: catalog_perf_124
+      n: 4
+    - table_name: catalog_perf_125
+      n: 4
+    - table_name: catalog_perf_126
+      n: 4
+    - table_name: catalog_perf_127
+      n: 4
+    - table_name: catalog_perf_13
+      n: 4
+    - table_name: catalog_perf_14
+      n: 4
+    - table_name: catalog_perf_15
+      n: 4
+    - table_name: catalog_perf_16
+      n: 4
+    - table_name: catalog_perf_17
+      n: 4
+    - table_name: catalog_perf_18
+      n: 4
+    - table_name: catalog_perf_19
+      n: 4
+    - table_name: catalog_perf_2
+      n: 4
+    - table_name: catalog_perf_20
+      n: 4
+    - table_name: catalog_perf_21
+      n: 4
+    - table_name: catalog_perf_22
+      n: 4
+    - table_name: catalog_perf_23
+      n: 4
+    - table_name: catalog_perf_24
+      n: 4
+    - table_name: catalog_perf_25
+      n: 4
+    - table_name: catalog_perf_26
+      n: 4
+    - table_name: catalog_perf_27
+      n: 4
+    - table_name: catalog_perf_28
+      n: 4
+    - table_name: catalog_perf_29
+      n: 4
+    - table_name: catalog_perf_3
+      n: 4
+    - table_name: catalog_perf_30
+      n: 4
+    - table_name: catalog_perf_31
+      n: 4
+    - table_name: catalog_perf_32
+      n: 4
+    - table_name: catalog_perf_33
+      n: 4
+    - table_name: catalog_perf_34
+      n: 4
+    - table_name: catalog_perf_35
+      n: 4
+    - table_name: catalog_perf_36
+      n: 4
+    - table_name: catalog_perf_37
+      n: 4
+    - table_name: catalog_perf_38
+      n: 4
+    - table_name: catalog_perf_39
+      n: 4
+    - table_name: catalog_perf_4
+      n: 4
+    - table_name: catalog_perf_40
+      n: 4
+    - table_name: catalog_perf_41
+      n: 4
+    - table_name: catalog_perf_42
+      n: 4
+    - table_name: catalog_perf_43
+      n: 4
+    - table_name: catalog_perf_44
+      n: 4
+    - table_name: catalog_perf_45
+      n: 4
+    - table_name: catalog_perf_46
+      n: 4
+    - table_name: catalog_perf_47
+      n: 4
+    - table_name: catalog_perf_48
+      n: 4
+    - table_name: catalog_perf_49
+      n: 4
+    - table_name: catalog_perf_5
+      n: 4
+    - table_name: catalog_perf_50
+      n: 4
+    - table_name: catalog_perf_51
+      n: 4
+    - table_name: catalog_perf_52
+      n: 4
+    - table_name: catalog_perf_53
+      n: 4
+    - table_name: catalog_perf_54
+      n: 4
+    - table_name: catalog_perf_55
+      n: 4
+    - table_name: catalog_perf_56
+      n: 4
+    - table_name: catalog_perf_57
+      n: 4
+    - table_name: catalog_perf_58
+      n: 4
+    - table_name: catalog_perf_59
+      n: 4
+    - table_name: catalog_perf_6
+      n: 4
+    - table_name: catalog_perf_60
+      n: 4
+    - table_name: catalog_perf_61
+      n: 4
+    - table_name: catalog_perf_62
+      n: 4
+    - table_name: catalog_perf_63
+      n: 4
+    - table_name: catalog_perf_64
+      n: 4
+    - table_name: catalog_perf_65
+      n: 4
+    - table_name: catalog_perf_66
+      n: 4
+    - table_name: catalog_perf_67
+      n: 4
+    - table_name: catalog_perf_68
+      n: 4
+    - table_name: catalog_perf_69
+      n: 4
+    - table_name: catalog_perf_7
+      n: 4
+    - table_name: catalog_perf_70
+      n: 4
+    - table_name: catalog_perf_71
+      n: 4
+    - table_name: catalog_perf_72
+      n: 4
+    - table_name: catalog_perf_73
+      n: 4
+    - table_name: catalog_perf_74
+      n: 4
+    - table_name: catalog_perf_75
+      n: 4
+    - table_name: catalog_perf_76
+      n: 4
+    - table_name: catalog_perf_77
+      n: 4
+    - table_name: catalog_perf_78
+      n: 4
+    - table_name: catalog_perf_79
+      n: 4
+    - table_name: catalog_perf_8
+      n: 4
+    - table_name: catalog_perf_80
+      n: 4
+    - table_name: catalog_perf_81
+      n: 4
+    - table_name: catalog_perf_82
+      n: 4
+    - table_name: catalog_perf_83
+      n: 4
+    - table_name: catalog_perf_84
+      n: 4
+    - table_name: catalog_perf_85
+      n: 4
+    - table_name: catalog_perf_86
+      n: 4
+    - table_name: catalog_perf_87
+      n: 4
+    - table_name: catalog_perf_88
+      n: 4
+    - table_name: catalog_perf_89
+      n: 4
+    - table_name: catalog_perf_9
+      n: 4
+    - table_name: catalog_perf_90
+      n: 4
+    - table_name: catalog_perf_91
+      n: 4
+    - table_name: catalog_perf_92
+      n: 4
+    - table_name: catalog_perf_93
+      n: 4
+    - table_name: catalog_perf_94
+      n: 4
+    - table_name: catalog_perf_95
+      n: 4
+    - table_name: catalog_perf_96
+      n: 4
+    - table_name: catalog_perf_97
+      n: 4
+    - table_name: catalog_perf_98
+      n: 4
+    - table_name: catalog_perf_99
+      n: 4
+cleanup:
+- scm: |-
+    (begin (map (produceN 128) (lambda (i) (droptable "memcp-tests" (concat "catalog_perf_" i) true))) true)

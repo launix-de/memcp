@@ -423,7 +423,7 @@ func TestConcurrentFirstDatabaseReadersShareOneSchemaLoad(t *testing.T) {
 		release:           make(chan struct{}),
 	}
 	db := newDatabase()
-	db.Name = "tconcurrentload"
+	db.Name = "tconcurrentloadsource"
 	db.persistence = blocking
 	db.srState = COLD
 
@@ -3102,7 +3102,7 @@ func TestPartitionUniqueKeepsUnrelatedShardsCold(t *testing.T) {
 	tbl.PShards = []*storageShard{NewShard(tbl), NewShard(tbl)}
 	tbl.publishTopologyLocked()
 	tbl.mu.Unlock()
-	tbl.schema.save()
+	tbl.schema.save(nil)
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString("low")}, {scm.NewInt(11), scm.NewString("high")},
 	}, nil, scm.NewNil(), false, nil)

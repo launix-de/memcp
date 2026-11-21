@@ -663,12 +663,16 @@ def run_replication_source_security(master, slave):
     slave.reclaim()
 
 
-def run_regressions(args, artifacts, journal):
+def run_source_security(args, artifacts, journal):
     print("SCENARIO: source-only replication security", flush=True)
     with Cluster(args, artifacts, "source-security") as security:
         security.initialize(["CREATE TABLE items(id INT PRIMARY KEY, value INT)"])
         run_replication_source_security(security.master, security.slave)
     journal.append({"scenario": "source-only-security", "master_restart": True})
+
+
+def run_regressions(args, artifacts, journal):
+    run_source_security(args, artifacts, journal)
     print("SCENARIO: alternating crashes, authentication, DDL, sharing and retirement", flush=True)
     with Cluster(args, artifacts, "regressions") as cluster:
         master, slave = cluster.master, cluster.slave
@@ -1531,7 +1535,21 @@ def run_retained_generation(master, worker, args, journal):
 
         eventually(released, "peer GC did not deregister old owner generations", timeout=args.timeout)
         w.sql("UPDATE remote_items SET value=value+1 WHERE id=1")
-        expect(m.number("SELECT SUM(value) AS n FROM remote_items"), expected + 1,
+        actual = m.number("SELECT SUM(value) AS n FROM remote_items")
+        if actual != expected + 1:
+            diagnostic = {"expected": expected + 1, "actual": actual}
+            for name, node in (("master", master), ("worker", worker)):
+                try:
+                    diagnostic[name] = {
+                        "rows": node.client.sql("SELECT id,value FROM remote_items ORDER BY id"),
+                        "state": node.snapshot(),
+                        "plan": node.client.sql("EXPLAIN SELECT SUM(value) AS n FROM remote_items"),
+                    }
+                except Exception as error:
+                    diagnostic[name] = {"error": str(error)}
+            (worker.data_dir.parent / "retained-generation-failure.json").write_text(
+                json.dumps(diagnostic, indent=2) + "\n")
+        expect(actual, expected + 1,
                "new generation remained coherent after old-reference release")
         journal.append({"scenario": "retained-generation", "old_uuids": sorted(old_ids),
                         "new_uuids": sorted(active_ids), "old_sum": expected,
@@ -1876,6 +1894,10 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
         nodes = [Node(args, directory, f"node-{i}", "listen") for i in range(3)]
         for index, node in enumerate(nodes):
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
+            # The snapshot's database anchor also references immutable catalog
+            # generations in the system backend. Seed that backend privately;
+            # only ordinary tenant payload remains shared between live nodes.
+            shutil.copytree(builder.data_dir / "system", node.data_dir / "system", dirs_exist_ok=True)
             (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
             node.process_env["GOMAXPROCS"] = "2"
@@ -2195,6 +2217,7 @@ def run_cluster_placement(args, artifacts, journal):
             source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)')
         standalone_operators = []
         operator_shared = None
+        operator_system = None
         # The placement/co-location preflight also runs in the generic cluster
         # and SQL-context scenarios, not just the operator YAML profile.
         source.sql("CREATE TABLE operator_keys(id INT PRIMARY KEY) ENGINE=SAFE")
@@ -2207,12 +2230,15 @@ def run_cluster_placement(args, artifacts, journal):
             builder.kill()
             operator_shared = directory / "shared-operator-fixture"
             shutil.copytree(builder.data_dir / DATABASE, operator_shared)
+            operator_system = directory / "system-operator-fixture"
+            shutil.copytree(builder.data_dir / "system", operator_system)
             source = builder.start()
             standalone_operators = run_cluster_yaml_cases(
                 suite or OPERATOR_SUITE, builder, [builder], builder.data_dir / DATABASE,
                 journal, directory / "standalone-operators.json")
         builder.kill()
         shared = operator_shared or builder.data_dir / DATABASE
+        system_fixture = operator_system or builder.data_dir / "system"
         catalog = json.loads((shared / "schema.json").read_text())["tables"]
         if args.cluster_context_only:
             context_schema = catalog["context_items"]
@@ -2240,7 +2266,11 @@ def run_cluster_placement(args, artifacts, journal):
             # runners. A serial scan can evict/reload every shard locally and
             # would never test simultaneous RAM admission or remote overflow.
             node.process_env["GOMAXPROCS"] = str(config["gomaxprocs"])
-            cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
+            cleanup.callback(node.cleanup)
+            # The snapshot's database anchor also references immutable catalog
+            # generations in the system backend. Seed that backend privately;
+            # only ordinary tenant payload remains shared between live nodes.
+            shutil.copytree(system_fixture, node.data_dir / "system", dirs_exist_ok=True)
             (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
             # The coordinator uses a deliberately tiny shard share below its
@@ -2377,7 +2407,7 @@ def run_cluster_placement(args, artifacts, journal):
             upstream.client.sql(f"CREATE DATABASE {database}", "system")
             upstream.client.sql("CREATE TABLE edge_items(id INT PRIMARY KEY,n INT) ENGINE=SAFE", database)
             edge = Node(args, directory, f"edge-{index}", f"http://127.0.0.1:{upstream.port}/cluster", database=database)
-            cleanup.callback(lambda edge=edge: edge.kill() if edge.process is not None else None)
+            cleanup.callback(edge.cleanup)
             # User rows and MOSI configuration deliberately share one stripe.
             # Data acquisition must complete before any UNIQUE reservation.
             (edge.data_dir / "settings.json").write_text(json.dumps({"UniqueScaleFactor": 0}))
@@ -2513,6 +2543,7 @@ def run_cluster_suite(args, path, artifacts, journal):
         protocol_ports = [free_port() for _ in nodes]
         for index, node in enumerate(nodes):
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
+            shutil.copytree(catalog.data_dir / "system", node.data_dir / "system", dirs_exist_ok=True)
             (node.data_dir / database).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{database}.json").write_text(json.dumps({"backend": "filesystem"}))
             ram = config["coordinator_ram_limit_bytes"] if index == 0 else config["ram_limit_bytes"]
@@ -2558,6 +2589,8 @@ def main():
     parser.add_argument("--dedicated-replication-port", action="store_true",
                         help="exercise the optional dedicated listener instead of the normal HTTP /cluster route")
     parser.add_argument("--remote-scans-only", action="store_true", help="run only the focused two-process remote scan scenario")
+    parser.add_argument("--replica-scenario", choices=("source-security", "regressions", "partitions", "stress", "multiple-slaves"),
+                        help="run one plain-replication scenario without the complete stress sequence")
     parser.add_argument("--cluster-context-only", action="store_true",
                         help="run SQL session/transaction contracts against standalone and clustered processes")
     parser.add_argument("--cluster-inserts-only", action="store_true", help="run focused concurrent shared-storage INSERT scenario")
@@ -2629,9 +2662,13 @@ def main():
                 run_cluster_inserts(args, artifacts, journal, hash_partitioned=True)
         elif args.cluster_only:
             run_cluster_placement(args, artifacts, journal)
+        elif args.replica_scenario:
+            {"source-security": run_source_security, "regressions": run_regressions,
+             "partitions": run_partitions, "stress": run_stress,
+             "multiple-slaves": run_multiple_slaves}[args.replica_scenario](args, artifacts, journal)
         else:
             run_remote_scans(args, artifacts, journal)
-        if not args.suites and not args.remote_scans_only and not args.cluster_only and not args.cluster_inserts_only:
+        if not args.suites and not args.remote_scans_only and not args.replica_scenario and not args.cluster_only and not args.cluster_inserts_only:
             run_regressions(args, artifacts, journal)
             run_partitions(args, artifacts, journal)
             run_stress(args, artifacts, journal)
@@ -2656,6 +2693,8 @@ def main():
         replay.extend(str(path) for path in args.suites)
         if args.remote_scans_only:
             replay.append("--remote-scans-only")
+        if args.replica_scenario:
+            replay.extend(("--replica-scenario", args.replica_scenario))
         if args.cluster_inserts_only:
             replay.extend(("--cluster-inserts-only", "--cluster-inserts-layout", args.cluster_inserts_layout))
         if args.cluster_context_only:

@@ -1,0 +1,198 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Declarations live in the relational system_schema catalog. They must be
+# queryable like tables, follow DDL immediately and survive restarts with
+# unchanged behaviour (keys, foreign keys, triggers, defaults, engines).
+metadata:
+  version: '1.0'
+  isolated: true
+  description: Schema declarations persist through the relational system_schema catalog
+setup:
+  - sql: DROP TABLE IF EXISTS sc_log
+  - sql: DROP TABLE IF EXISTS sc_child
+  - sql: DROP TABLE IF EXISTS sc_parent
+  - sql: DROP TABLE IF EXISTS sc_memory
+  - sql: DROP TABLE IF EXISTS sc_gone
+test_cases:
+  - name: Create a parent with named keys, defaults and comments
+    sql: >-
+      CREATE TABLE sc_parent (id INT PRIMARY KEY AUTO_INCREMENT, code VARCHAR(12) NOT NULL COMMENT 'business code',
+      kind ENUM('a','b','c') DEFAULT 'b', amount DECIMAL(10,2) DEFAULT 1.50, UNIQUE KEY sc_code_unique (code))
+      COMMENT='parent rows'
+  - name: Create a child with a cascading foreign key
+    sql: >-
+      CREATE TABLE sc_child (id INT PRIMARY KEY, parent_id INT, label TEXT,
+      FOREIGN KEY (parent_id) REFERENCES sc_parent(id) ON DELETE CASCADE)
+  - name: Create an audit table and a trigger
+    sql: CREATE TABLE sc_log (parent_code VARCHAR(12))
+  - name: Install the trigger
+    sql: CREATE TRIGGER sc_parent_audit AFTER INSERT ON sc_parent FOR EACH ROW INSERT INTO sc_log (parent_code) VALUES (NEW.code)
+  - name: Create a memory engine table
+    sql: CREATE TABLE sc_memory (id INT) ENGINE=MEMORY
+  - name: Create and drop a table
+    sql: CREATE TABLE sc_gone (id INT)
+  - name: Drop it again
+    sql: DROP TABLE sc_gone
+  - name: Insert parents through the trigger
+    sql: INSERT INTO sc_parent (code) VALUES ('p1'), ('p2')
+  - name: Insert children
+    sql: INSERT INTO sc_child VALUES (1, 1, 'one'), (2, 2, 'two')
+
+  - name: The catalog lists the tables of this database
+    sql: >-
+      SELECT name, persistency_mode, comment FROM system_schema.tables
+      WHERE schema_name = 'memcp-tests' AND name IN ('sc_parent', 'sc_child', 'sc_log', 'sc_memory', 'sc_gone') ORDER BY name
+    expect:
+      rows: 4
+      data:
+        - {name: sc_child, persistency_mode: safe, comment: ''}
+        - {name: sc_log, persistency_mode: safe, comment: ''}
+        - {name: sc_memory, persistency_mode: memory, comment: ''}
+        - {name: sc_parent, persistency_mode: safe, comment: parent rows}
+  - name: Columns keep their ordinals, declared types and comments
+    sql: >-
+      SELECT ordinal, name, LOWER(typ) AS typ, comment FROM system_schema.columns
+      WHERE schema_name = 'memcp-tests' AND table_name = 'sc_parent' ORDER BY ordinal
+    expect:
+      rows: 4
+      data:
+        - {ordinal: 0, name: id, typ: int, comment: ''}
+        - {ordinal: 1, name: code, typ: varchar, comment: business code}
+        - {ordinal: 2, name: kind, typ: enum, comment: ''}
+        - {ordinal: 3, name: amount, typ: decimal, comment: ''}
+  - name: SQL cannot delete authoritative column declarations
+    sql: DELETE FROM system_schema.columns WHERE schema_name = 'memcp-tests' AND table_name = 'sc_parent'
+    expect: {error: true}
+  - name: SQL cannot update authoritative table declarations
+    sql: UPDATE system_schema.tables SET comment = 'forged' WHERE schema_name = 'memcp-tests' AND name = 'sc_parent'
+    expect: {error: true}
+  - name: SQL cannot insert authoritative table declarations
+    sql: INSERT INTO system_schema.tables (schema_name, name) VALUES ('memcp-tests', 'forged')
+    expect: {error: true}
+  - name: Native catalog declarations cannot be altered through SQL
+    sql: ALTER TABLE system_schema.columns ADD COLUMN forged INT
+    expect: {error: true}
+  - name: Rejected writes leave the admitted definition intact
+    sql: SELECT comment FROM system_schema.tables WHERE schema_name = 'memcp-tests' AND name = 'sc_parent'
+    expect:
+      rows: 1
+      data: [{comment: parent rows}]
+  - name: Key columns join their keys
+    sql: >-
+      SELECT k.id, kc.column_name FROM system_schema.`keys` k
+      JOIN system_schema.key_columns kc ON kc.schema_name = k.schema_name AND kc.table_name = k.table_name AND kc.key_ordinal = k.ordinal
+      WHERE k.schema_name = 'memcp-tests' AND k.table_name = 'sc_parent' ORDER BY k.ordinal, kc.ordinal
+    expect:
+      rows: 2
+      data:
+        - {id: PRIMARY, column_name: id}
+        - {id: sc_code_unique, column_name: code}
+  - name: The foreign key is recorded on both tables
+    sql: >-
+      SELECT f.table_name, f.tbl1, f.tbl2, f.deletemode, fc.column1, fc.column2 FROM system_schema.foreign_keys f
+      JOIN system_schema.foreign_key_columns fc ON fc.schema_name = f.schema_name AND fc.table_name = f.table_name AND fc.foreign_key_ordinal = f.ordinal
+      WHERE f.schema_name = 'memcp-tests' AND f.tbl1 = 'sc_child' ORDER BY f.table_name
+    expect:
+      rows: 2
+      data:
+        - {table_name: sc_child, tbl1: sc_child, tbl2: sc_parent, deletemode: 1, column1: parent_id, column2: id}
+        - {table_name: sc_parent, tbl1: sc_child, tbl2: sc_parent, deletemode: 1, column1: parent_id, column2: id}
+  - name: The trigger keeps its SQL source
+    sql: >-
+      SELECT name, table_name, timing, language FROM system_schema.triggers
+      WHERE schema_name = 'memcp-tests' AND name = 'sc_parent_audit'
+    expect:
+      rows: 1
+      data:
+        - {name: sc_parent_audit, table_name: sc_parent, timing: after_insert, language: sql}
+  - name: Schema changes are visible immediately
+    sql: ALTER TABLE sc_child ADD COLUMN note TEXT DEFAULT 'none'
+  - name: The added column appears in the catalog
+    sql: >-
+      SELECT ordinal, name FROM system_schema.columns
+      WHERE schema_name = 'memcp-tests' AND table_name = 'sc_child' ORDER BY ordinal
+    expect:
+      rows: 4
+      data:
+        - {ordinal: 0, name: id}
+        - {ordinal: 1, name: parent_id}
+        - {ordinal: 2, name: label}
+        - {ordinal: 3, name: note}
+
+  - name: Restart loads the declarations from the catalog
+    action: restart
+  - name: Defaults survive the restart
+    sql: INSERT INTO sc_parent (code) VALUES ('p3')
+  - name: Recovered defaults and AUTO_INCREMENT continue
+    sql: SELECT id, kind, amount FROM sc_parent WHERE code = 'p3'
+    expect:
+      rows: 1
+      data:
+        - {id: 3, kind: b, amount: 1.5}
+  - name: The recovered trigger still fires
+    sql: SELECT parent_code FROM sc_log ORDER BY parent_code
+    expect:
+      rows: 3
+      data:
+        - {parent_code: p1}
+        - {parent_code: p2}
+        - {parent_code: p3}
+  - name: The recovered named key still rejects duplicates
+    sql: INSERT INTO sc_parent (code) VALUES ('p1')
+    expect:
+      error: true
+  - name: The recovered foreign key still cascades
+    sql: DELETE FROM sc_parent WHERE code = 'p1'
+  - name: Cascaded children are gone
+    sql: SELECT id FROM sc_child ORDER BY id
+    expect:
+      rows: 1
+      data:
+        - {id: 2}
+  - name: The recovered column default applies
+    sql: INSERT INTO sc_child (id, parent_id) VALUES (3, 2)
+  - name: The added column keeps its default
+    sql: SELECT note FROM sc_child WHERE id = 3
+    expect:
+      rows: 1
+      data:
+        - {note: none}
+  - name: The catalog is queryable after restart
+    sql: >-
+      SELECT COUNT(*) AS n FROM system_schema.columns
+      WHERE schema_name = 'memcp-tests' AND table_name IN ('sc_parent', 'sc_child')
+    expect:
+      rows: 1
+      data:
+        - {n: 8}
+  - name: A second restart reads the catalog written by this binary
+    action: restart
+  - name: Declarations remain complete after the second restart
+    sql: SELECT COUNT(*) AS n FROM sc_parent WHERE kind = 'b'
+    expect:
+      rows: 1
+      data:
+        - {n: 2}
+  - name: The memory engine table keeps its engine
+    sql: >-
+      SELECT persistency_mode FROM system_schema.tables WHERE schema_name = 'memcp-tests' AND name = 'sc_memory'
+    expect:
+      rows: 1
+      data:
+        - {persistency_mode: memory}
+
+  - name: Dropped tables leave the catalog
+    sql: DROP TABLE sc_memory
+  - name: The dropped table has no catalog rows
+    sql: >-
+      SELECT COUNT(*) AS n FROM system_schema.columns WHERE schema_name = 'memcp-tests' AND table_name = 'sc_memory'
+    expect:
+      rows: 1
+      data:
+        - {n: 0}
+cleanup:
+  - sql: DROP TABLE IF EXISTS sc_log
+  - sql: DROP TABLE IF EXISTS sc_child
+  - sql: DROP TABLE IF EXISTS sc_parent
+  - sql: DROP TABLE IF EXISTS sc_memory
+  - sql: DROP TABLE IF EXISTS sc_gone

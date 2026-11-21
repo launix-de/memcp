@@ -115,6 +115,9 @@ func (c *replicaCell) forwardingDone() <-chan struct{} {
 }
 
 func (table *table) schemaWrite() (*table, WriteAccess) {
+	if nativeCatalogRelation(table) {
+		panic("schema catalog declarations are read-only; use native DDL")
+	}
 	if table.isEphemeralQueryTable() {
 		return table, WriteAccess{}
 	}
@@ -354,22 +357,15 @@ func (r *replicationManager) firstDatabase(name string, session scm.Scmer) {
 	if db == nil {
 		panic("missing initial schema")
 	}
+	db.prepareReplicaCatalog()
 	resources := make([]mosiResource, 0)
-	for _, table := range db.tables.GetAll() {
-		if table.isEphemeralQueryTable() {
-			continue
-		}
-		for _, shard := range table.ActiveShards() {
-			if shard == nil {
-				continue
-			}
-			item := mosiResource{Database: name, Table: table.Name, Shard: shard.uuid.String()}
-			r.mu.Lock()
-			claimed := r.directory.Records[r.resourceKey(item)].InitialClaimed
-			r.mu.Unlock()
-			if !claimed {
-				resources = append(resources, item)
-			}
+	for _, shard := range db.replicationShards() {
+		item := shard.replicationResource()
+		r.mu.Lock()
+		claimed := r.directory.Records[r.resourceKey(item)].InitialClaimed
+		r.mu.Unlock()
+		if !claimed {
+			resources = append(resources, item)
 		}
 	}
 	c.bootstrapStarted = true
@@ -495,7 +491,9 @@ func (c *replicaCell) transactionContinues(tx *TxContext) bool {
 // acquire a lease and network streaming never retains an active writer.
 func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext, blocking bool) (*replicaCell, func(), bool) {
 	c := r.resourceCell(resource)
-	if resource.Shard != "" && tx != nil {
+	// Fixed catalog declarations precede the database schema and are also
+	// edited while preparing its handover. Their own shard M admits writes.
+	if resource.Shard != "" && tx != nil && !isCatalogResource(resource) {
 		schema := mosiResource{Database: resource.Database}
 		// A foreign DDL owner may already hold schema M while waiting for our
 		// native data transaction. Its continuation retains its old declarations

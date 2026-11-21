@@ -493,6 +493,9 @@ func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {
 	schema := mosiResource{Database: table.schema.Name}
 	r.resourceCell(schema).ownstate.Initialize(mosi.M)
 	r.schemaShards(table.schema, r.id, true)
+	for _, shard := range table.schema.catalog.live {
+		r.shardCell(shard).ownstate.RestoreBackend(mosi.M)
+	}
 	for _, item := range table.schema.tables.GetAll() {
 		for _, shard := range item.ActiveShards() {
 			r.shardCell(shard).ownstate.RestoreBackend(mosi.M)
@@ -500,6 +503,11 @@ func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {
 	}
 	if !r.reclaimDatabase(table.schema.Name) {
 		t.Fatal("current backend-only exclusive generations were not reclaimed")
+	}
+	for _, shard := range table.schema.catalog.live {
+		if r.shardCell(shard).ownstate.Phase() != mosi.M {
+			t.Fatalf("catalog %s: native partition was not acquired", shard.t.Name)
+		}
 	}
 	for _, item := range table.schema.tables.GetAll() {
 		for _, shard := range item.ActiveShards() {
@@ -871,6 +879,7 @@ func TestReplicationSnapshotKeepsGenerationAndFiles(t *testing.T) {
 	}
 	cell := r.resourceCell(resource)
 	original := cell.current.Load()
+	r.schemaShards(table.schema, r.id, true)
 	cell.ownstate.Initialize(mosi.S)
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
@@ -1471,7 +1480,7 @@ func TestReplicationCheckpointRoutesBeforeActivePublication(t *testing.T) {
 	tbl.Shards = []*storageShard{successor}
 	tbl.publishSchemaTopology(ShardModeFree, tbl.Shards, tbl.PDimensions)
 	tbl.mu.Unlock()
-	tbl.schema.save()
+	tbl.schema.save(nil)
 	// Schema publication itself must establish the route, before capture can
 	// advertise it or another peer can declare an independent successor cell.
 	if r.lookupCell(r.shardResource(successor)) != cell || r.resourceKey(resource) != r.shardResource(successor).key() {
@@ -1524,12 +1533,89 @@ func TestReplicationRequestLearnsOnlyOwnerForwarding(t *testing.T) {
 	}
 }
 
+func TestReplicationDeclaredSuccessorRetainsExistingReaderAuthority(t *testing.T) {
+	r := replicaRecoveryFixture()
+	from := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	to := from
+	to.Shard = uuid.NewString()
+	cell := r.resourceCell(from)
+	cell.ownstate.Initialize(mosi.S)
+	r.updateRecord(from, func(record *replicaRecord) bool {
+		record.Owner, record.State, record.Epoch = "client", "S", 9
+		record.Readers = map[string]bool{r.id: true}
+		return true
+	})
+	// A catalog declaration can introduce the successor's UUID before its
+	// first write request. It must still share its predecessor's revocation
+	// directory, including readers which already hold the predecessor payload.
+	r.declareShardResource(to, "client", false)
+	if err := r.acceptRequestRoutes("client", mosiPacket{Kind: "write", Resource: to, Forwards: []shardForward{{from, to}}}); err != nil {
+		t.Fatal(err)
+	}
+	if r.resourceCell(from) != r.resourceCell(to) || r.canonicalResource(from) != to {
+		t.Fatal("declared successor split the existing native authority")
+	}
+	record := r.directory.Records[to.key()]
+	if record.Epoch != 9 || !record.Readers[r.id] || cell.resolved().ownstate.Phase() != mosi.S {
+		t.Fatal("successor publication lost existing reader revocation rights or changed permission")
+	}
+}
+
+func TestReplicationRevokesReadsBeforeInvalidatingDependentCaches(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "replica-revocation-cache-order", 0)
+	r := replicaRecoveryFixture()
+	resource := tbl.ActiveShards()[0].replicationResource()
+	cell := r.declareShard(tbl.ActiveShards()[0], r.id, true)
+	cell.ownstate.Initialize(mosi.S)
+	generation := tbl.cacheGeneration.Load()
+	// Hold dependency traversal after its generation publication, allowing a
+	// reader to inspect the exact cache-invalidation/permission boundary.
+	tbl.mu.Lock()
+	done := make(chan struct{})
+	go func() { defer close(done); r.publishLocal(resource, mosi.IO) }()
+	defer func() { tbl.mu.Unlock(); <-done }()
+	deadline := time.Now().Add(time.Second)
+	for tbl.cacheGeneration.Load() == generation {
+		if time.Now().After(deadline) {
+			t.Fatal("cache invalidation did not reach its dependency traversal")
+		}
+		runtime.Gosched()
+	}
+	if cell.ownstate.Phase() != mosi.IO {
+		t.Fatal("cache invalidation still allowed reinitialization from revoked local payload")
+	}
+}
+
+func TestReplicationRequestResolvesRetainedCheckpointWithoutReversingCurrent(t *testing.T) {
+	r := replicaRecoveryFixture()
+	old := mosiResource{Database: "example", Table: "items", Shard: uuid.NewString()}
+	current, checkpoint := old, old
+	current.Shard, checkpoint.Shard = uuid.NewString(), uuid.NewString()
+	cell := r.resourceCell(old)
+	cell.ownstate.Initialize(mosi.M)
+	r.updateRecord(old, func(record *replicaRecord) bool {
+		record.Owner, record.State, record.Epoch = r.id, "M", 9
+		return true
+	})
+	r.forwardResource(old, current)
+	if err := r.acceptRequestRoutes("former-owner", mosiPacket{Resource: checkpoint, Forwards: []shardForward{{old, checkpoint}}}); err != nil {
+		t.Fatal(err)
+	}
+	if r.canonicalResource(old) != current || r.canonicalResource(checkpoint) != current || r.lookupCell(checkpoint) != cell {
+		t.Fatal("a retained checkpoint reversed the current UUID authority")
+	}
+	if record := r.directory.Records[current.key()]; record.Owner != r.id || record.Epoch != 9 || cell.ownstate.Phase() != mosi.M {
+		t.Fatal("resolving a retained checkpoint changed ownership or permissions")
+	}
+}
+
 func TestReplicationSharedSchemaKeepsNewerShard(t *testing.T) {
 	tbl, engine := createDurabilityTestTable(t, "replica_shared_schema_successor", 3)
 	RebuildTable(tbl, true, false)
 	older := append([]byte(nil), engine.ReadSchema()...)
 	r := replicaRecoveryFixture()
 	r.cluster = &nodeCluster{manager: r, self: clusterMember{ID: r.id}}
+	r.schemaShards(tbl.schema, r.id, true)
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
 	source := tbl.ActiveShards()[0]

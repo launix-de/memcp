@@ -86,7 +86,7 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 	// Persist reservations before acknowledging: other nodes can commit their
 	// allocated IDs without returning the allocator's shard WAL to this node.
 	// An interrupted request may leave a gap and must never be blindly replayed.
-	db.save(cell)
+	db.save(cell, t)
 	return reply, nil
 }
 
