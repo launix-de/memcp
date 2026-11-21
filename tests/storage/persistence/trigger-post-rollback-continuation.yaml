@@ -33,7 +33,8 @@ setup:
 - sql: CREATE TABLE abort_user_log(id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,kind INT)
 - sql: CREATE TABLE abort_zero(id INT NOT NULL PRIMARY KEY,value INT)
 - sql: INSERT abort_zero VALUES(1,10)
-- sql: CREATE TABLE abort_checked(id INT NOT NULL PRIMARY KEY,value INT,CONSTRAINT CK_abort_checked CHECK(value>=0))
+- sql: CREATE TABLE abort_checked(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: ALTER TABLE abort_checked ADD CONSTRAINT CK_abort_checked CHECK(value>=0)
 - sql: CREATE TABLE abort_check_source(id INT NOT NULL PRIMARY KEY,value INT)
 - sql: INSERT abort_check_source VALUES(1,10)
 - sql: CREATE TABLE abort_fk_parent(id INT NOT NULL PRIMARY KEY)
@@ -330,6 +331,8 @@ test_cases:
   scm: (crash)
   expect:
     interrupted_ok: true
+- name: Restart after hard process failure uses the same native fixture store
+  action: restart
 - name: Restart restores original rows and every safe or logged suffix commit
   steps:
   - sql: SELECT id,value,mode FROM abort_core ORDER BY id
@@ -516,7 +519,7 @@ test_cases:
             (insert audit '("id" "old_value" "new_value") (list (list 72 old_value new_value)) '() nil false nil bound))))))))
          '("inert" 41)))))) false false true)
      (tx_begin_acid owner)
-     (createstatementtrigger target "native_abort_probe" "after_statement" "abort-leaf-cleanup-observer" "observe" '("update") false false (owner "__memcp_tx"))
+     (createstatementtrigger target "native_abort_leaf_probe" "after_statement" "abort-leaf-cleanup-observer" "observe" '("update") false false (owner "__memcp_tx"))
      (tx_commit owner)
      (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
      true
