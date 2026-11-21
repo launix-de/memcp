@@ -119,8 +119,17 @@ is never retained by the cursor, its plan or a storage computed column. */
 	(define projections (merge (list (map (produceN (count fields)) (lambda (index)
 		(list (concat "c" index) (nth visible (+ 1 (* 2 index))))))
 		(mapIndex keys (lambda (index column) (list (concat "k" index) column))))))
+	/* A coarse first-axis bound avoids rescanning the already consumed
+	prefix. Text cursor keys use this exact native ASC relation, whose NULL
+	is first; the strict full-key residual still decides tuple membership. */
+	(define first_key (car keys))
+	(define first_info (sql_expr_info sources first_key))
+	(define seek (if (sql_text_type? (sql_info_type first_info))
+		(list 'not (list (collate (sql_collation_name first_info) false) first_key
+			(list 'if (list 'session "__tsql_parameter:__cursor:started")
+				(list 'session "__tsql_parameter:__cursor:key:0") nil))) true))
 	(define query (make_query_block (qb_schema query) sources (merge projections)
-		(combine_where (qb_where query) (list 'or
+		(combine_where (combine_where (qb_where query) seek) (list 'or
 			(list 'not (list 'session "__tsql_parameter:__cursor:started"))
 			(tsql_cursor_dynamic_after sources keys 0)))
 		nil nil (map keys (lambda (column) (list column <))) 1 nil '() '()

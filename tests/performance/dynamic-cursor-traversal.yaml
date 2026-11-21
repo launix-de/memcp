@@ -1,0 +1,46 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Complete composite dynamic traversal uses current keys without rescanning every prefix
+setup:
+- sql: DROP TABLE IF EXISTS cursor_walk_source
+- sql: CREATE TABLE cursor_walk_source(object_name VARCHAR(100) NOT NULL,permission_name VARCHAR(100)
+    NOT NULL,PRIMARY KEY(object_name,permission_name))
+- scm: "(insert (table \"memcp-tests\" false \"cursor_walk_source\" false nil) '(\"object_name\" \"permission_name\"\
+    )\n  (merge (map (produceN 128) (lambda (i)\n    (map '(\"UPDATE\" \"SELECT\" \"INSERT\" \"DELETE\"\
+    ) (lambda (permission)\n      (list (concat \"object_\" i) permission)))))))\n"
+cleanup:
+- sql: DROP TABLE IF EXISTS cursor_walk_source
+test_cases:
+- name: Every composite key is fetched exactly once and both result sets agree
+  expect:
+    result: []
+  threshold_ms: 60000
+  timeout: 60
+  performance_rows: 512
+  warmup: 0
+  timing_samples: 3
+  timing_aggregation: total
+  scm: "(begin\n  (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"memcp-tests\")\n \
+    \ (define output (newsession)) (output \"rows\" '())\n  (define close (lambda () (begin\n    (tx_rollback\
+    \ s) (tsql_cursor_close_all s) (tsql_temporary_close s))))\n  (define rows (try (lambda () (begin\n\
+    \    (tsql_execute_request \"memcp-tests\" \"BEGIN TRANSACTION;\\nCREATE TABLE #walk(object_name VARCHAR(100)\
+    \ NOT NULL,permission_name VARCHAR(100) NOT NULL,PRIMARY KEY(object_name,permission_name));\\nCREATE\
+    \ TABLE #present(object_name VARCHAR(100) NOT NULL,permission_name VARCHAR(100) NOT NULL,PRIMARY KEY(object_name,permission_name));\\\
+    nCREATE TABLE #seen(object_name VARCHAR(100) NOT NULL,permission_name VARCHAR(100) NOT NULL,PRIMARY\
+    \ KEY(object_name,permission_name));\\nINSERT #walk SELECT object_name,permission_name FROM cursor_walk_source;\\\
+    n\\nDELETE #seen;\\nDECLARE walk_cursor CURSOR FOR\\n  SELECT l.object_name,l.permission_name FROM\
+    \ #walk l\\n  LEFT JOIN #present r ON l.object_name COLLATE Latin1_General_CI_AS=r.object_name\\n\
+    \    AND l.permission_name COLLATE Latin1_General_CI_AS=r.permission_name\\n  WHERE r.object_name\
+    \ IS NULL;\\nDECLARE @object VARCHAR(100),@permission VARCHAR(100);\\nOPEN walk_cursor;\\nFETCH NEXT\
+    \ FROM walk_cursor INTO @object,@permission;\\nWHILE @@FETCH_STATUS=0\\nBEGIN\\n  INSERT #seen VALUES(@object,@permission);\\\
+    n  FETCH NEXT FROM walk_cursor INTO @object,@permission;\\nEND;\\nCLOSE walk_cursor;\\nDEALLOCATE\
+    \ walk_cursor;\\nSELECT l.object_name,l.permission_name FROM cursor_walk_source l\\n  LEFT JOIN #seen\
+    \ r ON l.object_name=r.object_name AND l.permission_name=r.permission_name\\n  WHERE r.object_name\
+    \ IS NULL\\nUNION ALL\\nSELECT r.object_name,r.permission_name FROM #seen r\\n  LEFT JOIN cursor_walk_source\
+    \ l ON l.object_name=r.object_name AND l.permission_name=r.permission_name\\n  WHERE l.object_name\
+    \ IS NULL;\\n\\nCOMMIT TRANSACTION;\" s nil 0\n      (lambda (row) (output \"rows\" (append (output\
+    \ \"rows\") row))) (lambda args true))\n    (output \"rows\")))\n    (lambda (failure) (begin (close)\
+    \ (error failure)))))\n  (close)\n  rows)"
