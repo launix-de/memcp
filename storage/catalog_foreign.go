@@ -102,14 +102,15 @@ func (snapshot *foreignMaintenanceSnapshot) validateLocked() {
 // The first profile admits declaration-only transactions: row mutations by
 // this owner are rejected by ordinary catalog admission before native effects.
 type publicCatalogViews struct {
-	keys           map[*table][]uniqueKey
-	checkedWriters map[*table]struct{}
-	history        []catalogDeclarationAmendment
-	blockedWriters map[*table]struct{}
-	tables         map[*table]*tableShowColumnsSnapshot
-	columnWriters  map[*table]struct{}
-	nullColumns    map[*table]map[string]struct{}
-	dropped        map[*table]struct{}
+	keys            map[*table][]uniqueKey
+	checkedWriters  map[*table]struct{}
+	history         []catalogDeclarationAmendment
+	blockedWriters  map[*table]struct{}
+	tables          map[*table]*tableShowColumnsSnapshot
+	columnWriters   map[*table]struct{}
+	nullColumns     map[*table]map[string]struct{}
+	appendedColumns map[*table]map[string]*column
+	dropped         map[*table]struct{}
 }
 
 type publicCatalogChanges struct {
@@ -899,7 +900,7 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 		}
 	}
 	for _, declaration := range defaults {
-		t := validateCatalogColumnDefault(db, declaration)
+		t := validateCatalogColumnDefault(db, declaration, changes.views.Load().tables)
 		if endpoints[t] == nil {
 			endpoint := &publicForeignEndpoint{table: t, checks: append([]*checkDeclaration(nil), t.Checks...), foreign: append([]foreignKey(nil), t.Foreign...), baselineWrapperBytes: changes.baselines[t].wrapperBytes}
 			endpoints[t] = endpoint

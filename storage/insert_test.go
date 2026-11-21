@@ -1062,7 +1062,7 @@ func TestUniqueNativeAfterInsertCanUpdatePublishedKey(t *testing.T) {
 	}
 	shard := tbl.ActiveShards()[0]
 	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(1)}), nil, true)
-	if !found || shard.rowValueByRecidLocked(id, "payload").String() != "after-insert" {
+	if !found || shard.rowValueByRecidLocked(id, "payload", nil, nil).String() != "after-insert" {
 		t.Fatal("native INSERT returned before its AFTER trigger's update")
 	}
 }

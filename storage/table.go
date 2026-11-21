@@ -566,6 +566,7 @@ func (t *table) hasDuplicateUniqueValues(cols []string, nullsNotDistinct bool, c
 		readAccesses[i] = shard.GetRead(currentTx, false)
 		shard = readAccesses[i].shard
 		shards[i] = shard
+		initializedColumns := shard.initializedColumnInput(currentTx)
 		func() {
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
@@ -581,7 +582,7 @@ func (t *table) hasDuplicateUniqueValues(cols []string, nullsNotDistinct bool, c
 				key := make([]scm.Scmer, len(cols))
 				hasNull := false
 				for i, col := range cols {
-					key[i] = shard.rowValueByRecidLocked(recid, col)
+					key[i] = shard.rowValueByRecidLocked(recid, col, currentTx, initializedColumns)
 					if key[i].IsNil() {
 						hasNull = true
 					}
@@ -2013,6 +2014,7 @@ func (t *table) metadataMemory() uint {
 		size += uint(cap(names.declarations)) * uint(unsafe.Sizeof((*column)(nil)))
 		// Ordinals extend the existing name-directory entries. Names still
 		// borrow column strings; there is no second column lookup directory.
+		size += names.initialBytes
 		size += uint(len(names.exact)+len(names.folded)) * uint(unsafe.Sizeof(int(0)))
 	}
 	if snapshot := t.showColumnsSnapshot.Load(); snapshot != nil && snapshot.metadata != nil {
@@ -2258,6 +2260,8 @@ type tableShowColumnsMetadata struct {
 type tableColumnNamesSnapshot struct {
 	declarations            []*column // immutable directory; column fields retain existing ownership
 	hasDeclaredComputations bool
+	initialByShard          map[uuid.UUID]*nativeColumnInitialInput
+	initialBytes            uint
 	exact                   map[string]tableColumnName
 	folded                  map[string]tableColumnName
 }
@@ -2427,7 +2431,33 @@ func (t *table) buildColumnNamesSnapshot(columns []*column) *tableColumnNamesSna
 	exact := make(map[string]tableColumnName, len(columns))
 	folded := make(map[string]tableColumnName, len(columns))
 	hasDeclaredComputations := false
+	var initialByShard map[uuid.UUID]*nativeColumnInitialInput
+	var initialBytes uint
 	for i, c := range columns {
+		if !isRuntimeComputedColumn(c) && c.ComputorDefinition == nil {
+			value := c.InitialValue
+			if c.recoverPersisted != nil && !value.IsNil() {
+				value = c.recoverPersisted(value)
+			}
+			for id, extent := range c.InitialValues {
+				identity, err := uuid.Parse(id)
+				if err != nil {
+					panic("invalid native column initialization identity")
+				}
+				if initialByShard == nil {
+					initialByShard = make(map[uuid.UUID]*nativeColumnInitialInput)
+					initialBytes += 64
+				}
+				input := initialByShard[identity]
+				if input == nil {
+					input = &nativeColumnInitialInput{fields: make(map[string]columnRecoveryValue)}
+					initialByShard[identity] = input
+					initialBytes += 128 + uint(unsafe.Sizeof(*input)) + 64
+				}
+				input.fields[c.Name] = columnRecoveryValue{Value: value, columnInitialExtent: extent}
+				initialBytes += 128 + scm.ComputeSize(value) - uint(unsafe.Sizeof(scm.Scmer{}))
+			}
+		}
 		computed := c.ComputorDefinition != nil
 		hasDeclaredComputations = hasDeclaredComputations || computed
 		entry := tableColumnName{name: c.Name, ordinal: i, computed: computed}
@@ -2440,7 +2470,7 @@ func (t *table) buildColumnNamesSnapshot(columns []*column) *tableColumnNamesSna
 			folded[foldedName] = entry
 		}
 	}
-	return &tableColumnNamesSnapshot{declarations: append([]*column(nil), columns...), exact: exact, folded: folded, hasDeclaredComputations: hasDeclaredComputations}
+	return &tableColumnNamesSnapshot{declarations: append([]*column(nil), columns...), exact: exact, folded: folded, hasDeclaredComputations: hasDeclaredComputations, initialByShard: initialByShard, initialBytes: initialBytes}
 }
 
 func (t *table) publishColumnNamesSnapshot() *tableColumnNamesSnapshot {

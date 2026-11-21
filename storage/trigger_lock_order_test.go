@@ -556,7 +556,7 @@ func TestBeforeUpdateForwardsTriggerValuesAfterRebuildCompletion(t *testing.T) {
 	var values []int
 	for id := uint32(0); id < rebuilt.main_count+uint32(len(rebuilt.deltaRows())); id++ {
 		if !rebuilt.deletions.Get(uint(id)) {
-			values = append(values, scm.ToInt(rebuilt.rowValueByRecidLocked(id, "id")))
+			values = append(values, scm.ToInt(rebuilt.rowValueByRecidLocked(id, "id", nil, nil)))
 		}
 	}
 	if len(values) != 1 || values[0] != 3 {

@@ -209,6 +209,7 @@ func recMapReadTarget(currentTx *TxContext, target recMapTarget, columns []strin
 	target.shard.ensureLoaded()
 	skipShardReadLock := target.shard.hasWriteOwnerForTx(currentTx)
 	target.shard.ensureMainCount(skipShardReadLock, currentTx)
+	initializedColumns := target.shard.initializedColumnInput(currentTx)
 	storages := make([]ColumnStorage, len(columns))
 	readers := make([]ColumnReader, len(columns))
 	for i, column := range columns {
@@ -229,7 +230,7 @@ func recMapReadTarget(currentTx *TxContext, target recMapTarget, columns []strin
 		} else if _, proxy := storages[i].(*StorageComputeProxy); proxy {
 			values[i] = readers[i].GetValue(target.recid)
 		} else {
-			values[i] = target.shard.getDelta(int(target.recid-target.shard.main_count), column)
+			values[i] = target.shard.getDeltaInput(int(target.recid-target.shard.main_count), column, initializedColumns)
 		}
 	}
 	return scm.Apply(mapper, values...)
@@ -284,6 +285,7 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 			shard.ensureLoaded()
 			skipShardReadLock := shard.hasWriteOwnerForTx(currentTx)
 			shard.ensureMainCount(skipShardReadLock, currentTx)
+			initializedColumns := shard.initializedColumnInput(currentTx)
 			storages := make([]ColumnStorage, len(columns))
 			readers := make([]ColumnReader, len(columns))
 			for i, column := range columns {
@@ -305,7 +307,7 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 					} else if _, proxy := storages[i].(*StorageComputeProxy); proxy {
 						position.values[i] = readers[i].GetValue(position.target.recid)
 					} else {
-						position.values[i] = shard.getDelta(int(position.target.recid-shard.main_count), column)
+						position.values[i] = shard.getDeltaInput(int(position.target.recid-shard.main_count), column, initializedColumns)
 					}
 				}
 			}
@@ -999,6 +1001,7 @@ func fillRecMapOrderValues(currentTx *TxContext, rows []recMapOrderRow, sides, c
 				shard.ensureLoaded()
 				skipLock := shard.hasWriteOwnerForTx(currentTx)
 				shard.ensureMainCount(skipLock, currentTx)
+				initializedColumns := shard.initializedColumnInput(currentTx)
 				storage := shard.getColumnStorageOrPanic(columns[column], skipLock, currentTx)
 				hints := ReadAuto
 				if currentTx != nil && currentTx.queryActive.Load() {
@@ -1019,7 +1022,7 @@ func fillRecMapOrderValues(currentTx *TxContext, rows []recMapOrderRow, sides, c
 					} else if _, proxy := storage.(*StorageComputeProxy); proxy {
 						rows[rowIndex].values[column] = reader.GetValue(recid)
 					} else {
-						rows[rowIndex].values[column] = shard.getDelta(int(recid-shard.main_count), columns[column])
+						rows[rowIndex].values[column] = shard.getDeltaInput(int(recid-shard.main_count), columns[column], initializedColumns)
 					}
 				}
 			}()
@@ -1158,6 +1161,7 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 			part.sourceShard.ensureLoaded()
 			skipLock := part.sourceShard.hasWriteOwnerForTx(currentTx)
 			part.sourceShard.ensureMainCount(skipLock, currentTx)
+			initializedColumns := part.sourceShard.initializedColumnInput(currentTx)
 			storages := make([]ColumnStorage, len(sourceCols))
 			for i, column := range sourceCols {
 				storages[i] = part.sourceShard.getColumnStorageOrPanic(column, skipLock, currentTx)
@@ -1174,7 +1178,7 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 					} else if _, proxy := storages[columnIndex].(*StorageComputeProxy); proxy {
 						values[columnIndex] = storages[columnIndex].GetValue(recid)
 					} else {
-						values[columnIndex] = part.sourceShard.getDelta(int(recid-part.sourceShard.main_count), column)
+						values[columnIndex] = part.sourceShard.getDeltaInput(int(recid-part.sourceShard.main_count), column, initializedColumns)
 					}
 				}
 				rows = append(rows, recMapSourceRow{shard: part.sourceShard, recid: recid, key: values, target: part.targets[i]})
@@ -1194,6 +1198,7 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 			shard.ensureLoaded()
 			skipLock := shard.hasWriteOwnerForTx(currentTx)
 			shard.ensureMainCount(skipLock, currentTx)
+			initializedColumns := shard.initializedColumnInput(currentTx)
 			storages := make([]ColumnStorage, len(previousTargetCols))
 			for i, column := range previousTargetCols {
 				storages[i] = shard.getColumnStorageOrPanic(column, skipLock, currentTx)
@@ -1211,7 +1216,7 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 					} else if _, proxy := storages[columnIndex].(*StorageComputeProxy); proxy {
 						value = storages[columnIndex].GetValue(previousTarget.recid)
 					} else {
-						value = shard.getDelta(int(previousTarget.recid-shard.main_count), column)
+						value = shard.getDeltaInput(int(previousTarget.recid-shard.main_count), column, initializedColumns)
 					}
 					rows[position].key = append(rows[position].key, value)
 				}
@@ -1290,6 +1295,7 @@ func (r *recSet) collectRecMapRows(currentTx *TxContext, sourceKeyCols []string,
 			shard.ensureLoaded()
 			skipShardReadLock := shard.hasWriteOwnerForTx(currentTx)
 			shard.ensureMainCount(skipShardReadLock, currentTx)
+			initializedColumns := shard.initializedColumnInput(currentTx)
 			allCols := append(append([]string(nil), sourceKeyCols...), valueCols...)
 			columns := make([]ColumnStorage, len(allCols))
 			readers := make([]ColumnReader, len(allCols))
@@ -1328,7 +1334,7 @@ func (r *recSet) collectRecMapRows(currentTx *TxContext, sourceKeyCols []string,
 					} else if _, proxy := columns[i].(*StorageComputeProxy); proxy {
 						item = readers[i].GetValue(recid)
 					} else {
-						item = shard.getDelta(int(recid-shard.main_count), column)
+						item = shard.getDeltaInput(int(recid-shard.main_count), column, initializedColumns)
 					}
 					if i < len(sourceKeyCols) {
 						key[i] = item

@@ -111,8 +111,13 @@ func (changes *publicCatalogChanges) acquireStoredColumnLease(tx *TxContext, t *
 			changes.anchor = lease
 		}
 	}
+	lease := changes.leases[t]
 	return func(accepted bool) {
 		if !accepted && acquired {
+			// A failed waiting prefix cannot retire a replacement constructor's lease.
+			if changes.leases[t] != lease {
+				return
+			}
 			// A waiting append releases changes.mu. A successful sibling may then
 			// publish an amendment borrowing this same lease. The actual accepted
 			// view/blocked root owns it now; a failed prefix must not retire it.
@@ -319,6 +324,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	writers := make(map[*table]struct{})
 	blocked := make(map[*table]struct{})
 	nullColumns := make(map[*table]map[string]struct{})
+	appendedColumns := make(map[*table]map[string]*column)
 	dropped := make(map[*table]struct{})
 	for _, entry := range history {
 		if key := entry.publicKey; key != nil {
@@ -357,10 +363,22 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 		if amendment := entry.column; amendment != nil {
 			if amendment.appendDeclaration != nil {
 				blocked[amendment.table] = struct{}{}
-				if nullColumns[amendment.table] == nil {
-					nullColumns[amendment.table] = make(map[string]struct{})
+				if appendedColumns[amendment.table] == nil {
+					appendedColumns[amendment.table] = make(map[string]*column)
 				}
-				nullColumns[amendment.table][amendment.appendDeclaration.Name] = struct{}{}
+				name := amendment.appendDeclaration.Name
+				for _, c := range amendment.columns {
+					if c.Name == name {
+						appendedColumns[amendment.table][name] = c
+						break
+					}
+				}
+				if amendment.appendDeclaration.Initialization == nil {
+					if nullColumns[amendment.table] == nil {
+						nullColumns[amendment.table] = make(map[string]struct{})
+					}
+					nullColumns[amendment.table][name] = struct{}{}
+				}
 			} else {
 				writers[amendment.table] = struct{}{}
 			}
@@ -386,7 +404,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	for t := range changes.leases {
 		t.setGuardedCatalogDeclarationInput(changes.owner, guarded[t])
 	}
-	changes.views.Store(&publicCatalogViews{keys: keys, tables: tables, columnWriters: writers, nullColumns: nullColumns, blockedWriters: blocked, dropped: dropped, checkedWriters: checked, history: history})
+	changes.views.Store(&publicCatalogViews{keys: keys, tables: tables, columnWriters: writers, nullColumns: nullColumns, appendedColumns: appendedColumns, blockedWriters: blocked, dropped: dropped, checkedWriters: checked, history: history})
 }
 
 func replaceStoredColumnMetadata(t *table, base *tableShowColumnsSnapshot, columns []*column) (*tableShowColumnsSnapshot, uint) {
@@ -404,7 +422,7 @@ func replaceStoredColumnMetadata(t *table, base *tableShowColumnsSnapshot, colum
 		result.value = result.metadata.columnRows
 		result.metadata.constraints, result.metadata.foreignByID = base.metadata.constraints, base.metadata.foreignByID
 		result.metadata.declarations = buildTableDeclarations(result.metadata.columnRows, result.metadata.constraints)
-		bytes := prefixBytes + uint(unsafe.Sizeof(*result)) + uint(unsafe.Sizeof(*result.metadata)) + uint(unsafe.Sizeof(*names))
+		bytes := prefixBytes + uint(unsafe.Sizeof(*result)) + uint(unsafe.Sizeof(*result.metadata)) + uint(unsafe.Sizeof(*names)) + names.initialBytes
 		bytes += scm.ComputeSize(result.value) + scm.ComputeSize(result.plannerValue) + scm.ComputeSize(result.metadata.declarations)
 		bytes += uint(cap(names.declarations))*uint(unsafe.Sizeof((*column)(nil))) + uint(len(names.exact)+len(names.folded))*uint(unsafe.Sizeof(tableColumnName{}))
 		return result, bytes
@@ -452,6 +470,12 @@ func storedColumnBytes(c *column) uint {
 	bytes := uint(unsafe.Sizeof(*c)) + uint(len(c.DefaultExpression)+len(c.DefaultName))
 	bytes += uint(cap(c.Typdimensions))*uint(unsafe.Sizeof(int(0))) + uint(cap(c.EnumValues))*uint(unsafe.Sizeof(""))
 	bytes += 64 * uint(len(c.DeclarationProperties))
+	if c.InitialValues != nil {
+		bytes += 64 + 64*uint(len(c.InitialValues)) + scm.ComputeSize(c.InitialValue) - uint(unsafe.Sizeof(scm.Scmer{}))
+		for id := range c.InitialValues {
+			bytes += uint(len(id))
+		}
+	}
 	return bytes + scm.ComputeSize(c.Default) - uint(unsafe.Sizeof(scm.Scmer{}))
 }
 
@@ -514,12 +538,16 @@ func publicStoredColumnInputs(history []catalogDeclarationAmendment) map[*table]
 	return result
 }
 
-func validateCatalogColumnDefault(db *database, declaration catalogColumnDefaultDeclaration) *table {
+func validateCatalogColumnDefault(db *database, declaration catalogColumnDefaultDeclaration, views ...map[*table]*tableShowColumnsSnapshot) *table {
 	t := db.tables.Get(declaration.Table)
 	if t == nil || t.RuntimeIdentity != declaration.Identity || !t.committedAt(db.catalogView().version) {
 		panic("default declaration endpoint generation was replaced")
 	}
-	for _, column := range t.Columns {
+	columns := t.Columns
+	if len(views) > 0 {
+		columns = catalogColumnsInView(t, views[0])
+	}
+	for _, column := range columns {
 		if column.Name == declaration.Column {
 			if column.IsTemp || column.ComputorDefinition != nil || isRuntimeComputedColumn(column) {
 				panic("default declaration requires an ordinary stored column")

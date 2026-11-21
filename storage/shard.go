@@ -888,8 +888,8 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool, cu
 // (Go's write-preferring RWMutex queues new readers behind pending writers).
 // Panics if the column is missing or not yet loaded from disk.
 func (u *storageShard) getColumnStorageRLocked(colName string, tx *TxContext) ColumnStorage {
-	if tx.pendingNullColumn(u.t, colName) {
-		return new(StorageSparse)
+	if storage := u.pendingAppendedStorage(tx, colName); storage != nil {
+		return storage
 	}
 	cs, present := u.columns[colName]
 	if !present {
@@ -904,8 +904,8 @@ func (u *storageShard) getColumnStorageRLocked(colName string, tx *TxContext) Co
 // getColumnStorageOrPanic returns a stable column storage. Callers must state
 // whether they already hold u.mu; lock ownership is never inferred implicitly.
 func (u *storageShard) getColumnStorageOrPanic(colName string, alreadyLocked bool, currentTx *TxContext) ColumnStorage {
-	if currentTx.pendingNullColumn(u.t, colName) {
-		return new(StorageSparse)
+	if storage := u.pendingAppendedStorage(currentTx, colName); storage != nil {
+		return storage
 	}
 	if alreadyLocked {
 		cs, present := u.columns[colName]
@@ -918,7 +918,7 @@ func (u *storageShard) getColumnStorageOrPanic(colName string, alreadyLocked boo
 				if proxy := u.makeComputedColumnProxy(colName, col); proxy != nil {
 					u.columns[colName] = proxy
 				} else {
-					u.columns[colName] = new(StorageSparse)
+					u.columns[colName] = initialMainStorage(col, u.uuid.String())
 				}
 				return u.columns[colName]
 			}
@@ -944,7 +944,7 @@ func (u *storageShard) getColumnStorageOrPanic(colName string, alreadyLocked boo
 				if proxy := u.makeComputedColumnProxy(colName, col); proxy != nil {
 					u.columns[colName] = proxy
 				} else {
-					u.columns[colName] = new(StorageSparse)
+					u.columns[colName] = initialMainStorage(col, u.uuid.String())
 				}
 			}
 			cs2 := u.columns[colName]
@@ -1515,17 +1515,17 @@ func (t *storageShard) hasWriteOwnerForTx(currentTx *TxContext) bool {
 }
 
 // rowValueByRecidLocked reads a column value for a recid. Caller must hold t.mu.
-func (t *storageShard) rowValueByRecidLocked(recid uint32, col string) scm.Scmer {
+func (t *storageShard) rowValueByRecidLocked(recid uint32, col string, tx *TxContext, initial *nativeColumnInitialInput) scm.Scmer {
 	if recid < t.main_count {
-		cs := t.getColumnStorageOrPanic(col, true, nil)
+		cs := t.getColumnStorageOrPanic(col, true, tx)
 		return cs.GetValue(recid)
 	}
-	return t.getDelta(int(recid-t.main_count), col)
+	return t.getDeltaInput(int(recid-t.main_count), col, initial)
 }
 
 // resolveVisiblePrimaryRecidLocked maps a stale/deleted recid to the currently
 // visible row with the same PRIMARY key. Caller must hold t.mu.
-func (t *storageShard) resolveVisiblePrimaryRecidLocked(staleRecid uint32, input *nativeMutationInput) (uint32, bool) {
+func (t *storageShard) resolveVisiblePrimaryRecidLocked(staleRecid uint32, input *nativeMutationInput, tx *TxContext, initial *nativeColumnInitialInput) (uint32, bool) {
 	var primaryCols []string
 	for _, uk := range mutationUniqueKeys(t.t, input) {
 		if uk.Id == "PRIMARY" {
@@ -1539,7 +1539,7 @@ func (t *storageShard) resolveVisiblePrimaryRecidLocked(staleRecid uint32, input
 
 	key := make([]scm.Scmer, len(primaryCols))
 	for i, col := range primaryCols {
-		key[i] = t.rowValueByRecidLocked(staleRecid, col)
+		key[i] = t.rowValueByRecidLocked(staleRecid, col, tx, initial)
 	}
 
 	limit := t.main_count + uint32(len(t.deltaRows()))
@@ -1550,7 +1550,7 @@ func (t *storageShard) resolveVisiblePrimaryRecidLocked(staleRecid uint32, input
 		}
 		match := true
 		for i, col := range primaryCols {
-			if !scm.Equal(t.rowValueByRecidLocked(candidate, col), key[i]) {
+			if !scm.Equal(t.rowValueByRecidLocked(candidate, col, tx, initial), key[i]) {
 				match = false
 				break
 			}
@@ -1565,11 +1565,12 @@ func (t *storageShard) resolveVisiblePrimaryRecidLocked(staleRecid uint32, input
 func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocked bool, currentTx *TxContext, uniqueGuard *uniqueWriteGuard) func(...scm.Scmer) scm.Scmer {
 	input := currentTx.mutationInputFor(t.t)
 	declarations := mutationColumns(t.t, currentTx, input)
+	initializedColumns := t.initializedColumnInput(currentTx)
 	var eventWriter *nativeMutationEventWriter
 	if withTrigger && currentTx != nil && currentTx.mutationOperation != nil {
 		eventWriter = currentTx.mutationOperation.eventWriter(t)
 	}
-	update := t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, nil, currentTx, uniqueGuard, eventWriter, declarations, input)
+	update := t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, nil, currentTx, uniqueGuard, eventWriter, declarations, input, initializedColumns)
 	return func(a ...scm.Scmer) scm.Scmer {
 		if currentTx != nil && currentTx.mutationOperation != nil {
 			leave := currentTx.mutationOperation.borrowMutation(currentTx)
@@ -1589,13 +1590,13 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 		t.t.beginContributionMutation()
 		defer t.t.endContributionMutation()
 		if uniqueGuard == nil && !alreadyLocked {
-			guard, current, found := t.guardUniqueRow(idx, currentTx, input)
+			guard, current, found := t.guardUniqueRow(idx, currentTx, input, initializedColumns)
 			if !found {
 				return scm.NewBool(false)
 			}
 			if guard != nil {
 				defer guard.release()
-				return t.UpdateFunctionBatch(current, withTrigger, alreadyLocked, nil, nil, currentTx, guard, eventWriter, declarations, input)(a...)
+				return t.UpdateFunctionBatch(current, withTrigger, alreadyLocked, nil, nil, currentTx, guard, eventWriter, declarations, input, initializedColumns)(a...)
 			}
 		}
 		return update(a...)
@@ -1616,7 +1617,7 @@ func isRuntimeComputedColumn(colDesc *column) bool {
 	return len(colDesc.OrcSortCols) > 0 || !colDesc.Computor.IsNil() || len(colDesc.ComputorInputCols) > 0
 }
 
-func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, eventWriter *nativeMutationEventWriter, declarations []*column, input *nativeMutationInput) func(...scm.Scmer) scm.Scmer {
+func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, eventWriter *nativeMutationEventWriter, declarations []*column, input *nativeMutationInput, initializedColumns *nativeColumnInitialInput) func(...scm.Scmer) scm.Scmer {
 	initialUniqueGuard := uniqueGuard
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
@@ -1727,7 +1728,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				if (currentTx == nil || currentTx.Mode != TxACID) && t.deletions.Get(uint(targetIdx)) {
 					followed := false
 					for attempt := 0; attempt < 256; attempt++ {
-						if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(targetIdx, input); ok {
+						if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(targetIdx, input, currentTx, initializedColumns); ok {
 							targetIdx = followIdx
 							followed = true
 							break
@@ -1769,7 +1770,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						continue
 					}
 					k := colDesc.Name
-					cs := t.getColumnStorageOrPanic(k, true, nil)
+					cs := t.getColumnStorageOrPanic(k, true, currentTx)
 					colidx, ok := t.deltaColumns[k]
 					if !ok {
 						colidx = len(t.deltaColumns)
@@ -1781,7 +1782,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					if targetIdx < t.main_count {
 						d2[colidx] = cs.GetValue(targetIdx)
 					} else {
-						d2[colidx] = t.getDelta(int(targetIdx-t.main_count), k)
+						d2[colidx] = t.getDeltaInput(int(targetIdx-t.main_count), k, initializedColumns)
 					}
 				}
 				buildPayload := func() ([]string, []scm.Scmer) {
@@ -1928,7 +1929,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					payloadCols, payloadRow := buildPayload()
 					oldRow := make([]scm.Scmer, len(payloadCols))
 					for i, name := range payloadCols {
-						oldRow[i] = t.rowValueByRecidLocked(targetIdx, name)
+						oldRow[i] = t.rowValueByRecidLocked(targetIdx, name, currentTx, initializedColumns)
 					}
 					needed := t.t.guardUniqueWrites(payloadCols, [][]scm.Scmer{payloadRow}, false, 0, currentTx, input)
 					oldKeys := t.t.guardUniqueWrites(payloadCols, [][]scm.Scmer{oldRow}, false, 0, currentTx, input)
@@ -2024,11 +2025,11 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 							row[i] = scm.NewNil()
 							continue
 						}
-						cs := t.getColumnStorageOrPanic(col.Name, true, nil)
+						cs := t.getColumnStorageOrPanic(col.Name, true, currentTx)
 						if idx < t.main_count {
 							row[i] = cs.GetValue(idx)
 						} else {
-							row[i] = t.getDelta(int(idx-t.main_count), col.Name)
+							row[i] = t.getDeltaInput(int(idx-t.main_count), col.Name, initializedColumns)
 						}
 					}
 					return row
@@ -2345,13 +2346,14 @@ type shardColumnReader struct {
 	main     ColumnReader
 	column   string
 	computed bool
+	input    *nativeColumnInitialInput
 }
 
 func (r *shardColumnReader) GetValue(idx uint32) scm.Scmer {
 	if idx < r.shard.main_count || r.computed {
 		return r.main.GetValue(idx)
 	}
-	return r.shard.getDelta(int(idx-r.shard.main_count), r.column)
+	return r.shard.getDeltaInput(int(idx-r.shard.main_count), r.column, r.input)
 }
 
 func (r *shardColumnReader) GetValueMulti(rows []uint32, target []scm.Scmer, stride int) {
@@ -2387,7 +2389,7 @@ func (t *storageShard) ColumnReaderTx(tx *TxContext, col string, alreadyLocked b
 	}
 	reader := newCachedColumnReaderTx(cstorage, tx, alreadyLocked || writeLocked, hints)
 	_, computed := cstorage.(*StorageComputeProxy)
-	return &shardColumnReader{shard: t, main: reader, column: col, computed: computed}
+	return &shardColumnReader{shard: t, main: reader, column: col, computed: computed, input: t.initializedColumnInput(tx)}
 }
 
 // breakSentinel is the panic value injected by $break pseudo-column closures.
@@ -2476,6 +2478,7 @@ type ShardMapReducer struct {
 	mapReduceScmer    scm.Scmer // original Scmer for network serialization
 	eventWriter       *nativeMutationEventWriter
 	mutationInput     *nativeMutationInput
+	columnInput       *nativeColumnInitialInput
 	mutationColumns   []*column            // one effective declaration contract per native input
 	dataInputReleases []func()             // operator-owned target data views, never row-owned leases
 	mutationFrame     *nativeMutationFrame // borrowed row/UNIQUE/batch callback payload
@@ -2625,7 +2628,7 @@ func (m *ShardMapReducer) prepareJITBufferReducer() {
 // MapOne evaluates the mapper for one already-visible record. Ordered scans use
 // this outside shard locks for predicates that must run after global ordering.
 func (m *ShardMapReducer) beginUniqueRow(id uint32) (uint32, bool) {
-	guard, current, found := m.shard.guardUniqueRow(id, m.currentTx, m.mutationInput)
+	guard, current, found := m.shard.guardUniqueRow(id, m.currentTx, m.mutationInput, m.columnInput)
 	m.uniqueGuard = guard
 	return current, found
 }
@@ -2720,6 +2723,7 @@ func (m *ShardMapReducer) callMutationMapper(body func() scm.Scmer) scm.Scmer {
 // mutation metadata. Retained operators allocate it through OpenMapReducer.
 func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext) {
 	*mr = ShardMapReducer{
+		columnInput:      t.initializedColumnInput(currentTx),
 		shard:            t,
 		currentTx:        currentTx,
 		mutationInput:    currentTx.mutationInputFor(t.t),
@@ -2996,7 +3000,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 		if needsMutationMetadata && mr.isUpdate[i] {
 			getter := func(id uint32, batchid uint32) scm.Scmer {
 				borrowedLock := mr.shardWriteLocked && (mr.currentTx == nil || mr.currentTx.mutationOperation == nil)
-				return mr.bindMutationCallback(mr.shard.UpdateFunctionBatch(id, true, borrowedLock, mr.deleteBatch, &mr.deletedRows, mr.currentTx, mr.uniqueGuard, mr.eventWriter, mr.mutationColumns, mr.mutationInput))
+				return mr.bindMutationCallback(mr.shard.UpdateFunctionBatch(id, true, borrowedLock, mr.deleteBatch, &mr.deletedRows, mr.currentTx, mr.uniqueGuard, mr.eventWriter, mr.mutationColumns, mr.mutationInput, mr.columnInput))
 			}
 			mr.mainGetters[i] = getter
 			mr.deltaGetters[i] = getter
@@ -3016,7 +3020,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			}
 		} else {
 			mr.deltaGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
-				return mr.shard.getDelta(int(id-mr.mainCount), colName)
+				return mr.shard.getDeltaInput(int(id-mr.mainCount), colName, mr.columnInput)
 			}
 		}
 	}
@@ -3164,7 +3168,7 @@ func (m *ShardMapReducer) loadDirectReadArgs(id uint32, rowOffset int, useBulkVa
 				m.args[i+1] = m.mainBulkReaders[i].GetValue(id)
 			}
 		} else {
-			m.args[i+1] = m.shard.getDelta(int(id-m.mainCount), m.colNames[i])
+			m.args[i+1] = m.shard.getDeltaInput(int(id-m.mainCount), m.colNames[i], m.columnInput)
 		}
 	}
 }
@@ -3415,7 +3419,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 			if m.hasUpdateCol || m.hasIncrementCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
-						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID, m.mutationInput)
+						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID, m.mutationInput, m.currentTx, m.columnInput)
 						if !ok {
 							return
 						}
@@ -3480,7 +3484,7 @@ func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, 
 			if m.hasUpdateCol || m.hasIncrementCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
-						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID, m.mutationInput)
+						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID, m.mutationInput, m.currentTx, m.columnInput)
 						if !ok {
 							return
 						}
@@ -3536,7 +3540,7 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 			if m.hasUpdateCol || m.hasIncrementCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
-						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID, m.mutationInput)
+						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID, m.mutationInput, m.currentTx, m.columnInput)
 						if !ok {
 							return
 						}
@@ -3587,7 +3591,7 @@ func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32,
 			if m.hasUpdateCol || m.hasIncrementCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
-						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID, m.mutationInput)
+						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID, m.mutationInput, m.currentTx, m.columnInput)
 						if !ok {
 							return
 						}
@@ -4204,6 +4208,7 @@ func releaseUniqueLookupScratch(scratch *uniqueLookupScratch, columns int) {
 }
 
 func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxContext, checkReservations bool) (result uint32, present bool) {
+	initializedColumns := t.initializedColumnInput(currentTx)
 	access = t.t.uniqueAccess(access)
 	columns := access.len()
 	scratch := acquireUniqueLookupScratch()
@@ -4288,7 +4293,7 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 			} else {
 				// Delta storage: use getDelta
 				for j := 0; j < columns; j++ {
-					if !uniqueColumnValuesEqual(declarations[j], t.getDelta(int(idx-mainCount), access.boundaryColumn(j)), access.boundValue(j, false)) {
+					if !uniqueColumnValuesEqual(declarations[j], t.getDeltaInput(int(idx-mainCount), access.boundaryColumn(j), initializedColumns), access.boundValue(j, false)) {
 						matched = false
 						break
 					}
@@ -4325,6 +4330,7 @@ type filteredRowEstimate struct {
 }
 
 func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition scm.Scmer, limit int, currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer) filteredRowEstimate {
+	initializedColumns := t.initializedColumnInput(currentTx)
 	if limit <= 0 {
 		limit = 1024
 	}
@@ -4414,7 +4420,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 					} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 						cdataset[i] = ccols[i].GetValue(idx)
 					} else {
-						cdataset[i] = t.getDelta(int(idx-mainCount), col)
+						cdataset[i] = t.getDeltaInput(int(idx-mainCount), col, initializedColumns)
 					}
 				}
 			}
@@ -4704,6 +4710,7 @@ func replayRebuiltRows(reader ColumnReader, mainRecids []uint32, mainMask []bool
 
 // rebuild main storage from main+delta
 func (t *storageShard) rebuild(all bool) *storageShard {
+	initializedColumns := t.initializedColumnInput(nil)
 	if cell := t.coherence.Load(); cell != nil && cell.engine != nil && cell.engine.cluster != nil && cell.resolved().ownstate.Phase() != mosi.M {
 		return t
 	}
@@ -4774,6 +4781,13 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				columnSnapshot = make(map[string]ColumnStorage, len(t.columns))
 				for col, storage := range t.columns {
 					columnSnapshot[col] = storage
+				}
+				if initializedColumns != nil {
+					for name, c := range initializedColumns.fields {
+						if _, found := columnSnapshot[name]; !found {
+							columnSnapshot[name] = &StorageConst{value: c.Value, count: uint64(c.MainRows)}
+						}
+					}
 				}
 				indexSnapshot = snapshotIndexesForRebuild(t.Indexes, 0.9)
 				deltaColumnsSnapshot = make(map[string]int, len(t.deltaColumns))
@@ -4887,6 +4901,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		rebuildIndexes(indexSnapshot, result, true)
 
 		getDelta := func(idx int, col string) scm.Scmer {
+			if value, ok := initialColumnValue(initializedColumns, col, idx); ok {
+				return value
+			}
 			item := insertsSnapshot[idx]
 			if colidx, ok := deltaColumnsSnapshot[col]; ok && colidx < len(item) {
 				return item[colidx]

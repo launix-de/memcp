@@ -54,6 +54,10 @@ type tableWriteLease struct {
 	transaction *transactionState
 	declaration bool
 	once        sync.Once
+	// The existing declaration lease may retain schema stability for private
+	// initialized slots until this same original transaction releases it.
+	ddlOnce  sync.Once
+	ddlTable atomic.Pointer[table]
 }
 
 // A checked statement keeps its real table writer exclusion through producer
@@ -120,12 +124,40 @@ func (lease *statementTableWriteLease) Close() error {
 	return nil
 }
 
+// All callers release amendment/schema/shard mutexes before entering Do.
+// Concurrent constructors of one original T reuse this exact retained owner.
+func (lease *tableWriteLease) retainDDL(t *table, transaction *transactionState) {
+	if lease == nil || !lease.declaration {
+		panic("private initialized column requires its declaration lease")
+	}
+	owner := &t.writeAdmission
+	lease.ddlOnce.Do(func() {
+		t.ddlMu.Lock()
+		owner.mu.Lock()
+		valid := lease.owner == owner && lease.transaction == transaction && owner.declaration == transaction
+		if valid {
+			lease.ddlTable.Store(t)
+		}
+		owner.mu.Unlock()
+		if !valid {
+			t.ddlMu.Unlock()
+			panic("private initialized column lost its declaration lease while waiting")
+		}
+	})
+	if lease.ddlTable.Load() != t {
+		panic("private column DDL lease changed endpoint")
+	}
+}
+
 func (lease *tableWriteLease) Close() error {
 	lease.once.Do(func() {
 		owner := lease.owner
 		owner.mu.Lock()
 		defer owner.mu.Unlock()
 		owner.finishSerializableWriteLocked(lease.transaction)
+		if t := lease.ddlTable.Swap(nil); t != nil {
+			t.ddlMu.Unlock()
+		}
 		if lease.declaration {
 			if owner.declaration != lease.transaction {
 				panic("native declaration admission lost its owner")

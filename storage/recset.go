@@ -566,6 +566,7 @@ func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessV
 }
 
 func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
+	initializedColumns := t.initializedColumnInput(currentTx)
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := scanAccessCoversResidual(access) ||
 		conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
@@ -676,7 +677,7 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 					cdataset[i] = cReaders[i].GetValue(idx)
 				} else {
-					cdataset[i] = t.getDelta(int(idx-t.main_count), col)
+					cdataset[i] = t.getDeltaInput(int(idx-t.main_count), col, initializedColumns)
 				}
 			}
 		}
@@ -1080,6 +1081,7 @@ func (r *recSet) collectKeys(currentTx *TxContext, sourceKeyCols []string, ss *s
 }
 
 func (t *storageShard) collectKeys(part *recSetShard, sourceKeyCols []string, currentTx *TxContext, ss *scm.SessionState, dst []scm.Scmer, includeNull bool) int {
+	initializedColumns := t.initializedColumnInput(currentTx)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock, currentTx)
@@ -1159,7 +1161,7 @@ func (t *storageShard) collectKeys(part *recSetShard, sourceKeyCols []string, cu
 				if _, isProxy := cols[i].(*StorageComputeProxy); isProxy {
 					dst[write+i] = cols[i].GetValue(idx)
 				} else {
-					dst[write+i] = t.getDelta(int(idx-mainCount), col)
+					dst[write+i] = t.getDeltaInput(int(idx-mainCount), col, initializedColumns)
 				}
 				if !includeNull && dst[write+i].IsNil() {
 					skip = true
@@ -1283,6 +1285,7 @@ func (t *storageShard) hasEqualityIndexPrefix(currentTx *TxContext, cols []strin
 // write lock and has loaded the key columns. No lazy load or lock wait is safe
 // inside that critical section.
 func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState, numeric bool, alreadyLocked bool) recSetShard {
+	initializedColumns := t.initializedColumnInput(currentTx)
 	if !alreadyLocked {
 		t.ensureLoaded()
 	}
@@ -1342,7 +1345,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 				} else if _, proxy := targetCols[col].(*StorageComputeProxy); proxy {
 					actual[col] = targetCols[col].GetValue(idx)
 				} else {
-					actual[col] = t.getDelta(int(idx-t.main_count), targetKeyCols[col])
+					actual[col] = t.getDeltaInput(int(idx-t.main_count), targetKeyCols[col], initializedColumns)
 				}
 			}
 			return keys.contains(actual)
@@ -1384,7 +1387,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 				if _, ok := seen[idx]; ok {
 					continue
 				}
-				if !t.projectJoinTargetMatches(idx, key, targetKeyCols, targetCols) {
+				if !t.projectJoinTargetMatches(idx, key, targetKeyCols, targetCols, initializedColumns) {
 					continue
 				}
 				seen[idx] = struct{}{}
@@ -1397,7 +1400,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 	return newRecSetShardFromSortedIDs(t, visibleUpper, recids)
 }
 
-func (t *storageShard) projectJoinTargetMatches(idx uint32, key []scm.Scmer, targetKeyCols []string, targetCols []ColumnStorage) bool {
+func (t *storageShard) projectJoinTargetMatches(idx uint32, key []scm.Scmer, targetKeyCols []string, targetCols []ColumnStorage, input *nativeColumnInitialInput) bool {
 	for i, expected := range key {
 		var actual scm.Scmer
 		if idx < t.main_count {
@@ -1405,7 +1408,7 @@ func (t *storageShard) projectJoinTargetMatches(idx uint32, key []scm.Scmer, tar
 		} else if _, isProxy := targetCols[i].(*StorageComputeProxy); isProxy {
 			actual = targetCols[i].GetValue(idx)
 		} else {
-			actual = t.getDelta(int(idx-t.main_count), targetKeyCols[i])
+			actual = t.getDeltaInput(int(idx-t.main_count), targetKeyCols[i], input)
 		}
 		if !scm.Equal(actual, expected) {
 			return false
@@ -1443,6 +1446,7 @@ func (r *recSet) scanExists(currentTx *TxContext, accessSchema scm.Scmer, access
 }
 
 func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {
+	initializedColumns := t.initializedColumnInput(currentTx)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock, currentTx)
@@ -1516,7 +1520,7 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 					cdataset[i] = cReaders[i].GetValue(idx)
 				} else {
-					cdataset[i] = t.getDelta(int(idx-mainCount), col)
+					cdataset[i] = t.getDeltaInput(int(idx-mainCount), col, initializedColumns)
 				}
 			}
 		}
@@ -1530,6 +1534,7 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 }
 
 func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64) {
+	initializedColumns := t.initializedColumnInput(currentTx)
 	conditionFn := scm.PrepareSerialProc(condition)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
@@ -1660,7 +1665,7 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 					cdataset[i] = cReaders[i].GetValue(idx)
 				} else {
-					cdataset[i] = t.getDelta(int(idx-mainCount), col)
+					cdataset[i] = t.getDeltaInput(int(idx-mainCount), col, initializedColumns)
 				}
 			}
 			if !scm.ToBool(conditionFn.Call(cdataset)) {
@@ -1693,6 +1698,7 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 // e.g. evaluating an expensive correlated ACL check only over the ~30k rows a
 // mandant filter already narrowed a table down to, not the full table.
 func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, access scanAccess, currentTx *TxContext, ss *scm.SessionState) recSetShard {
+	initializedColumns := t.initializedColumnInput(currentTx)
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := scanAccessCoversResidual(access) ||
 		conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
@@ -1782,7 +1788,7 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 					cdataset[i] = cReaders[i].GetValue(idx)
 				} else {
-					cdataset[i] = t.getDelta(int(idx-mainCount), col)
+					cdataset[i] = t.getDeltaInput(int(idx-mainCount), col, initializedColumns)
 				}
 			}
 		}

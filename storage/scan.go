@@ -1851,7 +1851,7 @@ func (t *storageShard) filterVisibleScanBatch(batch []uint32, visibleUpper uint3
 	return outN
 }
 
-func (t *storageShard) filterConditionScanBatch(batch []uint32, conditionCols []string, ccols []ColumnStorage, cReaders []ColumnReader, conditionGetters []mapArgGetter, cdataset []scm.Scmer, condition *scm.SerialProc) int {
+func (t *storageShard) filterConditionScanBatch(batch []uint32, conditionCols []string, ccols []ColumnStorage, cReaders []ColumnReader, conditionGetters []mapArgGetter, cdataset []scm.Scmer, condition *scm.SerialProc, initializedColumns *nativeColumnInitialInput) int {
 	outN := 0
 	for _, effectiveIdx := range batch {
 		if effectiveIdx < t.main_count {
@@ -1869,7 +1869,7 @@ func (t *storageShard) filterConditionScanBatch(batch []uint32, conditionCols []
 				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 					cdataset[i] = cReaders[i].GetValue(effectiveIdx)
 				} else {
-					cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), col)
+					cdataset[i] = t.getDeltaInput(int(effectiveIdx-t.main_count), col, initializedColumns)
 				}
 			}
 		}
@@ -1882,7 +1882,7 @@ func (t *storageShard) filterConditionScanBatch(batch []uint32, conditionCols []
 	return outN
 }
 
-func (t *storageShard) filterNativeArgConstantScanBatch(batch []uint32, conditionCols []string, ccols []ColumnStorage, cReaders []ColumnReader, conditionGetters []mapArgGetter, condition *scm.SerialProc) int {
+func (t *storageShard) filterNativeArgConstantScanBatch(batch []uint32, conditionCols []string, ccols []ColumnStorage, cReaders []ColumnReader, conditionGetters []mapArgGetter, condition *scm.SerialProc, initializedColumns *nativeColumnInitialInput) int {
 	argument := int(condition.Argument)
 	if argument < 0 || argument >= len(conditionCols) {
 		panic("serial filter argument outside condition columns")
@@ -1901,7 +1901,7 @@ func (t *storageShard) filterNativeArgConstantScanBatch(batch []uint32, conditio
 		} else if _, isProxy := ccols[argument].(*StorageComputeProxy); isProxy {
 			value = cReaders[argument].GetValue(idx)
 		} else {
-			value = t.getDelta(int(idx-t.main_count), conditionCols[argument])
+			value = t.getDeltaInput(int(idx-t.main_count), conditionCols[argument], initializedColumns)
 		}
 		if condition.ConstantFirst {
 			call[0], call[1] = condition.Value, value
@@ -1918,16 +1918,17 @@ func (t *storageShard) filterNativeArgConstantScanBatch(batch []uint32, conditio
 }
 
 type typedScanFilter struct {
-	shard      *storageShard
-	mainCount  uint32
-	width      int
-	multiFuncs []scm.JITStorageGetValueMultiFunc
-	kernel     scm.JITFilterBufferFunc
-	values     []scm.Scmer
-	pooled     *mapReducerBulkBuffer
+	columnInput *nativeColumnInitialInput
+	shard       *storageShard
+	mainCount   uint32
+	width       int
+	multiFuncs  []scm.JITStorageGetValueMultiFunc
+	kernel      scm.JITFilterBufferFunc
+	values      []scm.Scmer
+	pooled      *mapReducerBulkBuffer
 }
 
-func (t *storageShard) prepareTypedScanFilter(condition scm.Scmer, ccols []ColumnStorage, cReaders []ColumnReader, estimatedRows int) *typedScanFilter {
+func (t *storageShard) prepareTypedScanFilter(condition scm.Scmer, ccols []ColumnStorage, cReaders []ColumnReader, estimatedRows int, input *nativeColumnInitialInput) *typedScanFilter {
 	if len(ccols) == 0 || estimatedRows <= 0 {
 		return nil
 	}
@@ -1962,7 +1963,8 @@ func (t *storageShard) prepareTypedScanFilter(condition scm.Scmer, ccols []Colum
 		return nil
 	}
 	return &typedScanFilter{
-		shard: t, mainCount: t.main_count, width: len(ccols),
+		columnInput: input,
+		shard:       t, mainCount: t.main_count, width: len(ccols),
 		multiFuncs: multiFuncs, kernel: kernel,
 	}
 }
@@ -2020,7 +2022,7 @@ func (filter *typedScanFilter) filterBatch(batch []uint32, conditionCols []strin
 		if main {
 			selected = filter.filterMain(batch[start:end], cReaders)
 		} else {
-			selected = filter.shard.filterScanBatchDynamic(batch[start:end], conditionCols, ccols, cReaders, conditionGetters, cdataset, condition)
+			selected = filter.shard.filterScanBatchDynamic(batch[start:end], conditionCols, ccols, cReaders, conditionGetters, cdataset, condition, filter.columnInput)
 		}
 		copy(batch[out:], batch[start:start+selected])
 		out += selected
@@ -2029,11 +2031,11 @@ func (filter *typedScanFilter) filterBatch(batch []uint32, conditionCols []strin
 	return out
 }
 
-func (t *storageShard) filterScanBatchDynamic(batch []uint32, conditionCols []string, ccols []ColumnStorage, cReaders []ColumnReader, conditionGetters []mapArgGetter, cdataset []scm.Scmer, condition *scm.SerialProc) int {
+func (t *storageShard) filterScanBatchDynamic(batch []uint32, conditionCols []string, ccols []ColumnStorage, cReaders []ColumnReader, conditionGetters []mapArgGetter, cdataset []scm.Scmer, condition *scm.SerialProc, initializedColumns *nativeColumnInitialInput) int {
 	if condition.Kind == scm.SerialProcNativeArgConstant {
-		return t.filterNativeArgConstantScanBatch(batch, conditionCols, ccols, cReaders, conditionGetters, condition)
+		return t.filterNativeArgConstantScanBatch(batch, conditionCols, ccols, cReaders, conditionGetters, condition, initializedColumns)
 	}
-	return t.filterConditionScanBatch(batch, conditionCols, ccols, cReaders, conditionGetters, cdataset, condition)
+	return t.filterConditionScanBatch(batch, conditionCols, ccols, cReaders, conditionGetters, cdataset, condition, initializedColumns)
 }
 
 func (t *storageShard) filterVisibleBatchedScanBatch(batch []uint32, batchIDs []uint32, batchID uint32, visibleUpper uint32, hasMutationCallback bool, currentTx *TxContext, mutationSeen map[uint64]struct{}) int {
@@ -2072,6 +2074,7 @@ func (t *storageShard) filterVisibleBatchedScanBatch(batch []uint32, batchIDs []
 }
 
 func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) (uint32, bool) {
+	initializedColumns := t.initializedColumnInput(currentTx)
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
@@ -2180,7 +2183,7 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 					continue
 				}
 				candidate[0] = idx
-				if t.filterNativeArgConstantScanBatch(candidate[:], conditionCols, ccols, cReaders, conditionGetters, &conditionProgram) == 0 {
+				if t.filterNativeArgConstantScanBatch(candidate[:], conditionCols, ccols, cReaders, conditionGetters, &conditionProgram, initializedColumns) == 0 {
 					continue
 				}
 				found = true
@@ -2217,7 +2220,7 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 					} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 						cdataset[i] = cReaders[i].GetValue(idx)
 					} else {
-						cdataset[i] = t.getDelta(int(idx-mainCount), col)
+						cdataset[i] = t.getDeltaInput(int(idx-mainCount), col, initializedColumns)
 					}
 				}
 			}
@@ -2234,6 +2237,7 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 }
 
 func (t *storageShard) scan(access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, writeAcquired bool) (scm.Scmer, int64, int64) {
+	initializedColumns := t.initializedColumnInput(currentTx)
 	if scanMutates(callbackCols) && !writeAcquired {
 		writeAccess := t.GetWrite(currentTx)
 		defer writeAccess.Release()
@@ -2402,7 +2406,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	if !conditionAlwaysTrue && access.len() == 0 && estimatedFilterRows > defaultScanBufferSize {
 		minimumFilterRows := scm.CurrentJITCosts().FilterBufferMinimumRows
 		if minimumFilterRows > 0 && estimatedFilterRows >= minimumFilterRows {
-			typedFilter = t.prepareTypedScanFilter(condition, ccols, cReaders, estimatedFilterRows)
+			typedFilter = t.prepareTypedScanFilter(condition, ccols, cReaders, estimatedFilterRows, initializedColumns)
 		}
 	}
 	defer func() { typedFilter.close() }()
@@ -2496,7 +2500,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 					horizon = max(int64(0), filterHorizon.span-int64(maxInsertIndex))
 				}
 				if horizon > defaultScanBufferSize {
-					typedFilter = t.prepareTypedScanFilter(condition, ccols, cReaders, int(horizon))
+					typedFilter = t.prepareTypedScanFilter(condition, ccols, cReaders, int(horizon), initializedColumns)
 				}
 			}
 			candidateCount += int64(len(batch))
@@ -2506,7 +2510,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 				if typedFilter != nil {
 					outN = typedFilter.filterBatch(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, cdataset, &conditionProgram)
 				} else {
-					outN = t.filterScanBatchDynamic(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, cdataset, &conditionProgram)
+					outN = t.filterScanBatchDynamic(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, cdataset, &conditionProgram, initializedColumns)
 				}
 			}
 			if outN > 0 {
@@ -2652,6 +2656,7 @@ func (t *storageShard) hasOrderedScanProxy(cols []string, currentTx *TxContext) 
 }
 
 func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, mutationGuard *uniqueWriteGuard) (scm.Scmer, int64, int64) {
+	initializedColumns := t.initializedColumnInput(currentTx)
 	akkumulator := scm.ApplyOnce(neutral, nil)
 	var outCount int64
 	var candidateCount int64
@@ -2808,7 +2813,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 							} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 								cdataset[i] = cReaders[i].GetValue(effectiveIdx)
 							} else {
-								cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
+								cdataset[i] = t.getDeltaInput(int(effectiveIdx-t.main_count), k, initializedColumns)
 							}
 						}
 					}

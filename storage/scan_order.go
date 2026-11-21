@@ -2081,6 +2081,7 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 }
 
 func (t *storageShard) scan_order(access scanAccess, conditionCols []string, condition scm.Scmer, acceptCols []string, accept scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
+	initializedColumns := t.initializedColumnInput(currentTx)
 	result = new(shardqueue)
 	complete := false
 	defer func() {
@@ -2326,7 +2327,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 								} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 									cdataset[i] = cReaders[i].GetValue(idx)
 								} else {
-									cdataset[i] = t.getDelta(int(idx-t.main_count), k)
+									cdataset[i] = t.getDeltaInput(int(idx-t.main_count), k, initializedColumns)
 								}
 							}
 						}
@@ -2380,7 +2381,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 							if _, isProxy := acols[i].(*StorageComputeProxy); isProxy {
 								adataset[i] = aReaders[i].GetValue(idx)
 							} else {
-								adataset[i] = t.getDelta(int(idx-t.main_count), column)
+								adataset[i] = t.getDeltaInput(int(idx-t.main_count), column, initializedColumns)
 							}
 						}
 					}

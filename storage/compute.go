@@ -495,6 +495,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		// Read partition key of the requested row
 		partCols = col.OrcSortCols[:partCount]
 		partKeys = make([]scm.Scmer, partCount)
+		initializedColumns := requestShard.initializedColumnInput(nil)
 		for i, pc := range partCols {
 			// Retain the existing column-directory ownership for both main and
 			// delta evaluation; only the delta row directory is published atomically.
@@ -503,7 +504,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 			if cs != nil && requestIdx < requestShard.main_count {
 				partKeys[i] = cs.GetValue(requestIdx)
 			} else if requestIdx >= requestShard.main_count {
-				partKeys[i] = requestShard.getDelta(int(requestIdx-requestShard.main_count), pc)
+				partKeys[i] = requestShard.getDeltaInput(int(requestIdx-requestShard.main_count), pc, initializedColumns)
 			}
 			requestShard.mu.RUnlock()
 		}
@@ -771,6 +772,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			}
 			s.ensureLoaded()
 			s.ensureMainCount(false, nil)
+			initializedColumns := s.initializedColumnInput(nil)
 			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
 			// Retain index and column-directory ownership during invalidation.
@@ -786,7 +788,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 						if sortCSs[i] != nil && idx < s.main_count {
 							rowVals[i] = sortCSs[i].GetValue(idx)
 						} else if idx >= s.main_count {
-							rowVals[i] = s.getDelta(int(idx-s.main_count), col.OrcSortCols[i])
+							rowVals[i] = s.getDeltaInput(int(idx-s.main_count), col.OrcSortCols[i], initializedColumns)
 						}
 					}
 					if condFn(rowVals) {
