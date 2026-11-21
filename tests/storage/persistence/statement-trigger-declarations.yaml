@@ -309,12 +309,23 @@ test_cases:
 - name: Install one child DELETE handler before the outer statement begins
   scm: |
     (begin
+      (registertriggerlanguage "statement-cascade-values"
+        (close_procedure (lambda (_source _context)
+          (lambda (OLD NEW session tx) (begin
+            (define values (lambda (input)
+              (sort (scan tx input '() '() '() (lambda () true) '("id" "parent_id" "value")
+                (lambda (rows id parent value) (merge rows (list (list id parent value)))) '() merge)
+                (lambda (a b) (< (car a) (car b))))))
+            (session "calls" (+ (coalesceNil (session "calls") 0) 1))
+            (session "cascade_old" (values OLD))
+            (session "cascade_new" (values NEW)))))) false false true)
       (define owner (newsession)) (owner "username" "root") (tx_begin owner)
       (createstatementtrigger (table "memcp-tests" false "statement_decl_child" false (owner "__memcp_tx"))
-        "statement_decl_child_observe" "after_statement" "statement-event-observer" "observe" '("delete") false false (owner "__memcp_tx"))
+        "statement_decl_child_observe" "after_statement" "statement-cascade-values" "observe" '("delete") false false (owner "__memcp_tx"))
       (tx_commit owner) true)
   expect: {result: true}
-- name: Cascading statement handlers reject before either parent row or child handler and preserve earlier transaction work
+- name: Cascading statement handler observes every child once while earlier transaction work remains visible
+  noncritical: true
   scm: |
     (begin
       (define owner (newsession)) (owner "username" "root") (tx_begin owner)
@@ -325,21 +336,22 @@ test_cases:
         (define prior (table "memcp-tests" false "statement_decl_other" false tx))
         (with_table_mutation (list prior) (list "insert" '()) tx owner (lambda (tx)
           (insert prior '("id") (list (list 90)) '() nil false nil tx)))
-        (define rejected (try (lambda () (begin
-          (with_autocommit owner nil 0 "native multi-parent cascade preflight" (lambda (tx)
-            (with_table_mutation (list parent) (list "delete" '()) tx owner (lambda (tx)
-              (scan tx parent '() '() '() (lambda () true) '("$update")
-                (lambda (acc update) (begin (update) (+ acc 1))) 0 +)))))
-          false)) (lambda (failure)
-            (strlike (string failure) "%native cascading action on a statement-triggered child is not supported%"))))
-        (define count_rows (lambda (handle)
-          (scan tx handle '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc 1)) 0 +)))
-        (define result (and rejected (equal? (owner "transaction") true)
-          (equal? (count_rows parent) 2) (equal? (count_rows child) 2)
-          (equal? (count_rows prior) 1) (nil? (owner "calls"))))
+        (with_autocommit owner nil 0 "native multi-parent cascade" (lambda (tx)
+          (with_table_mutation (list parent) (list "delete" '()) tx owner (lambda (tx)
+            (scan tx parent '() '() '() (lambda () true) '("$update")
+              (lambda (acc update) (begin (update) (+ acc 1))) 0 +)))))
+        (define parent_rows (scan tx parent '() '() '() (lambda () true) '("id")
+          (lambda (rows id) (merge rows (list (list id)))) '() merge))
+        (define child_rows (scan tx child '() '() '() (lambda () true) '("id" "parent_id" "value")
+          (lambda (rows id parent value) (merge rows (list (list id parent value)))) '() merge))
+        (define prior_rows (scan tx prior '() '() '("id") (lambda (id) (equal? id 90)) '("id" "value")
+          (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+        (define result (list parent_rows child_rows prior_rows (owner "transaction")
+          (owner "calls") (owner "cascade_old") (owner "cascade_new")))
         (tx_rollback owner) result))
         (lambda (failure) (begin (tx_rollback owner) (error failure)))))
-  expect: {result: true}
+  expect:
+    result: [[], [], [[90, null]], true, 1, [[1, 1, 10], [2, 2, 20]], []]
 - name: Removing the child statement declaration restores the ordinary cascade profile
   scm: |
     (begin
