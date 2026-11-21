@@ -4,6 +4,12 @@ metadata:
   isolated: true
   description: UPDATE evaluates scalar producers before key admission and replaces only its original physical version
 setup:
+- sql: DROP TABLE IF EXISTS rhs_guard_parallel_left
+- sql: DROP TABLE IF EXISTS rhs_guard_parallel_right
+- sql: CREATE TABLE rhs_guard_parallel_left(id INT PRIMARY KEY,value INT) ENGINE=memory
+- sql: CREATE TABLE rhs_guard_parallel_right(id INT PRIMARY KEY,value INT) ENGINE=memory
+- sql: INSERT INTO rhs_guard_parallel_left VALUES(0,0)
+- sql: INSERT INTO rhs_guard_parallel_right VALUES(0,0)
 - sql: DROP TABLE IF EXISTS rhs_guard_initialized
 - sql: DROP TRIGGER IF EXISTS rhs_guard_log_before
 - sql: DROP TRIGGER IF EXISTS rhs_guard_before
@@ -288,7 +294,58 @@ test_cases:
     - connection: rhs_initialized_observer
       sql: SELECT COUNT(*) AS introduced_columns FROM sys.columns WHERE object_id=OBJECT_ID(N'rhs_guard_initialized') AND name=N'introduced'
       expect: {data: [{introduced_columns: 0}]}
+- name: Independent UPDATE rows sharing the conservative key domain both finish
+  # Zero keys deliberately share all global stripes across these two tables.
+  # The joined parallel form starts both producers even with a one-CPU budget.
+  scm: |
+    (begin
+      (define signals (newsession))
+      (define results (newsession))
+      (define run (lambda (name other table_name) (begin
+        (define owner (newsession)) (owner "username" "root")
+        (tx_begin_acid owner)
+        (define target (table "memcp-tests" false table_name false (owner "__memcp_tx")))
+        (try (lambda () (begin
+          (reduce (produceN 32) (lambda (unused step) (begin
+            (define applied (with_table_mutation (list target) (list "update" '("value"))
+              (owner "__memcp_tx") owner
+              (lambda (tx)
+                (scan tx target '() '() '("id") (lambda (id) (equal? id 0)) '("value" "$update")
+                  (lambda (unused value update) (begin
+                    (signals name step)
+                    (define await (lambda (remaining)
+                      (if (signals "failed") (error "parallel UPDATE peer failed")
+                        (>= (coalesceNil (signals other) -1) step) true
+                        (<= remaining 0) (error "parallel UPDATE producers did not rendezvous")
+                        (begin (sleep tx 0.0001) (await (- remaining 1))))))
+                    (await 1000)
+                    (and (equal? value step) (update (list "value" (+ step 1))))))
+                  false (lambda (left right) (or left right)) false))))
+            (if applied true (error "parallel UPDATE did not replace its actual row")))) true)
+          (tx_commit owner)
+          (results name true)))
+          (lambda (failure) (begin
+            (signals "failed" true)
+            (results (concat name "_failure") (string (failure_value failure)))
+            (if (not (nil? (owner "transaction"))) (tx_rollback owner) true)
+            (results name false)))))))
+      (parallel
+        (run "left" "right" "rhs_guard_parallel_left")
+        (run "right" "left" "rhs_guard_parallel_right"))
+      (if (signals "failed")
+        (error (concat "parallel UPDATE failure: " (results "left_failure") " / " (results "right_failure"))) true)
+      (define rows (lambda (name)
+        (scan nil (table "memcp-tests" false name false nil) '() '() '() (lambda () true) '("id" "value")
+          (lambda (acc id value) (cons (list id value) acc)) '()
+          (lambda (left right) (merge (list left right))) false)))
+      (list (results "left") (results "right")
+        (rows "rhs_guard_parallel_left") (rows "rhs_guard_parallel_right")))
+  timeout: 5
+  expect:
+    result: [true, true, [[0, 32]], [[0, 32]]]
 cleanup:
+- sql: DROP TABLE IF EXISTS rhs_guard_parallel_left
+- sql: DROP TABLE IF EXISTS rhs_guard_parallel_right
 - sql: DROP TABLE IF EXISTS rhs_guard_initialized
 - sql: DROP TRIGGER IF EXISTS rhs_guard_log_before
 - scm: (globalvars "__rhs_guard_version_control" nil)
