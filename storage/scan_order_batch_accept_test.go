@@ -194,7 +194,7 @@ func TestScanOrderRecSetParallelRunsPreserveTiesAndWindow(t *testing.T) {
 			scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 				ids = append(ids, values[1].Int())
 				return values[0]
-			}), scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+			}), scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), nil)
 		return ids
 	}
 	previous := runtime.GOMAXPROCS(1)

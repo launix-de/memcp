@@ -84,7 +84,7 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 			run: func() {
 				tbl.scan_order(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueFn, sortCols, sortDirs, 0, 0, 72,
 					[]string{"id"}, mapReduceFn, nilValue, false, nilValue, nil, nilValue,
-				)
+					nil)
 			},
 		},
 		{
@@ -92,7 +92,7 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 			run: func() {
 				recSetInput.scan_order(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueFn, sortCols, sortDirs, 0, 0, 72,
 					[]string{"id"}, mapReduceFn, nilValue, false, nilValue, nil, nilValue,
-				)
+					nil)
 			},
 		},
 		{

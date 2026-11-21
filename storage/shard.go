@@ -1567,10 +1567,13 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 	declarations := mutationColumns(t.t, currentTx, input)
 	initializedColumns := t.initializedColumnInput(currentTx)
 	var eventWriter *nativeMutationEventWriter
+	exactUpdate := false
 	if withTrigger && currentTx != nil && currentTx.mutationOperation != nil {
-		eventWriter = currentTx.mutationOperation.eventWriter(t)
+		var event nativeMutationEvent
+		eventWriter, event = currentTx.mutationOperation.eventWriter(t)
+		exactUpdate = event == nativeMutationUpdate
 	}
-	update := t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, nil, currentTx, uniqueGuard, eventWriter, declarations, input, initializedColumns)
+	update := t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, nil, currentTx, uniqueGuard, eventWriter, declarations, input, initializedColumns, exactUpdate)
 	return func(a ...scm.Scmer) scm.Scmer {
 		if currentTx != nil && currentTx.mutationOperation != nil {
 			leave := currentTx.mutationOperation.borrowMutation(currentTx)
@@ -1589,14 +1592,14 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 		}
 		t.t.beginContributionMutation()
 		defer t.t.endContributionMutation()
-		if uniqueGuard == nil && !alreadyLocked {
+		if uniqueGuard == nil && !alreadyLocked && (!exactUpdate || len(a) == 0) {
 			guard, current, found := t.guardUniqueRow(idx, currentTx, input, initializedColumns)
 			if !found {
 				return scm.NewBool(false)
 			}
 			if guard != nil {
 				defer guard.release()
-				return t.UpdateFunctionBatch(current, withTrigger, alreadyLocked, nil, nil, currentTx, guard, eventWriter, declarations, input, initializedColumns)(a...)
+				return t.UpdateFunctionBatch(current, withTrigger, alreadyLocked, nil, nil, currentTx, guard, eventWriter, declarations, input, initializedColumns, exactUpdate)(a...)
 			}
 		}
 		return update(a...)
@@ -1617,10 +1620,20 @@ func isRuntimeComputedColumn(colDesc *column) bool {
 	return len(colDesc.OrcSortCols) > 0 || !colDesc.Computor.IsNil() || len(colDesc.ComputorInputCols) > 0
 }
 
-func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, eventWriter *nativeMutationEventWriter, declarations []*column, input *nativeMutationInput, initializedColumns *nativeColumnInitialInput) func(...scm.Scmer) scm.Scmer {
+func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, eventWriter *nativeMutationEventWriter, declarations []*column, input *nativeMutationInput, initializedColumns *nativeColumnInitialInput, exactUpdate bool) func(...scm.Scmer) scm.Scmer {
 	initialUniqueGuard := uniqueGuard
+	var originalState *transactionState
+	if exactUpdate {
+		originalState = currentTx.transactionState
+	}
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
+		if exactUpdate && currentTx.transactionState != originalState {
+			panic("native mutation callback lost its original transaction")
+		}
+		if exactUpdate && len(a) == 0 {
+			panic("native mutation callback does not match its declared UPDATE operation")
+		}
 		keys := mutationUniqueKeys(t.t, input)
 		if input != nil && (input.event != nativeMutationUpdate || len(a) == 0) {
 			panic("private declaration input requires its checked UPDATE producer")
@@ -1640,6 +1653,18 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			currentTx.noteNativeRowAccess(t.t)
 		}
 		uniqueGuard := initialUniqueGuard
+		if exactUpdate && initialUniqueGuard != nil && initialUniqueGuard.mutation != nil {
+			// This guard retains the scan's native BEFORE/MOSI writer and AFTER
+			// queue. Key stripes acquired by one sink must not escape into the
+			// next mapper/RHS; its physical replacement is already complete.
+			defer func() {
+				if alreadyLocked {
+					t.runWithWriteLockReleased(currentTx, initialUniqueGuard.releaseKeys)
+				} else {
+					initialUniqueGuard.releaseKeys()
+				}
+			}()
+		}
 		var retainedUnique *uniqueWriteGuard
 		completed := false
 		defer func() {
@@ -1660,7 +1685,10 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 		// FK checks are enforced via auto-generated system triggers (see createforeignkey)
 
 		result := false // result = true when update was possible; false if there was a RESTRICT
-		targetIdx := idx
+		var targetIdx uint32
+		if !exactUpdate {
+			targetIdx = idx
+		}
 		var maintenanceNext *storageShard
 		if len(a) > 0 {
 			// update command
@@ -1721,11 +1749,20 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					t.mu.Lock()         // write lock
 					defer t.mu.Unlock() // write lock
 				}
+				if exactUpdate {
+					// This coordinate belongs to this callback. Only its own successful
+					// replacement below can advance it; another row with the same key
+					// is never a substitute for the row used to evaluate the mapper.
+					targetIdx = idx
+					if !currentTx.IsVisible(t, targetIdx) {
+						panic(sqldb.NewSQLError1(1213, "40001", "Concurrent row replacement; retry transaction"))
+					}
+				}
 
 				// For non-ACID updates, callbacks may race on stale recids that are
 				// already deleted by a concurrent writer. Follow to the currently
 				// visible row with the same PRIMARY key.
-				if (currentTx == nil || currentTx.Mode != TxACID) && t.deletions.Get(uint(targetIdx)) {
+				if !exactUpdate && (currentTx == nil || currentTx.Mode != TxACID) && t.deletions.Get(uint(targetIdx)) {
 					followed := false
 					for attempt := 0; attempt < 256; attempt++ {
 						if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(targetIdx, input, currentTx, initializedColumns); ok {
@@ -1841,9 +1878,9 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					// Both paths hold shard.mu here: either the mapper supplied
 					// it or this callback acquired it above. Trigger lookup and
 					// execution must release it before taking any table locks.
-					// TODO: validate the original row after a BEFORE trigger
-					// performs nested DML on the same target. Do not replay
-					// trigger effects when that validation detects a conflict.
+					// An admitted UPDATE validates its original physical version
+					// again below; a conflicting nested write never replays these
+					// trigger effects or redirects the callback by PRIMARY key.
 					t.runWithWriteLockReleased(currentTx, func() {
 						// Releasing distributed keys can wait for peer callbacks.
 						// Keep the native writer, but never wait under shard.mu.
@@ -1888,7 +1925,14 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						t.t.validateFinalUpdateRow(declarations, triggerOldRow, newRow, finalValidators, currentTx)
 					})
 				}
+				if exactUpdate && !currentTx.IsVisible(t, targetIdx) {
+					panic(sqldb.NewSQLError1(1213, "40001", "Concurrent row replacement; retry transaction"))
+				}
 				if !result { // only do a write if something changed
+					if exactUpdate {
+						locked := t.lockReplacementSuccessors(targetIdx, currentTx)
+						defer unlockReplacementSuccessors(locked)
+					}
 					if eventWriter != nil {
 						eventChunk = eventWriter.capture(nativeMutationUpdate, eventOldRow, schemaRowFromDelta(d2))
 					}
@@ -1923,6 +1967,23 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 
 				acidMode := currentTx != nil && currentTx.Mode == TxACID
 				uniqueCheckNeeded := keys != nil && uniqueColsChanged
+				if exactUpdate && len(keys) != 0 && !uniqueCheckNeeded {
+					payloadCols, payloadRow := buildPayload()
+					oldRow := make([]scm.Scmer, len(payloadCols))
+					for i, name := range payloadCols {
+						oldRow[i] = t.rowValueByRecidLocked(targetIdx, name)
+					}
+					needed := t.t.guardUniqueWrites(payloadCols, [][]scm.Scmer{payloadRow, oldRow}, false, 0, currentTx, input)
+					if uniqueGuard == nil {
+						if !needed.tryLock() {
+							panic(sqldb.NewSQLError1(1213, "40001", "Concurrent UNIQUE key change; retry transaction"))
+						}
+						needed.ownedShard = t
+						retainedUnique, uniqueGuard = &needed, &needed
+					} else {
+						uniqueGuard.extend(needed.mask)
+					}
+				}
 
 				// unique constraint checking
 				if uniqueCheckNeeded {
@@ -1965,17 +2026,30 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						}, 0, currentTx, uniqueGuard, nil, input)
 						checked = true
 					}()
+					if exactUpdate {
+						// The exclusion above was only for this UNIQUE probe. Restore
+						// its original visibility before attesting the physical version.
+						t.deletions.Set(uint(targetIdx), wasDeletedBefore)
+					}
 				} else {
 					// Keep old row visible until after we inserted the replacement in
 					// non-ACID mode. This avoids transient "row disappears" gaps that
 					// make concurrent UPDATE scans miss rows.
-					if acidMode {
+					if acidMode && !exactUpdate {
 						t.deletions.Set(uint(targetIdx), true) // staged delete in ACID overlay flow
 					}
 				}
 
 				payloadCols, payloadRow := buildPayload()
-				newRecid = t.replacePreparedRowLocked(targetIdx, payloadCols, payloadRow, currentTx, false, false, &successorBarriers)
+				var locked []*storageShard
+				if exactUpdate {
+					locked = t.lockReplacementSuccessors(targetIdx, currentTx)
+					defer unlockReplacementSuccessors(locked)
+				}
+				newRecid = t.replacePreparedRowLocked(targetIdx, payloadCols, payloadRow, currentTx, false, false, &successorBarriers, locked)
+				if exactUpdate {
+					idx = newRecid
+				}
 				// Capture for dual-write forwarding (cols/d2 are closure-local).
 				// Use repartitionDualWriteActive (set after Phase B snapshot)
 				// so rows already in the snapshot are not dual-written again.
@@ -2206,11 +2280,49 @@ func (barrier replacementWALBarrier) flush() {
 	}
 }
 
+// lockReplacementSuccessors attests one exact physical version through ready
+// rebuild mappings. The caller owns the source write lock; the returned locks
+// follow the existing forward-write order and cover only the final physical
+// step, never mapper/trigger execution or a UNIQUE probe. A not-ready builder
+// remains protected by the source lock and its existing catch-up buffer.
+func (t *storageShard) lockReplacementSuccessors(recid uint32, tx *TxContext) (locked []*storageShard) {
+	complete := false
+	defer func() {
+		if !complete {
+			unlockReplacementSuccessors(locked)
+		}
+	}()
+	current := t
+	for {
+		if !tx.IsVisible(current, recid) {
+			panic(sqldb.NewSQLError1(1213, "40001", "Concurrent row replacement; retry transaction"))
+		}
+		next := current.loadNext()
+		if next == nil || !current.nextReady.Load() {
+			complete = true
+			return locked
+		}
+		mapped, found := current.translateNextRecid(recid)
+		if !found {
+			panic(sqldb.NewSQLError1(1213, "40001", "Concurrent row replacement; retry transaction"))
+		}
+		next.mu.Lock()
+		locked = append(locked, next)
+		current, recid = next, mapped
+	}
+}
+
+func unlockReplacementSuccessors(locked []*storageShard) {
+	for index := len(locked) - 1; index >= 0; index-- {
+		locked[index].mu.Unlock()
+	}
+}
+
 // replacePreparedRowLocked is the physical copy-on-write step shared by an
 // admitted UPDATE and its rebuild replica. The complete stored payload has
 // already passed logical validation/default/trigger processing at the source.
 // Caller holds t.mu; no logical callbacks or UNIQUE probes run in this step.
-func (t *storageShard) replacePreparedRowLocked(oldRecid uint32, columns []string, row []scm.Scmer, currentTx *TxContext, replica, oldStaged bool, successorBarriers *[]replacementWALBarrier) uint32 {
+func (t *storageShard) replacePreparedRowLocked(oldRecid uint32, columns []string, row []scm.Scmer, currentTx *TxContext, replica, oldStaged bool, successorBarriers *[]replacementWALBarrier, lockedSuccessors []*storageShard) uint32 {
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	generation := t.generation.Load()
 	active := generation == nil || !generation.retired.Load()
@@ -2290,7 +2402,7 @@ func (t *storageShard) replacePreparedRowLocked(oldRecid uint32, columns []strin
 		}
 	}
 	if next := t.nextForMaintenanceLocked(&oldRecid); next != nil {
-		t.propagateUpdateToNext(next, oldRecid, newRecid, columns, row, currentTx, oldStaged, successorBarriers)
+		t.propagateUpdateToNext(next, oldRecid, newRecid, columns, row, currentTx, oldStaged, successorBarriers, lockedSuccessors)
 	}
 	return newRecid
 }
@@ -2298,13 +2410,20 @@ func (t *storageShard) replacePreparedRowLocked(oldRecid uint32, columns []strin
 // propagateUpdateToNext mirrors a completed physical replacement while the
 // source mutation lock still orders writers. Every new source version receives
 // its own successor version; no logical UPDATE/default/trigger runs twice.
-func (t *storageShard) propagateUpdateToNext(next *storageShard, oldRecid, replacementRecid uint32, columns []string, row []scm.Scmer, currentTx *TxContext, oldStaged bool, successorBarriers *[]replacementWALBarrier) {
+func (t *storageShard) propagateUpdateToNext(next *storageShard, oldRecid, replacementRecid uint32, columns []string, row []scm.Scmer, currentTx *TxContext, oldStaged bool, successorBarriers *[]replacementWALBarrier, lockedSuccessors []*storageShard) {
 	targetRecid, ok := t.translateNextRecid(oldRecid)
 	if !ok {
 		panic("completed rebuild is missing a live row translation")
 	}
-	next.mu.Lock()
-	defer next.mu.Unlock()
+	if len(lockedSuccessors) != 0 {
+		if lockedSuccessors[0] != next {
+			panic("replacement lost its attested native successor")
+		}
+		lockedSuccessors = lockedSuccessors[1:]
+	} else {
+		next.mu.Lock()
+		defer next.mu.Unlock()
+	}
 	generation := next.generation.Load()
 	if generation != nil && generation.acquireOperation() {
 		if currentTx == nil && next.t.PersistencyMode == Safe && next.logfile != nil {
@@ -2315,7 +2434,7 @@ func (t *storageShard) propagateUpdateToNext(next *storageShard, oldRecid, repla
 	} else if generation == nil && currentTx == nil && next.t.PersistencyMode == Safe && next.logfile != nil {
 		*successorBarriers = append(*successorBarriers, replacementWALBarrier{shard: next})
 	}
-	nextRecid := next.replacePreparedRowLocked(targetRecid, columns, row, currentTx, true, oldStaged, successorBarriers)
+	nextRecid := next.replacePreparedRowLocked(targetRecid, columns, row, currentTx, true, oldStaged, successorBarriers, lockedSuccessors)
 	// This is an exact native mutation result, never a post-write delta-length
 	// guess or a key lookup. Publish it before another source writer can use the
 	// replacement, and preserve it for commit/rollback and later generations.
@@ -2480,6 +2599,7 @@ type ShardMapReducer struct {
 	mutationInput     *nativeMutationInput
 	columnInput       *nativeColumnInitialInput
 	mutationColumns   []*column            // one effective declaration contract per native input
+	exactUpdate       bool                 // bound once from the actual admitted mutation event
 	dataInputReleases []func()             // operator-owned target data views, never row-owned leases
 	mutationFrame     *nativeMutationFrame // borrowed row/UNIQUE/batch callback payload
 	bufferReduceProc  *scm.Proc            // source retained for a profitable typed main-buffer specialization
@@ -2629,6 +2749,15 @@ func (m *ShardMapReducer) prepareJITBufferReducer() {
 // MapOne evaluates the mapper for one already-visible record. Ordered scans use
 // this outside shard locks for predicates that must run after global ordering.
 func (m *ShardMapReducer) beginUniqueRow(id uint32) (uint32, bool) {
+	if m.exactUpdate {
+		// RHS execution may construct/initialize another keyed relation. It
+		// cannot run under this row's node-global key stripes. The actual sink
+		// validates this exact version before its physical replacement instead.
+		m.shard.mu.RLock()
+		visible := m.currentTx.IsVisible(m.shard, id)
+		m.shard.mu.RUnlock()
+		return id, visible
+	}
 	guard, current, found := m.shard.guardUniqueRow(id, m.currentTx, m.mutationInput, m.columnInput)
 	m.uniqueGuard = guard
 	return current, found
@@ -2864,7 +2993,9 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 		}
 	}
 	if mr.hasUpdateCol && currentTx != nil && currentTx.mutationOperation != nil {
-		mr.eventWriter = currentTx.mutationOperation.eventWriter(t)
+		var event nativeMutationEvent
+		mr.eventWriter, event = currentTx.mutationOperation.eventWriter(t)
+		mr.exactUpdate = event == nativeMutationUpdate
 	}
 	// Pre-allocate tagClosure fn ptrs (hoisted, one per pseudo-col type per column).
 	// These are allocated once here so processMainBlock/processDeltaBlock can use
@@ -3001,7 +3132,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 		if needsMutationMetadata && mr.isUpdate[i] {
 			getter := func(id uint32, batchid uint32) scm.Scmer {
 				borrowedLock := mr.shardWriteLocked && (mr.currentTx == nil || mr.currentTx.mutationOperation == nil)
-				return mr.bindMutationCallback(mr.shard.UpdateFunctionBatch(id, true, borrowedLock, mr.deleteBatch, &mr.deletedRows, mr.currentTx, mr.uniqueGuard, mr.eventWriter, mr.mutationColumns, mr.mutationInput, mr.columnInput))
+				return mr.bindMutationCallback(mr.shard.UpdateFunctionBatch(id, true, borrowedLock, mr.deleteBatch, &mr.deletedRows, mr.currentTx, mr.uniqueGuard, mr.eventWriter, mr.mutationColumns, mr.mutationInput, mr.columnInput, mr.exactUpdate))
 			}
 			mr.mainGetters[i] = getter
 			mr.deltaGetters[i] = getter
@@ -3420,6 +3551,9 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 			if m.hasUpdateCol || m.hasIncrementCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
+						if m.exactUpdate {
+							return
+						}
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID, m.mutationInput, m.currentTx, m.columnInput)
 						if !ok {
 							return
@@ -3485,6 +3619,9 @@ func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, 
 			if m.hasUpdateCol || m.hasIncrementCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
+						if m.exactUpdate {
+							return
+						}
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID, m.mutationInput, m.currentTx, m.columnInput)
 						if !ok {
 							return
@@ -3541,6 +3678,9 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 			if m.hasUpdateCol || m.hasIncrementCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
+						if m.exactUpdate {
+							return
+						}
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID, m.mutationInput, m.currentTx, m.columnInput)
 						if !ok {
 							return
@@ -3592,6 +3732,9 @@ func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32,
 			if m.hasUpdateCol || m.hasIncrementCol {
 				if !m.acidMode {
 					if m.shard.deletions.Get(uint(effectiveID)) {
+						if m.exactUpdate {
+							return
+						}
 						followedID, ok := m.shard.resolveVisiblePrimaryRecidLocked(effectiveID, m.mutationInput, m.currentTx, m.columnInput)
 						if !ok {
 							return
@@ -3708,7 +3851,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	t.t.requireStatementTriggerMutation(currentTx, nativeMutationInsert)
 	var eventWriter *nativeMutationEventWriter
 	if currentTx != nil && currentTx.mutationOperation != nil {
-		eventWriter = currentTx.mutationOperation.eventWriter(t)
+		eventWriter, _ = currentTx.mutationOperation.eventWriter(t)
 	}
 	t.t.beginContributionMutation()
 	defer t.t.endContributionMutation()

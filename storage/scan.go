@@ -1643,6 +1643,7 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	if !compiled {
 		panic("scan received an invalid compiled access schema")
 	}
+	access.producerInput = requiredAccess.producerInput
 	if requiredAccess.len() > 0 || source != nil {
 		runtime := access.ensureRuntime()
 		// Batch join keys are equality seeks, not advisory trailing hooks.
@@ -2343,6 +2344,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	ownsWrite := false
 	lockMutationExclusively := hasMutationCallback && !ownsWrite
 	writeLocked := false
+	txWriteOwned := false
 	if lockMutationExclusively {
 		for {
 			prepareOrdered()
@@ -2354,13 +2356,16 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 			t.mu.Unlock()
 		}
 		defer func() {
+			if txWriteOwned {
+				currentTx.ExitShardWrite(t)
+			}
 			if writeLocked {
 				t.mu.Unlock()
 			}
 		}()
 		if currentTx != nil {
 			currentTx.EnterShardWrite(t)
-			defer currentTx.ExitShardWrite(t)
+			txWriteOwned = true
 		}
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
@@ -2423,6 +2428,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, 0, nil, currentTx)
 	}
 	mapper.uniqueGuard = mutationGuard
+	mapper.exactUpdate = mapper.exactUpdate || access.producerInput.exactUpdateFor(t.t, currentTx)
 	defer mapper.Close()
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
 	locked := false
@@ -2567,6 +2573,10 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		// processMainBlock/processDeltaBlock when shardWriteLocked=false.
 		// Table-level mutationMu still serializes concurrent mutations.
 		if writeLocked {
+			if txWriteOwned {
+				currentTx.ExitShardWrite(t)
+				txWriteOwned = false
+			}
 			t.mu.Unlock()
 			writeLocked = false
 			mapper.SetShardWriteLocked(false)
@@ -2586,6 +2596,10 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		locked = false
 	}
 	if writeLocked {
+		if txWriteOwned {
+			currentTx.ExitShardWrite(t)
+			txWriteOwned = false
+		}
 		t.mu.Unlock()
 		writeLocked = false
 	}
@@ -2677,17 +2691,21 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 	ownsWrite := false
 	lockMutationExclusively := hasMutationCallback && !ownsWrite
 	writeLocked := false
+	txWriteOwned := false
 	if lockMutationExclusively {
 		t.lockForMutation(currentTx, nil)
 		writeLocked = true
 		defer func() {
+			if txWriteOwned {
+				currentTx.ExitShardWrite(t)
+			}
 			if writeLocked {
 				t.mu.Unlock()
 			}
 		}()
 		if currentTx != nil {
 			currentTx.EnterShardWrite(t)
-			defer currentTx.ExitShardWrite(t)
+			txWriteOwned = true
 		}
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
@@ -2747,6 +2765,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, stride, batchdata, currentTx)
 	}
 	mapper.uniqueGuard = mutationGuard
+	mapper.exactUpdate = mapper.exactUpdate || access.producerInput.exactUpdateFor(t.t, currentTx)
 	defer mapper.Close()
 
 	locked := false
@@ -2859,6 +2878,10 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 	}
 	if hasMutationCallback && len(pendingRecids) > 0 {
 		if writeLocked {
+			if txWriteOwned {
+				currentTx.ExitShardWrite(t)
+				txWriteOwned = false
+			}
 			t.mu.Unlock()
 			writeLocked = false
 			mapper.SetShardWriteLocked(false)
@@ -2876,6 +2899,10 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 		locked = false
 	}
 	if writeLocked {
+		if txWriteOwned {
+			currentTx.ExitShardWrite(t)
+			txWriteOwned = false
+		}
 		t.mu.Unlock()
 		writeLocked = false
 	}

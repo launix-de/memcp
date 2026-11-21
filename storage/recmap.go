@@ -1074,7 +1074,7 @@ func scanRecMap(currentTx *TxContext, source scm.Scmer, accessSchema scm.Scmer, 
 	})
 	if sourceRecSet != nil {
 		sourceRecSet.scan(currentTx, accessSchema, accessValues, filterCols, filterFn,
-			callbackCols, reduce, scm.NewNil(), combine, false)
+			callbackCols, reduce, scm.NewNil(), combine, false, nil)
 	} else {
 		sourceTable.scan(currentTx, accessSchema, accessValues, filterCols, filterFn,
 			callbackCols, reduce, scm.NewNil(), combine, false)

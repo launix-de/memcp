@@ -139,6 +139,8 @@ func scmerToTxContext(v scm.Scmer) *TxContext {
 	switch value := v.Any().(type) {
 	case *TxContext:
 		return value
+	case *nativeMutationInput:
+		return value.originalExecution()
 	case *transactionState:
 		return &TxContext{transactionState: value}
 	default:
@@ -148,6 +150,7 @@ func scmerToTxContext(v scm.Scmer) *TxContext {
 
 type scanArgLayout struct {
 	tx              *TxContext
+	producerInput   *nativeMutationInput
 	tableIdx        int
 	accessSchemaIdx int
 	accessValuesIdx int
@@ -170,6 +173,7 @@ type scanArgLayout struct {
 func scanLayout(a []scm.Scmer) scanArgLayout {
 	return scanArgLayout{
 		tx:              scmerToTxContext(a[0]),
+		producerInput:   producerInputFromScmer(a[0]),
 		tableIdx:        1,
 		accessSchemaIdx: 2,
 		accessValuesIdx: 3,
@@ -1923,7 +1927,7 @@ func Init(en scm.Env) {
 				if len(a) > layout.combineIdx {
 					combine = a[layout.combineIdx]
 				}
-				return rs.scan(layout.tx, accessSchema, accessValues, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapReduceIdx], neutral, combine, isOuter)
+				return rs.scan(layout.tx, accessSchema, accessValues, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapReduceIdx], neutral, combine, isOuter, layout.producerInput)
 			}
 
 			t := TableFromScmer(tableArg)
@@ -1936,7 +1940,7 @@ func Init(en scm.Env) {
 			if len(a) > layout.combineIdx {
 				combine = a[layout.combineIdx]
 			}
-			return t.scanWithBatchFrom(layout.tx, nil, accessSchema, accessValues, scanAccess{}, filtercols, a[layout.filterFnIdx], mapcols,
+			return t.scanWithBatchFrom(layout.tx, nil, accessSchema, accessValues, scanAccess{producerInput: layout.producerInput}, filtercols, a[layout.filterFnIdx], mapcols,
 				a[layout.mapReduceIdx], neutral, combine, isOuter, 0, nil)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an unordered parallel filtered reduction on a single table and returns the reduced result",
@@ -2059,7 +2063,7 @@ func Init(en scm.Env) {
 			if len(a) > layout.combineIdx+sbShift {
 				combine = a[layout.combineIdx+sbShift]
 			}
-			return t.scanWithBatchFrom(layout.tx, source, accessSchema, accessValues, scanAccess{}, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapReduceIdx], neutral, combine, isOuter, stride, batchdata)
+			return t.scanWithBatchFrom(layout.tx, source, accessSchema, accessValues, scanAccess{producerInput: layout.producerInput}, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapReduceIdx], neutral, combine, isOuter, stride, batchdata)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an unordered parallel filtered reduction on a single table using batchdata-backed #N pseudo columns and returns the reduced result",
 			Params: []*scm.TypeDescriptor{
@@ -2085,7 +2089,7 @@ func Init(en scm.Env) {
 		Name: "scan_order_recset",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
-			source := scanOrderTableSpec{}
+			source := scanOrderTableSpec{producerInput: producerInputFromScmer(a[0])}
 			if a[1].IsCustom(TagRecSet) {
 				source.recset = RecSetFromScmer(a[1])
 			} else {
@@ -2163,7 +2167,7 @@ func Init(en scm.Env) {
 			if len(a) > 14 {
 				notFoundValue = a[14]
 			}
-			source := scanOrderTableSpec{}
+			source := scanOrderTableSpec{producerInput: producerInputFromScmer(a[0])}
 			if tableArg.IsCustom(TagRecSet) {
 				source.recset = RecSetFromScmer(tableArg)
 			} else {
@@ -2349,12 +2353,12 @@ func Init(en scm.Env) {
 			}
 
 			if tableArg.IsCustom(TagRecSet) {
-				return RecSetFromScmer(tableArg).scan_order(layout.tx, accessSchema, accessValues, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter)
+				return RecSetFromScmer(tableArg).scan_order(layout.tx, accessSchema, accessValues, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter, layout.producerInput)
 			}
 
 			t := TableFromScmer(a[layout.tableIdx])
 
-			return t.scan_order(layout.tx, accessSchema, accessValues, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter)
+			return t.scan_order(layout.tx, accessSchema, accessValues, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter, layout.producerInput)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an ordered parallel filter and serial reduction pass on a single table and returns the reduced result",
 			Params: []*scm.TypeDescriptor{
@@ -2445,6 +2449,7 @@ func Init(en scm.Env) {
 			specs := make([]scanOrderTableSpec, n)
 			for i := 0; i < n; i++ {
 				specs[i] = scanOrderTableSpec{
+					producerInput:  producerInputFromScmer(a[0]),
 					conditionCols:  scmerSliceToStrings(mustScmerSlice(filterColsArr[i], "filterColumns[i]")),
 					condition:      filterFnArr[i],
 					sortcols:       mustScmerSlice(sortcolsArr[i], "sortcols[i]"),

@@ -110,7 +110,7 @@ func (f *batchAcceptBenchmarkFixture) scanOrder(postOrderCols []string, postOrde
 		nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
 		f.sortCols, f.sortDirs, 0, 0, batchAcceptBenchmarkPageSize,
 		[]string{"id"}, f.mapReduceFn, scm.NewNil(), false, scm.NewNil(),
-		postOrderCols, postOrderFilter)
+		postOrderCols, postOrderFilter, nil)
 }
 
 func (f *batchAcceptBenchmarkFixture) batchAccept(batchFilter scm.Scmer) scm.Scmer {

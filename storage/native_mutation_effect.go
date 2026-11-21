@@ -73,18 +73,21 @@ func (operation *nativeMutationOperation) declareEffect(t *table, descriptor nat
 // source shard lock. A map entry represents a real native shard, not a row or a
 // transaction/session scratch value. All row capture then uses this direct
 // writer pointer under the source's existing writer protocol.
-func (operation *nativeMutationOperation) eventWriter(source *storageShard) *nativeMutationEventWriter {
+func (operation *nativeMutationOperation) eventWriter(source *storageShard) (*nativeMutationEventWriter, nativeMutationEvent) {
 	operation.mu.Lock()
 	defer operation.mu.Unlock()
 	if operation.closed || operation.producerDone {
 		panic("native mutation producer has finished")
 	}
 	effect := operation.effects[source.t]
-	if effect == nil || len(effect.programs) == 0 {
-		return nil
+	if effect == nil {
+		return nil, nativeMutationInsert
+	}
+	if len(effect.programs) == 0 {
+		return nil, effect.event
 	}
 	if writer := effect.writers[source]; writer != nil {
-		return writer
+		return writer, effect.event
 	}
 	writer := &nativeMutationEventWriter{event: effect.event, replacement: effect.replacement}
 	if effect.event != nativeMutationInsert {
@@ -97,7 +100,7 @@ func (operation *nativeMutationOperation) eventWriter(source *storageShard) *nat
 		effect.writers = make(map[*storageShard]*nativeMutationEventWriter)
 	}
 	effect.writers[source] = writer
-	return writer
+	return writer, effect.event
 }
 
 // Replacement candidates form the target row set, even if a joined producer

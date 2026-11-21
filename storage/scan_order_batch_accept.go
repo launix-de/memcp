@@ -355,6 +355,7 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 			}
 			reads[shard] = shard.acquireSnapshotRead(currentTx)
 			mapper = shard.OpenMapReducer(callbackCols, mapReduce, false, 0, nil, currentTx)
+			mapper.exactUpdate = mapper.exactUpdate || source.producerInput.exactUpdateFor(shard.t, currentTx)
 			mappers[shard] = mapper
 		}
 		return mapper

@@ -68,7 +68,7 @@ func scanOrderedRecSetIDsWithCondition(tbl *table, source *recSet, limit int, or
 			result = append(result, values[1].Int())
 			return values[0]
 		}),
-		scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+		scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), nil)
 	return result
 }
 
@@ -100,7 +100,7 @@ func TestRecSetScanSourceAddsExactBoundary(t *testing.T) {
 		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			got = append(got, values[1].Int())
 			return values[0]
-		}), scm.NewNil(), scm.NewNil(), false)
+		}), scm.NewNil(), scm.NewNil(), false, nil)
 
 	if want := []int64{103, 150}; !equalInt64s(got, want) {
 		t.Fatalf("RecSet boundary scan rows = %v, want %v", got, want)
@@ -125,7 +125,7 @@ func TestRepeatedUnorderedRecSetScanDoesNotBuildMembershipIndex(t *testing.T) {
 			scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 				got = append(got, values[1].Int())
 				return values[0]
-			}), scm.NewNil(), scm.NewNil(), false)
+			}), scm.NewNil(), scm.NewNil(), false, nil)
 		if want := []int64{103, 1_503}; !equalInt64s(got, want) {
 			t.Fatalf("repeated RecSet scan rows = %v, want %v", got, want)
 		}
@@ -372,7 +372,7 @@ func TestSparseOrderedRecSetAppliesNativeIndexRange(t *testing.T) {
 			[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{order},
 			0, 0, 10, []string{"id"},
 			scm.NewFunc(func(row ...scm.Scmer) scm.Scmer { got = append(got, row[1].Int()); return row[0] }),
-			scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+			scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), nil)
 		if want := []int64{3, 10_003}; !equalInt64s(got, want) {
 			t.Fatalf("attempt %d: sparse native-index range = %v, want %v", attempt, got, want)
 		}

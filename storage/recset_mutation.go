@@ -11,7 +11,7 @@ import "github.com/launix-de/memcp/scm"
 // UpdateFunctionBatch, UNIQUE/row effects, statement Undo and transition owner.
 func (r *recSet) scanMutation(tx *TxContext, schema scm.Scmer, values []scm.Scmer,
 	conditionCols []string, condition scm.Scmer, callbackCols []string,
-	mapper, neutral, combine scm.Scmer, outer bool) scm.Scmer {
+	mapper, neutral, combine scm.Scmer, outer bool, producerInput *nativeMutationInput) scm.Scmer {
 	tx, finishData := r.table.writeDataContext(tx)
 	defer finishData()
 
@@ -32,6 +32,7 @@ func (r *recSet) scanMutation(tx *TxContext, schema scm.Scmer, values []scm.Scme
 	}
 	touchTempColumns(r.table, conditionCols, callbackCols)
 	access := recSetScanAccess(r, schema, values)
+	access.producerInput = producerInput
 	accumulator := scm.ApplyOnce(neutral, nil)
 	emptyResult := func() scm.Scmer {
 		if outer {

@@ -348,7 +348,7 @@ func TestStorageStringPreparedFilterReaderIsConsumed(t *testing.T) {
 	// The ordered scalar/bulk paths must use the same prepared representation.
 	callback := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[1] })
 	result := tbl.scan_order(tx, access, nil, []string{"label"}, condition, nil, nil, 0, 0, 1,
-		[]string{"id"}, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+		[]string{"id"}, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), nil)
 	if result.IsNil() {
 		t.Fatal("ordered filter bypassed prepared reader")
 	}
@@ -364,7 +364,7 @@ func TestStorageStringPreparedFilterReaderIsConsumed(t *testing.T) {
 		t.Fatal("first-record prepared reader lost physical delta")
 	}
 	delta := tbl.scan_order(tx, access, nil, []string{"label"}, deltaCondition, nil, nil, 0, 0, 1,
-		[]string{"id"}, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+		[]string{"id"}, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), nil)
 	if delta.IsNil() || delta.Int() != 2048 {
 		t.Fatal("ordered prepared reader lost physical delta")
 	}

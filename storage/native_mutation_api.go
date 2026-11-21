@@ -125,6 +125,21 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 		checked = true
 	}
 	if !checked {
+		// Preserve the ordinary CS execution/decision owner. This local runtime
+		// input records an existing producer contract, not checked statement
+		// admission or another transaction. Distributed operators retain their
+		// existing native protocol rather than receiving unencoded authority.
+		if parent != nil && descriptor.event == nativeMutationUpdate && parent.remoteObject == nil &&
+			!parent.remoteInvocation && parent.coordinator == nil && parent.relationData == nil {
+			local := true
+			for _, target := range targets {
+				local = local && target.dataOwner == nil && activeReplication(target.schema) == nil && !sharedClusterSource(target)
+			}
+			if local {
+				input := &nativeMutationInput{execution: parent, owner: parent.transactionState, targets: targets, event: descriptor.event}
+				return scm.Apply(producer, scm.NewAny(input))
+			}
+		}
 		return scm.Apply(producer, txContextScmer(parent))
 	}
 	if parent == nil || db == nil || multipleDatabases {

@@ -2048,7 +2048,7 @@ func initTransaction(en scm.Env) {
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			tx := transactionForSession(a[0])
 			if len(a) > 1 && !a[1].IsNil() {
-				if current, ok := a[1].Any().(*TxContext); ok {
+				if current := scmerToTxContext(a[1]); current != nil {
 					tx = current
 				}
 			}
@@ -2067,7 +2067,7 @@ func initTransaction(en scm.Env) {
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			tx := transactionForSession(a[0])
 			if len(a) > 1 && !a[1].IsNil() {
-				if current, ok := a[1].Any().(*TxContext); ok {
+				if current := scmerToTxContext(a[1]); current != nil {
 					tx = current
 				}
 			}

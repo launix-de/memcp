@@ -1465,6 +1465,19 @@ func (s Scmer) marshalJSON(persistent bool) ([]byte, error) {
 			return arr
 		default:
 			tag := v.GetTag()
+			if tag == tagAny {
+				// Opaque embedding values can reject serialization through Go's
+				// existing JSON contract instead of losing their runtime identity
+				// in the diagnostic string fallback below.
+				if marshaler, ok := v.Any().(json.Marshaler); ok {
+					encoded, err := json.Marshal(marshaler)
+					if err != nil {
+						encodeErr = err
+						return nil
+					}
+					return json.RawMessage(encoded)
+				}
+			}
 			if codec := CustomJSONCodecs[tag]; codec.Encode != nil {
 				return map[string]any{"scmer_custom": int(tag), "value": codec.Encode(unsafe.Pointer(v.ptr))}
 			}
