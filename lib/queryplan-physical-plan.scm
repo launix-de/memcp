@@ -1268,7 +1268,7 @@ cache scan for every output row. */
 									(range_cache_state_init_expr stage ag)
 									(list (quote createcolumn) (source_table_expr target)
 										column_name "any" (quoted_runtime_list '())
-										(quoted_runtime_list '("temp" true))
+										(quoted_runtime_list '("temp" true "runtime_only" true))
 										(cons (quote list) input_cols)
 										(list (quote lambda)
 											(map input_cols (lambda (col)
@@ -2095,7 +2095,7 @@ outer joins. */
 			"any"
 			(quoted_runtime_list '())
 			(list (quote list)
-				"temp" true
+				"temp" true "runtime_only" true
 				"sortcols" (quoted_runtime_list (os_sortcols stage))
 				"sortdirs" (cons (quote list) (os_sortdirs stage))
 				"partitioncount" (os_partitioncount stage)
@@ -2123,7 +2123,7 @@ outer joins. */
 				"any"
 				(quoted_runtime_list '())
 				(list (quote list)
-					"temp" true
+					"temp" true "runtime_only" true
 					"sortcols" (quoted_runtime_list sortcols)
 					"sortdirs" (cons (quote list) sortdirs)
 					"partitioncount" partitioncount
@@ -3387,7 +3387,7 @@ cached plan is recompiled when data growth crosses the carrier boundary. */
 												(source_table_expr target)
 												column_name "any"
 												(quoted_runtime_list '())
-												(quoted_runtime_list '("temp" true))
+												(quoted_runtime_list '("temp" true "runtime_only" true))
 												(cons (quote list) input_cols)
 												(list (quote lambda) params lookup_expr)
 												(physical_query_tx_symbol)))
@@ -11009,7 +11009,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(prejoin_column_name sources alias col)
 			"any"
 			(quoted_runtime_list '())
-			(quoted_runtime_list (list "temp" true "collate" (source_column_order_collation src col)))
+			(quoted_runtime_list (list "temp" true "runtime_only" true "collate" (source_column_order_collation src col)))
 			(cons (quote list) input_cols)
 			computor))))
 
@@ -14540,7 +14540,7 @@ existing scan and expression primitives. No predicate is discarded. */
 		(define body (unqualify qualified_body))
 		(define name (concat ".predicate:" (stable_structural_hash (list (source_schema driver) (source_relation driver) (source_schema lookup) (source_relation lookup) columns body) true)))
 		(list name
-			(list (quote createcolumn) (source_table_expr driver) name "any" (quoted_runtime_list '()) (quoted_runtime_list '("temp" true))
+			(list (quote createcolumn) (source_table_expr driver) name "any" (quoted_runtime_list '()) (quoted_runtime_list '("temp" true "runtime_only" true))
 				(quoted_runtime_list columns)
 				(list (quote lambda) (map columns symbol) body))
 			(compile_scan_plan (quote scan) (physical_query_tx_symbol) (source_table_expr driver)
