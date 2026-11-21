@@ -7,6 +7,9 @@ metadata:
   requires_tds: true
   description: Statement trigger amendments after actual rows retain the original transaction and affect only following events
 setup:
+- sql: DROP TABLE IF EXISTS late_trigger_read_committed
+- sql: DROP TABLE IF EXISTS late_trigger_read_committed_audit
+- sql: DROP TABLE IF EXISTS late_trigger_read_committed_prior
 - sql: DROP TABLE IF EXISTS late_trigger_unrelated_audit
 - sql: DROP TABLE IF EXISTS late_trigger_unrelated
 - sql: DROP TABLE IF EXISTS late_trigger_unrelated_prior
@@ -85,6 +88,11 @@ setup:
     SELECT i.id,d.value,i.value,10 FROM inserted i INNER JOIN deleted d ON i.id=d.id; END
 - sql: CREATE TRIGGER late_trigger_enabled_program ON late_trigger_enabled AFTER UPDATE AS BEGIN INSERT late_trigger_enabled_audit(id,old_value,new_value,phase)
     SELECT i.id,d.value,i.value,10 FROM inserted i INNER JOIN deleted d ON i.id=d.id; END
+- sql: CREATE TABLE late_trigger_read_committed(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_read_committed VALUES(1,1)
+- sql: CREATE TABLE late_trigger_read_committed_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_read_committed_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_read_committed_audit(id INT,old_value INT,new_value INT,phase INT)
 cleanup:
 - sql: DROP TABLE IF EXISTS late_trigger_unrelated
 - sql: DROP TABLE IF EXISTS late_trigger_unrelated_audit
@@ -113,10 +121,15 @@ cleanup:
 - sql: DROP TABLE IF EXISTS late_trigger_default
 - sql: DROP TABLE IF EXISTS late_trigger_default_audit
 - sql: DROP TABLE IF EXISTS late_trigger_default_prior
+- sql: DROP TABLE IF EXISTS late_trigger_read_committed
+- sql: DROP TABLE IF EXISTS late_trigger_read_committed_audit
+- sql: DROP TABLE IF EXISTS late_trigger_read_committed_prior
 test_cases:
 - name: An unrelated row prefix and a new AFTER program share the original decision
   tds:
     statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
     - connection: owner
       sql: BEGIN TRANSACTION
     - connection: owner
@@ -196,6 +209,8 @@ test_cases:
   tds:
     statements:
     - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
       sql: BEGIN TRANSACTION
     - connection: owner
       sql: UPDATE late_trigger_same SET value=2 WHERE id=1
@@ -246,6 +261,8 @@ test_cases:
 - name: Rollback restores the original rows declaration and audit effects together
   tds:
     statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
     - connection: owner
       sql: BEGIN TRANSACTION
     - connection: owner
@@ -301,6 +318,8 @@ test_cases:
 - name: Savepoint rewind removes the declaration and suffix while preserving the row prefix
   tds:
     statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
     - connection: owner
       sql: BEGIN TRANSACTION
     - connection: owner
@@ -367,6 +386,8 @@ test_cases:
   tds:
     statements:
     - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
       sql: BEGIN TRANSACTION
     - connection: owner
       sql: UPDATE late_trigger_alter SET value=2 WHERE id=1
@@ -419,6 +440,8 @@ test_cases:
   tds:
     statements:
     - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
       sql: BEGIN TRANSACTION
     - connection: owner
       sql: UPDATE late_trigger_drop SET value=2 WHERE id=1
@@ -462,6 +485,8 @@ test_cases:
 - name: Disabled and enabled amendments after DML retain actual event ordering
   tds:
     statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
     - connection: owner
       sql: BEGIN TRANSACTION
     - connection: owner
@@ -513,6 +538,8 @@ test_cases:
   tds:
     statements:
     - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
       sql: BEGIN TRANSACTION
     - connection: owner
       sql: UPDATE late_trigger_empty_prior SET value=11 WHERE id=1
@@ -546,6 +573,8 @@ test_cases:
 - name: An earlier default declaration and row suffix can precede another endpoint trigger
   tds:
     statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
     - connection: owner
       sql: BEGIN TRANSACTION
     - connection: owner
@@ -598,3 +627,85 @@ test_cases:
           old_value: 1
           new_value: 2
           phase: 10
+- name: Read committed row prefixes retain the same later trigger semantics
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_read_committed_prior SET value=11 WHERE id=1
+    - connection: owner
+      sql: CREATE TRIGGER late_trigger_read_committed_program ON late_trigger_read_committed AFTER UPDATE AS BEGIN INSERT
+        late_trigger_read_committed_audit(id,old_value,new_value,phase) SELECT i.id,d.value,i.value,10 FROM inserted i INNER
+        JOIN deleted d ON i.id=d.id; END
+    - connection: owner
+      sql: UPDATE late_trigger_read_committed SET value=2 WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM late_trigger_read_committed ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 2
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_read_committed_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_read_committed ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 1
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_read_committed_audit ORDER BY old_value,phase
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'late_trigger_read_committed_program',N'TR') AS trigger_id
+      expect:
+        rows: 1
+        data:
+        - trigger_id: null
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 1
+          depth: 1
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_read_committed ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 2
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_read_committed_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 0
+          depth: 0
+  noncritical: true
