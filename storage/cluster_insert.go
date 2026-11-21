@@ -62,7 +62,7 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 		if peer == nil {
 			return reply, fmt.Errorf(mosi.NetworkError)
 		}
-		err = cluster.service.control(ctx, peer, "cluster.reserve_ids", request, &reply, true)
+		err = cluster.service.control(ctx, peer, "cluster.table_ids", request, &reply, true)
 		return reply, err
 	}
 	db := GetDatabase(request.Database)

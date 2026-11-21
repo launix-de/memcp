@@ -156,7 +156,7 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 		return cluster.handleTryRead(ctx, source, data)
 	case "cluster.location", "cluster.location_update", "cluster.schema_locations":
 		return cluster.handleLocations(ctx, source, method, data)
-	case "cluster.reserve_ids":
+	case "cluster.table_ids":
 		return cluster.handleIDReservation(ctx, data)
 	case "cluster.report":
 		var resource mosiResource
