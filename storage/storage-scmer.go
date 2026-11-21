@@ -142,6 +142,10 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 }
 
 func (s *StorageSCMER) Serialize(f io.Writer) {
+	// JSONL emits two small writes per value. Buffer those bytes locally so
+	// filesystem backends receive blocks, retaining the legacy framing exactly.
+	buffer := bufio.NewWriter(f)
+	f = buffer
 	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
 	for i := 0; i < len(s.values); i++ {
@@ -163,6 +167,9 @@ func (s *StorageSCMER) Serialize(f io.Writer) {
 		}
 		f.Write(v)
 		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 10
+	}
+	if err := buffer.Flush(); err != nil {
+		panic(err)
 	}
 }
 func (s *StorageSCMER) Deserialize(f io.Reader) uint {
