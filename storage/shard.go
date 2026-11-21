@@ -1691,6 +1691,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 		//fmt.Println("update/delete", a)
 		// FK checks are enforced via auto-generated system triggers (see createforeignkey)
 
+		attestReplacement := exactUpdate
 		result := false // result = true when update was possible; false if there was a RESTRICT
 		var targetIdx uint32
 		if !exactUpdate {
@@ -1943,6 +1944,11 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				// INSERT. Only a changed identity input needs preparation; ordinary
 				// row replacements/forwarding must never reserve again in the sink.
 				if identityPosition >= 0 && !sameUpdateValue(previousIdentity, d2[identityPosition]) {
+					// Releasing physical/key ownership creates a version boundary
+					// even for a raw callback. Reuse the existing exact physical
+					// replacement attestation after reservation, including forwarded
+					// generations; this grants no new mutation input authority.
+					attestReplacement = true
 					value := d2[identityPosition]
 					t.runWithWriteLockReleased(currentTx, func() {
 						if uniqueGuard != nil {
@@ -1953,11 +1959,11 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					})
 					d2[identityPosition] = value
 				}
-				if exactUpdate && !currentTx.IsVisible(t, targetIdx) {
+				if attestReplacement && !currentTx.IsVisible(t, targetIdx) {
 					panic(sqldb.NewSQLError1(1213, "40001", "Concurrent row replacement; retry transaction"))
 				}
 				if !result { // only do a write if something changed
-					if exactUpdate {
+					if attestReplacement {
 						locked := t.lockReplacementSuccessors(targetIdx, currentTx)
 						defer unlockReplacementSuccessors(locked)
 					}
@@ -2027,7 +2033,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						panic(sqldb.NewSQLError1(1213, "40001", "Concurrent row replacement; retry transaction"))
 					}
 				}
-				if exactUpdate && len(keys) != 0 && !uniqueCheckNeeded {
+				if attestReplacement && len(keys) != 0 && !uniqueCheckNeeded {
 					payloadCols, payloadRow := buildPayload()
 					oldRow := make([]scm.Scmer, len(payloadCols))
 					for i, name := range payloadCols {
@@ -2069,7 +2075,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						}, 0, currentTx, uniqueGuard, nil, input)
 						checked = true
 					}()
-					if exactUpdate {
+					if attestReplacement {
 						// The exclusion above was only for this UNIQUE probe. Restore
 						// its original visibility before attesting the physical version.
 						t.deletions.Set(uint(targetIdx), wasDeletedBefore)
@@ -2078,14 +2084,14 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					// Keep old row visible until after we inserted the replacement in
 					// non-ACID mode. This avoids transient "row disappears" gaps that
 					// make concurrent UPDATE scans miss rows.
-					if acidMode && !exactUpdate {
+					if acidMode && !attestReplacement {
 						t.deletions.Set(uint(targetIdx), true) // staged delete in ACID overlay flow
 					}
 				}
 
 				payloadCols, payloadRow := buildPayload()
 				var locked []*storageShard
-				if exactUpdate {
+				if attestReplacement {
 					locked = t.lockReplacementSuccessors(targetIdx, currentTx)
 					defer unlockReplacementSuccessors(locked)
 				}
