@@ -4600,44 +4600,15 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				continue
 			}
 
-			var newcol ColumnStorage = new(StorageSCMER) // currently only scmer-storages
-			var i uint32
+			var newcol ColumnStorage
+			i := uint32(len(rebuiltRowIDs))
 			func() {
 				// Both replay passes consume the complete selected main extent.
 				reader := c.GetCachedReader(ReadDecoded)
 				defer ReleaseColumnReader(reader)
-				for {
-					// scan phase
-					newcol.prepare()
-					replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, newcol.scan)
-					i = uint32(len(rebuiltRowIDs))
-					newcol2 := newcol.proposeCompression(i)
-					if _, blob := newcol2.(*OverlayBlob); blob && t.catalogHome != nil {
-						// system_schema shards are written inside a schema commit
-						// and describe the blob store's own table: their long
-						// values stay inline instead of entering the blob store.
-						break
-					}
-					if newcol2 == nil {
-						break // we found the optimal storage format
-					} else {
-						// redo scan phase with compression
-						//fmt.Printf("Compression with %T\n", newcol2)
-						newcol = newcol2
-					}
-				}
-				// build phase
-				// TODO: when source and target are both OverlayBlob, pass raw
-				// compressed blob data through instead of decompressing via
-				// GetValue and recompressing in build(). This avoids a full
-				// gzip round-trip per blob during rebuild.
-				if blob, ok := newcol.(*OverlayBlob); ok {
-					blob.schema = result.home()
-				}
-				newcol.init(i)
-				replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, newcol.build)
-				newcol.finish()
-
+				newcol = buildColumnStorage(i, result.home(), t.catalogHome != nil, func(emit func(uint32, scm.Scmer)) {
+					replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, emit)
+				})
 			}()
 
 			result.columns[col] = newcol
@@ -4744,13 +4715,17 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	result.mu.Unlock()
 	resultLocked = false
 	// Register the new shard with CacheManager
-	atomic.StoreUint64(&result.lastAccessed, uint64(time.Now().UnixNano()))
-	if result.t.PersistencyMode == Cache && !result.t.isEphemeralQueryTable() {
-		GlobalCache.AddItem(result, int64(result.exclusiveSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
-	} else if result.t.PersistencyMode != Memory && !result.t.isEphemeralQueryTable() {
-		GlobalCache.AddItem(result, int64(result.exclusiveSize()), TypeShard, shardCleanup, shardLastUsed, nil)
-	}
+	result.registerCachedStorage()
 	return result
+}
+
+func (s *storageShard) registerCachedStorage() {
+	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
+	if s.t.PersistencyMode == Cache && !s.t.isEphemeralQueryTable() {
+		GlobalCache.AddItem(s, int64(s.exclusiveSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+	} else if s.t.PersistencyMode != Memory && !s.t.isEphemeralQueryTable() {
+		GlobalCache.AddItem(s, int64(s.exclusiveSize()), TypeShard, shardCleanup, shardLastUsed, nil)
+	}
 }
 
 // A live shared snapshot opens an append handle only after acquiring native M.

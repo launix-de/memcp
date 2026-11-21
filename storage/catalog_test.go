@@ -208,6 +208,36 @@ func TestCatalogRowsRoundTripLegacyDocument(t *testing.T) {
 	}
 }
 
+func TestCatalogExportPreservesRawDefaultsAndLiteralJSONText(t *testing.T) {
+	document := []byte(`{"name":"shop","tables":{"values":{"Name":"values","Columns":[
+		{"Name":"a","Comment":"true","Default":true},
+		{"Name":"b","Comment":"[1,\"x\"]","Default":[1,"x"]},
+		{"Name":"c","Comment":"true","Default":true}
+	]}}}`)
+	rows := catalogRowsFromDocument(document)
+	var decoded catalogDocument
+	if err := json.Unmarshal(catalogDocumentFromRows("shop", &rows), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		Columns []struct {
+			Comment string
+			Default any
+		}
+	}
+	if err := json.Unmarshal(decoded.Tables["values"], &record); err != nil {
+		t.Fatal(err)
+	}
+	for i, expected := range []any{true, []any{float64(1), "x"}, true} {
+		if !reflect.DeepEqual(record.Columns[i].Default, expected) {
+			t.Fatalf("default %d changed JSON type: %v", i, record.Columns[i].Default)
+		}
+	}
+	if record.Columns[0].Comment != "true" || record.Columns[1].Comment != `[1,"x"]` || record.Columns[2].Comment != "true" {
+		t.Fatal("literal JSON text was interpreted as a raw default", record.Columns)
+	}
+}
+
 func TestCatalogRelationsCoverEveryPersistedField(t *testing.T) {
 	// Every JSON key of the legacy records is a catalog column or a child
 	// relation. A new persisted field automatically becomes a column.

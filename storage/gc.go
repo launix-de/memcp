@@ -364,7 +364,7 @@ func writeBlobManifestReferences(shard *storageShard, references map[string]stru
 		_ = writer.Close()
 		panic(err)
 	}
-	finishColumnWrite(writer, shard.t.PersistencyMode == Safe)
+	finishColumnWrite(writer, shard.durableColumns())
 }
 
 // cleanShards deletes shard column/log files whose UUID is not in any active shard.

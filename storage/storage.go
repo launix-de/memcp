@@ -286,6 +286,32 @@ type ColumnStorage interface {
 	Deserialize(io.Reader) uint // read from Reader (note that first byte is already read, so the reader starts at the second byte)
 }
 
+// buildColumnStorage analyzes and encodes one privately owned immutable column.
+// Each replay visits the same values and row order. inlineBlobs keeps catalog
+// metadata out of the blob store that the catalog itself declares.
+func buildColumnStorage(count uint32, home *database, inlineBlobs bool, replay func(func(uint32, scm.Scmer))) ColumnStorage {
+	var column ColumnStorage = new(StorageSCMER)
+	for {
+		column.prepare()
+		replay(column.scan)
+		proposed := column.proposeCompression(count)
+		if proposed == nil {
+			break
+		}
+		if _, blob := proposed.(*OverlayBlob); blob && inlineBlobs {
+			break
+		}
+		column = proposed
+	}
+	if blob, ok := column.(*OverlayBlob); ok {
+		blob.schema = home
+	}
+	column.init(count)
+	replay(column.build)
+	column.finish()
+	return column
+}
+
 // storageJITFunctions stores typed native readers on the immutable finished
 // storage object. Consumers resolve these getters once before entering their
 // row or batch loop.
