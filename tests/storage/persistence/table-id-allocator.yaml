@@ -41,6 +41,23 @@ cleanup:
 - sql: DROP TABLE IF EXISTS allocator_native
 - sql: DROP TABLE IF EXISTS allocator_recreated
 test_cases:
+- name: Native counter ALTER preserves its configured seed and advances future IDs
+  setup:
+  - sql: DROP TABLE IF EXISTS allocator_adjusted
+  - sql: CREATE TABLE allocator_adjusted(id INT IDENTITY(21,1) PRIMARY KEY,value INT)
+  steps:
+  - scm: |
+      (begin
+        (define target (table "memcp-tests" false "allocator_adjusted" false nil))
+        (define changed (altercolumn target "id" "auto_increment" 200))
+        (define state (table_id_state target nil))
+        (list changed (state "start") (state "issued") (state "high") (state "high_allocated")))
+    expect: {result: [true,'21',true,'200',true]}
+  - sql: INSERT allocator_adjusted(value) VALUES(9)
+  - sql: SELECT id,value,IDENT_CURRENT('allocator_adjusted') AS current_value FROM allocator_adjusted
+    expect: {rows: 1, data: [{id: 201,value: 9,current_value: 201}]}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS allocator_adjusted
 - name: Virgin native identities expose their actual seed and NUMERIC declaration
   tds:
     statements:
