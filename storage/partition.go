@@ -1578,14 +1578,23 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 		}
 	}
 
-	select {
-	case <-oldTopology.drained:
+	retired := make([]replacedShardGeneration, 0, len(oldshards))
+	ready := true
+	for _, shard := range oldshards {
+		generation := replacedShardGeneration{shard, oldTopology.drained, oldTopology.retirementDependencies}
+		retired = append(retired, generation)
+		ready = ready && generation.ready()
+	}
+	finish := func() {
+		for _, generation := range retired {
+			generation.wait()
+		}
 		finishRetirement()
-	default:
-		go func() {
-			<-oldTopology.drained
-			finishRetirement()
-		}()
+	}
+	if ready {
+		finish()
+	} else {
+		go finish()
 	}
 }
 
