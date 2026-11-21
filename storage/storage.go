@@ -3345,7 +3345,7 @@ func Init(en scm.Env) {
 				next := uint64(scm.ToInt(a[2]))
 				if next > 0 {
 					t.reserveAutoIncrement(next-1, 0)
-					db.save()
+					db.save(nil)
 				}
 				return scm.NewBool(true)
 			default:

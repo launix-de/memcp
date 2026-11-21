@@ -146,7 +146,7 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 			epoch := r.directory.Records[r.resourceKey(packet.Resource)].Epoch
 			r.mu.Unlock()
 			if packet.Epoch < epoch {
-				return fmt.Errorf("stale transfer epoch: %s received %d, current %d", packet.Resource.key(), packet.Epoch, epoch)
+				return fmt.Errorf("stale transfer epoch")
 			}
 		}
 		key := source + "/" + packet.ID
@@ -205,7 +205,7 @@ func (r *replicationManager) applyResourcePacket(source string, packet *mosiPack
 					epoch := r.directory.Records[r.resourceKey(packet.Resource)].Epoch
 					r.mu.Unlock()
 					if packet.Epoch < epoch {
-						return fmt.Errorf("stale transfer epoch: %s received %d, current %d", packet.Resource.key(), packet.Epoch, epoch)
+						return fmt.Errorf("stale transfer epoch")
 					}
 				}
 				if err := func() error {

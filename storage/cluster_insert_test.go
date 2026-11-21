@@ -125,7 +125,7 @@ func TestClusterWALReplayRecoversIntegerCounterWithoutAllocator(t *testing.T) {
 	c.AutoIncrement = true
 	c.UpdateSanitizer()
 	tbl.publishShowColumnsSnapshot(true)
-	tbl.schema.save()
+	tbl.schema.save(nil)
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 		{scm.NewInt(10000), scm.NewString("explicit")},
 		{scm.NewInt(10001), scm.NewString("explicit")},

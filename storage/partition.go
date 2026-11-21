@@ -1512,7 +1512,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 	var savePanic any
 	func() {
 		defer func() { savePanic = recover() }()
-		t.schema.save()
+		t.schema.save(nil, t)
 	}()
 	if savePanic != nil {
 		for i := len(oldshardsLocked) - 1; i >= 0; i-- {

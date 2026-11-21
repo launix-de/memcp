@@ -431,16 +431,22 @@ func TestCatalogReplicaTransferAdmitsSuccessorBeforePublishingRoutes(t *testing.
 	}
 }
 
-func TestCatalogReplicaProposalsKeepRuntimeCachesLocal(t *testing.T) {
-	for _, master := range []bool{false, true} {
-		t.Run(fmt.Sprint(master), func(t *testing.T) {
+func TestCatalogDefinitionProposalsKeepRuntimeCachesLocal(t *testing.T) {
+	for _, mode := range []string{"standalone", "master", "slave"} {
+		t.Run(mode, func(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "catalog-local-cache-proposals", 0)
 			db := tbl.schema
-			r := replicaRecoveryFixture()
-			r.master = master
-			r.schemaShards(db, r.id, true)
+			var r *replicationManager
+			if mode != "standalone" {
+				r = replicaRecoveryFixture()
+				r.master = mode == "master"
+				r.schemaShards(db, r.id, true)
+			}
 			previous := replication.Swap(r)
 			defer replication.Store(previous)
+			db.schemalock.Lock()
+			before := db.catalogRowsLocked()
+			db.schemalock.Unlock()
 			cache := db.newTable(".grp:local", Cache)
 			db.tables.Set(cache.Name, cache)
 			compute := &column{Name: "local_compute", Typ: "INT", IsTemp: true, Computor: scm.NewSymbol("local_runtime_helper")}
@@ -455,6 +461,9 @@ func TestCatalogReplicaProposalsKeepRuntimeCachesLocal(t *testing.T) {
 				}
 			}
 			for relation := range rows {
+				if catalogFingerprint(catalogRelationID(relation), before[relation]) != catalogFingerprint(catalogRelationID(relation), rows[relation]) {
+					t.Fatalf("runtime workspace changed canonical relation %s", catalogRelations[relation].name)
+				}
 				if err := validateReplicaCatalogRows(db.Name, catalogRelationID(relation), rows[relation]); err != nil {
 					t.Fatal("runtime cache code reached native admission", err)
 				}
@@ -463,6 +472,34 @@ func TestCatalogReplicaProposalsKeepRuntimeCachesLocal(t *testing.T) {
 				t.Fatal("canonical declaration filtering destroyed node-local compute owners")
 			}
 		})
+	}
+}
+
+
+func TestCatalogCacheRebuildLeavesUnrelatedStatisticsUncheckpointed(t *testing.T) {
+	source, _ := createDurabilityTestTable(t, "catalog_cache_checkpoint_scope", 0)
+	db := source.schema
+	cache, _ := CreateTable(db.Name, ".grp:checkpoint_scope", Cache, false)
+	db.ensureBlobTable()
+	before := readCatalogRoot(db.persistence.ReadSchema())
+	if before == nil {
+		t.Fatal("missing initial native catalog root")
+	}
+	// Query planning can update advisory statistics without changing a table's
+	// physical generation. Rebuilding its query cache does not own that change.
+	source.PlannerRowEstimate.value.Store(12345)
+	if result := RebuildTable(cache, true, false); strings.Contains(result, "errors:") {
+		t.Fatal(result)
+	}
+	after := readCatalogRoot(db.persistence.ReadSchema())
+	if after == nil || !reflect.DeepEqual(before.Shards, after.Shards) {
+		t.Fatal("query cache rebuild rewrote native definition partitions")
+	}
+	// The source's own checkpoint must still record its new statistics.
+	db.save(nil, source)
+	after = readCatalogRoot(db.persistence.ReadSchema())
+	if after.Shards["tables"] == before.Shards["tables"] {
+		t.Fatal("source checkpoint lost its advisory statistics")
 	}
 }
 
@@ -663,7 +700,7 @@ func TestCatalogCheckpointCannotOverwriteDefinitionsFromRuntime(t *testing.T) {
 	// must export the admitted definition, rather than silently adopting this.
 	tbl.Comment = "runtime-only divergence"
 	tbl.Columns[1].Comment = "runtime column divergence"
-	db.save()
+	db.save(nil)
 	root := readCatalogRoot(db.persistence.ReadSchema())
 	if root == nil || root.Version != catalogFormatVersion {
 		t.Fatal("checkpoint did not preserve its catalog root")
@@ -894,7 +931,7 @@ func TestCatalogReadsTenantBackendRoot(t *testing.T) {
 	if restored.tables.Get(tbl.Name) == nil {
 		t.Fatal("tenant-backend catalog was not loaded")
 	}
-	restored.save()
+	restored.save(nil)
 	rewritten := readCatalogRoot(db.persistence.ReadSchema())
 	if rewritten == nil || rewritten.Version != catalogFormatVersion {
 		t.Fatal("legacy catalog root was not upgraded on save")
@@ -1077,7 +1114,7 @@ func TestCatalogNamespaceDurabilityPrecedesTenantRoot(t *testing.T) {
 			t.Error("retry published its root before syncing the system namespace")
 		}
 	}
-	db.save()
+	db.save(nil)
 	if barrier.calls != 2 || counting.calls.Load() != 1 {
 		t.Fatal("retry did not durably order the native namespace before its tenant root")
 	}
@@ -1111,7 +1148,7 @@ func TestCatalogCheckpointDoesNotReactivateHistoricalUUID(t *testing.T) {
 	if err := r.replaceCatalogShard(initial.replicationResource(), initial, successor); err != nil {
 		t.Fatal(err)
 	}
-	db.save()
+	db.save(nil)
 	current := cell.resolved().current.Load()
 	canonical := r.canonicalResource(initial.replicationResource())
 	if current.uuid.String() != canonical.Shard {

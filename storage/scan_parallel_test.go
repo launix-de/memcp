@@ -1164,9 +1164,9 @@ func TestReserveIDsRestartContract(t *testing.T) {
 	if atomic.LoadUint64(&crashed.Auto_increment) != 3 {
 		t.Fatal("pure reservation unexpectedly changed persistent state")
 	}
-	crashed.schema.save()
+	crashed.schema.save(nil)
 	scm.Apply(reserve, NewTableScmer(crashed), scm.NewInt(2))
-	crashed.schema.save()
+	crashed.schema.save(nil)
 	checkpointed := reloadTableFromPersistence(t, "treserveidrestart", persistence)
 	if atomic.LoadUint64(&checkpointed.Auto_increment) != 5 {
 		t.Fatal("existing schema checkpoint did not retain the reserved counter")
