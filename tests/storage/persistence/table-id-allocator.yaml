@@ -197,12 +197,16 @@ test_cases:
 - name: Native identity assignments and subsequent INSERT share one allocator
   scm: |
     (begin
-      (define target (table "memcp-tests" false "allocator_native" false nil))
-      (define first (insert target '("value") (list (list 31))))
-      (define updated (scan nil target '() '() '() (lambda () true) '("$update")
+      (define session (newsession)) (session "username" "root")
+      (tx_begin_acid session)
+      (define tx (session "__memcp_tx"))
+      (define target (table "memcp-tests" false "allocator_native" false tx))
+      (define first (insert target '("value") (list (list 31)) '() nil false nil tx))
+      (define updated (scan tx target '() '() '() (lambda () true) '("$update")
         (lambda (count update) (begin (update (list "id" 100)) (+ count 1))) 0 +))
-      (define second (insert target '("value") (list (list 32))))
-      (define state (table_id_state target nil))
+      (define second (insert target '("value") (list (list 32)) '() nil false nil tx))
+      (define state (table_id_state target tx))
+      (tx_commit session)
       (list first updated second (state "start") (state "issued") (state "high")))
   expect: {result: [1,1,1,'1',true,'101']}
 - name: Native identity assignments retain complete stored values
