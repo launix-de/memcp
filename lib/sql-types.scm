@@ -457,6 +457,10 @@ multipart reference. This same pure collector serves mutation contracts. */
 		((symbol get_column) _alias _alias_ic _column _column_ic) (list expr)
 		((symbol quote) _datum) '()
 		((symbol inner_select) _query) '()
+		/* Child queries own their column namespace. An IN probe remains in
+		this scope, while its typed query child stops at this boundary. */
+		(cons (symbol query-block) _parts) '()
+		(cons (symbol union-block) _parts) '()
 		(cons _head args) (merge (map args sql_column_refs))
 		_ '())))
 /* Comparison: BOOLEAN. Preserve plain operators for direct scan bounds;
@@ -757,6 +761,11 @@ Unannotated scalar terminals have no trustworthy integer syntax contract. */
 	(match expr
 		((symbol quote) _datum) '()
 		((symbol inner_select) _query) '()
+		/* Admission consumes comparisons in this mutation's source scope.
+		The common binder compiles nested queries with their own declarations;
+		their comparisons cannot establish a direct parent key contract. */
+		(cons (symbol query-block) _parts) '()
+		(cons (symbol union-block) _parts) '()
 		(cons head args) (begin
 			(define operands (match expr
 				(cons (symbol sql_compile_expr) (cons _compiler arguments))
