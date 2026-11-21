@@ -13,9 +13,11 @@ import "github.com/launix-de/memcp/scm"
 type nativeMutationEvent uint8
 
 // Bounded producer metadata, independent of row cardinality. Names describe
-// explicit assignments; they are never inferred from OLD/NEW equality. Other
-// event producers may provide no assignment names. Frontend policy decides how
-// to interpret this metadata for its language.
+// the complete explicit assignments when nonempty, enforced by the physical
+// UPDATE sink before row/callback effects. Empty means unknown/all columns for
+// existing producers. BEFORE programs may still rewrite NEW; cold dependency
+// admission widens their potential footprint separately. Names are never
+// inferred from OLD/NEW equality.
 type nativeMutationDescriptor struct {
 	event   nativeMutationEvent
 	columns []string

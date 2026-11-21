@@ -1597,13 +1597,14 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 	declarations := mutationColumns(t.t, currentTx, input)
 	initializedColumns := t.initializedColumnInput(currentTx)
 	var eventWriter *nativeMutationEventWriter
+	var assignments nativeMutationAssignments
 	exactUpdate := false
 	if withTrigger && currentTx != nil && currentTx.mutationOperation != nil {
 		var event nativeMutationEvent
-		eventWriter, event = currentTx.mutationOperation.eventWriter(t)
+		eventWriter, event, assignments = currentTx.mutationOperation.eventWriter(t)
 		exactUpdate = event == nativeMutationUpdate
 	}
-	update := t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, nil, currentTx, uniqueGuard, eventWriter, declarations, input, initializedColumns, exactUpdate)
+	update := t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, nil, currentTx, uniqueGuard, eventWriter, declarations, input, initializedColumns, exactUpdate, assignments)
 	return func(a ...scm.Scmer) scm.Scmer {
 		if currentTx != nil && currentTx.mutationOperation != nil {
 			leave := currentTx.mutationOperation.borrowMutation(currentTx)
@@ -1629,7 +1630,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 			}
 			if guard != nil {
 				defer guard.release()
-				return t.UpdateFunctionBatch(current, withTrigger, alreadyLocked, nil, nil, currentTx, guard, eventWriter, declarations, input, initializedColumns, exactUpdate)(a...)
+				return t.UpdateFunctionBatch(current, withTrigger, alreadyLocked, nil, nil, currentTx, guard, eventWriter, declarations, input, initializedColumns, exactUpdate, assignments)(a...)
 			}
 		}
 		return update(a...)
@@ -1650,7 +1651,7 @@ func isRuntimeComputedColumn(colDesc *column) bool {
 	return len(colDesc.OrcSortCols) > 0 || !colDesc.Computor.IsNil() || len(colDesc.ComputorInputCols) > 0
 }
 
-func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, eventWriter *nativeMutationEventWriter, declarations []*column, input *nativeMutationInput, initializedColumns *nativeColumnInitialInput, exactUpdate bool) func(...scm.Scmer) scm.Scmer {
+func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, eventWriter *nativeMutationEventWriter, declarations []*column, input *nativeMutationInput, initializedColumns *nativeColumnInitialInput, exactUpdate bool, assignments nativeMutationAssignments) func(...scm.Scmer) scm.Scmer {
 	identityName := ""
 	for _, declaration := range declarations {
 		if declaration.AutoIncrement {
@@ -1897,14 +1898,20 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					triggerOldRow = schemaRowFromDelta(d2)
 				}
 				for j := 0; j < len(changes); j += 2 {
-					colidx, ok := t.deltaColumns[scm.String(changes[j])]
+					name := scm.String(changes[j])
+					if assignments != nil {
+						if _, declared := assignments[name]; !declared {
+							panic("native UPDATE assignment is outside its declared columns: " + name)
+						}
+					}
+					colidx, ok := t.deltaColumns[name]
 					if !ok {
-						panic("UPDATE on invalid column: " + scm.String(changes[j]))
+						panic("UPDATE on invalid column: " + name)
 					}
 					newVal := changes[j+1]
 					// apply type sanitizer
 					for _, colDesc := range declarations {
-						if colDesc.Name == scm.String(changes[j]) && colDesc.sanitizer != nil {
+						if colDesc.Name == name && colDesc.sanitizer != nil {
 							newVal = colDesc.sanitizer(newVal)
 							break
 						}
@@ -1912,7 +1919,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					if !sameUpdateValue(d2[colidx], newVal) {
 						d2[colidx] = newVal
 						result = true // mark that something has changed
-						if uniqueColsSet[scm.String(changes[j])] {
+						if uniqueColsSet[name] {
 							uniqueColsTouched = true
 						}
 					}
@@ -2675,6 +2682,7 @@ type ShardMapReducer struct {
 	mapReduceProgram  scm.SerialProc
 	mapReduceScmer    scm.Scmer // original Scmer for network serialization
 	eventWriter       *nativeMutationEventWriter
+	assignments       nativeMutationAssignments
 	mutationInput     *nativeMutationInput
 	columnInput       *nativeColumnInitialInput
 	mutationColumns   []*column            // one effective declaration contract per native input
@@ -3073,7 +3081,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 	}
 	if mr.hasUpdateCol && currentTx != nil && currentTx.mutationOperation != nil {
 		var event nativeMutationEvent
-		mr.eventWriter, event = currentTx.mutationOperation.eventWriter(t)
+		mr.eventWriter, event, mr.assignments = currentTx.mutationOperation.eventWriter(t)
 		mr.exactUpdate = event == nativeMutationUpdate
 	}
 	// Pre-allocate tagClosure fn ptrs (hoisted, one per pseudo-col type per column).
@@ -3211,7 +3219,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 		if needsMutationMetadata && mr.isUpdate[i] {
 			getter := func(id uint32, batchid uint32) scm.Scmer {
 				borrowedLock := mr.shardWriteLocked && (mr.currentTx == nil || mr.currentTx.mutationOperation == nil)
-				return mr.bindMutationCallback(mr.shard.UpdateFunctionBatch(id, true, borrowedLock, mr.deleteBatch, &mr.deletedRows, mr.currentTx, mr.uniqueGuard, mr.eventWriter, mr.mutationColumns, mr.mutationInput, mr.columnInput, mr.exactUpdate))
+				return mr.bindMutationCallback(mr.shard.UpdateFunctionBatch(id, true, borrowedLock, mr.deleteBatch, &mr.deletedRows, mr.currentTx, mr.uniqueGuard, mr.eventWriter, mr.mutationColumns, mr.mutationInput, mr.columnInput, mr.exactUpdate, mr.assignments))
 			}
 			mr.mainGetters[i] = getter
 			mr.deltaGetters[i] = getter
@@ -3930,7 +3938,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 	t.t.requireStatementTriggerMutation(currentTx, nativeMutationInsert)
 	var eventWriter *nativeMutationEventWriter
 	if currentTx != nil && currentTx.mutationOperation != nil {
-		eventWriter, _ = currentTx.mutationOperation.eventWriter(t)
+		eventWriter, _, _ = currentTx.mutationOperation.eventWriter(t)
 	}
 	t.t.beginContributionMutation()
 	defer t.t.endContributionMutation()

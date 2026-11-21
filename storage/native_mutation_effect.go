@@ -15,10 +15,16 @@ type nativeStatementTrigger struct {
 	program     scm.Scmer // (OLD relation, NEW relation, invocation Session, invocation Tx)
 }
 
+// A non-nil set is the complete explicit-assignment contract of this producer.
+// It is built once from actual column declarations and shared immutably by
+// physical source bindings; nil retains the legacy unknown/all-columns profile.
+type nativeMutationAssignments map[string]struct{}
+
 type nativeMutationEffect struct {
 	target      *table
 	event       nativeMutationEvent
 	columns     scm.Scmer
+	assignments nativeMutationAssignments
 	programs    []nativeStatementTrigger
 	replacement bool
 	old, new    *nativeTransitionRelation
@@ -48,6 +54,23 @@ func (operation *nativeMutationOperation) declareEffect(t *table, descriptor nat
 		values[index] = scm.NewString(column)
 	}
 	effect := &nativeMutationEffect{target: t, event: descriptor.event, columns: scm.NewSlice(values), programs: programs}
+	if descriptor.event == nativeMutationUpdate && len(descriptor.columns) != 0 {
+		names := t.columnNamesForTx(operation.invocation)
+		if names == nil {
+			panic("native mutation requires published column declarations")
+		}
+		effect.assignments = make(nativeMutationAssignments, len(descriptor.columns))
+		for _, name := range descriptor.columns {
+			column, exists := names.exact[name]
+			if !exists {
+				column, exists = names.folded[scm.CaseFoldKey(name)]
+			}
+			if !exists {
+				panic("native mutation declares an unknown assignment column: " + name)
+			}
+			effect.assignments[column.name] = struct{}{}
+		}
+	}
 	if len(programs) != 0 {
 		effect.replacement = programs[0].replacement
 		declarations := mutationColumns(t, operation.invocation, operation.invocation.mutationInputFor(t))
@@ -73,21 +96,23 @@ func (operation *nativeMutationOperation) declareEffect(t *table, descriptor nat
 // source shard lock. A map entry represents a real native shard, not a row or a
 // transaction/session scratch value. All row capture then uses this direct
 // writer pointer under the source's existing writer protocol.
-func (operation *nativeMutationOperation) eventWriter(source *storageShard) (*nativeMutationEventWriter, nativeMutationEvent) {
+func (operation *nativeMutationOperation) eventWriter(source *storageShard) (*nativeMutationEventWriter, nativeMutationEvent, nativeMutationAssignments) {
 	operation.mu.Lock()
-	defer operation.mu.Unlock()
 	if operation.closed || operation.producerDone {
+		operation.mu.Unlock()
 		panic("native mutation producer has finished")
 	}
 	effect := operation.effects[source.t]
 	if effect == nil {
-		return nil, nativeMutationInsert
+		operation.mu.Unlock()
+		return nil, nativeMutationInsert, nil
 	}
+	defer operation.mu.Unlock()
 	if len(effect.programs) == 0 {
-		return nil, effect.event
+		return nil, effect.event, effect.assignments
 	}
 	if writer := effect.writers[source]; writer != nil {
-		return writer, effect.event
+		return writer, effect.event, effect.assignments
 	}
 	writer := &nativeMutationEventWriter{event: effect.event, replacement: effect.replacement}
 	if effect.event != nativeMutationInsert {
@@ -100,7 +125,7 @@ func (operation *nativeMutationOperation) eventWriter(source *storageShard) (*na
 		effect.writers = make(map[*storageShard]*nativeMutationEventWriter)
 	}
 	effect.writers[source] = writer
-	return writer, effect.event
+	return writer, effect.event, effect.assignments
 }
 
 // Replacement candidates form the target row set, even if a joined producer

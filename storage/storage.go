@@ -5185,6 +5185,27 @@ func fkExistenceCheck(tx *TxContext, tbl *table, columns []string, values []scm.
 	return newForeignKeyLookup(tbl, columns).exists(tx, values)
 }
 
+// A real child scan with statement declarations joins the existing native
+// producer owner. Its event/input belongs to this child scan, while nested
+// admission retains the original transaction and outer statement Undo. Parent
+// FK callbacks reach this helper only after releasing row/UNIQUE write locks.
+func fkCascadeScan(currentTx *TxContext, childTbl *table, event nativeMutationEvent, cols []string, condition scm.Scmer, mapCols []string, mapReduceFn scm.Scmer) {
+	produce := func(tx *TxContext) scm.Scmer {
+		return childTbl.scan(tx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, cols, condition, mapCols, mapReduceFn, scm.NewNil(), scm.NewNil(), false)
+	}
+	if childTbl.statementTriggerEvents.Load() == 0 && currentTx.privateMutationSource(childTbl) == nil {
+		produce(currentTx)
+		return
+	}
+	descriptor := nativeMutationDescriptor{event: event}
+	if event == nativeMutationUpdate {
+		descriptor.columns = cols
+	}
+	withNativeTableMutation([]*table{childTbl}, descriptor, currentTx, txSessionScmer(currentTx), scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		return produce(scmerToTxContext(a[0]))
+	}))
+}
+
 // fkCascadeDelete deletes rows in childTbl where cols match vals.
 func fkCascadeDelete(currentTx *TxContext, childTbl *table, cols []string, vals []scm.Scmer) {
 	lookup := newForeignKeyLookup(childTbl, cols)
@@ -5199,7 +5220,7 @@ func fkCascadeDelete(currentTx *TxContext, childTbl *table, cols []string, vals 
 		scm.Apply(a[len(cols)+1]) // $update() with no args = delete
 		return a[0]
 	})
-	childTbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, cols, condition, mapCols, mapReduceFn, scm.NewNil(), scm.NewNil(), false)
+	fkCascadeScan(currentTx, childTbl, nativeMutationDelete, cols, condition, mapCols, mapReduceFn)
 }
 
 // fkCascadeSetNull sets FK cols to NULL in childTbl where cols match vals.
@@ -5221,7 +5242,7 @@ func fkCascadeSetNull(currentTx *TxContext, childTbl *table, cols []string, vals
 		scm.Apply(a[len(cols)+1], scm.NewSlice(payload))
 		return a[0]
 	})
-	childTbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, cols, condition, mapCols, mapReduceFn, scm.NewNil(), scm.NewNil(), false)
+	fkCascadeScan(currentTx, childTbl, nativeMutationUpdate, cols, condition, mapCols, mapReduceFn)
 }
 
 // fkCascadeUpdate updates FK cols in childTbl from oldVals to newVals.
@@ -5243,7 +5264,7 @@ func fkCascadeUpdate(currentTx *TxContext, childTbl *table, cols []string, oldVa
 		scm.Apply(a[len(cols)+1], scm.NewSlice(payload))
 		return a[0]
 	})
-	childTbl.scan(currentTx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, cols, condition, mapCols, mapReduceFn, scm.NewNil(), scm.NewNil(), false)
+	fkCascadeScan(currentTx, childTbl, nativeMutationUpdate, cols, condition, mapCols, mapReduceFn)
 }
 
 // foreignKeyChecksEnabled reads the executing session, never the session that

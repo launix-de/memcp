@@ -178,7 +178,7 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 				physicalTargets = append(physicalTargets, target)
 			}
 		}
-		operation.rejectStatementCascades(physicalTargets, descriptor.event)
+		operation.rejectStatementCascades(physicalTargets, descriptor)
 		return scm.Apply(producer, txContextScmer(binding))
 	})
 }
