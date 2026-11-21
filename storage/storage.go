@@ -598,7 +598,7 @@ func lockTablePublicationShards(shards []*storageShard, write bool, snapshotFoll
 // registered with the session so that ReleaseAllLocks() can free it later.
 // FIFO-adjacent READ requests share the lock. Owners drain admitted UNIQUE
 // batches after publication; exclusive locks also drain incompatible shard users.
-func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss *scm.SessionState, querySeq uint64) func() {
+func acquireTableLock(schema, name string, write bool, snapshotFollows bool, currentTx *TxContext, ss *scm.SessionState, querySeq uint64) func() {
 	if ss == nil {
 		panic("LOCK TABLES requires a query session")
 	}
@@ -606,7 +606,10 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 	if db == nil {
 		panic("LOCK TABLES: unknown database: " + schema)
 	}
-	t := db.GetTable(name)
+	// Source preparation retains the caller's existing visibility owner. A
+	// scoped generation can belong to this active transaction without being
+	// visible to an unrelated public lookup. Nil callers keep that public view.
+	t := db.GetTableForTx(name, false, currentTx)
 	if t == nil {
 		panic("LOCK TABLES: unknown table: " + schema + "." + name)
 	}
@@ -736,8 +739,8 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 	})
 }
 
-func lockTable(schema, name string, write bool, ss *scm.SessionState, querySeq uint64) {
-	unlock := acquireTableLock(schema, name, write, false, ss, querySeq)
+func lockTable(schema, name string, write bool, currentTx *TxContext, ss *scm.SessionState, querySeq uint64) {
+	unlock := acquireTableLock(schema, name, write, false, currentTx, ss, querySeq)
 	if ss != nil {
 		ss.AddLock(unlock)
 	}
@@ -1165,7 +1168,7 @@ func Init(en scm.Env) {
 				}
 			}()
 			for _, source := range tables {
-				unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, true, ss, querySeqFromTx(currentTx)))
+				unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, true, currentTx, ss, querySeqFromTx(currentTx)))
 			}
 			return scm.Apply(a[2])
 		},
@@ -2870,7 +2873,7 @@ func Init(en scm.Env) {
 
 			unlockTable := func() {}
 			if ss := SessionStateFromTx(currentTx); ss != nil {
-				unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, ss, querySeqFromTx(currentTx))
+				unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, currentTx, ss, querySeqFromTx(currentTx))
 			}
 			defer unlockTable()
 			t, schemaAccess := t.schemaWrite()
@@ -3795,7 +3798,7 @@ func Init(en scm.Env) {
 					}
 				}()
 				for _, source := range sourceTables {
-					unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, true, lockOwner, querySeqFromTx(currentTx)))
+					unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, true, currentTx, lockOwner, querySeqFromTx(currentTx)))
 				}
 				// Install maintenance while source writes are blocked. Once the
 				// locks are released, every later mutation observes the triggers.
@@ -3835,7 +3838,7 @@ func Init(en scm.Env) {
 				schema := scm.String(triple[0])
 				tbl := scm.String(triple[1])
 				write := triple[2].Bool()
-				lockTable(schema, tbl, write, ss, querySeq)
+				lockTable(schema, tbl, write, tx, ss, querySeq)
 			}
 			return scm.NewBool(true)
 		},
@@ -6119,7 +6122,7 @@ func createTableKey(t *table, key uniqueKey, currentTx *TxContext) bool {
 	// and therefore does not require a user-level lock.
 	unlockTable := func() {}
 	if ss := SessionStateFromTx(currentTx); ss != nil {
-		unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, ss, querySeqFromTx(currentTx))
+		unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, currentTx, ss, querySeqFromTx(currentTx))
 	}
 	defer unlockTable()
 
