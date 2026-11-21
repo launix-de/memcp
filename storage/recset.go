@@ -1417,7 +1417,7 @@ func (t *storageShard) projectJoinTargetMatches(idx uint32, key []scm.Scmer, tar
 	return true
 }
 
-func (r *recSet) scan(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool) scm.Scmer {
+func (r *recSet) scan(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool, producerInput *nativeMutationInput) scm.Scmer {
 	if r == nil || r.table == nil {
 		return neutral
 	}
@@ -1432,9 +1432,9 @@ func (r *recSet) scan(currentTx *TxContext, accessSchema scm.Scmer, accessValues
 	}
 	if mutation {
 		return r.scanMutation(currentTx, accessSchema, accessValues, conditionCols, condition,
-			callbackCols, mapReduce, neutral, combine, isOuter)
+			callbackCols, mapReduce, neutral, combine, isOuter, producerInput)
 	}
-	return r.table.scanWithBatchFrom(currentTx, r, accessSchema, accessValues, scanAccess{}, conditionCols, condition,
+	return r.table.scanWithBatchFrom(currentTx, r, accessSchema, accessValues, scanAccess{producerInput: producerInput}, conditionCols, condition,
 		callbackCols, mapReduce, neutral, combine, isOuter, 0, nil)
 }
 

@@ -206,6 +206,7 @@ func orderedPrefixBounds(original scanAccess, prefix *orderedPrefixAccess) scanA
 		}
 	}
 	bounds := scanAccessFromAnalyzed(boundaries)
+	bounds.producerInput = original.producerInput
 	bounds.ensureRuntime().prefixMerge = prefix
 	bounds.feedback = original.feedback
 	return bounds

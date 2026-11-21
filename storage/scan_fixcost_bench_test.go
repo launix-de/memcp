@@ -531,7 +531,7 @@ func TestScanOrderFirstReusesReadBuffers(t *testing.T) {
 					}
 				}()
 				result := tbl.scan_order(nil, access, values, nil, condition, nil, nil,
-					0, 0, 1, columns, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+					0, 0, 1, columns, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), nil)
 				if panics {
 					t.Fatal("callback panic was lost")
 				}

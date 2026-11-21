@@ -431,7 +431,7 @@ func initReplicationAdmin(en *scm.Env) {
 			Params: []*scm.TypeDescriptor{{Kind: "func", Label: "session"}, {Kind: "string", Label: "database"}, {Kind: "string", Label: "sql"}, {Kind: "bool", Label: "postgresql"}, {Kind: "func", Label: "resultrow"}, {Kind: "func", Label: "resultfields"}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
 	scm.Declare(en, &scm.Declaration{Name: "replication_write", Fn: func(a ...scm.Scmer) scm.Scmer {
 		if !a[0].IsNil() {
-			if tx, ok := a[0].Any().(*TxContext); ok {
+			if tx := scmerToTxContext(a[0]); tx != nil {
 				replicationWrite(tx)
 			}
 		}

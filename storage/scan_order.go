@@ -633,6 +633,8 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 
 // scanOrderTableSpec holds per-table parameters for scanOrderMulti.
 type scanOrderTableSpec struct {
+	producerInput *nativeMutationInput // explicit local producer input, not compiled or serialized
+
 	dataTx          *TxContext // selected once for this actual native input
 	dataBound       bool
 	remoteBatchSize int      // shared coordinator window divided over shard jobs
@@ -1147,6 +1149,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		scratch := acquireScanAnalyzeScratch()
 		defer releaseScanAnalyzeScratch(scratch)
 		bounds, compiled := scanAccessFromScheme(spec.accessSchema, spec.accessValues, nil)
+		bounds.producerInput = spec.producerInput
 		if !compiled {
 			panic("scan_order received an invalid compiled access schema")
 		}
@@ -1364,6 +1367,7 @@ func mergeScanOrderQueues(currentTx *TxContext, tables []scanOrderTableSpec, q g
 		}
 		if spec.recordVisitor == nil {
 			sq.mapper = sq.shard.OpenMapReducer(sq.callbackCols, sq.callback, false, 0, nil, inputTx)
+			sq.mapper.exactUpdate = sq.mapper.exactUpdate || spec.producerInput.exactUpdateFor(sq.shard.t, inputTx)
 		}
 		if !spec.postOrderFilter.IsNil() {
 			sq.postOrderMapper = sq.shard.OpenMapper(
@@ -1625,6 +1629,7 @@ func consumeDirectScanOrder(queue *shardqueue, spec *scanOrderTableSpec, current
 		queue.shard.initReadMapReducer(&mapperStorage, spec.callbackCols, spec.callback, false, currentTx)
 	} else {
 		mapper = queue.shard.OpenMapReducer(spec.callbackCols, spec.callback, false, 0, nil, currentTx)
+		mapper.exactUpdate = mapper.exactUpdate || spec.producerInput.exactUpdateFor(queue.shard.t, currentTx)
 	}
 	defer mapper.Close()
 	var postOrderMapper *ShardMapReducer
@@ -1835,6 +1840,7 @@ func (t *table) scanOrderSingle(currentTx *TxContext, spec scanOrderTableSpec, s
 	scratch := acquireScanAnalyzeScratch()
 	defer releaseScanAnalyzeScratch(scratch)
 	bounds, compiled := scanAccessFromScheme(spec.accessSchema, spec.accessValues, nil)
+	bounds.producerInput = spec.producerInput
 	if !compiled {
 		panic("scan_order received an invalid compiled access schema")
 	}
@@ -1872,7 +1878,7 @@ func (t *table) scanOrderSingle(currentTx *TxContext, spec scanOrderTableSpec, s
 
 // scan_order dispatches a single relevant shard directly and reserves the
 // queue/channel merge machinery for actual fanout.
-func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer) scm.Scmer {
+func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer, producerInput *nativeMutationInput) scm.Scmer {
 	var finishData func()
 	if scanMutates(callbackCols) {
 		currentTx, finishData = t.writeDataContext(currentTx)
@@ -1892,9 +1898,10 @@ func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessV
 	// explicitly allowed to add overhead, so keep it visible instead of letting
 	// the LIMIT 1 fast path silently omit this scan from system statistics.
 	if !Settings.ScanDebugging && !contributionMutationColumns(callbackCols) && postOrderFilter.IsNil() && len(sortcols) == 0 && limitPartitionCols == 0 && offset == 0 && limit == 1 && !isOuter {
-		return t.scanOrderFirst(currentTx, accessSchema, accessValues, conditionCols, condition, callbackCols, mapReduce, neutral, notFoundValue)
+		return t.scanOrderFirst(currentTx, accessSchema, accessValues, conditionCols, condition, callbackCols, mapReduce, neutral, notFoundValue, producerInput)
 	}
 	spec := scanOrderTableSpec{
+		producerInput:   producerInput,
 		table:           t,
 		conditionCols:   conditionCols,
 		condition:       condition,
@@ -1919,7 +1926,7 @@ func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessV
 // scanOrderFirst is the no-order LIMIT 1 specialization of scan_order. It
 // preserves the scan operator contract while avoiding the queues, channels,
 // and global merge needed by the general ordered multi-shard implementation.
-func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer) scm.Scmer {
+func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer, producerInput *nativeMutationInput) scm.Scmer {
 	var finishData func()
 	if scanMutates(callbackCols) {
 		currentTx, finishData = t.writeDataContext(currentTx)
@@ -1935,6 +1942,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	bounds, compiled := scanAccessFromScheme(accessSchema, accessValues, nil)
+	bounds.producerInput = producerInput
 	if !compiled {
 		panic("scan_order received an invalid compiled access schema")
 	}
@@ -1974,7 +1982,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 			panic("query killed")
 		}
 		if acquisitionFailure != nil {
-			spec := scanOrderTableSpec{table: t, conditionCols: conditionCols, condition: condition, callbackCols: callbackCols, callback: mapReduce}
+			spec := scanOrderTableSpec{producerInput: producerInput, table: t, conditionCols: conditionCols, condition: condition, callbackCols: callbackCols, callback: mapReduce}
 			queue := delegateOrderedQueue(currentTx, shard, bounds, &spec, nil, 0, 0, 1, acquisitionFailure)
 			adopted := false
 			defer func() {
@@ -2016,7 +2024,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 		panic(firstErr)
 	}
 	if foundQueue != nil {
-		spec := scanOrderTableSpec{callbackCols: callbackCols, callback: mapReduce}
+		spec := scanOrderTableSpec{producerInput: producerInput, callbackCols: callbackCols, callback: mapReduce}
 		result, _ := foundQueue.remote.stream(&spec, foundQueue, scm.ApplyOnce(neutral, nil), foundQueue.items[:1])
 		return result
 	}
@@ -2033,6 +2041,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 		foundShard.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, mapperAlreadyLocked, currentTx)
 	} else {
 		mapper = foundShard.OpenMapReducer(callbackCols, mapReduce, mapperAlreadyLocked, 0, nil, currentTx)
+		mapper.exactUpdate = mapper.exactUpdate || producerInput.exactUpdateFor(foundShard.t, currentTx)
 	}
 	defer mapper.Close()
 	result := mapper.Stream(scm.ApplyOnce(neutral, nil), []uint32{foundID}, nil)
@@ -2040,13 +2049,14 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 	return result
 }
 
-func (r *recSet) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer) scm.Scmer {
+func (r *recSet) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer, producerInput *nativeMutationInput) scm.Scmer {
 	if r.order != nil {
 		sortcols = []scm.Scmer{scm.NewCustom(TagRecSetOrder, unsafe.Pointer(r.order))}
 		sortdirs = []func(...scm.Scmer) scm.Scmer{scm.Globalenv.Vars[scm.Symbol("<")].Func()}
 		limitPartitionCols = 0
 	}
 	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
+		producerInput:   producerInput,
 		recset:          r,
 		conditionCols:   conditionCols,
 		condition:       condition,

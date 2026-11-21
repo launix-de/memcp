@@ -98,6 +98,13 @@ func (invocation shardScanInvocation) delegate(shard *storageShard, failure shar
 			result = scanResult{err: scanError{recovered, string(debug.Stack())}}
 		}
 	}()
+	mutationColumns := invocation.callbackCols
+	if invocation.order != nil {
+		mutationColumns = invocation.order.projected
+	}
+	if scanMutates(mutationColumns) && invocation.access.producerInput.exactUpdateFor(shard.t, invocation.tx) {
+		panic("local mutation execution input cannot be delegated")
+	}
 	target := failure.target
 	validResource := target != nil && target.resource.Shard == shard.uuid.String()
 	if target != nil && target.origin == shard {

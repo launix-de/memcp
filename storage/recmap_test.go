@@ -220,7 +220,7 @@ func TestRecMapPrunedDomainImageAndComposition(t *testing.T) {
 		0, 0, -1, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			orderedIDs = append(orderedIDs, values[1].Int())
 			return values[0]
-		}), scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+		}), scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), nil)
 	if len(orderedIDs) != 2 || orderedIDs[0] != 2 || orderedIDs[1] != 1 {
 		t.Fatalf("ordered RecMap window scan = %v, want [2 1]", orderedIDs)
 	}
@@ -233,7 +233,7 @@ func TestRecMapPrunedDomainImageAndComposition(t *testing.T) {
 		0, 0, -1, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			mixedIDs = append(mixedIDs, values[1].Int())
 			return values[0]
-		}), scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+		}), scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), nil)
 	if len(mixedIDs) != 2 || mixedIDs[0] != 3 || mixedIDs[1] != 1 {
 		t.Fatalf("mixed target/source RecMap window scan = %v, want [3 1]", mixedIDs)
 	}
@@ -259,7 +259,7 @@ func TestRecMapPrunedDomainImageAndComposition(t *testing.T) {
 			return scm.NewInt(values[0].Int() + value.Int())
 		}), scm.NewInt(0), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(values[0].Int() + values[1].Int())
-		}), false)
+		}), false, nil)
 	if sum.Int() != 23 {
 		t.Fatalf("$recmap_call projected sum = %d, want 23", sum.Int())
 	}

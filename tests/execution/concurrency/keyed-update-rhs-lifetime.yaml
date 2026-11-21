@@ -1,0 +1,261 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: UPDATE evaluates scalar producers before key admission and replaces only its original physical version
+setup:
+- sql: DROP TRIGGER IF EXISTS rhs_guard_log_before
+- sql: DROP TRIGGER IF EXISTS rhs_guard_before
+- sql: DROP TABLE IF EXISTS rhs_guard_log
+- sql: DROP TABLE IF EXISTS rhs_guard_assoc
+- sql: DROP TABLE IF EXISTS rhs_guard_source
+- sql: DROP TABLE IF EXISTS rhs_guard_version
+- sql: CREATE TABLE rhs_guard_source(ID INT PRIMARY KEY,name TEXT,date1 BIGINT,date2 BIGINT)
+- sql: CREATE TABLE rhs_guard_assoc(ID INT PRIMARY KEY,src_id INT,target INT,creation BIGINT)
+- sql: CREATE TABLE rhs_guard_log(ID INT PRIMARY KEY,ref_id INT,dt BIGINT,notiz TEXT)
+- sql: CREATE TABLE rhs_guard_version(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO rhs_guard_source VALUES(1,'hello',3000,6000),(2,'world',1000,2000)
+- sql: INSERT INTO rhs_guard_assoc VALUES(1,1,10,1000),(2,2,20,2000)
+# A legal zero PRIMARY key exercises the conservative native key domain, so
+# the cold nested-cache case does not depend on an accidental stripe collision.
+- sql: INSERT INTO rhs_guard_log VALUES(0,1,999,'old1'),(2,2,888,'old2')
+- sql: INSERT INTO rhs_guard_version VALUES(1,10)
+- scm: |
+    (begin
+      (define run (lambda (mode rebuild_first repeat_own) (begin
+        (define h (table "memcp-tests" false "rhs_guard_version" false nil))
+        (define owner (newsession)) (owner "username" "root")
+        (define rows (lambda (tx)
+          (sort (scan tx h '() '() '() (lambda () true) '("id" "value")
+            (lambda (acc id value) (cons (list id value) acc)) '()
+            (lambda (left right) (merge (list left right))) false)
+            (lambda (left right) (< (car left) (car right))))))
+        (if (equal? mode "cs") (tx_begin owner) (tx_begin_acid owner))
+        (try (lambda () (begin
+          (define result (try (lambda () (begin
+            (with_table_mutation (list h) '("update" ("id" "value"))
+              (owner "__memcp_tx") (if (equal? mode "foreign") nil owner) (lambda (tx)
+                (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+                  (lambda (acc update) (begin
+                    (if rebuild_first (rebuild h true false) true)
+                    (if repeat_own
+                      (reduce (produceN 200) (lambda (count value) (begin
+                        (update (list "value" value)) (+ count 1))) 0)
+                      (begin
+                        (if (equal? mode "foreign")
+                          (begin
+                            (define competing_owner (newsession))
+                            (competing_owner "username" "root") (tx_begin competing_owner)
+                            (try (lambda () (begin
+                              (insert h '("id" "value") '((1 99)) '("$update")
+                                (lambda (competing) (competing '("value" 99)))
+                                false nil (competing_owner "__memcp_tx"))
+                              (tx_commit competing_owner)))
+                              (lambda (failure) (begin
+                                (tx_rollback competing_owner) (error failure)))))
+                          (insert h '("id" "value") '((1 99)) '("$update")
+                            (lambda (competing)
+                              (competing (if (equal? mode "key") '("id" 2 "value" 99) '("value" 99))))
+                            false nil tx))
+                        (update '("value" 20))
+                        false)))) 0 + false)))
+            repeat_own))
+            (lambda (failure)
+              (if repeat_own (error failure)
+                (regexp_test (string (failure_value failure)) "Concurrent row replacement")))))
+          (if repeat_own (tx_commit owner) (tx_rollback owner))
+          (list result (rows nil) (nil? (owner "transaction")))))
+          (lambda (failure) (begin
+            (if (owner "transaction") (tx_rollback owner) true)
+            (error failure)))))))
+      (globalvars "__rhs_guard_version_control" (close_procedure run))
+      true)
+test_cases:
+- name: Rebuild the exact three-table correlated UPDATE fixture
+  scm: |
+    (begin
+      (map '("rhs_guard_source" "rhs_guard_assoc" "rhs_guard_log") (lambda (name)
+        (rebuild (table "memcp-tests" false name false nil) true false)))
+      true)
+- name: Cold correlated scalar cache initializes before the outer UPDATE takes key stripes
+  sql: |
+    UPDATE rhs_guard_log,rhs_guard_assoc AS A SET rhs_guard_log.notiz=
+      (SELECT s.name FROM rhs_guard_source s WHERE s.ID=A.src_id
+       AND CASE WHEN date2 IS NULL THEN TRUE ELSE date2>=500 END LIMIT 1)
+    WHERE rhs_guard_log.ref_id=A.ID AND A.src_id=1
+  timeout: 5
+- name: Cold UPDATE preserves all target values
+  sql: SELECT ID,ref_id,notiz FROM rhs_guard_log ORDER BY ref_id
+  expect:
+    data: [{ID: 0, ref_id: 1, notiz: hello}, {ID: 2, ref_id: 2, notiz: old2}]
+- name: Warm same-value UPDATE uses the same scalar result without changing another row
+  sql: |
+    UPDATE rhs_guard_log,rhs_guard_assoc AS A SET rhs_guard_log.notiz=
+      (SELECT s.name FROM rhs_guard_source s WHERE s.ID=A.src_id
+       AND CASE WHEN date2 IS NULL THEN TRUE ELSE date2>=500 END LIMIT 1)
+    WHERE rhs_guard_log.ref_id=A.ID AND A.src_id=1
+  timeout: 5
+- name: Warm UPDATE preserves all target values
+  sql: SELECT ID,ref_id,notiz FROM rhs_guard_log ORDER BY ref_id
+  expect:
+    data: [{ID: 0, ref_id: 1, notiz: hello}, {ID: 2, ref_id: 2, notiz: old2}]
+- name: Real source mutation invalidates the scalar cache
+  sql: UPDATE rhs_guard_source SET name='changed' WHERE ID=1
+- name: An invalidated scalar cache remains usable by UPDATE
+  sql: |
+    UPDATE rhs_guard_log,rhs_guard_assoc AS A SET rhs_guard_log.notiz=
+      (SELECT s.name FROM rhs_guard_source s WHERE s.ID=A.src_id
+       AND CASE WHEN date2 IS NULL THEN TRUE ELSE date2>=500 END LIMIT 1)
+    WHERE rhs_guard_log.ref_id=A.ID AND A.src_id=1
+  timeout: 5
+- name: Updated scalar value and untouched target row are both preserved
+  sql: SELECT ID,ref_id,notiz FROM rhs_guard_log ORDER BY ref_id
+  expect:
+    data: [{ID: 0, ref_id: 1, notiz: changed}, {ID: 2, ref_id: 2, notiz: old2}]
+- name: Bind a real BEFORE writer across two correlated target rows
+  sql: CREATE TRIGGER rhs_guard_log_before BEFORE UPDATE ON rhs_guard_log FOR EACH ROW SET NEW.dt=700
+- name: Each BEFORE-protected sink releases its key stripes before the next cold scalar RHS
+  sql: |
+    UPDATE rhs_guard_log,rhs_guard_assoc AS A SET rhs_guard_log.notiz=
+      (SELECT CONCAT(s.name,'-before') FROM rhs_guard_source s WHERE s.ID=A.src_id
+       AND CASE WHEN date2 IS NULL THEN TRUE ELSE date2>=501 END LIMIT 1)
+    WHERE rhs_guard_log.ref_id=A.ID
+  timeout: 5
+- name: Both rows retain actual BEFORE effects and their distinct scalar-cache values
+  sql: SELECT ID,ref_id,dt,notiz FROM rhs_guard_log ORDER BY ref_id
+  expect:
+    data: [{ID: 0, ref_id: 1, dt: 700, notiz: changed-before}, {ID: 2, ref_id: 2, dt: 700, notiz: world-before}]
+- name: Release the two-row BEFORE fixture
+  sql: DROP TRIGGER rhs_guard_log_before
+- name: An unchanged-key competing version is never overwritten by an older mapper
+  scm: ((globalvars "__rhs_guard_version_control") "acid" false false)
+  timeout: 5
+  expect:
+    result: [true, [[1, 10]], true]
+- name: A competing key change is never followed by searching for an old PRIMARY key
+  scm: ((globalvars "__rhs_guard_version_control") "key" false false)
+  timeout: 5
+  expect:
+    result: [true, [[1, 10]], true]
+- name: Exact ready-rebuild mapping cannot hide a competing successor replacement
+  scm: ((globalvars "__rhs_guard_version_control") "acid" true false)
+  timeout: 5
+  expect:
+    result: [true, [[1, 10]], true]
+- name: An unchecked ACID mapper cannot overwrite another original transaction's committed replacement
+  scm: ((globalvars "__rhs_guard_version_control") "foreign" true false)
+  timeout: 5
+  expect:
+    result: [true, [[1, 99]], true]
+- name: Restore the committed value before testing an ACID callback's own replacements
+  sql: UPDATE rhs_guard_version SET value=10 WHERE id=1
+- name: An ACID callback advances through its own successful replacements across rebuild
+  scm: ((globalvars "__rhs_guard_version_control") "acid" true true)
+  timeout: 5
+  expect:
+    result: [true, [[1, 199]], true]
+- name: Restore the original value for the native CS control
+  sql: UPDATE rhs_guard_version SET value=10 WHERE id=1
+- name: A native CS callback advances only through its own successful replacements
+  scm: ((globalvars "__rhs_guard_version_control") "cs" true true)
+  timeout: 5
+  expect:
+    result: [true, [[1, 199]], true]
+- name: A declared native UPDATE cannot invoke its callback as DELETE
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (define h (table "memcp-tests" false "rhs_guard_version" false (owner "__memcp_tx")))
+        (define rejected (with_table_mutation (list h) '("update" ("value"))
+          (owner "__memcp_tx") owner (lambda (tx)
+            (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+              (lambda (acc update)
+                (try (lambda () (begin (update) false))
+                  (lambda (failure)
+                    (regexp_test (string (failure_value failure)) "does not match its declared UPDATE operation"))))
+              false (lambda (left right) (or left right)) false))))
+        (tx_rollback owner) rejected))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: Rejecting the descriptor mismatch preserves every stored value
+  sql: SELECT id,value FROM rhs_guard_version ORDER BY id
+  expect:
+    data: [{id: 1, value: 199}]
+- name: A properly declared native DELETE retains its actual callback and rollback contract
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (define h (table "memcp-tests" false "rhs_guard_version" false (owner "__memcp_tx")))
+        (define applied (with_table_mutation (list h) '("delete" ())
+          (owner "__memcp_tx") owner (lambda (tx)
+            (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+              (lambda (acc remove) (remove)) false (lambda (left right) (or left right)) false))))
+        (define remaining (scan (owner "__memcp_tx") h '() '() '() (lambda () true) '()
+          (lambda (count) (+ count 1)) 0 + false))
+        (tx_rollback owner) (list applied remaining)))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: [true, 0]
+- name: Rolling back the declared DELETE restores every stored value
+  sql: SELECT id,value FROM rhs_guard_version ORDER BY id
+  expect:
+    data: [{id: 1, value: 199}]
+- name: A local mutation input cannot silently lose its executor through JSON, source or a captured callback
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (define h (table "memcp-tests" false "rhs_guard_version" false (owner "__memcp_tx")))
+        (define rejected (with_table_mutation (list h) '("update" ("value"))
+          (owner "__memcp_tx") owner (lambda (tx)
+            (list
+              (try (lambda () (json_encode tx))
+                (lambda (failure)
+                  (regexp_test (string (failure_value failure)) "local and cannot be serialized")))
+              (try (lambda () (json_encode (close_procedure (lambda () tx))))
+                (lambda (failure)
+                  (regexp_test (string (failure_value failure)) "local and cannot be serialized")))
+              (try (lambda () (serialize tx))
+                (lambda (failure)
+                  (regexp_test (string (failure_value failure)) "local and cannot be serialized")))
+              (try (lambda () (serialize (close_procedure (lambda () tx))))
+                (lambda (failure)
+                  (regexp_test (string (failure_value failure)) "local and cannot be serialized")))))))
+        (tx_rollback owner) rejected))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: [true, true, true, true]
+- name: Install an actual BEFORE key normalizer
+  sql: CREATE TRIGGER rhs_guard_before BEFORE UPDATE ON rhs_guard_version FOR EACH ROW SET NEW.id=3
+- name: The final UNIQUE check consumes the actual BEFORE-normalized key
+  sql: UPDATE rhs_guard_version SET id=2,value=5 WHERE id=1
+- name: BEFORE normalization preserves one complete replacement row
+  sql: SELECT id,value FROM rhs_guard_version ORDER BY id
+  expect:
+    data: [{id: 3, value: 5}]
+- name: Add a real conflicting final key and replace the normalizer
+  sql: INSERT INTO rhs_guard_version VALUES(4,7)
+- name: Remove the first normalizer
+  sql: DROP TRIGGER rhs_guard_before
+- name: Normalize to the already occupied final key
+  sql: CREATE TRIGGER rhs_guard_before BEFORE UPDATE ON rhs_guard_version FOR EACH ROW SET NEW.id=4
+- name: A real final normalized-key collision still rejects the UPDATE
+  sql: UPDATE rhs_guard_version SET value=8 WHERE id=3
+  expect:
+    error: true
+    contains: Duplicate entry
+- name: Failed final-key validation preserves both exact existing rows
+  sql: SELECT id,value FROM rhs_guard_version ORDER BY id
+  expect:
+    data: [{id: 3, value: 5}, {id: 4, value: 7}]
+cleanup:
+- sql: DROP TRIGGER IF EXISTS rhs_guard_log_before
+- scm: (globalvars "__rhs_guard_version_control" nil)
+- sql: DROP TRIGGER IF EXISTS rhs_guard_before
+- sql: DROP TABLE IF EXISTS rhs_guard_log
+- sql: DROP TABLE IF EXISTS rhs_guard_assoc
+- sql: DROP TABLE IF EXISTS rhs_guard_source
+- sql: DROP TABLE IF EXISTS rhs_guard_version

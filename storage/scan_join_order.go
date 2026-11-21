@@ -123,9 +123,10 @@ type scanJoinOrderColumn struct {
 // is the ORDER BY driver. Every later input joins targetKeyCols against values
 // taken from the already assembled tuple through sourceKeyCols.
 type scanJoinOrderInput struct {
-	table      *table
-	filterCols []string
-	filter     scm.Scmer
+	producerInput *nativeMutationInput
+	table         *table
+	filterCols    []string
+	filter        scm.Scmer
 	// Optional immutable semijoin filter; the complete join still runs below.
 	candidateCols  []string
 	candidate      scm.Scmer
@@ -142,7 +143,8 @@ type scanJoinOrderInput struct {
 }
 
 type scanJoinOrderSpec struct {
-	inputs []scanJoinOrderInput
+	producerInput *nativeMutationInput
+	inputs        []scanJoinOrderInput
 
 	orderCols          []scanJoinOrderColumn
 	orderDirs          []func(...scm.Scmer) scm.Scmer
@@ -396,6 +398,7 @@ func materializeScanJoinRecords(currentTx *TxContext, input *scanJoinOrderInput,
 		mapper := mappers[ref.shard]
 		if mapper == nil {
 			mapper = ref.shard.OpenMapper(input.readCols, identity, false, currentTx)
+			mapper.exactUpdate = mapper.exactUpdate || input.producerInput.exactUpdateFor(ref.shard.t, currentTx)
 			mappers[ref.shard] = mapper
 		}
 		values := mapper.MapOne(ref.recid)
@@ -532,6 +535,7 @@ func (readers *scanJoinOrderMapReaders) values(tuple *scanJoinOrderTuple, dst []
 			mapper := inputMappers[record.shard]
 			if mapper == nil {
 				mapper = record.shard.OpenMapper(input.lateMapCols, readers.identity, false, readers.currentTx)
+				mapper.exactUpdate = mapper.exactUpdate || readers.spec.producerInput.exactUpdateFor(record.shard.t, readers.currentTx)
 				inputMappers[record.shard] = mapper
 			}
 			lateValues[ref.table] = mapper.MapOne(record.recid).Slice()
@@ -1599,6 +1603,9 @@ func applyScanJoinOrderPartitionWindow(spec *scanJoinOrderSpec, tuples []*scanJo
 }
 
 func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
+	for index := range spec.inputs {
+		spec.inputs[index].producerInput = spec.producerInput
+	}
 	for _, ref := range spec.mapCols {
 		if contributionMutationColumns([]string{ref.column}) {
 			t := spec.inputs[ref.table].table
@@ -1799,6 +1806,7 @@ func declareScanJoinOrder(en *scm.Env) {
 			}
 			batchedProbe := len(a) > 20 && scm.ToBool(a[20])
 			return scanJoinOrder(scmerToTxContext(a[0]), scanJoinOrderSpec{
+				producerInput:      producerInputFromScmer(a[0]),
 				inputs:             decodeScanJoinOrderInputs(tables, a[4], a[5], a[6], accessSchemas, accessValues),
 				joinFilterCols:     decodeScanJoinOrderColumns(a[7], "joinFilterColumns"),
 				joinFilter:         a[8],

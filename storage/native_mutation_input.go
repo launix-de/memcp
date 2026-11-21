@@ -4,11 +4,18 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 package storage
 
 import "unsafe"
+import "errors"
+import "github.com/launix-de/memcp/scm"
 
 // This is one immutable logical target input of an admitted native producer.
 // It owns no table facade, physical index, row identity or independent decision.
 // The existing statement lease/drain retains its native target and declarations.
 type nativeMutationInput struct {
+	// A plain producer's runtime header carries no declaration view or row
+	// authority. Native consumers unwrap the identical original executor; only
+	// mapper setup consumes its actual event and targets. No wire encoding.
+	execution    *TxContext
+	targets      []*table
 	target       *table
 	owner        *transactionState
 	event        nativeMutationEvent
@@ -21,6 +28,50 @@ type nativeMutationInput struct {
 	afterUpdate  []TriggerDescription
 	memory       *publicCatalogMemory
 	bytes        uint64
+}
+
+func (*nativeMutationInput) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("native mutation execution input is local and cannot be serialized")
+}
+
+func (*nativeMutationInput) ClusterObjectType() string { return "local-mutation-input" }
+
+func (*nativeMutationInput) Serialize(*scm.SerializationContext) (scm.Scmer, error) {
+	return scm.NewNil(), errors.New("native mutation execution input is local and cannot be serialized")
+}
+
+func (input *nativeMutationInput) originalExecution() *TxContext {
+	if input == nil || input.execution == nil || input.owner == nil || input.execution.transactionState != input.owner {
+		panic("native mutation input lost its original transaction")
+	}
+	return input.execution
+}
+
+func (input *nativeMutationInput) exactUpdateFor(t *table, tx *TxContext) bool {
+	if input == nil {
+		return false
+	}
+	if input.event == nativeMutationUpdate {
+		for _, target := range input.targets {
+			if target == t {
+				if input.originalExecution() != tx {
+					panic("native mutation input belongs to another executor")
+				}
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func producerInputFromScmer(value scm.Scmer) *nativeMutationInput {
+	if !value.IsNil() {
+		if input, ok := value.Any().(*nativeMutationInput); ok {
+			input.originalExecution()
+			return input
+		}
+	}
+	return nil
 }
 
 type nativeTriggerSlot struct {
