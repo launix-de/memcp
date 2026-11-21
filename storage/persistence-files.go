@@ -172,11 +172,15 @@ func (s *FileStorage) WriteColumn(shard string, column string) io.WriteCloser {
 	if err := os.MkdirAll(s.path, 0750); err != nil {
 		raisePersistenceFailure(s.BackendName(), s.path, "column.write.open", err)
 	}
-	f, err := os.Create(s.path + shard + "-" + ProcessColumnName(column))
+	finalPath := s.path + shard + "-" + ProcessColumnName(column)
+	// Parallel imports and existing readers can name the same immutable
+	// generation. Its visible column must never become an empty/partial stream.
+	// Keep the UUID prefix so ordinary generation GC owns abandoned staging.
+	f, err := os.CreateTemp(s.path, shard+"-"+ProcessColumnName(column)+".writing-")
 	if err != nil {
 		raisePersistenceFailure(s.BackendName(), s.path, "column.write.open", err)
 	}
-	return &fileObjectWriter{File: f, database: s.path, operation: "column.write"}
+	return &fileObjectWriter{File: f, database: s.path, operation: "column.write", finalPath: finalPath}
 }
 
 func (s *FileStorage) RemoveColumn(shard string, column string) {
@@ -220,13 +224,22 @@ type fileObjectWriter struct {
 	*os.File
 	database  string
 	operation string
+	finalPath string // columns publish complete private bytes at Close
 }
 
 func (w *fileObjectWriter) Abort() error {
-	if err := w.File.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
-		return err
+	closeErr := w.File.Close()
+	if errors.Is(closeErr, os.ErrClosed) {
+		closeErr = nil
 	}
-	return nil
+	var removeErr error
+	if w.finalPath != "" {
+		removeErr = os.Remove(w.File.Name())
+		if os.IsNotExist(removeErr) {
+			removeErr = nil
+		}
+	}
+	return errors.Join(closeErr, removeErr)
 }
 
 func (w *fileObjectWriter) Write(buffer []byte) (int, error) {
@@ -235,6 +248,7 @@ func (w *fileObjectWriter) Write(buffer []byte) (int, error) {
 		if err == nil {
 			err = io.ErrShortWrite
 		}
+		abortPersistenceWrite(w)
 		raisePersistenceFailure("filesystem", w.database, w.operation, err)
 	}
 	return n, nil
@@ -242,14 +256,21 @@ func (w *fileObjectWriter) Write(buffer []byte) (int, error) {
 
 func (w *fileObjectWriter) Sync() error {
 	if err := w.File.Sync(); err != nil {
+		abortPersistenceWrite(w)
 		raisePersistenceFailure("filesystem", w.database, w.operation+".sync", err)
 	}
 	return nil
 }
 
 func (w *fileObjectWriter) Close() error {
+	defer abortPersistenceWrite(w)
 	if err := w.File.Close(); err != nil {
 		raisePersistenceFailure("filesystem", w.database, w.operation+".close", err)
+	}
+	if w.finalPath != "" {
+		if err := os.Rename(w.File.Name(), w.finalPath); err != nil {
+			raisePersistenceFailure("filesystem", w.database, w.operation+".publish", err)
+		}
 	}
 	return nil
 }

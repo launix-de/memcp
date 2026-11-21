@@ -912,6 +912,11 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 		for _, route := range transfer.header.Forwards {
 			r.forwardResource(route.From, route.To)
 		}
+	} else {
+		// A completed data placement can become durable through the system
+		// configuration WAL, independently of this backend's schema directory.
+		// Persist the staged column names before publishing that placement.
+		transfer.engine.SyncNamespace()
 	}
 	c := r.resourceCell(resource)
 	publication := c.ownstate.Snapshot()
