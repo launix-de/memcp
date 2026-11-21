@@ -439,7 +439,7 @@ func TestClusterInvalidationFollowsRebuiltOwnerUUID(t *testing.T) {
 
 func TestClusterReferenceAcknowledgesInstalledGrant(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tclustergrantack", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}}
 	cluster.initializeManager()
@@ -578,7 +578,7 @@ func TestClusterCounterCheckpointDuringLocalSchemaUpgrade(t *testing.T) {
 
 func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tclusterhandovernewgrant", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}, ctx: context.Background(), service: &nodeScanService{}}
 	cluster.initializeManager()
 	r := cluster.manager
@@ -694,7 +694,7 @@ func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
 
 func TestClusterReferenceGrantSurvivesInvalidSuccessor(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tclusterreferencependinguuid", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	remote := "memcp://11111111-1111-4111-8111-111111111111"
 	cluster := &nodeCluster{self: clusterMember{ID: "memcp://22222222-2222-4222-8222-222222222222"}}

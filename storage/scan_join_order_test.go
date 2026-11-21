@@ -279,7 +279,7 @@ func TestScanJoinOrderDeclarationSupportsOrderFromJoinedTable(t *testing.T) {
 
 func repartitionScanJoinOrderTable(t *testing.T, table *table, dimensions []shardDimension) {
 	t.Helper()
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	if !table.beginManualRepartition() {
 		t.Fatal("manual repartition was not claimed")
 	}

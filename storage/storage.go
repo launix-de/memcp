@@ -4536,12 +4536,26 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			if len(a) > 0 && a[0].IsCustom(TagTable) {
+				if len(a) > 5 {
+					panic("table rebuild accepts table, all, repartition, transaction and completion requirement")
+				}
 				all := len(a) > 1 && scm.ToBool(a[1])
 				repartition := true
 				if len(a) > 2 {
 					repartition = scm.ToBool(a[2])
 				}
-				return scm.NewString(RebuildTable(TableFromScmer(a[0]), all, repartition))
+				var tx *TxContext
+				if len(a) > 3 {
+					tx = scmerToTxContext(a[3])
+				}
+				result := RebuildTable(TableFromScmer(a[0]), all, repartition, tx)
+				if result.err != nil {
+					panic(result.err)
+				}
+				if len(a) > 4 && scm.ToBool(a[4]) && !result.complete {
+					panic("native table rebuild did not complete")
+				}
+				return scm.NewString(result.duration)
 			}
 			if len(a) > 2 {
 				panic("global rebuild accepts at most all and repartition")
@@ -4562,6 +4576,8 @@ func Init(en scm.Env) {
 				{Kind: "bool|table", Label: "table_or_all", Description: "table handle for a table-local rebuild; otherwise whether to rebuild unchanged shards globally (default: false)", Optional: true},
 				{Kind: "bool", Label: "all_or_repartition", Description: "with a table: whether to rebuild unchanged shards; globally: whether to repartition (default: true)", Optional: true},
 				{Kind: "bool", Label: "repartition", Description: "with a table handle, whether to repartition that table (default: true)", Optional: true},
+				{Kind: "any", Label: "transaction", Description: "with a table handle, the actual invoking native transaction", Optional: true},
+				{Kind: "bool", Label: "require_complete", Description: "with a table handle, reject a busy, cold or delegated rebuild that did not complete", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "string"},
 		},

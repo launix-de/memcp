@@ -123,7 +123,7 @@ func historicalObjectAlive(ptr weak.Pointer[storageShard]) bool { return ptr.Val
 
 func TestClusterObjectHistoricalScanRebuildAndPeerGC(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "t_cluster_object_gc", 4)
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	peer, client, _ := setupRemoteScanConnection(t)
 	defer client.stopObjects()
 	owner := nodeScans.Load()
@@ -135,7 +135,7 @@ func TestClusterObjectHistoricalScanRebuildAndPeerGC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	if table.ActiveShards()[0].uuid.String() == task.Shard.Resource.Shard {
 		t.Fatal("fixture did not replace the shard")
 	}
@@ -668,7 +668,7 @@ func prepareRegisteredDiskGeneration(t *testing.T, owner *nodeScanService, peer 
 	// Drop one current row so the successor no longer owns its blob. The old
 	// physical generation's column and manifest still need that blob on disk.
 	old.UpdateFunction(0, false, false, nil, nil)()
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	if tbl.ActiveShards()[0].uuid == old.uuid {
 		t.Fatal("rebuild kept old UUID")
 	}
@@ -1102,7 +1102,7 @@ func prepareRegisteredOrderedRun(t *testing.T, owner *nodeScanService, peer *mos
 	if err != nil {
 		t.Fatal(err)
 	}
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	if tbl.ActiveShards()[0].uuid == old.uuid {
 		t.Fatal("rebuild retained UUID")
 	}
@@ -1111,7 +1111,7 @@ func prepareRegisteredOrderedRun(t *testing.T, owner *nodeScanService, peer *mos
 }
 func TestClusterObjectOrderedRunRetainsHistoricalGeneration(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tordered_run_gc", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	_, client, _ := setupRemoteScanConnection(t)
 	owner := nodeScans.Load()
 	peer := objectOwnerPeer(t, owner, client)

@@ -108,7 +108,7 @@ func TestReplicationOrderedScanRetainsColdPayloadThroughCallback(t *testing.T) {
 			path := strings.TrimSuffix(name, "-panic")
 			failCallback := path != name
 			tbl, _ := createDurabilityTestTable(t, "torderedcold", 4)
-			RebuildTable(tbl, true, false)
+			RebuildTable(tbl, true, false, nil)
 			shard := tbl.ActiveShards()[0]
 			part := newRecSetShardFromSortedIDs(shard, 4, []uint32{0, 1, 2, 3})
 			source := &recSet{table: tbl, shards: []recSetShard{part}, count: 4}
@@ -272,7 +272,7 @@ func TestReplicationOrderedMutationDrainsNativeTransactionBeforeHandover(t *test
 
 func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "torderedhistory", 3)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	original := tbl.ActiveShards()[0]
 	part := newRecSetShardFromSortedIDs(original, 3, []uint32{0, 1, 2})
 	source := &recSet{table: tbl, shards: []recSetShard{part}, count: 3}
@@ -1308,7 +1308,7 @@ func TestReplicationActiveWriterPreventsPayloadEviction(t *testing.T) {
 
 func TestReplicationRebuildForwardsUUIDAndRights(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "t_uuid_forwarding", 4)
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	original := table.ActiveShards()[0]
 	r := replicaRecoveryFixture()
 	previous := replication.Swap(r)
@@ -1319,7 +1319,7 @@ func TestReplicationRebuildForwardsUUIDAndRights(t *testing.T) {
 	resource := *cell.resource.Load()
 	for i := 0; i < 3; i++ {
 		before := table.ActiveShards()[0]
-		RebuildTable(table, true, false)
+		RebuildTable(table, true, false, nil)
 		after := table.ActiveShards()[0]
 		if after.uuid == before.uuid || before.loadNext() != after {
 			t.Fatal("rebuild did not publish a distinct UUID through native forwarding")
@@ -1408,7 +1408,7 @@ func TestReplicationLateTransferCannotReplaceSuccessor(t *testing.T) {
 		t.Fatal(err)
 	}
 	held := cell.current.Load()
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	latest := cell.current.Load()
 	transfer, err := r.startImport(mosiPacket{Resource: resource, Content: first})
 	if err != nil {
@@ -1526,7 +1526,7 @@ func TestReplicationRequestLearnsOnlyOwnerForwarding(t *testing.T) {
 
 func TestReplicationSharedSchemaKeepsNewerShard(t *testing.T) {
 	tbl, engine := createDurabilityTestTable(t, "replica_shared_schema_successor", 3)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	older := append([]byte(nil), engine.ReadSchema()...)
 	r := replicaRecoveryFixture()
 	r.cluster = &nodeCluster{manager: r, self: clusterMember{ID: r.id}}
@@ -2121,7 +2121,7 @@ func TestReplicationDeclarationIgnoresMaterializedColumnAddExtents(t *testing.T)
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
 	r.declareShard(tbl.ActiveShards()[0], r.id, true)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	current := tbl.ActiveShards()[0]
 	if !r.sameReplicaDeclaration(tbl, &incoming) {
 		t.Error("materializing ADD recovery extents changed logical declaration identity")

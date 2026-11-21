@@ -51,7 +51,7 @@ func scanColumnCostTable(b testing.TB, name string, rows int) (*table, []string)
 		}
 	}
 	tbl.Insert(cols, values, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	return tbl, cols
 }
 
@@ -113,7 +113,7 @@ func TestScanSelectivityEstimateScalesIndexCandidatesByShardPopulation(t *testin
 		values[row] = []scm.Scmer{scm.NewInt(int64(row % 10))}
 	}
 	tbl.Insert([]string{"tenant"}, values, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 
 	condition := scm.NewProcStruct(scm.Proc{
 		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("tenant")}),
@@ -168,7 +168,7 @@ func TestScanSelectivityEstimateScalesIndexCandidatesByShardPopulation(t *testin
 func TestScanSelectivityEstimateLoadsColdPersistentShard(t *testing.T) {
 	Init(scm.Globalenv)
 	tbl, persistence := createDurabilityTestTable(t, "test_selectivity_cold_shard", 100)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 
 	db := newDatabase()
 	db.Name = "test_selectivity_cold_shard"
@@ -304,7 +304,7 @@ func scanTypedColumnCostTable(b *testing.B, name string, typ string, rows int, v
 		}
 	}
 	tbl.Insert(cols, values, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	return tbl, cols
 }
 

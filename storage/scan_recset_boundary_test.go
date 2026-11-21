@@ -37,7 +37,7 @@ func setupAdaptiveRecSetOrderTable(t *testing.T, database string, rows int) *tab
 		}
 	}
 	tbl.Insert([]string{"id", "rank"}, values, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	return tbl
 }
 
@@ -354,7 +354,7 @@ func TestSparseOrderedRecSetAppliesNativeIndexRange(t *testing.T) {
 			}
 		}
 	}()
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	native := func() bool {
 		shard := tbl.ActiveShards()[0]
 		defer shard.GetRead(nil, false).Release()

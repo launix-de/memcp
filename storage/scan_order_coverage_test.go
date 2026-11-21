@@ -299,7 +299,7 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 		}
 	}
 	tbl.Insert([]string{"id", "bucket", "rank"}, values, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 
 	equalSymbol := scm.Symbol("equal?")
 	equalFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
@@ -398,7 +398,7 @@ func TestOrderedComparisonReaderLifetime(t *testing.T) {
 		values[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString(value)}
 	}
 	tbl.Insert([]string{"id", "label"}, values, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	// Keep a genuine current compressed dictionary as this generation's
 	// comparison column rather than relying on adaptive format selection.
