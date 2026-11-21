@@ -106,8 +106,57 @@ callbacks. Local operator optimizer hooks may subsequently transform the plan. *
 		"lower_inclusive" lower_inclusive "upper_inclusive" upper_inclusive
 		"collation" collation "null_safe" null_safe)))
 
+/* A declared text result is not a representation proof: native equality also
+accepts compressed values and non-text scalars. A literal replacement produces
+ordinary string/NULL values, independently of its input representation. Keep
+unknown callables and raw columns on their existing residual path. */
+(define scan_plan_plain_text (lambda (expr)
+	(or (string? expr) (nil? expr)
+		(match expr
+			'(head _value pattern replacement)
+			(and (or (identical? head regexp_replace) (expression_equal? head (quote regexp_replace)))
+				(string? pattern) (string? replacement))
+			_ false))))
+
+/* The value side crosses exactly one scan callback boundary. Only existing
+outer row slots, session reads and literal replacement expressions may move
+there; arbitrary callback work must not be evaluated speculatively. */
+(define scan_plan_text_binding (lambda (expr)
+	(match expr
+		((quote quote) value) (or (string? value) (nil? value))
+		((quote outer) depth value) (and (> depth 0) (symbol? value))
+		((quote session) (string? _key)) true
+		'(head value pattern replacement)
+		(and (or (identical? head regexp_replace) (expression_equal? head (quote regexp_replace)))
+			(string? pattern) (string? replacement) (scan_plan_text_binding value))
+		_ (or (string? expr) (nil? expr)))))
+
+/* equal_collate owns Unicode SimpleFold equality for *_ci names, rather than
+the locale/numeric ordering of collate(SQL-name). Explicit native relations
+let the existing computed-index mapper represent that equality without a
+schema column, request capture or a raw-column ordering assumption. */
+(define scan_plan_collated_comparison (lambda (left right name params columns)
+	(if (not (and (string? name) (scan_plan_plain_text left) (scan_plan_plain_text right))) nil
+		(begin
+			(define left_column (scan_expression_column left params columns))
+			(define right_column (scan_expression_column right params columns))
+			(if (equal? (nil? left_column) (nil? right_column)) nil
+				(begin
+					(define value (if (nil? left_column) left right))
+					(define column (if (nil? left_column) right_column left_column))
+					(if (or (scan_plan_uses value params) (not (scan_plan_text_binding value))) nil
+						(begin
+							(define relation (if (regexp_test (toLower name) "_ci") "unicode-simple-fold" "unicode-string"))
+							(define lifted (scan_plan_lift value))
+							(append (scan_plan_boundary "equal" column lifted lifted true true true true relation false)
+								"order" (collate relation false) "order_metadata" (concat relation ":asc")
+								"retain_residual" true)))))))))
+
 (define scan_plan_comparison (lambda (expr params columns)
 	(match expr
+		'(head left right name)
+		(if (or (identical? head equal_collate) (expression_equal? head (quote equal_collate)))
+			(scan_plan_collated_comparison left right name params columns) nil)
 		'(operator left right)
 		(if (has? (list (quote equal?) (quote equal??) (quote <) (quote <=) (quote >) (quote >=)) operator)
 			(begin
@@ -258,7 +307,7 @@ Keep its residual: exclusions, word boundaries and relevance are not gram facts.
 			(match remaining '() true '(only) only _ (cons (quote and) remaining)))
 		_ (begin
 			(define want (scan_plan_comparison expr params columns))
-			(if (and (not (nil? want))
+			(if (and (not (nil? want)) (not (want "retain_residual"))
 				(or (not (want "null_safe"))
 					(and (not (nil? (want "lower"))) (not (list? (want "lower"))) (not (symbol? (want "lower")))))
 				(reduce covered (lambda (found have) (or found (scan_plan_boundary_covers have want))) false))
@@ -278,9 +327,13 @@ Keep its residual: exclusions, word boundaries and relevance are not gram facts.
 			(define next_values (if (nil? (boundary "mapper")) upper_values
 				(merge upper_values (list (list (quote compile_scan_computed_index) (boundary "mapper")
 					(list (quote quote) (boundary "map_columns")))))))
-			(define packed (scan_boundary (boundary "kind") (boundary "column") lower_slot upper_slot
-				(boundary "lower_inclusive") (boundary "upper_inclusive") (boundary "collation") (boundary "null_safe")
-				mapper_slot (boundary "map_columns")))
+			(define packed (if (nil? (boundary "order"))
+				(scan_boundary (boundary "kind") (boundary "column") lower_slot upper_slot
+					(boundary "lower_inclusive") (boundary "upper_inclusive") (boundary "collation") (boundary "null_safe")
+					mapper_slot (boundary "map_columns"))
+				(scan_boundary (boundary "kind") (boundary "column") lower_slot upper_slot
+					(boundary "lower_inclusive") (boundary "upper_inclusive") (boundary "collation") (boundary "null_safe")
+					mapper_slot (boundary "map_columns") (boundary "order") (boundary "order_metadata") false)))
 			(match (scan_plan_pack (cdr bounds) next_values) '(tail bindings)
 				(list (cons packed tail) bindings))))))
 
