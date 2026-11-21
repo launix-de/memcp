@@ -113,6 +113,7 @@ func (state *transactionState) retainVisibilityProjection(shard *storageShard) *
 	if state.visibilityClosed.Load() {
 		state.visibilityProjections.Store(nil)
 		shard.visibilityProjections.CompareAndDelete(state, projection)
+		shard.t.signalTransactionDrain()
 		return nil
 	}
 	return projection
@@ -124,6 +125,7 @@ func (state *transactionState) releaseVisibilityProjections() {
 		for _, projection := range *directory {
 			if target := projection.target.Value(); target != nil {
 				target.visibilityProjections.CompareAndDelete(state, projection)
+				target.t.signalTransactionDrain()
 			}
 		}
 	}
