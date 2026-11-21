@@ -61,6 +61,17 @@ func currentForeignAdditions(history []catalogDeclarationAmendment) map[catalogF
 	return current
 }
 
+// Compare complete retired recipes, not merely a declaration name. Legacy
+// endpoints may retain another recipe with the same folded pair/name identity.
+func retiredForeignRecipe(db *database, fk foreignKey, retired map[catalogForeignIdentity][]catalogForeignDeclaration) bool {
+	for _, previous := range retired[db.storedForeignIdentity(fk)] {
+		if sameForeignDeclaration(previous.Foreign, fk) {
+			return true
+		}
+	}
+	return false
+}
+
 // Callers own native schema publication. Only exact committed predecessors
 // named by this history may vacate their declaration names; other kinds retain
 // their existing shared namespace owner.
@@ -235,5 +246,5 @@ func nativeForeignActions(actions []catalogForeignAction) []catalogNativeDeclara
 }
 
 func (db *database) recoverPublicForeignHistory(actions []catalogForeignAction) {
-	db.recoverNativeDeclarations(nativeForeignActions(actions), catalogNativeLegacyV13)
+	db.recoverNativeDeclarations(nativeForeignActions(actions), catalogNativeLegacyV13, catalogForeignEndpointScope{})
 }

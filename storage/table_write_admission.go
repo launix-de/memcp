@@ -314,7 +314,7 @@ func (owner *tableWriteAdmission) admit(ctx context.Context, transaction *transa
 			// each other while retaining their native transaction leases.
 			ownDefaultWriter := false
 			if transaction != nil {
-				if identity := transaction.catalogIdentity.Load(); identity != nil && identity.latePublic {
+				if identity := transaction.catalogIdentity.Load(); identity != nil && (identity.latePublic || kind == tableValidatedDeclarationAdmission) {
 					ownDefaultWriter = len(owner.writers) == 1 && owner.writers[transaction].leases != 0
 				}
 			}

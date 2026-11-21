@@ -105,6 +105,7 @@ type publicCatalogViews struct {
 	keys            map[*table][]uniqueKey
 	checkedWriters  map[*table]nativeMutationInputProfile
 	history         []catalogDeclarationAmendment
+	foreignHistory  bool // immutable declaration summary; no data/header read
 	blockedWriters  map[*table]struct{}
 	tables          map[*table]*tableShowColumnsSnapshot
 	columnWriters   map[*table]struct{}
@@ -165,7 +166,23 @@ func (changes *publicCatalogChanges) Close() error {
 	changes.closeStatementTriggersLocked()
 	changes.constraintStates = nil
 	changes.views.Store(nil)
-	changes.owner.catalogAmendments.Store(nil)
+	changes.owner.mu.Lock()
+	var private []catalogDeclarationAmendment
+	if changes.owner.State == TxActive && !changes.owner.decisionStarted {
+		if history := changes.owner.catalogAmendments.Load(); history != nil {
+			for _, entry := range *history {
+				if entry.table != nil {
+					private = append(private, entry)
+				}
+			}
+		}
+	}
+	if len(private) == 0 {
+		changes.owner.catalogAmendments.Store(nil)
+	} else {
+		changes.owner.catalogAmendments.Store(&private)
+	}
+	changes.owner.mu.Unlock()
 	changes.publication = nil
 	changes.memory.snapshot.Store(nil)
 	changes.memory.publicationBytes.Store(0)
@@ -207,27 +224,32 @@ func (tx *TxContext) stageCatalogForeign(child, parent *table, fk foreignKey, ex
 		panic("public foreign declaration requires an active native transaction")
 	}
 	fk.Untrusted = !validateExisting
-	finish := tx.beginCatalogConstruction(catalogEnforcementConstruction, child, parent)
+	owned := (catalogForeignEndpointScope{owner: tx.transactionState}).owns(child) || (catalogForeignEndpointScope{owner: tx.transactionState}).owns(parent)
+	profile := catalogEnforcementConstruction
+	if owned {
+		profile = catalogValidationConstruction
+	}
+	finish := tx.beginCatalogConstruction(profile, child, parent)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
 	if tx.State != TxActive || tx.decisionStarted {
 		panic("public foreign declaration requires an active native transaction")
 	}
-	requireTableMaintenance(child.schema.Name, child.Name, maintenanceAlter)
-	requireTableMaintenance(parent.schema.Name, parent.Name, maintenanceAlter)
+	tx.requireForeignEndpoint(child)
+	tx.requireForeignEndpoint(parent)
 	requireSelfForeignModes(child, parent, fk)
 	if child.Ephemeral || parent.Ephemeral || child.isEphemeralQueryTable() || parent.isEphemeralQueryTable() {
 		panic("public foreign declaration requires durable native table declarations")
 	}
-	if child.schema != parent.schema || !child.committedAt(child.schema.catalogView().version) || !parent.committedAt(parent.schema.catalogView().version) {
+	if child.schema != parent.schema {
 		panic("public foreign declaration requires two committed endpoints in one database")
-	}
-	if tx.catalogIntents.Load() != nil {
-		panic("public and private catalog declarations cannot be mixed")
 	}
 	if tx.coordinator != nil || activeReplication(child.schema) != nil {
 		panic("public foreign declaration requires distributed table admission")
 	}
 	kind := catalogEnforcementKind
+	if owned {
+		kind = catalogOwnedForeignKind
+	}
 	if tx.foreignReplacement(fk.Id, child, parent) {
 		kind = catalogForeignReplacementKind
 	}
@@ -300,11 +322,16 @@ func (state *publicCatalogChanges) stageForeign(tx *TxContext, child, parent *ta
 			}
 		}
 	}()
+	owned := (catalogForeignEndpointScope{owner: tx.transactionState}).owns(child) || (catalogForeignEndpointScope{owner: tx.transactionState}).owns(parent)
 	for _, t := range endpoints {
 		if state.leases[t] != nil {
 			continue
 		}
-		lease, err := t.writeAdmission.admit(scanQueryContext(tx, context.Background()), tx.transactionState, tableCatalogDeclarationAdmission, false)
+		kind := tableCatalogDeclarationAdmission
+		if owned {
+			kind = tableValidatedDeclarationAdmission
+		}
+		lease, err := t.writeAdmission.admit(scanQueryContext(tx, context.Background()), tx.transactionState, kind, false)
 		if err != nil {
 			panic(err)
 		}
@@ -315,6 +342,19 @@ func (state *publicCatalogChanges) stageForeign(tx *TxContext, child, parent *ta
 			state.refreshMemoryLocked()
 			lease.attachRetainedMemory(state.memory)
 			state.anchor = lease
+		}
+	}
+	var restore []func()
+	if owned {
+		defer func() {
+			if !accepted {
+				for i := len(restore) - 1; i >= 0; i-- {
+					restore[i]()
+				}
+			}
+		}()
+		for _, t := range endpoints {
+			restore = append(restore, t.guardCatalogDeclarationInput(tx.transactionState))
 		}
 	}
 	db := state.db
@@ -338,7 +378,8 @@ func (state *publicCatalogChanges) stageForeign(tx *TxContext, child, parent *ta
 	// Existing rows and generated programs are inspected privately, outside the
 	// schema mutex; no trigger body runs and no relational row bag is retained.
 	if validateExisting {
-		validateExistingForeignRows(tx, child, fk, lookup)
+		child.enterPendingCatalogData(tx, state.leases[child])
+		validateExistingForeignRows(tx, child, fk, lookup, state.leases[parent])
 	}
 	programs := buildFKTriggers(db, child, parent, fk)
 	captureForeignProgramFootprints(programs)
@@ -387,6 +428,7 @@ func (state *publicCatalogChanges) stageForeign(tx *TxContext, child, parent *ta
 	}
 	state.constraintStates[fk.Id] = &catalogConstraintState{addition: amendment, enabled: true, trusted: validateExisting}
 	state.constraintStatesHighWater = max(state.constraintStatesHighWater, len(state.constraintStates))
+	tx.noteStatementMutation(child)
 	tx.catalogAmendments.Store(&history)
 	state.publishViews(history, views)
 	accepted = true
@@ -411,7 +453,7 @@ func (state *publicCatalogChanges) validateStageLocked(tx *TxContext, child, par
 			panic("public declaration conflict: endpoint declaration changed")
 		}
 	}
-	validateCatalogForeign(db, declaration, tx.publicUniqueKeys(), tx.publicDeclarationViews())
+	validateCatalogForeign(db, declaration, tx.publicUniqueKeys(), tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState})
 	fk := declaration.Foreign
 	if expected != nil {
 		expected.validate(child, parent, fk)
@@ -432,13 +474,14 @@ func (state *publicCatalogChanges) validateStageLocked(tx *TxContext, child, par
 // Read-only validation belongs to the public metadata transaction. Its ordinary
 // native scans preserve query cancellation, visibility and reader lifetimes;
 // the endpoint admission owner prevents writers through publication/rollback.
-func validateExistingForeignRows(tx *TxContext, child *table, fk foreignKey, parent *foreignKeyLookup) {
+func validateExistingForeignRows(tx *TxContext, child *table, fk foreignKey, parent *foreignKeyLookup, parentInput *tableWriteLease) {
 	validate := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		for _, value := range values[1:] {
 			if value.IsNil() {
 				return scm.NewBool(true)
 			}
 		}
+		parent.table.enterPendingCatalogData(tx, parentInput)
 		if !parent.exists(tx, values[1:]) {
 			panic(fmt.Errorf("foreign key constraint %s failed: existing child row has no parent", fk.Id))
 		}
@@ -450,11 +493,11 @@ func validateExistingForeignRows(tx *TxContext, child *table, fk foreignKey, par
 		scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }), false)
 }
 
-func validateCatalogForeign(db *database, declaration catalogForeignDeclaration, keys map[*table][]uniqueKey, views map[*table]*tableShowColumnsSnapshot) {
+func validateCatalogForeign(db *database, declaration catalogForeignDeclaration, keys map[*table][]uniqueKey, views map[*table]*tableShowColumnsSnapshot, scope catalogForeignEndpointScope) {
 	fk := declaration.Foreign
 	child, parent := db.tables.Get(fk.Tbl1), db.tables.Get(fk.Tbl2)
-	if child == nil || parent == nil || child.RuntimeIdentity != declaration.ChildIdentity || parent.RuntimeIdentity != declaration.ParentIdentity ||
-		!child.committedAt(db.catalogVersion) || !parent.committedAt(db.catalogVersion) {
+	if child == nil || parent == nil || child.schema != db || parent.schema != db || child.RuntimeIdentity != declaration.ChildIdentity || parent.RuntimeIdentity != declaration.ParentIdentity ||
+		(!child.committedAt(db.catalogVersion) && !scope.owns(child)) || (!parent.committedAt(db.catalogVersion) && !scope.owns(parent)) {
 		panic("foreign declaration endpoint generation was replaced")
 	}
 	for _, identity := range []string{declaration.ChildIdentity, declaration.ParentIdentity} {
@@ -528,7 +571,11 @@ func (tx *TxContext) restorePublicDeclarations(keep int) {
 	changes.mu.Lock()
 	defer changes.mu.Unlock()
 	defer changes.refreshMemoryLocked()
-	if len(changes.sourceBaselines) != 0 || len(changes.statementTriggers) != 0 {
+	private := false
+	for _, entry := range tx.publicForeignAmendments() {
+		private = private || entry.table != nil
+	}
+	if private || len(changes.sourceBaselines) != 0 || len(changes.statementTriggers) != 0 {
 		access := changes.db.GetWrite(nil)
 		defer access.Release()
 		changes.db.schemalock.Lock()
@@ -540,6 +587,23 @@ func (tx *TxContext) restorePublicDeclarations(keep int) {
 		panic("invalid native public declaration boundary")
 	}
 	for i := len(history) - 1; i >= keep; i-- {
+		if before := history[i]; before.table != nil {
+			t := before.table
+			if (catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) {
+				t.ddlMu.Lock()
+				t.Unique = append([]uniqueKey(nil), before.keys...)
+				t.Columns = append([]*column(nil), before.columns...)
+				t.publishShowColumnsSnapshot(true)
+				t.ddlMu.Unlock()
+				if _, tracked := changes.baselines[t]; tracked {
+					changes.baselines[t] = foreignBaseline(t.showColumnsSnapshot.Load())
+				}
+				if views[t] != nil {
+					views[t] = t.showColumnsSnapshot.Load()
+				}
+			}
+			continue
+		}
 		if drop := history[i].tableDrop; drop != nil {
 			changes.restoreTableDropLocked(drop)
 			continue
@@ -693,7 +757,7 @@ func (tx *TxContext) validatePublicDeclarations(db *database) error {
 	// Validate the same ordered program used by publication and restart.
 	// Reservation checks remain attached to actual final active additions.
 	if actions := tx.publicNativeDeclarations(); len(actions) > 0 {
-		db.projectNativeDeclarations(actions, tx.publicDeclarationViews(), catalogNativeCurrent)
+		db.projectNativeDeclarations(actions, tx.publicDeclarationViews(), catalogNativeCurrent, catalogForeignEndpointScope{owner: tx.transactionState})
 	}
 	current := currentForeignAdditions(tx.publicForeignAmendments())
 	for _, amendment := range tx.publicForeignAmendments() {
@@ -815,14 +879,14 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 	var keyProjection map[*table][]uniqueKey
 	var propertyProjection map[*table][]*column
 	if len(nativeDeclarations) > 0 {
-		projection := db.projectNativeDeclarations(nativeDeclarations, (&TxContext{transactionState: changes.owner}).publicDeclarationViews(), catalogNativeCurrent)
+		projection := db.projectNativeDeclarations(nativeDeclarations, (&TxContext{transactionState: changes.owner}).publicDeclarationViews(), catalogNativeCurrent, catalogForeignEndpointScope{owner: changes.owner})
 		declarations, foreignDrops, keyProjection, propertyProjection = projection.foreignAdds, projection.foreignDrops, projection.keys, projection.propertyColumns
 	}
 	publication := &publicForeignPublication{changes: changes}
 	endpoints := make(map[*table]*publicForeignEndpoint)
 	additions := make(map[*table][]foreignKey)
 	for _, declaration := range foreignDrops {
-		validateCatalogForeignDrop(db, declaration)
+		validateCatalogForeignDrop(db, declaration, catalogForeignEndpointScope{owner: changes.owner})
 		fk := declaration.Foreign
 		for _, t := range foreignEndpointTables(db.tables.Get(fk.Tbl1), db.tables.Get(fk.Tbl2)) {
 			endpoint := endpoints[t]
@@ -838,7 +902,7 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 		}
 	}
 	for _, declaration := range declarations {
-		validateCatalogForeign(db, declaration, keyProjection, (&TxContext{transactionState: changes.owner}).publicDeclarationViews())
+		validateCatalogForeign(db, declaration, keyProjection, (&TxContext{transactionState: changes.owner}).publicDeclarationViews(), catalogForeignEndpointScope{owner: changes.owner})
 		fk := declaration.Foreign
 		publication.foreignPayloadBytes += fk.payloadFootprint
 		child, parent := db.tables.Get(fk.Tbl1), db.tables.Get(fk.Tbl2)
@@ -1120,9 +1184,9 @@ func (publication *publicForeignPublication) retirePrevious() {
 // Recovery constructs declarations before ordinary loader initialization. System
 // programs and SHOW metadata are rebuilt by that loader after all rows/tables
 // have their existing native back-references restored.
-func (db *database) recoverPublicForeignDeclarations(declarations []catalogForeignDeclaration) {
+func (db *database) recoverPublicForeignDeclarations(declarations []catalogForeignDeclaration, scope catalogForeignEndpointScope) {
 	for _, declaration := range declarations {
-		validateCatalogForeign(db, declaration, nil, nil)
+		validateCatalogForeign(db, declaration, nil, nil, scope)
 		fk := declaration.Foreign
 		child, parent := db.tables.Get(fk.Tbl1), db.tables.Get(fk.Tbl2)
 		child.Foreign = append(child.Foreign, fk)

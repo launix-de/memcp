@@ -285,7 +285,7 @@ func (t *table) readDataContext(tx *TxContext) (*TxContext, func()) {
 		}
 	}()
 	t.requireCatalogDataVisibility(read)
-	t.enterPendingCatalogData(read)
+	t.enterPendingCatalogData(read, nil)
 	t.recordSerializableRead(read)
 	ready = true
 	return read, finish
@@ -364,7 +364,7 @@ func (t *table) writeDataContext(tx *TxContext) (*TxContext, func()) {
 		}
 	}()
 	t.requireCatalogDataVisibility(write)
-	t.enterPendingCatalogData(write)
+	t.enterPendingCatalogData(write, nil)
 	ready = true
 	return write, finish
 }

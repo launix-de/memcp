@@ -272,7 +272,7 @@ func (db *database) verifyCatalogEnrollment(enrollment *catalogParticipantRecord
 	var failure error
 	for frame := range frames {
 		commit, ok := frame.(LogEntryCommit)
-		if !ok || (!strings.HasPrefix(commit.txID, catalogParticipantJournalPrefix) && !strings.HasPrefix(commit.txID, catalogEnforcementParticipantJournalPrefix) && !strings.HasPrefix(commit.txID, catalogForeignDropJournalPrefix) && !strings.HasPrefix(commit.txID, catalogForeignHistoryJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnDeclarationJournalPrefix) && !strings.HasPrefix(commit.txID, catalogNativeDeclarationJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnPropertyJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnAppendJournalPrefix) && !strings.HasPrefix(commit.txID, catalogForeignValidationJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnInitializationJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnPropertyClaimJournalPrefix)) {
+		if !ok || (!strings.HasPrefix(commit.txID, catalogParticipantJournalPrefix) && !strings.HasPrefix(commit.txID, catalogEnforcementParticipantJournalPrefix) && !strings.HasPrefix(commit.txID, catalogForeignDropJournalPrefix) && !strings.HasPrefix(commit.txID, catalogForeignHistoryJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnDeclarationJournalPrefix) && !strings.HasPrefix(commit.txID, catalogNativeDeclarationJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnPropertyJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnAppendJournalPrefix) && !strings.HasPrefix(commit.txID, catalogForeignValidationJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnInitializationJournalPrefix) && !strings.HasPrefix(commit.txID, catalogColumnPropertyClaimJournalPrefix) && !strings.HasPrefix(commit.txID, catalogOwnedDeclarationJournalPrefix)) {
 			continue
 		}
 		record, err := decodeCatalogDecision(commit.txID)
@@ -366,8 +366,11 @@ func (db *database) catalogParticipantFrames() []interface{} {
 func (tx *TxContext) pinCatalogParticipantDatabases(preparation *acidPreparation, directory map[*storageShard]*storageShardTransaction) error {
 	identity := tx.catalogIdentity.Load()
 	changes := tx.publicCatalogChanges()
-	if identity == nil || identity.lateCreates || changes == nil {
+	if identity == nil || changes == nil {
 		return nil
+	}
+	if changes.owner != tx.transactionState || changes.db != identity.database || !tx.publicCatalogEntered.Load() {
+		return fmt.Errorf("catalog row participants lost the joined original owner")
 	}
 	views := changes.views.Load()
 	if views == nil {
@@ -449,7 +452,7 @@ func (tx *TxContext) catalogRowParticipantInventory() ([]catalogParticipantIdent
 	if tx.prepared == nil || len(tx.prepared.catalogDatabases) < 2 {
 		return nil, nil
 	}
-	if identity == nil || identity.lateCreates || tx.coordinator != nil || len(tx.participants) != 0 || tx.clusterNumber.Load() != 0 {
+	if identity == nil || identity.lateCreates && (tx.publicCatalogChanges() == nil || tx.publicCatalogChanges().owner != tx.transactionState || tx.publicCatalogChanges().db != identity.database || !tx.publicCatalogEntered.Load()) || tx.coordinator != nil || len(tx.participants) != 0 || tx.clusterNumber.Load() != 0 {
 		return nil, fmt.Errorf("cross-database catalog rows require an original local transaction")
 	}
 	participants := make([]catalogParticipantIdentity, 0, len(tx.prepared.catalogDatabases))

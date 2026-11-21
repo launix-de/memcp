@@ -96,9 +96,9 @@ func (changes *publicCatalogChanges) stageForeignDrop(tx *TxContext, child *tabl
 			panic("foreign removal requires an existing native declaration")
 		}
 		if addition == nil {
-			validateCatalogForeignDrop(db, declaration)
+			validateCatalogForeignDrop(db, declaration, catalogForeignEndpointScope{owner: tx.transactionState})
 		} else {
-			validateCatalogForeign(db, declaration, tx.publicUniqueKeys(), tx.publicDeclarationViews())
+			validateCatalogForeign(db, declaration, tx.publicUniqueKeys(), tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState})
 		}
 	}()
 	endpoints := foreignEndpointTables(child, parent)
@@ -140,9 +140,9 @@ func (changes *publicCatalogChanges) stageForeignDrop(tx *TxContext, child *tabl
 	defer db.schemalock.RUnlock()
 	changes.validateConstraintStateEndpointsLocked(tx)
 	if addition == nil {
-		validateCatalogForeignDrop(db, declaration)
+		validateCatalogForeignDrop(db, declaration, catalogForeignEndpointScope{owner: tx.transactionState})
 	} else {
-		validateCatalogForeign(db, declaration, tx.publicUniqueKeys(), tx.publicDeclarationViews())
+		validateCatalogForeign(db, declaration, tx.publicUniqueKeys(), tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState})
 		if currentForeignAdditions(tx.publicForeignAmendments())[foreignIdentity(addition.declaration)] != addition {
 			panic("foreign removal pending predecessor changed")
 		}
@@ -305,8 +305,8 @@ func (t *table) reserveForeignDropProgram(transaction *transactionState, expecte
 	owner.triggerNamesHighWater = max(owner.triggerNamesHighWater, len(owner.triggerNames))
 }
 
-func validateCatalogForeignDrop(db *database, declaration catalogForeignDeclaration) {
-	validateCatalogForeign(db, declaration, nil, nil)
+func validateCatalogForeignDrop(db *database, declaration catalogForeignDeclaration, scope catalogForeignEndpointScope) {
+	validateCatalogForeign(db, declaration, nil, nil, scope)
 	fk := declaration.Foreign
 	for _, t := range foreignEndpointTables(db.tables.Get(fk.Tbl1), db.tables.Get(fk.Tbl2)) {
 		matched := false
@@ -337,7 +337,7 @@ func (tx *TxContext) validatePublicForeignDrops(db *database) error {
 			}
 			continue
 		}
-		validateCatalogForeignDrop(db, entry.foreignDrop.declaration)
+		validateCatalogForeignDrop(db, entry.foreignDrop.declaration, catalogForeignEndpointScope{owner: tx.transactionState})
 		for _, program := range entry.foreignDrop.programs {
 			t := program.table
 			t.mu.Lock()
@@ -361,9 +361,9 @@ func (tx *TxContext) validatePublicForeignDrops(db *database) error {
 	return nil
 }
 
-func (db *database) recoverPublicForeignDrops(declarations []catalogForeignDeclaration) {
+func (db *database) recoverPublicForeignDrops(declarations []catalogForeignDeclaration, scope catalogForeignEndpointScope) {
 	for _, declaration := range declarations {
-		validateCatalogForeignDrop(db, declaration)
+		validateCatalogForeignDrop(db, declaration, scope)
 		fk := declaration.Foreign
 		child, parent := db.tables.Get(fk.Tbl1), db.tables.Get(fk.Tbl2)
 		removeFKTriggers(child, parent, fk)

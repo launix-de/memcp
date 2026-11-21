@@ -131,7 +131,7 @@ const (
 // This is a private metadata interpreter at prepare/recovery. Each action sees
 // the exact key and FK declarations left by its predecessor; no public header
 // is edited in order to validate a later action.
-func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration, views map[*table]*tableShowColumnsSnapshot, domain catalogNativeReplayDomain) *catalogNativeProjection {
+func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration, views map[*table]*tableShowColumnsSnapshot, domain catalogNativeReplayDomain, scope catalogForeignEndpointScope) *catalogNativeProjection {
 	if domain != catalogNativeCurrent && domain != catalogNativeLegacyV13 {
 		panic("invalid native declaration replay domain")
 	}
@@ -144,7 +144,7 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 				panic("invalid native foreign action")
 			}
 			d := *action.Foreign
-			validateCatalogForeign(db, d, p.keys, views)
+			validateCatalogForeign(db, d, p.keys, views, scope)
 			name := foreignIdentity(d)
 			current, exists := p.foreign[name]
 			if action.Operation == "foreign_drop" {
@@ -274,20 +274,20 @@ func nativeDeclarationNameConflict(db *database, name string, target *table, key
 	return false
 }
 
-func (db *database) recoverNativeDeclarations(actions []catalogNativeDeclaration, domain catalogNativeReplayDomain) {
+func (db *database) recoverNativeDeclarations(actions []catalogNativeDeclaration, domain catalogNativeReplayDomain, scope catalogForeignEndpointScope) {
 	if domain != catalogNativeCurrent && domain != catalogNativeLegacyV13 {
 		panic("invalid native declaration replay domain")
 	}
 	if len(actions) == 0 {
 		return
 	}
-	db.projectNativeDeclarations(actions, nil, domain)
+	db.projectNativeDeclarations(actions, nil, domain, scope)
 	for _, action := range actions {
 		switch action.Operation {
 		case "foreign_add":
-			db.recoverPublicForeignDeclarations([]catalogForeignDeclaration{*action.Foreign})
+			db.recoverPublicForeignDeclarations([]catalogForeignDeclaration{*action.Foreign}, scope)
 		case "foreign_drop":
-			db.recoverPublicForeignDrops([]catalogForeignDeclaration{*action.Foreign})
+			db.recoverPublicForeignDrops([]catalogForeignDeclaration{*action.Foreign}, scope)
 		case "column_property_claim", "column_property_drop":
 			t, columns := db.projectColumnPropertyChange(action.Property, action.Operation, nil)
 			t.Columns = columns

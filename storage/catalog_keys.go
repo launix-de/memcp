@@ -6,6 +6,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
+import "maps"
 import "context"
 import "strings"
 import "github.com/launix-de/memcp/scm"
@@ -160,6 +161,19 @@ func (tx *TxContext) amendCatalogDeclaration(t *table, amend func(*table) bool) 
 	if tx.catalogDeclarationDataEntered(t) {
 		panic("transactional declaration amendments must precede native row access")
 	}
+	changes := tx.publicCatalogChanges()
+	if changes != nil {
+		changes.mu.Lock()
+		defer changes.mu.Unlock()
+		if changes.owner != tx.transactionState || changes.db != t.schema {
+			panic("private amendment lost its joined catalog owner")
+		}
+		for _, entry := range tx.publicForeignAmendments() {
+			if entry.foreign != nil && (entry.foreign.endpoints[0] == t || entry.foreign.endpoints[1] == t) || entry.column != nil && entry.column.table == t || entry.publicKey != nil && entry.publicKey.table == t || entry.statementTrigger != nil && entry.statementTrigger.slot.table == t {
+				panic("private declaration is already bound to its endpoint input")
+			}
+		}
+	}
 	identity := tx.catalogIdentity.Load()
 	db := GetDatabase(t.schema.Name)
 	if db == nil || db != identity.database || db.incarnationID() != identity.Incarnation {
@@ -175,6 +189,9 @@ func (tx *TxContext) amendCatalogDeclaration(t *table, amend func(*table) bool) 
 	}
 	current.ddlMu.Lock()
 	defer current.ddlMu.Unlock()
+	if tx.publicCatalogChanges() != changes {
+		panic("private declaration phase changed during native admission; retry statement")
+	}
 	if tx.catalogDeclarationDataEntered(current) {
 		panic("transactional declaration amendments must precede native row access")
 	}
@@ -191,6 +208,15 @@ func (tx *TxContext) amendCatalogDeclaration(t *table, amend func(*table) bool) 
 	tx.catalogAmendments.Store(&history)
 	tx.mu.Unlock()
 	current.publishShowColumnsSnapshot(true)
+	if changes != nil {
+		views := maps.Clone(changes.views.Load().tables)
+		if _, tracked := changes.baselines[current]; tracked {
+			changes.baselines[current] = foreignBaseline(current.showColumnsSnapshot.Load())
+			views[current] = current.showColumnsSnapshot.Load()
+		}
+		changes.publishViews(history, views)
+		changes.refreshMemoryLocked()
+	}
 	return true
 }
 

@@ -1659,6 +1659,11 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			break
 		}
 	}
+	boundUpdateTriggers, boundDeleteTriggers := false, false
+	if input != nil {
+		boundUpdateTriggers = len(input.beforeUpdate) != 0 || len(input.afterUpdate) != 0
+		boundDeleteTriggers = len(input.beforeDelete) != 0 || len(input.afterDelete) != 0
+	}
 	initialUniqueGuard := uniqueGuard
 	var originalState *transactionState
 	if exactUpdate {
@@ -1666,6 +1671,14 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 	}
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
+		hasUpdateTriggers, hasDeleteTriggers := boundUpdateTriggers, boundDeleteTriggers
+		if input == nil {
+			// Legacy raw callbacks can outlive their original scan. Preserve
+			// their existing public-header selection; only bound input is frozen.
+			hasUpdateTriggers = len(t.t.Triggers) != 0
+			hasDeleteTriggers = hasUpdateTriggers
+		}
+
 		if exactUpdate && (currentTx.transactionState != originalState || currentTx.State != TxActive) {
 			panic("native mutation callback lost its original transaction")
 		}
@@ -1887,14 +1900,14 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				}
 				// now d2 contains the old row values
 				var oldDeltaRow dataset
-				if len(t.t.Triggers) > 0 {
+				if hasUpdateTriggers {
 					oldDeltaRow = append(dataset{}, d2...)
 				}
 				if eventWriter != nil {
 					eventOldRow = schemaRowFromDelta(d2)
 				}
 				// copy slice for triggers before modifying (scheme values are immutable, but Go slice is modified)
-				if withTrigger && len(t.t.Triggers) > 0 {
+				if withTrigger && hasUpdateTriggers {
 					triggerOldRow = schemaRowFromDelta(d2)
 				}
 				for j := 0; j < len(changes); j += 2 {
@@ -2019,7 +2032,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				// Only re-run global unique collision scans when at least one
 				// unique key column value actually changed.
 				uniqueColsChanged := uniqueColsTouched
-				if keys != nil && len(t.t.Triggers) > 0 {
+				if keys != nil && hasUpdateTriggers {
 					// BEFORE UPDATE triggers may touch unique columns even if they
 					// are not present in the explicit UPDATE assignment list.
 					uniqueColsChanged = false
@@ -2038,7 +2051,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				}
 
 				// save new row for triggers (d2 now contains new values)
-				if withTrigger && len(t.t.Triggers) > 0 {
+				if withTrigger && hasUpdateTriggers {
 					triggerNewRow = schemaRowFromDelta(d2)
 				}
 
@@ -2181,7 +2194,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			var triggerDeletedRow dataset // for BEFORE/AFTER DELETE trigger
 
 			// capture row data for triggers before deletion (outside lock for BEFORE trigger)
-			if withTrigger && len(t.t.Triggers) > 0 {
+			if withTrigger && hasDeleteTriggers {
 				readDeletedRow := func() dataset {
 					row := make(dataset, len(declarations))
 					for i, col := range declarations {
@@ -2991,10 +3004,14 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 		mr.invClosureFn = make([]*func(uint32, ...scm.Scmer) scm.Scmer, len(cols))
 	}
 	hasDeleteTriggers := false
-	for _, tr := range t.t.Triggers {
-		if tr.Timing == AfterDelete {
-			hasDeleteTriggers = true
-			break
+	if mr.mutationInput != nil {
+		hasDeleteTriggers = len(mr.mutationInput.afterDelete) != 0
+	} else {
+		for _, tr := range t.t.Triggers {
+			if tr.Timing == AfterDelete {
+				hasDeleteTriggers = true
+				break
+			}
 		}
 	}
 	for i, col := range cols {
@@ -4106,9 +4123,13 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 	firstNewInsertIdx := len(t.deltaRows()) // for capturing actual rows after insertDataset fills auto-increment
 	input := currentTx.mutationInputFor(t.t)
 	declarations := mutationColumns(t.t, currentTx, input)
+	fireRowTriggers := fireTriggers && len(t.t.Triggers) > 0 && (t.t.statementTriggerEvents.Load() == 0 || t.t.hasNonStatementTriggers.Load())
+	if input != nil {
+		fireRowTriggers = fireTriggers && (len(input.beforeInsert) != 0 || len(input.afterInsert) != 0)
+	}
 	var triggerInsertRows []dataset
 	t.insertDataset(columns, values, onFirstInsertId, validatedSchema, currentTx)
-	if fireTriggers && len(t.t.Triggers) > 0 && (t.t.statementTriggerEvents.Load() == 0 || t.t.hasNonStatementTriggers.Load()) {
+	if fireRowTriggers {
 		newRows := t.deltaRows()[firstNewInsertIdx:]
 		triggerInsertRows = make([]dataset, len(newRows))
 		for i, deltaRow := range newRows {
@@ -4195,7 +4216,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 	// execute AFTER INSERT triggers outside the shard write lock, matching the
 	// AFTER UPDATE/DELETE paths and avoiding lock inversion with computed-column
 	// invalidation on shared keytables.
-	if fireTriggers && len(t.t.Triggers) > 0 && (t.t.statementTriggerEvents.Load() == 0 || t.t.hasNonStatementTriggers.Load()) {
+	if fireRowTriggers {
 		func() {
 			t.mu.Unlock()
 			defer t.lockForMutation(currentTx, uniqueGuard)

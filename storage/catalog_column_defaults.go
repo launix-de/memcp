@@ -342,6 +342,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	appendedColumns := make(map[*table]map[string]*column)
 	dropped := make(map[*table]struct{})
 	tablesCloned := false
+	foreignHistory := false
 	statementInput := func(t *table) {
 		blocked[t] = struct{}{}
 		guarded[t] = true
@@ -359,20 +360,32 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	// A headless slot selects its exact baseline; it has no durable amendment.
 	// Keep checked input until decision rather than waiting on our own lease or
 	// releasing a layout lease adopted by a successful sibling constructor.
+	// A retained original-owned generation keeps its exact constructor baseline
+	// after all FK amendments rewind; do not self-wait on that existing lease.
+	for t, lease := range changes.leases {
+		if lease != nil && lease.owner == &t.writeAdmission && lease.transaction == changes.owner && (catalogForeignEndpointScope{owner: changes.owner}).owns(t) {
+			statementInput(t)
+		}
+	}
 	statementInputs := changes.statementInputTables()
 	for t := range statementInputs {
 		statementInput(t)
 	}
 	for _, entry := range history {
+		foreignHistory = foreignHistory || entry.foreign != nil || entry.foreignDrop != nil
 		if key := entry.publicKey; key != nil {
 			keys[key.table] = key.keys
 			guarded[key.table] = true
 			blocked[key.table] = struct{}{}
 		}
 		if amendment := entry.foreign; amendment != nil {
+			owned := ownedForeignAddition(changes.owner, amendment)
 			for _, t := range amendment.endpoints {
 				if t != nil {
 					blocked[t] = struct{}{}
+					if owned {
+						guarded[t] = true
+					}
 				}
 			}
 		}
@@ -433,7 +446,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	for t := range blocked {
 		delete(writers, t)
 	}
-	checked := checkedCatalogWriters(history, statementInputs)
+	checked := checkedCatalogWriters(history, statementInputs, changes.owner, changes.leases)
 	changes.viewsHighWater = max(changes.viewsHighWater, len(tables))
 	changes.checkedWritersHighWater = max(changes.checkedWritersHighWater, len(checked))
 	changes.columnWritersHighWater = max(changes.columnWritersHighWater, len(writers))
@@ -442,7 +455,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	for t := range changes.leases {
 		t.setGuardedCatalogDeclarationInput(changes.owner, guarded[t])
 	}
-	changes.views.Store(&publicCatalogViews{keys: keys, tables: tables, columnWriters: writers, nullColumns: nullColumns, appendedColumns: appendedColumns, blockedWriters: blocked, dropped: dropped, checkedWriters: checked, history: history})
+	changes.views.Store(&publicCatalogViews{keys: keys, tables: tables, columnWriters: writers, nullColumns: nullColumns, appendedColumns: appendedColumns, blockedWriters: blocked, dropped: dropped, checkedWriters: checked, history: history, foreignHistory: foreignHistory})
 }
 
 func replaceStoredColumnMetadata(t *table, base *tableShowColumnsSnapshot, columns []*column) (*tableShowColumnsSnapshot, uint) {

@@ -293,7 +293,7 @@ func prepareScanJoinOrderSpec(currentTx *TxContext, spec *scanJoinOrderSpec) {
 		if input.table == nil {
 			panic("scan_join_order: input table is nil")
 		}
-		input.table.enterPendingCatalogData(currentTx)
+		input.table.enterPendingCatalogData(currentTx, nil)
 		input.table.recordSerializableRead(currentTx)
 		if input.filter.IsNil() {
 			input.filter = scanJoinTrue()

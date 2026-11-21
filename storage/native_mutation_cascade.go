@@ -10,6 +10,9 @@ import "github.com/launix-de/memcp/scm"
 // A nonempty UPDATE descriptor is enforced at its physical assignment sink;
 // ordinary BEFORE programs and indirectly computed keys widen that footprint.
 func (operation *nativeMutationOperation) rejectStatementCascades(targets []*table, descriptor nativeMutationDescriptor) {
+	if descriptor.event != nativeMutationUpdate && descriptor.event != nativeMutationDelete {
+		return
+	}
 	type action struct {
 		target *table
 		event  nativeMutationEvent
@@ -38,13 +41,62 @@ func (operation *nativeMutationOperation) rejectStatementCascades(targets []*tab
 	}
 	visited := make(map[action]nativeMutationAssignments)
 	profile := nativeTriggerProfileFor(operation.invocation)
+	// Index only immutable original-T deltas. Public predecessors are read
+	// after each actual endpoint lease, never copied from an unleased catalog.
+	type endpoint struct{ name, identity string }
+	type delta struct {
+		retired   map[catalogForeignIdentity][]catalogForeignDeclaration
+		additions []*catalogForeignAmendment
+	}
+	var byParent map[endpoint]*delta
+	if changes := operation.invocation.publicCatalogChanges(); changes != nil && changes.owner == operation.state {
+		views := changes.views.Load()
+		if input := operation.invocation.declarationInput; input != nil {
+			views = input.source
+		}
+		if views != nil && views.foreignHistory {
+			byParent = make(map[endpoint]*delta)
+			get := func(identity catalogForeignIdentity) *delta {
+				key := endpoint{identity.parentName, identity.parent}
+				if byParent[key] == nil {
+					byParent[key] = &delta{retired: make(map[catalogForeignIdentity][]catalogForeignDeclaration)}
+				}
+				return byParent[key]
+			}
+			current := currentForeignAdditions(views.history)
+			for _, entry := range views.history {
+				if drop := entry.foreignDrop; drop != nil {
+					identity := foreignIdentity(drop.declaration)
+					changes := get(identity)
+					changes.retired[identity] = append(changes.retired[identity], drop.declaration)
+				}
+				if add := entry.foreign; add != nil && current[foreignIdentity(add.declaration)] == add {
+					changes := get(foreignIdentity(add.declaration))
+					changes.additions = append(changes.additions, add)
+				}
+			}
+		}
+	}
 	for len(pending) != 0 {
 		current := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
-		if current.target.cascadingForeignMutationEvents.Load()&(1<<current.event) == 0 {
+		changes := byParent[endpoint{current.target.Name, current.target.RuntimeIdentity}]
+		if current.target.cascadingForeignMutationEvents.Load()&(1<<current.event) == 0 && changes == nil {
 			continue
 		}
 		operation.admitStatementTable(current.target)
+		foreign := current.target.Foreign
+		if changes != nil {
+			foreign = nil
+			for _, fk := range current.target.Foreign {
+				if !retiredForeignRecipe(current.target.schema, fk, changes.retired) {
+					foreign = append(foreign, fk)
+				}
+			}
+			for _, add := range changes.additions {
+				foreign = append(foreign, add.declaration.Foreign)
+			}
+		}
 		if current.event == nativeMutationUpdate && current.columns != nil {
 			var before []TriggerDescription
 			if input := operation.invocation.mutationInputFor(current.target); input != nil {
@@ -85,7 +137,7 @@ func (operation *nativeMutationOperation) rejectStatementCascades(targets []*tab
 		}
 		visited[current.action] = current.columns
 		columnNames := current.target.columnNamesForTx(operation.invocation)
-		for _, key := range mutationForeignKeys(current.target, operation.invocation) {
+		for _, key := range foreign {
 			if key.Tbl2 != current.target.Name {
 				continue
 			}

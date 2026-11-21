@@ -117,16 +117,8 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 		// Run after all schema/construction owners unwind, including a failed
 		// or no-op first constructor that allocated no native intent.
 		defer tx.retireUnacceptedLateCreatePhase()
-		if tx.publicCatalogEntered.Load() {
-			panic("public and private catalog declarations cannot be mixed")
-		}
 		done := tx.beginCatalogConstruction(catalogDeclarationConstruction)
 		defer done()
-		// A public phase can enter between the optimistic check and admission.
-		// Its phase store shares this same resource-scope owner.
-		if tx.publicCatalogEntered.Load() {
-			panic("public and private catalog declarations cannot be mixed")
-		}
 	}
 	if staged && tx.coordinator != nil {
 		return tx.forwardCatalogCreate(a)

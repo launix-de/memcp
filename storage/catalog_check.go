@@ -226,9 +226,9 @@ func (state *catalogConstraintState) endpoints() []*table {
 	return []*table{state.check.table}
 }
 
-func (state *catalogConstraintState) validate(db *database, keys map[*table][]uniqueKey, views map[*table]*tableShowColumnsSnapshot) {
+func (state *catalogConstraintState) validate(db *database, keys map[*table][]uniqueKey, views map[*table]*tableShowColumnsSnapshot, scope catalogForeignEndpointScope) {
 	if state.addition != nil {
-		validateCatalogForeign(db, state.addition.declaration, keys, views)
+		validateCatalogForeign(db, state.addition.declaration, keys, views, scope)
 	} else {
 		validateCatalogCheck(db, state.check.declaration)
 	}

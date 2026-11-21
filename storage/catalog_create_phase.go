@@ -13,6 +13,11 @@ const lateCreateResourceKey = "native-private-catalog-database"
 // later declarations retain O(1) admission to the same database and owner.
 // Caller holds tx.mu. The existing database lease pins local mode separately.
 func (tx *TxContext) validateLateCreateOwnerLocked(db *database, participants bool) error {
+	if tx.publicCatalogChanges() != nil {
+		// A public phase already owns this original local decision. Preserve its
+		// participant proof and writer restrictions while adding private names.
+		return tx.validateLatePublicOwnerLocked(db, participants)
+	}
 	if tx.Mode != TxACID || tx.State != TxActive || tx.decisionStarted || tx.prepared != nil ||
 		tx.catalogCommit != nil || tx.coordinator != nil || tx.clusterNumber.Load() != 0 || tx.clusterID != "" ||
 		len(tx.participants) != 0 || len(tx.endpoints) != 0 || tx.readViews.Load() != nil ||
@@ -55,7 +60,7 @@ func (tx *TxContext) lateCreateRowAllowed(t *table) bool {
 // only the first input seals the owned generation. Ordinary and already sealed
 // inputs take no new lock or shared synchronization write, including row loops.
 // Metadata description does not call this data boundary.
-func (t *table) enterPendingCatalogData(tx *TxContext) {
+func (t *table) enterPendingCatalogData(tx *TxContext, construction *tableWriteLease) {
 	if tx == nil || tx.transactionState == nil || t.catalogDataEntered.Load() || t.creator.Load() != tx.transactionState {
 		return
 	}
@@ -66,8 +71,19 @@ func (t *table) enterPendingCatalogData(tx *TxContext) {
 	scope := tx.resourceScope()
 	scope.mu.Lock()
 	defer scope.mu.Unlock()
-	if scope.closed || scope.deciding || scope.constructing != 0 || tx.catalogIdentity.Load() != identity {
+	if scope.closed || scope.deciding || scope.constructing != 0 && construction == nil || tx.catalogIdentity.Load() != identity {
 		panic("private catalog generation is not open for data access")
+	}
+	if construction != nil {
+		owner := &t.writeAdmission
+		owner.mu.Lock()
+		valid := scope.constructing != 0 && construction.owner == owner && construction.transaction == tx.transactionState && construction.declaration &&
+			owner.declaration == tx.transactionState && owner.declarationGuardedInput &&
+			(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t)
+		owner.mu.Unlock()
+		if !valid {
+			panic("catalog validation lost its exact construction-owned input")
+		}
 	}
 	t.catalogDataEntered.Store(true)
 	tx.rowAccessed.Store(true)

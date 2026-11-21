@@ -96,7 +96,7 @@ func (tx *TxContext) stageConstraintState(child *table, names []string, all, ena
 		}
 		changes.validateConstraintStateEndpointsLocked(tx)
 		for _, target := range targets {
-			target.validate(db, tx.publicUniqueKeys(), tx.publicDeclarationViews())
+			target.validate(db, tx.publicUniqueKeys(), tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState})
 			var lookup *foreignKeyLookup
 			if target.addition != nil {
 				declaration := target.addition.declaration
@@ -111,7 +111,7 @@ func (tx *TxContext) stageConstraintState(child *table, names []string, all, ena
 	if validate {
 		for i, target := range targets {
 			if target.addition != nil {
-				validateExistingForeignRows(tx, child, target.addition.declaration.Foreign, lookups[i])
+				validateExistingForeignRows(tx, child, target.addition.declaration.Foreign, lookups[i], changes.leases[lookups[i].table])
 			} else {
 				validateExistingCheckRows(tx, child, target.check.declaration.Check, target.check.programs[0].trigger.Func)
 			}
@@ -162,7 +162,7 @@ func (tx *TxContext) stageConstraintState(child *table, names []string, all, ena
 	defer db.schemalock.RUnlock()
 	changes.validateConstraintStateEndpointsLocked(tx)
 	for _, target := range targets {
-		target.validate(db, tx.publicUniqueKeys(), tx.publicDeclarationViews())
+		target.validate(db, tx.publicUniqueKeys(), tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState})
 	}
 	// The entire target set and all validations completed before this sole private
 	// publication. Construction admission excludes transaction decision/rewind.

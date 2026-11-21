@@ -67,6 +67,12 @@ func tableMaintenanceCapabilities(schema, name string) maintenanceCapabilities {
 			return maintenanceCapabilities{class: "unpublished_catalog"}
 		}
 	}
+	return declaredTableMaintenanceCapabilities(schema, name)
+}
+
+// Declaration class is independent of public visibility. An original-T owner
+// must prove its exact private generation before using this classification.
+func declaredTableMaintenanceCapabilities(schema, name string) maintenanceCapabilities {
 	if strings.EqualFold(name, ".blobs") {
 		return maintenanceCapabilities{class: "engine_internal"}
 	}

@@ -3,24 +3,26 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 
 package storage
 
+import "sort"
 import "unsafe"
 import "errors"
 import "github.com/launix-de/memcp/scm"
 
-// An immutable statement-trigger-only input can use every existing DML event.
-// Inputs that change row layout/key/FK contracts retain their earlier bound.
+// Statement-only and complete original-owned generation inputs support every
+// existing DML event. Key/layout amendment inputs retain their earlier bound.
 type nativeMutationInputProfile uint8
 
 const (
 	nativeDeclarationRowInput nativeMutationInputProfile = iota + 1
 	nativeStatementTriggerRowInput
+	nativeOwnedCatalogRowInput
 )
 
 func (views *publicCatalogViews) mutationEventAllowed(t *table, event nativeMutationEvent) bool {
 	switch views.checkedWriters[t] {
 	case nativeDeclarationRowInput:
 		return event == nativeMutationInsert || event == nativeMutationUpdate
-	case nativeStatementTriggerRowInput:
+	case nativeStatementTriggerRowInput, nativeOwnedCatalogRowInput:
 		return event == nativeMutationInsert || event == nativeMutationUpdate || event == nativeMutationDelete
 	default:
 		return false
@@ -37,6 +39,7 @@ type nativeMutationInput struct {
 	execution    *TxContext
 	targets      []*table
 	target       *table
+	source       *publicCatalogViews
 	owner        *transactionState
 	event        nativeMutationEvent
 	columns      []*column
@@ -178,13 +181,18 @@ func (tx *TxContext) mutationInputFor(t *table) *nativeMutationInput {
 // Source/history and descriptors come from the same immutable publication.
 // Statement programs use the same later-producer admission; other enforcing
 // programs outside this bounded input still prohibit writes.
-func checkedCatalogWriters(history []catalogDeclarationAmendment, statements map[*table]struct{}) map[*table]nativeMutationInputProfile {
+func checkedCatalogWriters(history []catalogDeclarationAmendment, statements map[*table]struct{}, owner *transactionState, leased map[*table]*tableWriteLease) map[*table]nativeMutationInputProfile {
 	result, blocked := make(map[*table]nativeMutationInputProfile), make(map[*table]struct{})
 	// Rewound heads still have their original reserved slot/declaration lease.
 	// The later checked owner binds its actual baseline programs, not a dropped
 	// historical recipe. Current endpoint amendments below retain every veto.
 	for t := range statements {
 		result[t] = nativeStatementTriggerRowInput
+	}
+	for t, lease := range leased {
+		if lease != nil && lease.owner == &t.writeAdmission && lease.transaction == owner && (catalogForeignEndpointScope{owner: owner}).owns(t) {
+			result[t] = nativeOwnedCatalogRowInput
+		}
 	}
 	for _, entry := range history {
 		if key := entry.publicKey; key != nil {
@@ -229,9 +237,16 @@ func checkedCatalogWriters(history []catalogDeclarationAmendment, statements map
 	}
 	for _, addition := range currentForeignAdditions(history) {
 		if addition != nil {
+			owned := ownedForeignAddition(owner, addition)
 			for _, t := range addition.endpoints {
 				if t != nil {
-					blocked[t] = struct{}{}
+					if owned {
+						if profile, exists := result[t]; !exists || profile == nativeStatementTriggerRowInput {
+							result[t] = nativeOwnedCatalogRowInput
+						}
+					} else {
+						blocked[t] = struct{}{}
+					}
 				}
 			}
 		}
@@ -289,15 +304,7 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 	// A legacy program-name collision must not suppress another retained FK.
 	// Selection is owned by exact native recipes, not a textual prefix filter.
 	for _, fk := range t.Foreign {
-		identity := t.schema.storedForeignIdentity(fk)
-		removed := false
-		for _, old := range retiredForeign[identity] {
-			if sameForeignDeclaration(old.Foreign, fk) {
-				removed = true
-				break
-			}
-		}
-		if removed {
+		if retiredForeignRecipe(t.schema, fk, retiredForeign) {
 			continue
 		}
 		foreign = append(foreign, fk)
@@ -313,7 +320,25 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 			}
 		}
 	}
-	input := &nativeMutationInput{target: t, owner: tx.transactionState, event: event,
+	var addedPrograms []TriggerDescription
+	active := currentForeignAdditions(source.history)
+	for _, entry := range source.history {
+		addition := entry.foreign
+		if addition == nil || active[foreignIdentity(addition.declaration)] != addition {
+			continue
+		}
+		fk := addition.declaration.Foreign
+		if fk.Tbl1 != t.Name && fk.Tbl2 != t.Name {
+			continue
+		}
+		foreign = append(foreign, fk)
+		for _, program := range addition.programs {
+			if program.table == t {
+				addedPrograms = append(addedPrograms, program.trigger)
+			}
+		}
+	}
+	input := &nativeMutationInput{target: t, source: source, owner: tx.transactionState, event: event,
 		columns: source.tables[t].metadata.columnNames.declarations, unique: uniqueKeysInView(t, source.keys), foreign: foreign}
 	profile := nativeTriggerProfileFor(tx)
 	input.beforeInsert = t.GetTriggers(BeforeInsert, retired, profile)
@@ -323,6 +348,31 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 	if event == nativeMutationDelete {
 		input.beforeDelete = t.GetTriggers(BeforeDelete, retired, profile)
 		input.afterDelete = t.GetTriggers(AfterDelete, retired, profile)
+	}
+	for _, program := range addedPrograms {
+		switch program.Timing {
+		case BeforeInsert:
+			input.beforeInsert = append(input.beforeInsert, program)
+		case AfterInsert:
+			input.afterInsert = append(input.afterInsert, program)
+		case BeforeUpdate:
+			input.beforeUpdate = append(input.beforeUpdate, program)
+		case AfterUpdate:
+			input.afterUpdate = append(input.afterUpdate, program)
+		case BeforeDelete:
+			if event == nativeMutationDelete {
+				input.beforeDelete = append(input.beforeDelete, program)
+			}
+		case AfterDelete:
+			if event == nativeMutationDelete {
+				input.afterDelete = append(input.afterDelete, program)
+			}
+		}
+	}
+	if len(addedPrograms) != 0 {
+		for _, programs := range [][]TriggerDescription{input.beforeInsert, input.afterInsert, input.beforeUpdate, input.afterUpdate, input.beforeDelete, input.afterDelete} {
+			sort.SliceStable(programs, func(i, j int) bool { return programs[i].Priority < programs[j].Priority })
+		}
 	}
 	if tx.privateMutationSource(t) != source {
 		panic("private declaration input changed while preparing its programs")

@@ -16,9 +16,16 @@ func (tx *TxContext) validateLatePublicOwnerLocked(db *database, participants bo
 		tx.catalogCommit != nil || tx.coordinator != nil || tx.clusterNumber.Load() != 0 || tx.clusterID != "" ||
 		len(tx.participants) != 0 || len(tx.endpoints) != 0 || tx.readViews.Load() != nil ||
 		tx.remoteActive != 0 || tx.mutationOperations != 0 || tx.checkedMutation != nil || tx.relationDataOrigins != 0 ||
-		tx.catalogIntents.Load() != nil || db.incarnationID() == "" || GetDatabase(db.Name) != db ||
+		db.incarnationID() == "" || GetDatabase(db.Name) != db ||
 		sharedClusterDatabase(db.Name) || activeReplication(db) != nil {
 		return errors.New("late public declarations require an unprepared local ACID transaction")
+	}
+	if intents := tx.catalogIntents.Load(); intents != nil {
+		for _, t := range *intents {
+			if t.schema != db || !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) {
+				return errors.New("joint declarations lost their original private generation")
+			}
+		}
 	}
 	if !participants {
 		return nil
@@ -46,14 +53,16 @@ func (tx *TxContext) validateLatePublicOwnerLocked(db *database, participants bo
 // unamended tables retain their ordinary native row admission.
 func (tx *TxContext) latePublicRowAllowed(t *table) bool {
 	identity := tx.catalogIdentity.Load()
-	if identity == nil || identity.lateCreates || !localCatalogRowDatabase(t.schema) || !localCatalogRowDatabase(identity.database) ||
+	if identity == nil || identity.lateCreates && !tx.publicCatalogEntered.Load() || !localCatalogRowDatabase(t.schema) || !localCatalogRowDatabase(identity.database) ||
 		tx.Mode != TxACID || tx.State != TxActive || tx.coordinator != nil || tx.clusterNumber.Load() != 0 ||
 		tx.clusterID != "" || len(tx.participants) != 0 {
 		return false
 	}
 	changes := tx.publicCatalogChanges()
 	if changes == nil {
-		return false
+		// A failed first public factory can leave original private intents and
+		// the monotone phase marker. It published no public row restriction.
+		return (catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) || identity.lateCreates && tx.lateCreateRowAllowed(t)
 	}
 	views := changes.views.Load()
 	if views == nil || identity.Incarnation != identity.database.incarnationID() {
@@ -74,7 +83,7 @@ func localCatalogRowDatabase(db *database) bool {
 // decision is never switched back to another authority.
 func (tx *TxContext) retireEmptyPublicCatalogPhase() {
 	identity := tx.catalogIdentity.Load()
-	if identity == nil || identity.lateCreates || !tx.publicCatalogEntered.Load() || tx.hasCatalogIntents() {
+	if identity == nil || !tx.publicCatalogEntered.Load() || tx.hasCatalogIntents() {
 		return
 	}
 	scope := tx.resourceScope()
@@ -118,7 +127,11 @@ func (tx *TxContext) retireEmptyPublicCatalogPhase() {
 		panic("public catalog phase changed during native retirement")
 	}
 	delete(scope.entries, publicDeclarationResourceKey)
-	tx.catalogIdentity.Store(nil)
+	// A mixed late CREATE still has its existing database-mode resource. The
+	// immediately following private phase retirement closes that original pin.
+	if !identity.lateCreates {
+		tx.catalogIdentity.Store(nil)
+	}
 }
 
 // A failed or no-op first declaration has no accepted delta. Its factory has

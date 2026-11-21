@@ -25,6 +25,7 @@ const (
 	catalogEnforcementKind
 	catalogColumnKind
 	catalogStatementTriggerKind
+	catalogOwnedForeignKind
 )
 
 // Identity is allocated before the first unpublished declaration. It is part of
@@ -129,8 +130,11 @@ func (scope *transactionResources) catalogReadOnlyLocked() bool {
 }
 
 func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarationKind) {
-	public := kind == catalogDefaultKind || kind == catalogSourceKind || kind == catalogTableDropKind || kind == catalogForeignDropKind || kind == catalogForeignReplacementKind || kind == catalogPublicKeyKind || kind == catalogColumnKind || kind == catalogStatementTriggerKind
+	public := kind == catalogDefaultKind || kind == catalogSourceKind || kind == catalogTableDropKind || kind == catalogForeignDropKind || kind == catalogForeignReplacementKind || kind == catalogPublicKeyKind || kind == catalogColumnKind || kind == catalogStatementTriggerKind || kind == catalogOwnedForeignKind
 	privateCreate := kind == catalogCreateKind
+	if kind == catalogTableDropKind && tx.catalogIntents.Load() != nil {
+		panic("table removal cannot share an owned creation decision")
+	}
 	if tx.hasTableDrops() && (!public || kind == catalogStatementTriggerKind) {
 		panic("table removal phase admits only default or source declarations")
 	}
@@ -162,16 +166,18 @@ func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarati
 	// profile. Clean declaration owners retain their enforcement boundary.
 	late := (public || privateCreate) && tx.Mode == TxACID && identity == nil && dirty && !readOnly
 	if tx.rowAccessed.Load() && !tx.publicCatalogEntered.Load() && !late &&
-		!(identity != nil && identity.lateCreates && privateCreate) && !readOnly {
+		!(identity != nil && (kind == catalogOwnedForeignKind || identity.lateCreates && (privateCreate || public))) && !readOnly {
 		unlock()
 		panic("transactional catalog declarations must precede native row access")
 	}
 	if identity != nil {
 		valid := identity.Database == db.Name && identity.Incarnation == db.incarnationID() && identity.database == db
-		allowed := (!identity.latePublic || public) && (!identity.lateCreates || privateCreate)
+		allowed := (!identity.latePublic || public || privateCreate) && (!identity.lateCreates || privateCreate || public)
 		var entryError error
 		if valid && allowed {
-			if identity.latePublic {
+			if public && tx.catalogIntents.Load() != nil || privateCreate && tx.publicCatalogEntered.Load() {
+				entryError = tx.validateLatePublicOwnerLocked(db, false)
+			} else if identity.latePublic {
 				entryError = tx.validateLatePublicOwnerLocked(db, false)
 			} else if identity.lateCreates {
 				entryError = tx.validateLateCreateOwnerLocked(db, false)
@@ -246,20 +252,24 @@ func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarati
 		panic("transactional catalog declarations must precede native row access")
 	}
 	if tx.rowAccessed.Load() && !tx.publicCatalogEntered.Load() && !late &&
-		!(identity != nil && identity.lateCreates && privateCreate) && !readOnly {
+		!(identity != nil && (kind == catalogOwnedForeignKind || identity.lateCreates && (privateCreate || public))) && !readOnly {
 		panic("transactional catalog declarations must precede native row access")
 	}
 	if identity != nil {
 		if identity.Database != db.Name || identity.Incarnation != db.incarnationID() || identity.database != db {
 			panic("transactional catalog creation is limited to its original database")
 		}
-		if identity.latePublic && !public {
+		if identity.latePublic && !public && !privateCreate {
 			panic("late catalog phase admits only default or source declarations")
 		}
-		if identity.lateCreates && !privateCreate {
+		if identity.lateCreates && !privateCreate && !public {
 			panic("late private catalog phase admits only new table declarations")
 		}
-		if identity.latePublic {
+		if public && tx.catalogIntents.Load() != nil || privateCreate && tx.publicCatalogEntered.Load() {
+			if err := tx.validateLatePublicOwnerLocked(db, false); err != nil {
+				panic(err)
+			}
+		} else if identity.latePublic {
 			if err := tx.validateLatePublicOwnerLocked(db, false); err != nil {
 				panic(err)
 			}
@@ -307,8 +317,12 @@ func (tx *TxContext) enterPublicCatalogPhase() {
 	// A private constructor may have published its intent and retired its
 	// construction count since the caller's optimistic mixed-profile check.
 	// Its count retires under this same scope owner after appending the intent.
-	if tx.catalogIntents.Load() != nil {
-		panic("public and private catalog declarations cannot be mixed")
+	if intents := tx.catalogIntents.Load(); intents != nil {
+		for _, t := range *intents {
+			if !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) {
+				panic("public catalog phase lost its original private generation")
+			}
+		}
 	}
 	tx.publicCatalogEntered.Store(true)
 	if identity := tx.catalogIdentity.Load(); identity != nil && identity.latePublic {
@@ -495,6 +509,9 @@ func (tx *TxContext) prepareCatalogDecision() error {
 	if record.hasColumnPropertyClaimActions() {
 		record.Format = 20
 	}
+	if len(record.Tables) != 0 && record.hasPublicDeltas() {
+		record.Format = 22
+	}
 	if len(record.ColumnAppends) != 0 || len(record.NativeDeclarations) != 0 || len(record.ColumnDeclarations) != 0 || len(record.ColumnPropertyRemovals) != 0 || len(record.Checks) != 0 || len(record.ColumnDefaults) != 0 || len(record.CheckDrops) != 0 {
 		commit.publicPublication = db.preparePublicConstraintPublication(record.Checks, record.ColumnDefaults, record.ColumnDeclarations, record.ColumnAppends, record.ColumnPropertyRemovals, record.CheckDrops, record.NativeDeclarations, record.Version, tx.publicConstraintPrograms(), tx.publicCatalogChanges())
 	}
@@ -648,7 +665,7 @@ func (tx *TxContext) admitCatalogMutation(table *table) {
 			scope.mu.Unlock()
 			panic("catalog transaction is not open for native row mutation")
 		}
-		if identity.lateCreates {
+		if identity.lateCreates && !tx.publicCatalogEntered.Load() {
 			if !tx.lateCreateRowAllowed(table) {
 				scope.mu.Unlock()
 				panic("late private catalog changes require their original data database")
@@ -991,7 +1008,7 @@ func (tx *TxContext) forwardCatalogCreate(arguments []scm.Scmer) scm.Scmer {
 
 func (tx *TxContext) noteNativeRowAccess(table *table) {
 	if table != nil {
-		table.enterPendingCatalogData(tx)
+		table.enterPendingCatalogData(tx, nil)
 	}
 	if tx != nil && (table == nil || !table.Ephemeral || table.PersistencyMode != Memory) {
 		tx.rowAccessed.Store(true)
