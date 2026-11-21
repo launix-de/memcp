@@ -1032,9 +1032,16 @@ func (s *storageShard) retainCacheRead() {
 }
 
 func (s *storageShard) releaseCacheRead() {
-	if s.cacheReaders.Add(-1) == 0 && sharedClusterSource(s.t) && !GlobalCache.canLoadClusterShard(s.t) {
-		GlobalCache.reclaimShardRAM(s.t)
+	if s.cacheReaders.Add(-1) == 0 {
+		s.t.signalTransactionDrain()
+		if sharedClusterSource(s.t) && !GlobalCache.canLoadClusterShard(s.t) {
+			GlobalCache.reclaimShardRAM(s.t)
+		}
 	}
+}
+
+func (s *storageShard) persistenceInUse() bool {
+	return s.activeTransactions.Load() != 0 || s.cacheReaders.Load() != 0
 }
 
 // mayDelegate describes the caller's ability to consume a shard-local result.
@@ -4691,9 +4698,25 @@ func (t *storageShard) RemoveFromDisk() {
 		// Rebuild retirement may overlap a later ADD after releasing ddlMu.
 		// Borrow one published directory, never the mutable declaration slice.
 		columns := t.t.columnDeclarations()
-		// close logfile
-		if t.logfile != nil {
-			t.logfile.Close()
+		// First-touch forwarding and first cache leases already own mu. Join
+		// those admissions at the final check, but never wait or release blobs
+		// while holding this physical shard mutex.
+		for {
+			if err := t.t.waitForShardDrain(context.Background(), t.persistenceInUse); err != nil {
+				panic(err)
+			}
+			t.mu.Lock()
+			if t.persistenceInUse() {
+				t.mu.Unlock()
+				continue
+			}
+			func() {
+				defer t.mu.Unlock()
+				if t.logfile != nil {
+					t.logfile.Close()
+				}
+			}()
+			break
 		}
 		// Release blob refcounts before removing column files.
 		// Skip for COLD shards (columns not loaded) -- orphaned blobs will be cleaned by (clean).

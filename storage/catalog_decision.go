@@ -714,7 +714,7 @@ func (tx *TxContext) discardCatalogIntents(keep int) {
 			drained := topology.retire()
 			for _, shard := range table.ActiveShards() {
 				if shard != nil {
-					retired = append(retired, replacedShardGeneration{shard, drained})
+					retired = append(retired, replacedShardGeneration{shard, drained, topology.retirementDependencies})
 				}
 			}
 		}

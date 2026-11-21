@@ -906,7 +906,30 @@ func (tx *TxContext) RegisterTouchedShard(shard *storageShard) {
 		return
 	}
 	tx.durableID()
-	tx.touchedShards.Store(shard, true)
+	if _, exists := tx.touchedShards.Load(shard); exists {
+		return
+	}
+	// The existing overlay or forwarding writer's mu owns first admission.
+	// Publish its physical lifetime before another registrant sees the key.
+	shard.beginTransactionUse()
+	if _, exists := tx.touchedShards.LoadOrStore(shard, true); exists {
+		shard.endTransactionUse()
+	}
+}
+
+func (tx *TxContext) releaseTouchedShard(shard *storageShard) {
+	if _, exists := tx.touchedShards.LoadAndDelete(shard); exists {
+		shard.endTransactionUse()
+	}
+}
+
+// Decisions have joined their invocations before draining deferred WAL users.
+func (tx *TxContext) releaseTouchedShards() {
+	tx.touchedShards.Range(func(key, _ any) bool {
+		tx.releaseTouchedShard(key.(*storageShard))
+		return true
+	})
+	tx.touchedShards = sync.Map{}
 }
 
 // SyncTouchedShards flushes all pending log writes to durable storage. Only a
@@ -947,10 +970,10 @@ func (tx *TxContext) SyncTouchedShards() error {
 			return err
 		}
 		if err := persistenceCall(func() { shard.logfile.Flush(durable) }); err != nil {
-			tx.touchedShards = sync.Map{}
+			tx.releaseTouchedShards()
 			return markCommitOutcomeUnknown(err)
 		}
-		tx.touchedShards = sync.Map{}
+		tx.releaseTouchedShards()
 		return nil
 	}
 	for _, shard := range shards {
@@ -964,7 +987,7 @@ func (tx *TxContext) SyncTouchedShards() error {
 	authorityPublished := false
 	for _, commit := range databases {
 		if err := commit.db.commitTransaction(tx.durableID(), commit.durable); err != nil {
-			tx.touchedShards = sync.Map{}
+			tx.releaseTouchedShards()
 			if authorityPublished {
 				return markCommitOutcomeUnknown(err)
 			}
@@ -972,7 +995,7 @@ func (tx *TxContext) SyncTouchedShards() error {
 		}
 		authorityPublished = true
 	}
-	tx.touchedShards = sync.Map{}
+	tx.releaseTouchedShards()
 	return nil
 }
 
@@ -1507,7 +1530,7 @@ func (tx *TxContext) abortACIDCommit(shards []*storageShard, trackedShards map[*
 	tx.State = TxAborted
 	tx.shards.Store(nil)
 	tx.mu.Unlock()
-	tx.touchedShards = sync.Map{}
+	tx.releaseTouchedShards()
 }
 
 func (tx *TxContext) finishCursorStabilityCommit() {
@@ -1663,7 +1686,7 @@ func (tx *TxContext) rollbackCursorStability(persist bool) {
 	tx.releaseActiveTransactionsLocked()
 	tx.State = TxAborted
 	tx.shards.Store(nil)
-	tx.touchedShards = sync.Map{}
+	tx.releaseTouchedShards()
 }
 
 // rollbackACID discards overlay masks. Staged rows that were globally hidden
@@ -1687,7 +1710,7 @@ func (tx *TxContext) rollbackACID() {
 	tx.State = TxAborted
 	tx.shards.Store(nil)
 	tx.mu.Unlock()
-	tx.touchedShards = sync.Map{}
+	tx.releaseTouchedShards()
 }
 
 // SessionStateFromTx returns the SessionState from the given tx, falling back

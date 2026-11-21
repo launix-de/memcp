@@ -894,7 +894,7 @@ func (capture *liveShardTransfer) enlist(ctx context.Context, request scm.Cluste
 		}
 		tx.publishReadViewLocked(st.clusterShard, st)
 		directory.Delete(st.clusterShard)
-		tx.touchedShards.Delete(st.clusterShard)
+		tx.releaseTouchedShard(st.clusterShard)
 		st.clusterShard.overlays.Delete(tx.transactionState)
 		st.clusterShard.endTransactionUse()
 		if st.generation != nil {
