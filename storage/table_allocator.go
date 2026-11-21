@@ -339,7 +339,6 @@ func (t *table) reserveLocalAutoIncrement(explicit, generated uint64, observedEx
 	}
 	// Consume before I/O: an ambiguous failure may have persisted the frame.
 	// Further allocation fails closed until recovery re-establishes authority.
-	t.allocator.Store(&next)
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
 		if err := persistenceCall(func() {
 			db.transactionLog.Write(LogEntryTableAllocator{next})
@@ -352,6 +351,10 @@ func (t *table) reserveLocalAutoIncrement(explicit, generated uint64, observedEx
 			panic(err)
 		}
 	}
+	// Lock-free observers see only the accepted generation. The separate
+	// compatibility highwater already consumed the range before I/O; failure
+	// latches it closed, but must not publish unaccepted issued/high facts.
+	t.allocator.Store(&next)
 	return base
 }
 
