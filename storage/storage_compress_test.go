@@ -18,7 +18,9 @@ package storage
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"reflect"
 	"strings"
@@ -892,6 +894,39 @@ func TestConstishZerosAndNulls(t *testing.T) {
 	}
 	t.Logf("After roundtrip: %T (%s)", col2, col2.String())
 	verifyStorage(t, col2, n, gen)
+}
+
+func TestStorageSCMERBufferedSerializationKeepsLegacyBytes(t *testing.T) {
+	text := strings.Repeat("<catalog>&\"\nGröße", 1000)
+	storage := &StorageSCMER{values: []scm.Scmer{scm.NewString(text), scm.NewInt(42), scm.NewNil()}}
+	var serialized bytes.Buffer
+	storage.Serialize(&serialized)
+	// Legacy magic, little-endian count, then one JSON value per line. Include
+	// a value larger than the buffer to cover both streamed and final writes.
+	want := []byte{1, 3, 0, 0, 0, 0, 0, 0, 0}
+	encoded, err := json.Marshal(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = append(want, encoded...)
+	want = append(want, []byte("\n42\nnull\n")...)
+	if !bytes.Equal(serialized.Bytes(), want) {
+		t.Fatal("buffering changed legacy SCMER framing or JSON escaping")
+	}
+}
+
+type scmerFailedWriter struct{}
+
+func (scmerFailedWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestStorageSCMERBufferedSerializationPropagatesWriteFailure(t *testing.T) {
+	defer func() {
+		if failure := recover(); failure != io.ErrClosedPipe {
+			t.Fatalf("serialization failure = %v, want closed pipe", failure)
+		}
+	}()
+	storage := &StorageSCMER{values: []scm.Scmer{scm.NewString("buffered tail")}}
+	storage.Serialize(scmerFailedWriter{})
 }
 
 func TestStorageSCMERPreservesBSONTag(t *testing.T) {
