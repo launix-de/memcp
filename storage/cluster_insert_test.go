@@ -542,7 +542,7 @@ func TestClusterCounterCheckpointDuringLocalSchemaUpgrade(t *testing.T) {
 	defer nodeScans.Store(service)
 	releaseCoordination := cell.coordinate(context.Background())
 	defer releaseCoordination()
-	tbl.reserveLocalTableIDs(0, 8, false)
+	tbl.reserveLocalAutoIncrement(0, 8, false)
 	pending, action := cell.ownstate.Request(mosi.M)
 	if action != mosi.Send || pending.Retained() != mosi.O {
 		t.Fatal("fixture did not start an O-to-M upgrade")

@@ -3299,7 +3299,7 @@ func Init(en scm.Env) {
 				defer t.admitNativeMaintenance()()
 				next := uint64(scm.ToInt(a[2]))
 				if next > 0 {
-					t.reserveAutoIncrement(next-1, 0)
+					t.reserveAutoIncrement(next-1, 0, false)
 					db.save()
 				}
 				return scm.NewBool(true)
@@ -3936,7 +3936,7 @@ func Init(en scm.Env) {
 			if count == 0 {
 				return scm.NewSlice(nil)
 			}
-			base := t.reserveAutoIncrement(0, count)
+			base := t.reserveAutoIncrement(0, count, false)
 			return scm.NewSlice([]scm.Scmer{scm.NewInt(int64(base + 1)), scm.NewInt(int64(base + count))})
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "reserves a disjoint ID block from the existing table counter; returns inclusive (first last), or an empty list for zero. SAFE/LOGGED reservations have independent table-UUID WAL durability and survive rollback, savepoints and restart, including unused blocks. MEMORY/SLOPPY retain their existing engine durability guarantees.", HasSideEffects: true,

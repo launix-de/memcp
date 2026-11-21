@@ -295,7 +295,7 @@ func (t *table) loadAllocatorAuthorityLocked() tableAllocatorState {
 // No shard lock, UNIQUE stripe or row callback is acquired by this operation.
 // The existing persistence lifecycle boundary excludes MOVE/DB retirement.
 
-func (t *table) reserveLocalTableIDs(explicit, generated uint64, observedExplicit bool) uint64 {
+func (t *table) reserveLocalAutoIncrement(explicit, generated uint64, observedExplicit bool) uint64 {
 	t.prepareAllocatorRecovery()
 	db := t.schema
 	if !db.persistenceLifecycle.TryRLock() {
