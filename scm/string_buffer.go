@@ -2,32 +2,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package scm
 
-import "io"
 import "unsafe"
 import "unicode/utf8"
-import "github.com/launix-de/memcp/storage/stringconcat"
 
 const StringCodecConcat = 3
 
-// StringConcatCompression is immutable and contains no decoded cache.
-type StringConcatCompression = stringconcat.Buffer
-
 func BuildStringConcatBuffer(entries []string) (*StringConcatCompression, []uint64) {
 	if len(entries) == 1 {
-		return stringconcat.Raw(entries[0]), []uint64{0}
+		return rawStringConcatPool(entries[0]), []uint64{0}
 	}
-	builder := stringconcat.NewBuilder(len(entries))
+	builder := NewStringConcatBuilder(len(entries))
 	offsets := make([]uint64, len(entries))
 	for i, text := range entries {
 		offsets[i] = builder.Add(text)
 	}
 	return builder.Finish(), offsets
 }
-func ReadStringConcatBuffer(r io.Reader) *StringConcatCompression { return stringconcat.Read(r) }
 
 // All 56 non-tag bits identify the concat entry. Its first word is its length.
 func NewBufferString(b *StringConcatCompression, offset uint64) Scmer {
-	if offset > stringconcat.MaxOffset {
+	if offset > maxStringConcatOffset {
 		panic("concat offset exceeds 56 bits")
 	}
 	return Scmer{(*byte)(unsafe.Pointer(b)), makeAux(tagConcat, offset)}
@@ -47,7 +41,7 @@ type TextScratch struct{}
 type TextCursor struct {
 	source              Scmer
 	buffer              *StringConcatCompression
-	concat              stringconcat.Cursor
+	concat              stringConcatCursor
 	view                operatorStringView
 	offset, length, pos int
 	push                [3]byte

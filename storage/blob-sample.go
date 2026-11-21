@@ -6,7 +6,7 @@ package storage
 import "io"
 import "strings"
 import "compress/gzip"
-import "github.com/launix-de/memcp/storage/stringconcat"
+import "github.com/launix-de/memcp/scm"
 
 const (
 	blobSampleSlots       = 8
@@ -75,7 +75,7 @@ func (s *longTextSample) inlineLimit() int {
 	if !sampleSharesChunks(s.values[:s.count]) {
 		return maxInlineBlobBytes
 	}
-	pool := stringconcat.NewSamplingBuilder(s.count)
+	pool := scm.NewSamplingStringConcatBuilder(s.count)
 	var writer *gzip.Writer
 	compressed := countingWriter{}
 	zipBytes, firstBytes, sourceBytes := 0, 0, 0

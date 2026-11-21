@@ -3,7 +3,7 @@
 
 `StorageString` version 6 replaces runtime LZ4 dictionaries with immutable pools
 of literal byte spans and concat entries. The codec implementation is in
-`storage/stringconcat`, shared by storage and Scheme without an import cycle;
+`scm/string_concat.go`, owned by the runtime and reused directly by storage;
 `storage/StringConcatCompression.go` owns column integration and legacy loading.
 
 A Scheme value is a 16-byte `Scmer`: a GC pointer to the pool and a 56-bit entry
