@@ -1,0 +1,169 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  syntax: mysql
+  description: Native ASC relation ranges preserve NULL and metadata without changing SQL NULL comparisons
+setup:
+- sql: DROP TABLE IF EXISTS native_order_rows
+- sql: CREATE TABLE native_order_rows(id INT PRIMARY KEY,label VARCHAR(20),score INT)
+- sql: INSERT INTO native_order_rows VALUES(1,NULL,-3),(2,'Alpha',0),(3,'beta',5),(4,'ALPHA',-1),(5,'',9),(6,'delta',NULL)
+test_cases:
+- name: Native text range includes the initial NULL bound and changing current keys
+  scm: "(begin\n  (define relation (collate \"unicode-string\" false))\n  (define columns (list \"label\"\
+    ))\n  (define predicate (list 'lambda (list 'value)\n    (list 'not (list relation 'value (list 'session\
+    \ \"bound\")))))\n  (define plan (compile_scan_plan 'scan nil\n    (list 'table \"memcp-tests\" false\
+    \ \"native_order_rows\" false nil)\n    (list 'quote columns) predicate (list 'quote '(\"id\"))\n\
+    \    (list 'lambda (list 'acc 'id) (list 'cons 'id 'acc)) '()\n    (list 'lambda (list 'left 'right)\
+    \ (list 'merge (list 'list 'left 'right))) false))\n  (define run (eval (list 'lambda (list 'session)\
+    \ plan)))\n  (define input (newsession))\n  (map '(nil \"Alpha\" \"beta\" \"zzzz\") (lambda (value)\
+    \ (begin (input \"bound\" value) (sort (run input) <)))))"
+  expect:
+    result:
+    - - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+    - - 2
+      - 3
+      - 6
+    - - 3
+      - 6
+    - []
+- name: Native numeric range retains negative keys and treats only its initial bound as unbounded
+  scm: "(begin\n  (define relation (collate \"bin\" false))\n  (define columns (list \"score\"))\n  (define\
+    \ predicate (list 'lambda (list 'value)\n    (list 'not (list relation 'value (list 'session \"bound\"\
+    )))))\n  (define plan (compile_scan_plan 'scan nil\n    (list 'table \"memcp-tests\" false \"native_order_rows\"\
+    \ false nil)\n    (list 'quote columns) predicate (list 'quote '(\"id\"))\n    (list 'lambda (list\
+    \ 'acc 'id) (list 'cons 'id 'acc)) '()\n    (list 'lambda (list 'left 'right) (list 'merge (list 'list\
+    \ 'left 'right))) false))\n  (define run (eval (list 'lambda (list 'session) plan)))\n  (define input\
+    \ (newsession))\n  (map '(nil -1 0) (lambda (value) (begin (input \"bound\" value) (sort (run input)\
+    \ <)))))"
+  expect:
+    result:
+    - - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+    - - 2
+      - 3
+      - 4
+      - 5
+    - - 2
+      - 3
+      - 5
+- name: Descending native comparisons retain their actual result without an ascending range proof
+  scm: "(begin\n  (define relation (collate \"unicode-string\" true))\n  (define columns (list \"label\"\
+    ))\n  (define predicate (list 'lambda (list 'value)\n    (list 'not (list relation 'value (list 'session\
+    \ \"bound\")))))\n  (define plan (compile_scan_plan 'scan nil\n    (list 'table \"memcp-tests\" false\
+    \ \"native_order_rows\" false nil)\n    (list 'quote columns) predicate (list 'quote '(\"id\"))\n\
+    \    (list 'lambda (list 'acc 'id) (list 'cons 'id 'acc)) '()\n    (list 'lambda (list 'left 'right)\
+    \ (list 'merge (list 'list 'left 'right))) false))\n  (define run (eval (list 'lambda (list 'session)\
+    \ plan)))\n  (define input (newsession))\n  (map '(\"Alpha\") (lambda (value) (begin (input \"bound\"\
+    \ value) (sort (run input) <)))))"
+  expect:
+    result:
+    - - 1
+      - 2
+      - 4
+      - 5
+- name: A lexically replaced collation factory keeps its own descending result
+  scm: "(begin\n  (define actual_relation (collate \"unicode-string\" true))\n  ((lambda (collate) (begin\n\
+    \    (define columns '(\"label\"))\n    (define predicate (list 'lambda (list 'value)\n      (list\
+    \ 'not (list (list 'collate \"unicode-string\" false) 'value \"Alpha\"))))\n    (define access (scan_plan_compile_filter\
+    \ (list 'quote columns) predicate))\n    (define real_filter (close_procedure (lambda (value)\n  \
+    \    (not (actual_relation value \"Alpha\")))))\n    (sort (scan nil (table \"memcp-tests\" false\
+    \ \"native_order_rows\" false nil)\n      (car access) (cadr access)\n      columns real_filter '(\"\
+    id\")\n      (lambda (acc id) (cons id acc)) '()\n      (lambda (left right) (merge (list left right)))\
+    \ false) <)))\n    (lambda (name reverse) actual_relation)))"
+  expect:
+    result:
+    - 1
+    - 2
+    - 4
+    - 5
+- name: Complementary ranges with distinct native relations retain every original match
+  setup:
+  - sql: INSERT INTO native_order_rows VALUES(7,'Z',10)
+  scm: "(begin\n  (define relation (collate \"unicode-simple-fold\" false))\n  (define predicate (list\
+    \ 'lambda (list 'value)\n    (list 'and (list 'not (list relation 'value \"a\")) (list '< 'value \"\
+    b\"))))\n  (define plan (compile_scan_plan 'scan nil\n    (list 'table \"memcp-tests\" false \"native_order_rows\"\
+    \ false nil)\n    (list 'quote '(\"label\")) predicate (list 'quote '(\"id\"))\n    (list 'lambda\
+    \ (list 'acc 'id) (list 'cons 'id 'acc)) '()\n    (list 'lambda (list 'left 'right) (list 'merge (list\
+    \ 'list 'left 'right))) false))\n  (sort (eval plan) <))"
+  expect:
+    result:
+    - 2
+    - 4
+    - 7
+  cleanup:
+  - sql: DELETE FROM native_order_rows WHERE id=7
+- name: Batched native range distinguishes NULL-safe initial bounds from SQL NULL probes
+  scm: "(begin\n  (define target (table \"memcp-tests\" false \"native_order_rows\" false nil))\n  (define\
+    \ relation (collate \"unicode-string\" false))\n  (define run (lambda (null_safe) (begin\n    (define\
+    \ boundary (scan_boundary \"range\" \"label\" -2 -1 true false \"unicode-string\" null_safe\n    \
+    \  -1 '() relation \"unicode-string:asc\" false))\n    (define schema (scan_access_schema (list boundary)\
+    \ '() nil false '(\"label\")))\n    (define rows (scan_batch nil target schema '() '(\"label\" \"\
+    #0\")\n      (lambda (label bound) (not (relation label bound))) '(\"#0\" \"id\")\n      (lambda (acc\
+    \ bound id) (cons (list bound id) acc)) 1 '(nil \"Alpha\") '()\n      (lambda (left right) (merge\
+    \ (list left right))) false))\n    (map '(nil \"Alpha\") (lambda (bound)\n      (sort (map (filter\
+    \ rows (lambda (row) (expression_equal? (car row) bound))) cadr) <))))))\n  (list (run true) (run\
+    \ false)))"
+  expect:
+    result:
+    - - - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+      - - 2
+        - 3
+        - 6
+    - - []
+      - - 2
+        - 3
+        - 6
+- name: Relation metadata does not invoke or compile opaque caller procedures
+  scm: "(begin\n  (define state (newsession)) (state \"calls\" 0)\n  (define foreign (lambda (a b) (begin\
+    \ (state \"calls\" (+ 1 (state \"calls\"))) (< a b))))\n  (list (collation_info (collate \"unicode-string\"\
+    \ false))\n    (collation_info (collate \"unicode-string\" true))\n    (collation_info foreign) (collation_info\
+    \ +) (collation_info \"unrelated\") (state \"calls\")))"
+  expect:
+    result:
+    - - name
+      - unicode-string
+      - reverse
+      - false
+    - - name
+      - unicode-string
+      - reverse
+      - true
+    - null
+    - null
+    - null
+    - 0
+- name: mysql SQL NULL range remains UNKNOWN
+  syntax: mysql
+  sql: SELECT id FROM native_order_rows WHERE score>=NULL ORDER BY id
+  expect:
+    rows: 0
+    data: []
+- name: tsql SQL NULL range remains UNKNOWN
+  syntax: tsql
+  sql: SELECT id FROM native_order_rows WHERE score>=NULL ORDER BY id
+  expect:
+    rows: 0
+    data: []
+- name: postgresql SQL NULL range remains UNKNOWN
+  syntax: postgresql
+  sql: SELECT id FROM native_order_rows WHERE score>=NULL ORDER BY id
+  expect:
+    rows: 0
+    data: []
+cleanup:
+- sql: DROP TABLE IF EXISTS native_order_rows

@@ -826,79 +826,142 @@ func extendBoundariesWithSortCols(b analyzedBoundaries, sortcols []scm.Scmer, so
 	return b, len(sortcols) > 0
 }
 
-// extendScanAccessWithSortCols adds only the runtime ORDER BY portion to the
-// immutable compiled access view. Unlike extendBoundariesWithSortCols it never
-// copies the analyzer-produced filter boundaries into a runtime array.
-func extendScanAccessWithSortCols(access scanAccess, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) (scanAccess, bool) {
-	for i := 0; i < access.len(); i++ {
-		if !scanAccessBoundaryIsPoint(access, i) {
-			return access, false
-		}
-	}
+// scanOrderBoundaries resolves the requested native key order once at setup.
+// Its computed expressions use the same canonical names and raw-row proof as
+// the index mapper; invocation-dependent expressions retain the sorting path.
+func scanOrderBoundaries(sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) (analyzedBoundaries, bool) {
 	if len(sortcols) == 0 || len(sortdirs) < len(sortcols) {
-		return access, false
+		return nil, false
 	}
-	inserted := make(analyzedBoundaries, 0, len(sortcols))
-	hasSorted := func(column string) bool {
-		for i := 0; i < access.len(); i++ {
-			if access.boundaryColumn(i) == column && access.boundaryAnalyzer(i).IsSorted() {
-				return true
+	result := make(analyzedBoundaries, 0, len(sortcols))
+	for i, sortcol := range sortcols {
+		if sortdirs[i] == nil {
+			return nil, false
+		}
+		boundary := analyzedBoundary{matcher: RangeMatcher, order: sortdirs[i], orderMeta: orderRelationMeta(sortdirs[i]), lowerInclusive: true, upperInclusive: true}
+		if sortcol.IsString() {
+			boundary.col = sortcol.String()
+		} else {
+			var proc scm.Proc
+			if sortcol.IsProc() {
+				proc = sortcol.Proc().Snapshot()
+			} else if value, ok := sortcol.Any().(scm.Proc); ok {
+				proc = value
+			} else {
+				return nil, false
+			}
+			if !proc.Params.IsSlice() || len(proc.Params.Slice()) == 0 {
+				return nil, false
+			}
+			params := proc.Params.Slice()
+			if scanSortHasInvocationContext(params) || !isRawDataset(params, proc.Body) {
+				return nil, false
+			}
+			columns := make([]string, len(params))
+			for j, param := range params {
+				columns[j] = scm.String(param)
+			}
+			boundary.col = canonicalColName(proc.Body, params, columns)
+			boundary.mapCols, boundary.mapFn = buildComputedFn(proc.Body, proc.Params, proc.En, columns)
+			if boundary.mapFn.IsNil() || boundary.mapCols == nil {
+				return nil, false
 			}
 		}
-		for _, boundary := range inserted {
-			if boundary.col == column && boundary.matcher.IsSorted() {
+		result = append(result, boundary)
+	}
+	return result, true
+}
+
+// extendScanAccessWithSortCols preserves a matching ordered range prefix and
+// appends only its missing ORDER BY suffix. Equality coordinates are constant
+// over the candidate domain; every non-point coordinate must match in sequence
+// and carry the exact native relation. A mismatch retains the sorting path.
+func extendScanAccessWithSortCols(access scanAccess, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) (scanAccess, bool) {
+	order, known := scanOrderBoundaries(sortcols, sortdirs)
+	if !known {
+		return access, false
+	}
+	point := func(column string) bool {
+		for i := 0; i < access.len(); i++ {
+			if access.boundaryColumn(i) == column && access.boundaryAnalyzer(i) == EqualMatcher {
 				return true
 			}
 		}
 		return false
 	}
-	for i, sortcol := range sortcols {
-		if sortdirs[i] == nil {
-			return access, false
-		}
-		orderMeta := orderRelationMeta(sortdirs[i])
-		if sortcol.IsString() {
-			column := sortcol.String()
-			if !hasSorted(column) {
-				inserted = append(inserted, analyzedBoundary{col: column, matcher: RangeMatcher,
-					lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta})
-			}
+	sortedEnd := 0
+	for sortedEnd < access.len() && access.boundaryAnalyzer(sortedEnd).IsSorted() {
+		sortedEnd++
+	}
+	next := 0
+	for next < sortedEnd && scanAccessBoundaryIsPoint(access, next) {
+		next++
+	}
+	inserted := make(analyzedBoundaries, 0, len(order))
+	for _, requested := range order {
+		if point(requested.col) {
 			continue
 		}
-		proc, ok := sortcol.Any().(scm.Proc)
-		if !ok && sortcol.IsProc() {
-			proc, ok = sortcol.Proc().Snapshot(), true
-		}
-		if !ok || !proc.Params.IsSlice() || len(proc.Params.Slice()) == 0 {
-			return access, false
-		}
-		params := proc.Params.Slice()
-		if scanSortHasInvocationContext(params) {
-			return access, false
-		}
-		conditionCols := make([]string, len(params))
-		for j, param := range params {
-			conditionCols[j] = scm.String(param)
-		}
-		if !isRawDataset(params, proc.Body) {
-			return access, false
-		}
-		canonical := canonicalColName(proc.Body, params, conditionCols)
-		mapCols, mapFn := buildComputedFn(proc.Body, proc.Params, proc.En, conditionCols)
-		if mapFn.IsNil() || mapCols == nil {
-			return access, false
-		}
-		if !hasSorted(canonical) {
-			inserted = append(inserted, analyzedBoundary{col: canonical, matcher: RangeMatcher,
-				lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta,
-				mapCols: mapCols, mapFn: mapFn})
+		if next < sortedEnd {
+			relation, metadata := access.boundaryOrder(next)
+			if relation == nil || access.boundaryColumn(next) != requested.col {
+				return access, false
+			}
+			if metadata == "" {
+				metadata = orderRelationMeta(relation)
+			}
+			if metadata != requested.orderMeta {
+				return access, false
+			}
+			next++
+		} else {
+			inserted = append(inserted, requested)
 		}
 	}
-	compiledCount := access.compiledCount
-	runtime := access.ensureRuntime()
-	runtime.insertAt = compiledCount
-	runtime.inserted = scanAccessSegmentFromAnalyzed(inserted)
+	if next < sortedEnd {
+		return access, false
+	}
+	if len(inserted) != 0 {
+		// Invocation segments may already own mandatory join constraints. Do
+		// not replace or move them to manufacture an ORDER prefix.
+		if sortedEnd > access.compiledCount || (access.runtime != nil && len(access.runtime.inserted.items) != 0) {
+			return access, false
+		}
+		runtime := access.ensureRuntime()
+		runtime.insertAt = sortedEnd
+		runtime.inserted = scanAccessSegmentFromAnalyzed(inserted)
+	}
 	return access, true
+}
+
+// A boundary-order proof alone covers only the filtering prefix. Before early
+// LIMIT or skipping a sort, prove every requested coordinate against the actual
+// selected index, including tie keys absent from that filtering prefix.
+func indexCoversScanOrder(index *StorageIndex, active bool, bounds scanAccess, effectiveCols int, requested analyzedBoundaries) bool {
+	if !indexCoversBoundaryOrder(index, active, bounds, effectiveCols) || len(requested) == 0 {
+		return false
+	}
+	point := func(column string) bool {
+		for i := 0; i < bounds.len(); i++ {
+			if bounds.boundaryColumn(i) == column && bounds.boundaryAnalyzer(i) == EqualMatcher {
+				return true
+			}
+		}
+		return false
+	}
+	position := 0
+	for _, key := range requested {
+		for position < len(index.Cols) && index.Cols[position] != key.col && point(index.Cols[position]) {
+			position++
+		}
+		if position >= len(index.Cols) || position >= len(index.ColOrderMeta) ||
+			index.Cols[position] != key.col || index.ColOrderMeta[position] != key.orderMeta ||
+			!index.columnIsSorted(position) {
+			return false
+		}
+		position++
+	}
+	return true
 }
 
 func indexCoversBoundaryOrder(index *StorageIndex, active bool, bounds scanAccess, effectiveCols int) bool {
@@ -2212,6 +2275,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 	// scan loop in read lock
 	var maxInsertIndex int
 	var visibleUpper uint32
+	requestedOrder, requestedOrderKnown := scanOrderBoundaries(sortcols, sortdirs)
 	resultAlreadySorted := len(sortcols) == 0
 	func() {
 		shardLocked := false
@@ -2262,7 +2326,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 		indexBounds := newScanIndexBounds(access)
 		t.iterateIndexOrdered(currentTx, access, maxInsertIndex, buf, usageWeight, limit, boundaryCoveredLimit, func(index *StorageIndex, active bool) {
 			if len(sortcols) > 0 {
-				resultAlreadySorted = indexCoversBoundaryOrder(index, active, access, indexBounds.len())
+				resultAlreadySorted = requestedOrderKnown && indexCoversScanOrder(index, active, access, indexBounds.len(), requestedOrder)
 			}
 		}, func(batch []uint32) bool {
 			result.candidateCount += int64(len(batch))

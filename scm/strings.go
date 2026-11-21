@@ -18493,6 +18493,27 @@ func init_strings() {
 		},
 	})
 
+	// Expose only metadata owned by a canonical native relation. Inspecting a
+	// foreign callable must neither invoke it nor compile a Scheme procedure.
+	Declare(&Globalenv, &Declaration{
+		Name: "collation_info",
+		Fn: func(a ...Scmer) Scmer {
+			value := a[0].WithoutSourceInfo()
+			if value.GetTag() != tagFunc {
+				return NewNil()
+			}
+			name, reverse, known := LookupCollate(value.Func())
+			if !known {
+				return NewNil()
+			}
+			return NewSlice([]Scmer{NewString("name"), NewString(name), NewString("reverse"), NewBool(reverse)})
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "returns immutable metadata for a canonical collation relation, or nil for other values",
+			Params: []*TypeDescriptor{{Kind: "any", Label: "relation"}},
+			Return: &TypeDescriptor{Kind: "any", Label: "metadata"}, Const: true,
+		},
+	})
+
 	/* escaping functions similar to PHP */
 	Declare(&Globalenv, &Declaration{
 		Name: "htmlentities",

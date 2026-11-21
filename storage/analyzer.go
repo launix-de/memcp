@@ -434,16 +434,16 @@ func (a scanAccess) resolveBatchValue(value scm.Scmer, batched bool, subindex in
 	return *(*scm.Scmer)(unsafe.Add(unsafe.Pointer(a.batchValues), uintptr(subindex)*unsafe.Sizeof(value)))
 }
 
-// impossible reports SQL comparison probes whose runtime operand is NULL.
+// impossible reports non-null-safe SQL comparison probes whose runtime operand is NULL.
 // NULL is otherwise also the unbounded-range sentinel, so this check must use
 // the schema slot rather than the materialized boundary value.
 func (a scanAccess) impossible() bool {
 	for i := 0; i < a.len(); i++ {
 		boundary, values := a.boundaryParts(i)
-		if boundary.lowerSlot >= 0 && values[boundary.lowerSlot].IsNil() && (boundary.analyzer == RangeMatcher || (boundary.analyzer == EqualMatcher && !boundary.nullSafe)) {
+		if boundary.lowerSlot >= 0 && values[boundary.lowerSlot].IsNil() && ((boundary.analyzer == RangeMatcher || boundary.analyzer == EqualMatcher) && !boundary.nullSafe) {
 			return true
 		}
-		if boundary.upperSlot >= 0 && values[boundary.upperSlot].IsNil() && boundary.analyzer == RangeMatcher {
+		if boundary.upperSlot >= 0 && values[boundary.upperSlot].IsNil() && boundary.analyzer == RangeMatcher && !boundary.nullSafe {
 			return true
 		}
 	}
@@ -457,10 +457,10 @@ func (a scanAccess) impossibleBatch(stride int, batchdata []scm.Scmer, batchid i
 	for i := 0; i < a.len(); i++ {
 		boundary, _ := a.boundaryParts(i)
 		for _, slot := range [2]int{boundary.lowerSlot, boundary.upperSlot} {
-			if slot <= -2 && (boundary.analyzer == RangeMatcher || (boundary.analyzer == EqualMatcher && !boundary.nullSafe)) {
+			if slot <= -2 && (boundary.analyzer == RangeMatcher || boundary.analyzer == EqualMatcher) {
 				subindex := -slot - 2
 				position := batchid*stride + subindex
-				if position < 0 || position >= len(batchdata) || batchdata[position].IsNil() {
+				if position < 0 || position >= len(batchdata) || (!boundary.nullSafe && batchdata[position].IsNil()) {
 					return true
 				}
 			}
@@ -1797,11 +1797,18 @@ func newScanIndexBounds(access scanAccess) scanIndexBounds {
 		sortedEnd++
 	}
 	usableSorted := sortedEnd
-	for usableSorted >= 2 {
-		if !scanAccessBoundaryIsPoint(access, usableSorted-2) &&
-			!(scanAccessBoundaryIsUnboundedOrder(access, usableSorted-2) && scanAccessBoundaryIsUnboundedOrder(access, usableSorted-1)) {
-			usableSorted--
+	// An ordered index may keep its complete sort suffix after one range.
+	// Only unbounded ORDER coordinates may follow the first non-point axis;
+	// another restriction still belongs to the residual, as before.
+	for i := 0; i < sortedEnd; i++ {
+		if scanAccessBoundaryIsPoint(access, i) {
 			continue
+		}
+		for j := i + 1; j < sortedEnd; j++ {
+			if !scanAccessBoundaryIsUnboundedOrder(access, j) {
+				usableSorted = j
+				break
+			}
 		}
 		break
 	}
@@ -1813,9 +1820,7 @@ func newScanIndexBounds(access scanAccess) scanIndexBounds {
 	if effectiveLen > 0 {
 		result.firstLower = access.boundValue(0, false)
 	}
-	if usableSorted > 0 {
-		result.lastUpper = access.boundValue(usableSorted-1, true)
-	}
+	result.updateLastUpper(access)
 	return result
 }
 
@@ -1848,10 +1853,18 @@ func (b *scanIndexBounds) truncate(access scanAccess, length int) {
 	}
 	if b.usableSorted > length {
 		b.usableSorted = length
-		if length > 0 {
-			b.lastUpper = access.boundValue(length-1, true)
-		} else {
-			b.lastUpper = scm.NewNil()
+		b.updateLastUpper(access)
+	}
+}
+
+// The cached upper value belongs to the last restriction, not to trailing
+// unbounded ORDER coordinates retained only for physical index ordering.
+func (b *scanIndexBounds) updateLastUpper(access scanAccess) {
+	b.lastUpper = scm.NewNil()
+	for i := b.usableSorted - 1; i >= 0; i-- {
+		if !scanAccessBoundaryIsUnboundedOrder(access, i) {
+			b.lastUpper = access.boundValue(i, true)
+			return
 		}
 	}
 }

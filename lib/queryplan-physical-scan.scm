@@ -77,7 +77,7 @@ callbacks. Local operator optimizer hooks may subsequently transform the plan. *
 		((quote quote) _) true
 		(cons head args) (and (has? (list (quote session) (quote equal?) (quote equal??) (quote nil?)
 			(quote not) (quote sql_not) (quote and) (quote or) (quote coalesceNil) (quote bool?)
-			(quote int?) (quote float?) (quote string?) (quote <) (quote <=) (quote >) (quote >=)) head)
+			(quote int?) (quote float?) (quote string?) (quote if) (quote <) (quote <=) (quote >) (quote >=)) head)
 			(reduce args (lambda (safe arg) (and safe (scan_plan_hoist_safe arg))) true))
 		_ (not (symbol? expr)))))
 
@@ -214,8 +214,23 @@ Keep its residual: exclusions, word boundaries and relevance are not gram facts.
 		_ nil)
 )))
 
+/* Native ASC order predicates include NULL as the first value. They are
+not SQL comparisons: an initial NULL lower bound is an ordinary conservative
+candidate range, and the complete original predicate remains authoritative. */
+(define scan_plan_native_order_lower (lambda (relation left right params columns) (begin
+	(define info (collation_info relation))
+	(define column (if (and (not (nil? info)) (not (info "reverse")))
+		(scan_expression_column left params columns) nil))
+	(if (or (nil? column) (scan_plan_uses right params) (not (scan_plan_hoist_safe right))) nil (begin
+		(define value (scan_plan_lift right))
+		(define name (info "name"))
+		(append (scan_plan_boundary "range" column value nil true false true false name true)
+			"order" (collate name false) "order_metadata" (concat name ":asc") "retain_residual" true))))))
+
 (define scan_plan_special (lambda (expr params columns)
 	(match expr
+		(list (quote not) (list relation left right))
+		(scan_plan_native_order_lower relation left right params columns)
 		((quote nil?) value)
 		(match (scan_expression_column value params columns)
 			'(column map_columns mapper) (if (nil? mapper)
@@ -259,7 +274,11 @@ Keep its residual: exclusions, word boundaries and relevance are not gram facts.
 				(begin
 					(define have (car existing))
 					(if (and (equal? (have "kind") "range") (equal? (boundary "kind") "range"))
-						(if (or (and (have "lower_set") (boundary "lower_set"))
+						/* Bounds may share a column while comparing it through different
+						relations. Such intervals cannot be intersected in either order. */
+						(if (or (not (reduce '("collation" "order_metadata" "null_safe")
+							(lambda (same field) (and same (expression_equal? (have field) (boundary field)))) true))
+							(and (have "lower_set") (boundary "lower_set"))
 							(and (have "upper_set") (boundary "upper_set"))) nil
 							(map bounds (lambda (item)
 								(if (equal? (item "column") (boundary "column"))

@@ -641,12 +641,15 @@ func (s *StorageIndex) boundKernel(bounds scanAccess, cmpCols int) (firstSorted 
 		if firstSorted < 0 {
 			firstSorted = i
 		}
-		lastSorted = i
+		order, _ := bounds.boundaryOrder(i)
+		unbounded := (order != nil || bounds.boundaryAnalyzer(i).IsSorted()) &&
+			!scanAccessBoundaryIsPoint(bounds, i) && bounds.boundValue(i, false).IsNil() && bounds.boundValue(i, true).IsNil()
+		if !unbounded {
+			lastSorted = i
+		}
 		if i < 64 {
 			sortedMask |= uint64(1) << i
-			order, _ := bounds.boundaryOrder(i)
-			if (order != nil || bounds.boundaryAnalyzer(i).IsSorted()) &&
-				!scanAccessBoundaryIsPoint(bounds, i) && bounds.boundValue(i, false).IsNil() && bounds.boundValue(i, true).IsNil() {
+			if unbounded {
 				unboundedMask |= uint64(1) << i
 			}
 		}
@@ -850,7 +853,7 @@ func effectiveBoundaryInclusiveness(cols scanAccess, indexBounds *scanIndexBound
 		return true, true
 	}
 	for i := indexBounds.len() - 1; i >= 0; i-- {
-		if cols.boundaryAnalyzer(i).IsSorted() {
+		if cols.boundaryAnalyzer(i).IsSorted() && !scanAccessBoundaryIsUnboundedOrder(cols, i) {
 			return cols.boundaryLowerInclusive(i), cols.boundaryUpperInclusive(i)
 		}
 	}
@@ -2053,10 +2056,6 @@ func (s *StorageIndex) bindColdRangeMatcher(tx *TxContext, bounds scanAccess, in
 			}
 			inRange, _ := s.rowWithinBounds(bounds, indexBounds, cmpCols, lastSorted, sortedMask, unboundedMask, lowerInclusive, upperInclusive, valueAt)
 			if inRange && !lowerInclusive {
-				lastSorted := cmpCols - 1
-				for lastSorted >= 0 && !s.columnIsSorted(lastSorted) {
-					lastSorted--
-				}
 				if lastSorted >= 0 && !indexBounds.lower(bounds, lastSorted).IsNil() &&
 					s.compareAt(lastSorted, valueAt(lastSorted), indexBounds.lower(bounds, lastSorted)) == 0 {
 					inRange = false
