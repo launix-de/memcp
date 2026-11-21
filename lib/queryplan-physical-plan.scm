@@ -14525,25 +14525,113 @@ compile repeats Scheme closure optimization even when no domain was changed. */
 			(not (ir_has_unproved_query_aggregate? candidate))))))
 
 /* A reusable candidate needs a priced, closed work domain. This initial
-profile covers flat native joins and scalar column/Boolean work, not opaque
+profile covers flat native joins and bounded scalar work, not opaque
 procedures, grouped carriers or relation-free arbitrary projections. Count the
 full Cartesian domain deliberately: parameter selectivity cannot make this
 compilation break-even estimate smaller and hide a later specialization. */
-(define parameter_plan_scalar_work (lambda (expr)
-	(if (or (query_session_read? expr) (sql_column_ref? expr)) 1
-		(match expr
-			((symbol quote) _value) 0
-			(cons head tail)
-			(if (and (symbol? head) (contains? (list (quote and) (quote or) (quote not) (quote if)
-				(quote equal?) (quote equal??) (quote <) (quote >) (quote <=) (quote >=) (quote nil?)
-				(quote sql_is_null) (quote sql_is_not_null) (quote sql_not) (quote sql_and)
-				(quote sql_or) (quote sql_compare)) head))
-				(reduce tail (lambda (total part) (begin
-					(define cost (parameter_plan_scalar_work part))
-					(if (and (number? total) (number? cost)) (+ total cost 1) nil))) 0)
-				nil)
-			_ (if (or (nil? expr) (string? expr) (number? expr)
-				(expression_equal? expr true) (expression_equal? expr false)) 0 nil)))))
+/* Scalar work carries (operations byte-work input-byte-keys width width-keys).
+Width describes a value, not a row subset. Only native bounded CHAR/VARCHAR,
+literals and current scalar inputs can prove text width; opaque values decline.
+Every byte term is charged both during candidate choice and at invocation reuse. */
+(define parameter_plan_merge_scalar_work (lambda (profiles)
+	(if (reduce profiles (lambda (unknown profile) (or unknown (nil? profile))) false) nil
+		(list
+			(reduce profiles (lambda (total profile) (+ total (nth profile 0))) 0)
+			(reduce profiles (lambda (total profile) (+ total (nth profile 1))) 0.0)
+			(merge (map profiles (lambda (profile) (nth profile 2)))) nil '()))))
+
+(define parameter_plan_text_comparison_work (lambda (profiles passes)
+	(if (reduce profiles (lambda (unknown profile)
+		(or unknown (nil? profile) (and (not (nil? profile)) (nil? (nth profile 3))))) false) nil
+		(begin
+			(define merged (parameter_plan_merge_scalar_work profiles))
+			(list (+ passes (car merged))
+				(+ (nth merged 1) (* passes (reduce profiles (lambda (total profile) (+ total (nth profile 3))) 0.0)))
+				(merge (list (nth merged 2) (merge (map (produceN passes) (lambda (_pass)
+					(map (merge (map profiles (lambda (profile) (nth profile 4)))) (lambda (key) (list key true)))))))) nil '())))))
+
+/* Character dimensions belong to the bound native declaration; scalar return
+contracts intentionally retain dimensions only for decimal/enum arithmetic. */
+(define parameter_plan_column_byte_bound (lambda (expr sources)
+	(match (sql_info_formula (sql_expr_info sources expr))
+		((symbol get_column) alias _alias_ci column _column_ci) (begin
+			(define src (source_for_alias sources nil alias false))
+			(define declaration (if (or (nil? src) (not (source_is_native_table? src))) nil
+				(source_column_declaration src column false)))
+			(define dimensions (if (nil? declaration) '() (coalesceNil (declaration "Dimensions") '())))
+			(if (and (not (nil? declaration))
+				(has? '("CHAR" "VARCHAR") (toUpper (declaration "RawType")))
+				(not (empty_list? dimensions)) (number? (car dimensions)) (> (car dimensions) 0))
+				(* 4.0 (car dimensions)) nil))
+		_ nil)))
+
+(define parameter_plan_scalar_work (lambda (expr sources)
+	(begin
+		(define input (query_session_read_expr expr))
+		(if (and (not (nil? input)) (expression_equal? (car input) (quote session)) (string? (cadr input)))
+			(list 1 0.0 (list (list (cadr input) false)) 0.0 (list (cadr input)))
+			(sql_column_ref? expr)
+			(list 1 0.0 '() (parameter_plan_column_byte_bound expr sources) '())
+			(match expr
+				((symbol quote) value) (if (or (nil? value) (string? value) (number? value) (or (expression_equal? value true) (expression_equal? value false)))
+					(list 0 0.0 '() (if (nil? value) 0.0 (string? value) (strlen value) nil) '()) nil)
+				((symbol sql_type_expr) formula _type _collation) (parameter_plan_scalar_work formula sources)
+				(cons raw_head tail) (begin
+					(define head (expression_syntax raw_head))
+					(if (and (or (identical? head regexp_replace) (expression_equal? head (quote regexp_replace)))
+						(equal? (count tail) 3) (expression_equal? (nth tail 1) " +$") (expression_equal? (nth tail 2) ""))
+						(begin
+							(define value (parameter_plan_scalar_work (car tail) sources))
+							(if (or (nil? value) (nil? (nth value 3))) nil
+								(list (+ 1 (car value)) (+ (nth value 1) (nth value 3))
+									(merge (list (nth value 2) (map (nth value 4) (lambda (key) (list key true))))) (nth value 3) (nth value 4))))
+						(and (or (identical? head equal_collate) (expression_equal? head (quote equal_collate)))
+							(equal? (count tail) 3) (string? (nth tail 2)))
+						(parameter_plan_text_comparison_work (map (list (car tail) (cadr tail))
+							(lambda (part) (parameter_plan_scalar_work part sources))) 2)
+						(and (or (identical? head sql_compare) (expression_equal? head (quote sql_compare)))
+							(equal? (count tail) 4) (not (nil? (collation_info (nth tail 2))))
+							(has? '("equal?" "equal??" "<" ">" "<=" ">=") (nth tail 3)))
+						(parameter_plan_text_comparison_work (map (list (car tail) (cadr tail))
+							(lambda (part) (parameter_plan_scalar_work part sources)))
+							(if (has? '("equal?" "equal??") (nth tail 3)) 2 1))
+						(and (not (nil? (collation_info head))) (equal? (count tail) 2))
+						(parameter_plan_text_comparison_work (map tail (lambda (part) (parameter_plan_scalar_work part sources))) 1)
+						(and (symbol? head) (has? (list 'and 'or 'not 'if 'equal? 'equal?? '< '> '<= '>= 'nil?
+							'sql_is_null 'sql_is_not_null 'sql_not 'sql_and 'sql_or) head))
+						(begin
+							(define profiles (map tail (lambda (part) (parameter_plan_scalar_work part sources))))
+							(define merged (parameter_plan_merge_scalar_work profiles))
+							(if (nil? merged) nil (begin
+								(define arms (if (and (expression_equal? head (quote if)) (equal? (count profiles) 3))
+									(list (nth profiles 1) (nth profiles 2)) '()))
+								(define bounded (and (not (empty_list? arms))
+									(reduce arms (lambda (known arm) (and known (number? (nth arm 3)))) true)))
+								(list (+ (count tail) (car merged)) (nth merged 1) (nth merged 2)
+									(if bounded (reduce arms (lambda (total arm) (+ total (nth arm 3))) 0.0) nil)
+									(if bounded (merge (map arms (lambda (arm) (nth arm 4)))) '())))))
+						nil))
+				_ (if (or (nil? expr) (string? expr) (number? expr) (or (expression_equal? expr true) (expression_equal? expr false)))
+					(list 0 0.0 '() (if (nil? expr) 0.0 (string? expr) (strlen expr) nil) '()) nil))))))
+
+/* Fold input multiplicities once at compile time; invocation guards read each
+current scalar once. No input expression or caller procedure is evaluated. */
+(define parameter_plan_input_byte_terms (lambda (terms)
+	(begin
+		(define counts (newsession))
+		(map terms (lambda (term) (begin
+			(define previous (coalesceNil (counts (car term)) '(0 false)))
+			(counts (car term) (list (+ 1 (car previous)) (or (cadr previous) (cadr term)))))))
+		(map (sort (counts) <) (lambda (key) (cons key (counts key)))))))
+
+(define parameter_plan_input_byte_work (lambda (terms session)
+	(reduce terms (lambda (total term) (begin
+		(define value (session (car term)))
+		(if (nil? total) nil
+			(string? value) (+ total (* (cadr term) (+ 0.0 (strlen value))))
+			(nil? value) total
+			(and (not (nth term 2)) (or (number? value) (or (expression_equal? value true) (expression_equal? value false)))) total
+			nil))) 0.0)))
 
 (define parameter_plan_work_profile (lambda (ir)
 	(begin
@@ -14551,40 +14639,47 @@ compilation break-even estimate smaller and hide a later specialization. */
 		(if (or (not (query_block? root)) (not (empty_list? (ir_stages ir)))) nil
 			(begin
 				(define sources (qb_sources root))
-				(define expressions (merge (list
-					(extract_assoc (qb_fields root) (lambda (_title expr) expr))
-					(extract_assoc (qb_hidden root) (lambda (_title expr) expr))
-					(map (qb_order root) car)
-					(map sources source_join_expr)
-					(list (qb_where root) (qb_limit root) (qb_offset root)))))
-				(define scalar_work (reduce expressions (lambda (total expr) (begin
-					(define cost (parameter_plan_scalar_work expr))
-					(if (and (number? total) (number? cost)) (+ total cost) nil))) 0))
-				(if (and (not (empty_list? sources)) (<= (count sources) 5)
-					(empty_list? (qb_group root)) (not (query_block_has_aggregates? root))
-					(number? scalar_work)
-					(reduce sources (lambda (known src) (and known (source_is_native_table? src))) true))
-					(list sources scalar_work (count (qb_order root))) nil))))))
+				/* Decline unsupported domains before walking scalar programs or
+				reading column declarations for work we cannot price. */
+				(if (or (empty_list? sources) (> (count sources) 5)
+					(not (empty_list? (qb_group root))) (query_block_has_aggregates? root)
+					(not (reduce sources (lambda (known src) (and known (source_is_native_table? src))) true))) nil
+					(begin
+						(define expressions (merge (list
+							(extract_assoc (qb_fields root) (lambda (_title expr) expr))
+							(extract_assoc (qb_hidden root) (lambda (_title expr) expr))
+							(map (qb_order root) car) (map sources source_join_expr)
+							(list (qb_where root) (qb_limit root) (qb_offset root)))))
+						(define scalar_work (parameter_plan_merge_scalar_work
+							(map expressions (lambda (expr) (parameter_plan_scalar_work expr sources)))))
+						(if (nil? scalar_work) nil
+							(list sources (car scalar_work) (count (qb_order root)) (nth scalar_work 1)
+								(parameter_plan_input_byte_terms (nth scalar_work 2)))))))))))
 
-(define parameter_plan_reuse_work (lambda (profile tx)
+(define parameter_plan_work_cost (lambda (profile session tx)
 	(if (nil? profile) nil
 		(begin
 			(define statistics (map (car profile) (lambda (src)
 				(table_planner_statistics (table (source_schema src) false (source_relation src) false tx)))))
 			(define rows (map statistics (lambda (stats) (stats "row_count"))))
+			(define input_bytes (parameter_plan_input_byte_work (nth profile 4) session))
 			(if (or (not (reduce statistics (lambda (known stats)
 				(and known (expression_equal? (stats "has_read_program") false))) true))
-				(not (reduce rows (lambda (known value) (and known (number? value))) true))) nil
+				(not (reduce rows (lambda (known value) (and known (number? value))) true))
+				(nil? input_bytes)) nil
 				(begin
 					(define domain (reduce rows (lambda (total value) (* total (max 1 (+ 0.0 value)))) 1.0))
-					(+ (* (count rows) 4000)
+					(define byte_work (* domain (+ (nth profile 3) input_bytes) planner_membership_broad_text_match_byte_ns))
+					(define admission_work (+ (* (count rows) 4000)
 						(* (reduce rows + 0) 54.0)
 						(* domain (count rows) 1240.0)
 						(* domain (cadr profile) planner_membership_expression_operation_row_ns)
+						byte_work
 						(if (equal? (nth profile 2) 0) 0
 							(+ planner_membership_ordered_scan_invocation_ns
 								(* (nth profile 2) (membership_ordered_recset_sort_work domain)
-									planner_membership_ordered_recset_sort_unit_ns))))))))))
+									planner_membership_ordered_recset_sort_unit_ns)))))
+					(list admission_work byte_work)))))))
 
 (define parameter_plan_execution_cost (lambda (ir)
 	(begin

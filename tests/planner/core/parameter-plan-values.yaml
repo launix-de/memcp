@@ -161,6 +161,39 @@ test_cases:
       (list ((table_planner_statistics target) "has_read_program") (answer "row"))))
   expect:
     result: [true, [id, 7]]
+- name: Current text inputs retain NULL padding Unicode and large values across cached requests
+  scm: |-
+    (begin
+      (define input (newsession)) (input "username" "root") (input "schema" "memcp-tests")
+      (define output (newsession)) (output "rows" '())
+      (define cleanup (lambda () (begin
+        (tx_rollback input) (tsql_cursor_close_all input) (tsql_temporary_close input))))
+      (define rows (try (lambda () (begin
+        (tsql_execute_request "memcp-tests" "BEGIN TRANSACTION;\nCREATE TABLE #text_values(id INT PRIMARY KEY,label VARCHAR(12) COLLATE Latin1_General_CI_AS);\nINSERT #text_values VALUES(1,'Alpha'),(2,'ALPHA '),(3,'beta'),(4,N'Grüße');\nDECLARE @needle NVARCHAR(MAX);\nSET @needle=NULL;\nSELECT id,label FROM #text_values WHERE label=@needle ORDER BY id;\nSET @needle=N'alpha';\nSELECT id,label FROM #text_values WHERE label=@needle ORDER BY id;\nSET @needle=REPLICATE(N'x',100000);\nSELECT id,label FROM #text_values WHERE label=@needle ORDER BY id;\nSET @needle=N'Grüße';\nSELECT id,label FROM #text_values WHERE label=@needle ORDER BY id;\nSET @needle=N'BETA ';\nSELECT id,label FROM #text_values WHERE label=@needle ORDER BY id;\nROLLBACK TRANSACTION;" input nil 0
+          (lambda (row) (output "rows" (append (output "rows") row))) (lambda args true))
+        (output "rows"))) (lambda (failure) (begin (cleanup) (error failure)))))
+      (cleanup)
+      rows)
+  expect:
+    result:
+    - - id
+      - 1
+      - label
+      - Alpha
+    - - id
+      - 2
+      - label
+      - 'ALPHA '
+    - - id
+      - 4
+      - label
+      - Grüße
+    - - id
+      - 3
+      - label
+      - beta
+
+
 cleanup:
 - sql: DROP TABLE IF EXISTS parameter_values_initialized
 - sql: DROP TABLE IF EXISTS parameter_values_child
