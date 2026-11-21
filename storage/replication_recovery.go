@@ -76,7 +76,22 @@ func (r *replicationManager) recoveryInventory(auth replicaAuth) []replicaRecord
 				}
 			}
 			resource = r.canonicalResource(resource)
-			resources[resource.key()] = replicaRecord{Resource: resource, Content: shard.uuid.String()}
+			cell := r.resourceCell(resource)
+			if shard.catalogOwner == "" && !cell.ownstate.Initialized() {
+				r.mu.Lock()
+				backup, completed := r.backups[resource.key()]
+				r.mu.Unlock()
+				if completed && backup.Content == resource.Shard && backup.Content != shard.uuid.String() {
+					// The durable root can retain the rebuild predecessor. Bind
+					// its completed local successor (including later WAL), without
+					// claiming rights or reporting the predecessor as current data.
+					if err := r.restoreBackup(replicaRecord{Resource: resource, Content: backup.Content}); err != nil {
+						panic(err)
+					}
+					shard = cell.current.Load()
+				}
+			}
+			resources[resource.key()] = replicaRecord{Resource: resource, Content: shard.uuid.String(), Forwards: r.shardRoutes(resource)}
 		}
 	}
 	r.mu.Lock()
