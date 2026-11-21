@@ -399,6 +399,42 @@ func TestReplicationRecoveredSharedBindsCompletedGeneration(t *testing.T) {
 	}
 }
 
+func TestReplicationRecoveredDataDoesNotAcquireColdCatalogPermissions(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "cold_shared_recovery", 3)
+	tbl.schema.rebuild(true, false, false, tbl)
+	completed := tbl.ActiveShards()[0]
+	resource := completed.replicationResource()
+	r := replicaRecoveryFixture()
+	r.restoring[resource.Database] = true
+	r.backups[resource.key()] = replicaBackup{Resource: resource, Content: resource.Shard}
+	var native []*replicaCell
+	for _, shard := range tbl.schema.replicationShards() {
+		if shard.catalogOwner != "" {
+			native = append(native, r.resourceCell(shard.replicationResource()))
+		}
+	}
+	cold := newDatabase()
+	cold.Name, cold.persistence, cold.srState = tbl.schema.Name, engine, COLD
+	databases.Set(cold.Name, cold)
+	defer databases.Set(cold.Name, tbl.schema)
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	owner := uuid.NewString()
+	report := replicaRecord{Resource: resource, Owner: owner, State: "O", Epoch: 7, Content: resource.Shard, Readers: map[string]bool{r.id: true}}
+	if _, err := r.recoverPeer(context.Background(), owner, replicaRequest{Boot: uuid.NewString(), Resources: []replicaRecord{report}}, replicaAuth{Admin: true}); err != nil {
+		t.Fatal(err)
+	}
+	cell := r.resourceCell(resource)
+	if cell.ownstate.Phase() != mosi.S || cell.current.Load() == nil || cell.current.Load().uuid != completed.uuid {
+		t.Fatal("data recovery did not bind the completed shared generation")
+	}
+	for _, cell := range native {
+		if cell.ownstate.Initialized() || cell.ownstate.Phase().Readable() {
+			t.Fatal("recovering data acquired catalog authority before its independent report")
+		}
+	}
+}
+
 func TestReplicationIdentityUsesLocalSettingsCheckpoint(t *testing.T) {
 	oldBase := Basepath
 	settingsMu.Lock()
