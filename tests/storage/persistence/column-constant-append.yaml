@@ -141,6 +141,24 @@ test_cases:
     - connection: observer
       sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'constant_append_savepoint') AND name=N'discarded'
       expect: {rows: 1,data: [{n: 0}]}
+- name: An INSERT descriptor cannot authorize an UPDATE through a native callback
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin_acid s)
+      (define tx (s "__memcp_tx"))
+      (define target (table "memcp-tests" false "constant_append_rollback" false tx))
+      (createcolumn target "producer_guard" "INT" '() '("null" false "default" 3) nil nil tx)
+      (define rejected (try (lambda () (begin
+        (with_table_mutation (list target) (list "insert" '("id")) tx s (lambda (bound)
+          (scan bound target '() '() '() (lambda () true) '("$update")
+            (lambda (update) (update '("id" 99))) 0 +)))
+        false)) (lambda (_failure) true)))
+      (define own (scan tx target '() '() '() (lambda () true) '("id" "producer_guard")
+        (lambda (id flag) (list (list id flag))) '() merge))
+      (define observed (scan nil target '() '() '() (lambda () true) '("id") + 0 +))
+      (tx_rollback s)
+      (list rejected own observed (nil? (show target "column" "producer_guard" false nil))))
+  expect: {result: [true,[[5,3]],5,true]}
 - name: Nullable default without WITH VALUES retains historical NULL
   sql: BEGIN TRANSACTION; ALTER TABLE constant_append_nullable ADD flag INT NULL DEFAULT (5); COMMIT TRANSACTION
 - name: Future nullable rows still receive their actual default
