@@ -1329,7 +1329,7 @@ func TestUniqueSnapshotDrainsAdmittedWriter(t *testing.T) {
 	readers := make(chan func(), 2)
 	for index := int64(1); index <= 2; index++ {
 		go func() {
-			readers <- acquireTableLock(tbl.schema.Name, tbl.Name, false, true, &scm.SessionState{}, 0)
+			readers <- acquireTableLock(tbl.schema.Name, tbl.Name, false, true, nil, &scm.SessionState{}, 0)
 		}()
 		deadline := time.Now().Add(2 * time.Second)
 		for tbl.tableLockState.Load() != index {
@@ -1411,7 +1411,7 @@ func TestUniqueSnapshotCancellation(t *testing.T) {
 			var first chan func()
 			if kind == "adjacent" {
 				first = make(chan func(), 1)
-				go func() { first <- acquireTableLock(tbl.schema.Name, tbl.Name, false, true, &scm.SessionState{}, 0) }()
+				go func() { first <- acquireTableLock(tbl.schema.Name, tbl.Name, false, true, nil, &scm.SessionState{}, 0) }()
 				waitState(1)
 			}
 			ss := &scm.SessionState{}
@@ -1422,7 +1422,7 @@ func TestUniqueSnapshotCancellation(t *testing.T) {
 			done := make(chan any, 1)
 			go func() {
 				defer func() { done <- recover() }()
-				unlock := acquireTableLock(tbl.schema.Name, tbl.Name, kind == "write", true, ss, seq)
+				unlock := acquireTableLock(tbl.schema.Name, tbl.Name, kind == "write", true, nil, ss, seq)
 				unlock()
 			}()
 			expected := int64(1)
@@ -1451,7 +1451,7 @@ func TestUniqueSnapshotCancellation(t *testing.T) {
 			if tbl.hasTableLock() {
 				t.Fatal("cancelled owner retained table ownership")
 			}
-			unlock := acquireTableLock(tbl.schema.Name, tbl.Name, false, true, &scm.SessionState{}, 0)
+			unlock := acquireTableLock(tbl.schema.Name, tbl.Name, false, true, nil, &scm.SessionState{}, 0)
 			unlock()
 		})
 	}
