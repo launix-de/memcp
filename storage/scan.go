@@ -2567,6 +2567,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		return scm.NewNil(), outCount, candidateCount
 	}
 	if hasMutationCallback && len(pendingRecids) > 0 {
+		t.retainMutationSource(currentTx, access.producerInput, callbackCols)
 		// Release exclusive lock before the fused callback: it may contain
 		// nested scans on the same table (e.g. EXISTS inside UPDATE).
 		// The mapper re-acquires mu.Lock() per batch internally via
@@ -2877,6 +2878,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 		return scm.NewNil(), outCount, candidateCount
 	}
 	if hasMutationCallback && len(pendingRecids) > 0 {
+		t.retainMutationSource(currentTx, access.producerInput, callbackCols)
 		if writeLocked {
 			if txWriteOwned {
 				currentTx.ExitShardWrite(t)

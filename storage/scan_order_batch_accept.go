@@ -169,6 +169,9 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 						limit-len(records), nil, currentTx, sessionState)
 				}()
 				defer queue.closeReaders()
+				if len(queue.items) != 0 {
+					queue.shard.retainMutationSource(currentTx, source.producerInput, source.projectionCols)
+				}
 				if remainingOffset >= len(queue.items) {
 					remainingOffset -= len(queue.items)
 					return
@@ -297,6 +300,7 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 		panic("scan_order_batch_accept: offset plus limit overflows")
 	}
 
+	source.projectionCols = append(append([]string(nil), source.projectionCols...), callbackCols...)
 	var finishData func()
 	if scanMutates(callbackCols) {
 		currentTx, finishData = source.backingTable().writeDataContext(currentTx)

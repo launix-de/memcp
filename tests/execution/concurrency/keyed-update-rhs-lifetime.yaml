@@ -33,32 +33,43 @@ setup:
         (if (equal? mode "cs") (tx_begin owner) (tx_begin_acid owner))
         (try (lambda () (begin
           (define result (try (lambda () (begin
-            (with_table_mutation (list h) '("update" ("id" "value"))
-              (owner "__memcp_tx") (if (equal? mode "foreign") nil owner) (lambda (tx)
-                (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
-                  (lambda (acc update) (begin
-                    (if rebuild_first (rebuild h true false) true)
-                    (if repeat_own
-                      (reduce (produceN 200) (lambda (count value) (begin
-                        (update (list "value" value)) (+ count 1))) 0)
-                      (begin
-                        (if (equal? mode "foreign")
-                          (begin
-                            (define competing_owner (newsession))
-                            (competing_owner "username" "root") (tx_begin competing_owner)
-                            (try (lambda () (begin
-                              (insert h '("id" "value") '((1 99)) '("$update")
-                                (lambda (competing) (competing '("value" 99)))
-                                false nil (competing_owner "__memcp_tx"))
-                              (tx_commit competing_owner)))
-                              (lambda (failure) (begin
-                                (tx_rollback competing_owner) (error failure)))))
-                          (insert h '("id" "value") '((1 99)) '("$update")
-                            (lambda (competing)
-                              (competing (if (equal? mode "key") '("id" 2 "value" 99) '("value" 99))))
-                            false nil tx))
-                        (update '("value" 20))
-                        false)))) 0 + false)))
+            (with_table_mutation (list h) (list "update" '("id" "value"))
+              (owner "__memcp_tx")
+              (if (or rebuild_first (equal? mode "foreign")) nil owner)
+              (lambda (tx) (begin
+                (define mutate (lambda (update)
+                  (if repeat_own
+                    (reduce (produceN 200) (lambda (count value) (begin
+                      (update (list "value" value)) (+ count 1))) 0)
+                    (begin
+                      (if (equal? mode "foreign")
+                        (begin
+                          (define competing_owner (newsession))
+                          (competing_owner "username" "root") (tx_begin competing_owner)
+                          (try (lambda () (begin
+                            (insert h '("id" "value") (list '(1 99)) '("$update")
+                              (lambda (competing) (competing '("value" 99)))
+                              false nil (competing_owner "__memcp_tx"))
+                            (tx_commit competing_owner)))
+                            (lambda (failure) (begin
+                              (tx_rollback competing_owner) (error failure)))))
+                        (insert h '("id" "value") (list '(1 99)) '("$update")
+                          (lambda (competing)
+                            (competing (if (equal? mode "key") '("id" 2 "value" 99) '("value" 99))))
+                          false nil tx))
+                      (update '("value" 20)) false))))
+                (if rebuild_first
+                  (begin
+                    ; A plain nonnil callback retains its original transaction's
+                    ; writer resource after scan drain. Checked rowframes never
+                    ; escape here; maintenance cannot synchronously drain itself.
+                    (define captured (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+                      (lambda (unused update) update) nil
+                      (lambda (left right) (if (nil? left) right left)) false))
+                    (rebuild h true false)
+                    (mutate captured))
+                  (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+                    (lambda (acc update) (mutate update)) 0 + false)))))
             repeat_own))
             (lambda (failure)
               (if repeat_own (error failure)
@@ -66,7 +77,7 @@ setup:
           (if repeat_own (tx_commit owner) (tx_rollback owner))
           (list result (rows nil) (nil? (owner "transaction")))))
           (lambda (failure) (begin
-            (if (owner "transaction") (tx_rollback owner) true)
+            (if (not (nil? (owner "transaction"))) (tx_rollback owner) true)
             (error failure)))))))
       (globalvars "__rhs_guard_version_control" (close_procedure run))
       true)
@@ -167,7 +178,7 @@ test_cases:
       (define owner (newsession)) (owner "username" "root") (tx_begin owner)
       (try (lambda () (begin
         (define h (table "memcp-tests" false "rhs_guard_version" false (owner "__memcp_tx")))
-        (define rejected (with_table_mutation (list h) '("update" ("value"))
+        (define rejected (with_table_mutation (list h) (list "update" '("value"))
           (owner "__memcp_tx") owner (lambda (tx)
             (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
               (lambda (acc update)
@@ -189,7 +200,7 @@ test_cases:
       (define owner (newsession)) (owner "username" "root") (tx_begin owner)
       (try (lambda () (begin
         (define h (table "memcp-tests" false "rhs_guard_version" false (owner "__memcp_tx")))
-        (define applied (with_table_mutation (list h) '("delete" ())
+        (define applied (with_table_mutation (list h) (list "delete" '())
           (owner "__memcp_tx") owner (lambda (tx)
             (scan tx h '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
               (lambda (acc remove) (remove)) false (lambda (left right) (or left right)) false))))
@@ -209,7 +220,7 @@ test_cases:
       (define owner (newsession)) (owner "username" "root") (tx_begin owner)
       (try (lambda () (begin
         (define h (table "memcp-tests" false "rhs_guard_version" false (owner "__memcp_tx")))
-        (define rejected (with_table_mutation (list h) '("update" ("value"))
+        (define rejected (with_table_mutation (list h) (list "update" '("value"))
           (owner "__memcp_tx") owner (lambda (tx)
             (list
               (try (lambda () (json_encode tx))
