@@ -235,6 +235,7 @@ Their values preserve the grammar's declared spelling. */
 (define tsql_keyword_rtrim (tsql_keyword_parser "RTRIM"))
 (define tsql_keyword_schema_id (tsql_keyword_parser "SCHEMA_ID"))
 (define tsql_keyword_schema_name (tsql_keyword_parser "SCHEMA_NAME"))
+(define tsql_keyword_ident_current (tsql_keyword_parser "IDENT_CURRENT"))
 (define tsql_keyword_scope_identity (tsql_keyword_parser "SCOPE_IDENTITY"))
 (define tsql_keyword_scroll (tsql_keyword_parser "SCROLL"))
 (define tsql_keyword_scroll_locks (tsql_keyword_parser "SCROLL_LOCKS"))

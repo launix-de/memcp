@@ -684,7 +684,7 @@ func (u *storageShard) load() {
 			// WAL rows already contain allocated IDs. Recovery runs under the
 			// shard lock and must never contact the distributed allocator: its
 			// ownership handover can need this very shard to finish loading.
-			t.reserveLocalAutoIncrement(maxVal, 0)
+			t.mergeRecoveredAutoIncrement(maxVal)
 			break // only one AUTO_INCREMENT column per table
 		}
 	}
@@ -1621,6 +1621,13 @@ func isRuntimeComputedColumn(colDesc *column) bool {
 }
 
 func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, eventWriter *nativeMutationEventWriter, declarations []*column, input *nativeMutationInput, initializedColumns *nativeColumnInitialInput, exactUpdate bool) func(...scm.Scmer) scm.Scmer {
+	identityName := ""
+	for _, declaration := range declarations {
+		if declaration.AutoIncrement {
+			identityName = declaration.Name
+			break
+		}
+	}
 	initialUniqueGuard := uniqueGuard
 	var originalState *transactionState
 	if exactUpdate {
@@ -1839,6 +1846,13 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					}
 					return pCols, pRow
 				}
+				identityPosition := -1
+				previousIdentity := scm.NewNil()
+				if identityName != "" {
+					if position, exists := t.deltaColumns[identityName]; exists {
+						identityPosition, previousIdentity = position, d2[position]
+					}
+				}
 				// now d2 contains the old row values
 				var oldDeltaRow dataset
 				if len(t.t.Triggers) > 0 {
@@ -1924,6 +1938,20 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					t.runWithWriteLockReleased(currentTx, func() {
 						t.t.validateFinalUpdateRow(declarations, triggerOldRow, newRow, finalValidators, currentTx)
 					})
+				}
+				// Native AUTO_INCREMENT assignments share the same allocator as
+				// INSERT. Only a changed identity input needs preparation; ordinary
+				// row replacements/forwarding must never reserve again in the sink.
+				if identityPosition >= 0 && !sameUpdateValue(previousIdentity, d2[identityPosition]) {
+					value := d2[identityPosition]
+					t.runWithWriteLockReleased(currentTx, func() {
+						if uniqueGuard != nil {
+							uniqueGuard.releaseKeys()
+						}
+						_, rows, _ := t.t.prepareInsertIDs([]string{identityName}, [][]scm.Scmer{{value}}, nil, declarations)
+						value = rows[0][0]
+					})
+					d2[identityPosition] = value
 				}
 				if exactUpdate && !currentTx.IsVisible(t, targetIdx) {
 					panic(sqldb.NewSQLError1(1213, "40001", "Concurrent row replacement; retry transaction"))
@@ -3912,6 +3940,15 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 			return 0
 		}
 		if !alreadyLocked {
+			for i, row := range preparedRows {
+				cols, rows, assigned := t.t.prepareInsertIDs(preparedColumns[i], [][]scm.Scmer{row}, onFirstInsertId, declarations)
+				preparedColumns[i], preparedRows[i] = cols, rows[0]
+				if assigned {
+					onFirstInsertId = nil
+				}
+			}
+		}
+		if !alreadyLocked {
 			t.lockForMutation(currentTx, uniqueGuard)
 			defer t.mu.Unlock()
 		}
@@ -3933,6 +3970,14 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		values = t.t.sanitizeInsertRows(columns, values, isIgnore, declarations)
 		if len(values) == 0 {
 			return 0 // all rows skipped by sanitizer in INSERT IGNORE mode
+		}
+	}
+
+	if validatedSchema == nil && !alreadyLocked {
+		var assigned bool
+		columns, values, assigned = t.t.prepareInsertIDs(columns, values, onFirstInsertId, declarations)
+		if assigned {
+			onFirstInsertId = nil
 		}
 	}
 
@@ -4137,59 +4182,24 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			t.deltaColumns[col] = colidx[i]
 		}
 	}
-	var Auto_increment uint64
-	var hasAI bool
-	var aiColIdx int = -1
-	var aiInputIdx int = -1
+	var aiColIdx = -1
 	for _, c := range declarations {
-		if c.AutoIncrement {
-			hasAI = true
-			for i, name := range columns {
-				if name == c.Name {
-					aiInputIdx = i
-					break
-				}
-			}
-		}
 		if c.AutoIncrement || c.hasDefault() {
-			// column with default or auto increment -> also add to deltacolumns
 			cidx, ok := t.deltaColumns[c.Name]
 			if !ok {
-				// add column to delta
 				cidx = len(t.deltaColumns)
 				t.deltaColumns[c.Name] = cidx
-				colidx = append(colidx, cidx)
 			}
 			if c.AutoIncrement {
 				aiColIdx = cidx
+				position := slices.Index(columns, c.Name)
+				for _, row := range values {
+					if position < 0 || position >= len(row) || row[position].IsNil() {
+						panic("native shard INSERT requires explicit IDs reserved before shard mutation")
+					}
+				}
 			}
 		}
-	}
-	generatedIDs := 0
-	var maxExplicitID uint64
-	if hasAI {
-		for _, row := range values {
-			if aiInputIdx < 0 || aiInputIdx >= len(row) || row[aiInputIdx].IsNil() {
-				generatedIDs++
-				continue
-			}
-			if explicitID := scm.ToInt(row[aiInputIdx]); explicitID > 0 && uint64(explicitID) > maxExplicitID {
-				maxExplicitID = uint64(explicitID)
-			}
-		}
-		if sharedClusterSource(t.t) {
-			if generatedIDs != 0 {
-				panic("cluster INSERT requires reserved explicit IDs before shard mutation")
-			}
-		} else {
-			Auto_increment = t.t.reserveAutoIncrement(maxExplicitID, uint64(generatedIDs))
-		}
-	}
-	// if requested, notify the first assigned id once per statement
-	if generatedIDs > 0 && onFirstInsertId != nil {
-		onFirstInsertId(int64(Auto_increment) + 1)
-		// do not call again for this shard; table-level wrapper ensures only first shard triggers
-		onFirstInsertId = nil
 	}
 
 	defaultInputs := make(map[string]int)
@@ -4209,15 +4219,7 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 	for _, row := range values {
 		newrow := make([]scm.Scmer, len(t.deltaColumns))
 		for _, c := range declarations {
-			if c.AutoIncrement {
-				// Fill only missing/NULL values; explicit values were accounted for
-				// before reserving the batch's generated range.
-				cidx := t.deltaColumns[c.Name]
-				if aiInputIdx < 0 || aiInputIdx >= len(row) || row[aiInputIdx].IsNil() {
-					Auto_increment++ // local increase within the reserved range
-					newrow[cidx] = scm.NewInt(int64(Auto_increment))
-				}
-			} else if c.hasDefault() {
+			if !c.AutoIncrement && c.hasDefault() {
 				if input, provided := defaultInputs[c.Name]; provided && input < len(row) {
 					continue
 				}

@@ -869,18 +869,10 @@ func (t *table) prepareInsertDefaults(columns []string, values [][]scm.Scmer, de
 	return cols, rows
 }
 
-// Reserve before shard ownership when clustering/routing or finite native
-// validation requires generated values. The shard sink receives explicit IDs.
-// Notification retains the first ASSIGNED ID contract, including IGNORE gaps.
-func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify func(int64), dimensions []shardDimension, force bool) ([]string, [][]scm.Scmer, bool) {
-	needed := force || sharedClusterSource(t)
-	for _, d := range dimensions {
-		needed = needed || d.Method != ""
-	}
-	if !needed {
-		return columns, values, false
-	}
-	for _, c := range t.columnDeclarations() {
+// Every generated value is assigned before shard ownership or UNIQUE guards.
+// The shard sink receives complete explicit values; recovery never reserves.
+func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify func(int64), declarations []*column) ([]string, [][]scm.Scmer, bool) {
+	for _, c := range declarations {
 		if !c.AutoIncrement {
 			continue
 		}
@@ -893,16 +885,18 @@ func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify 
 		}
 		generated := uint64(0)
 		explicit := uint64(0)
+		observedExplicit := false
 		for _, row := range values {
 			if position < 0 || position >= len(row) || row[position].IsNil() {
 				generated++
 				continue
 			}
+			observedExplicit = true
 			if id := scm.ToInt(row[position]); id > 0 {
 				explicit = max(explicit, uint64(id))
 			}
 		}
-		base := t.reserveAutoIncrement(explicit, generated)
+		base := t.reserveTableIDs(explicit, generated, observedExplicit)
 		if generated > 0 && notify != nil {
 			notify(int64(base + 1))
 		}

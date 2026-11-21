@@ -281,6 +281,22 @@ test_cases:
     rows: 1
     data: [{first_id: 245001, end_status: -1, dynamic_rows: -1, sticky_status: -1}]
     cluster: {min_remote_shards: 1}
+- name: Authoritative table identity state survives delegated business rows
+  syntax: tsql
+  setup:
+  - sql: DROP TABLE IF EXISTS operator_allocator_probe
+  - sql: CREATE TABLE operator_allocator_probe(id INT IDENTITY(100,1) PRIMARY KEY,value INT)
+  - sql: INSERT operator_allocator_probe(value) VALUES(1),(2)
+  sql: |
+    SELECT id,IDENT_CURRENT(CASE WHEN id%2=0 THEN N'dbo.operator_allocator_probe'
+      ELSE N'OPERATOR_ALLOCATOR_PROBE' END) AS current_value
+    FROM big_items WHERE id IN(245000,245001) ORDER BY id
+  expect:
+    rows: 2
+    data: [{id: 245000,current_value: 101},{id: 245001,current_value: 101}]
+    cluster: {min_remote_shards: 1}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS operator_allocator_probe
 - name: schema-and-database-property-inputs-survive-delegated-row-callbacks
   syntax: tsql
   sql: >-

@@ -5044,6 +5044,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(list (quote sql_type_expr)
 				(list (quote tsql_has_dbaccess) (tsql_cast_expr name "NVARCHAR" '(128))
 					(tsql_actor_formula)) "INT" nil))
+		(parser '(tsql_keyword_ident_current "(" (define name tsql_expression) ")")
+			(tsql_ident_current_call schema name))
 		(parser '(tsql_keyword_scope_identity "(" ")") (tsql_identity_expr true))
 		(parser '((define name (or (parser tsql_keyword_error_message "message")
 			(parser tsql_keyword_error_number "number")

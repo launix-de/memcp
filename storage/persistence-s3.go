@@ -737,6 +737,11 @@ func encodeS3LogEntry(e interface{}) []byte {
 	case LogEntryCommit:
 		tmp, _ := json.Marshal(s3EncCommit{T: "commit", TxID: l.txID})
 		payload = tmp
+	case LogEntryTableAllocator:
+		payload, _ = json.Marshal(struct {
+			T     string `json:"t"`
+			Value string `json:"value"`
+		}{T: "allocator-v1", Value: encodeTableAllocatorRecord(l)})
 	case LogEntrySequence:
 		payload, _ = json.Marshal(struct {
 			T     string `json:"t"`
@@ -773,6 +778,14 @@ func decodeS3LogStream(data []byte, out chan interface{}) {
 			continue
 		}
 		switch head.T {
+		case "allocator-v1":
+			var record struct {
+				Value string `json:"value"`
+			}
+			if err := json.Unmarshal(payload, &record); err != nil {
+				panic("invalid native table allocator frame")
+			}
+			out <- decodeTableAllocatorRecord(record.Value)
 		case "sequence-v1":
 			var record struct {
 				Value string `json:"value"`

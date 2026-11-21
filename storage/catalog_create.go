@@ -273,6 +273,7 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 	newTable.Charset = charset
 	newTable.Comment = comment
 	newTable.Auto_increment = autoIncrement
+	newTable.initializeNewAllocator(autoIncrement + 1)
 	if !oninit.IsNil() {
 		closedOnInit := scm.CloseProcedure(oninit)
 		newTable.OnInit.Store(&closedOnInit)

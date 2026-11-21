@@ -1003,7 +1003,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 				}
 			}
 			if previous != nil && r.sameReplicaDeclaration(previous, table) {
-				previous.reserveLocalAutoIncrement(atomic.LoadUint64(&table.Auto_increment), 0)
+				previous.mergeImportedAllocator(table.localTableAllocator(), table.localTableAllocator().High)
 				previous.CatalogVersion.Store(table.CatalogVersion.Load())
 				if r.cluster != nil {
 					for _, incoming := range table.ActiveShards() {
@@ -1117,7 +1117,7 @@ func (r *replicationManager) replicaDeclaration(table *table, includeTopology bo
 	if json.Unmarshal(encoded, &fields) != nil {
 		return encoded
 	}
-	for _, key := range []string{"Auto_increment", "planner_row_estimate", "key_frequencies", "filter_feedback", "shard_forwards", "catalog_version"} {
+	for _, key := range []string{"Auto_increment", "allocator", "planner_row_estimate", "key_frequencies", "filter_feedback", "shard_forwards", "catalog_version"} {
 		delete(fields, key)
 	}
 	for _, key := range []string{"Shards", "PShards"} {
@@ -1411,7 +1411,7 @@ func (r *replicationManager) schemaDigest(data []byte) (string, error) {
 		if err := json.Unmarshal(encoded, &fields); err != nil {
 			return "", err
 		}
-		for _, key := range []string{"Auto_increment", "planner_row_estimate", "key_frequencies", "filter_feedback", "shard_forwards", "catalog_version"} {
+		for _, key := range []string{"Auto_increment", "allocator", "planner_row_estimate", "key_frequencies", "filter_feedback", "shard_forwards", "catalog_version"} {
 			delete(fields, key)
 		}
 		for _, key := range []string{"Shards", "PShards"} {

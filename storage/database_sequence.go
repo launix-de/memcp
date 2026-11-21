@@ -69,6 +69,8 @@ func (db *database) acceptDatabaseWALFrame(entry interface{}, committed map[stri
 		if record.txID != "" {
 			return db.acceptNativeCommitFrame(record.txID, committed, generation)
 		}
+	case LogEntryTableAllocator:
+		return db.acceptTableAllocator(record.state)
 	case LogEntrySequence:
 		if validSequenceName(record.name) && record.high > 0 {
 			if db.sequences == nil {

@@ -86,8 +86,10 @@ type database struct {
 	catalogProofVersion     atomic.Uint64                        `json:"-"`
 	transactionGen          uint64                               `json:"-"`
 	// Nontransactional sequence authority shares the database WAL and mutex.
-	sequences       map[string]int64 `json:"-"`
-	sequenceFailure error            `json:"-"`
+	sequences        map[string]int64               `json:"-"`
+	sequenceFailure  error                          `json:"-"`
+	tableAllocators  map[string]tableAllocatorState `json:"-"`
+	allocatorFailure atomic.Pointer[error]          `json:"-"`
 
 	// lazy-loading/shared-resource state (not serialized)
 	srState SharedState `json:"-"`
@@ -187,6 +189,9 @@ func (db *database) initializeTransactionLog() {
 	old := db.transactionLog
 	db.transactionLog = logfile
 	db.transactionLogKeyOpened = key
+	for _, t := range db.tables.GetAll() {
+		db.restoreTableAllocator(t)
+	}
 	if old != nil {
 		old.Close()
 	}
@@ -314,6 +319,7 @@ func (db *database) compactTransactionLog(cutoff uint64) {
 	}
 	entries = append(entries, db.catalogParticipantFrames()...)
 	entries = append(entries, db.sequenceLogEntries()...)
+	entries = append(entries, db.tableAllocatorLogEntries()...)
 
 	// Committers share transactionMu, so nobody can append between this
 	// barrier and publishing the replacement log.
@@ -514,6 +520,15 @@ func (d *database) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	for _, table := range d.tables.GetAll() {
+		if table.Allocator != nil {
+			if err := table.Allocator.validate(); err != nil {
+				return err
+			}
+			if table.Allocator.Table != table.RuntimeIdentity {
+				return fmt.Errorf("table allocator schema identity mismatch")
+			}
+			table.allocator.Store(table.Allocator)
+		}
 		if err := table.validateSystemCleanupFormats(); err != nil {
 			return err
 		}
@@ -1054,6 +1069,7 @@ func (db *database) ensureLoaded() {
 		// restore back-references; do not touch on-disk columns yet
 		for _, t := range db.tables.GetAll() {
 			t.schema = db
+			db.restoreTableAllocator(t)
 			invalidatePersistedPlannerCodeAfterLoad(t)
 			if t.Name == ".blobs" {
 				db.blobRefState().table.Store(t)
@@ -2409,6 +2425,7 @@ func moveTransactionLog(db *database, dst PersistenceEngine) PersistenceLogfile 
 	}
 	entries = append(entries, db.catalogParticipantFrames()...)
 	entries = append(entries, db.sequenceLogEntries()...)
+	entries = append(entries, db.tableAllocatorLogEntries()...)
 	replacement := dst.SwapLog(db.transactionLogKey(), entries, true)
 	old := db.transactionLog
 	db.transactionLog = replacement
@@ -2765,6 +2782,7 @@ func (db *database) newTable(name string, pm PersistencyMode) *table {
 	t.Shards[0] = NewShard(t)
 	t.publishTopologyLocked()
 	t.Auto_increment = 0
+	t.initializeNewAllocator(1)
 	t.publishShowColumnsSnapshot(true)
 	return t
 }
@@ -3134,6 +3152,11 @@ func (db *database) importClusterCommits(owner string) error {
 			db.transactionMu.Unlock()
 			return err
 		}
+	}
+	// The cold acquisition producer publishes complete allocator observations
+	// before granting schema/shard rights. Metadata getters never replay WAL.
+	for _, t := range db.tables.GetAll() {
+		db.restoreTableAllocator(t)
 	}
 	db.transactionMu.Unlock()
 	db.catalogProofVersion.Store(catalogVersion)

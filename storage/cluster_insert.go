@@ -8,7 +8,6 @@ import "fmt"
 import "time"
 import "bytes"
 import "context"
-import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
@@ -16,28 +15,32 @@ import "github.com/launix-de/memcp/storage/mosi"
 // is no seed/master allocator, second counter, or durable permissions catalog.
 // Requests are once per INSERT batch/block, before any shard lock or ownership.
 type clusterIDRequest struct {
-	Database string `json:"database"`
-	Table    string `json:"table"`
-	Explicit uint64 `json:"explicit"`
-	Count    uint64 `json:"count"`
+	Database         string `json:"database"`
+	Table            string `json:"table"`
+	Identity         string `json:"identity"`
+	Read             bool   `json:"read"`
+	ObservedExplicit bool   `json:"observed_explicit"`
+	Explicit         uint64 `json:"explicit"`
+	Count            uint64 `json:"count"`
 }
 
 type clusterIDReply struct {
-	Base uint64 `json:"base"`
+	Base  uint64              `json:"base"`
+	State tableAllocatorState `json:"state"`
 }
 
-func (cluster *nodeCluster) reserveInsertIDs(t *table, explicit, count uint64) uint64 {
+func (cluster *nodeCluster) reserveInsertIDs(t *table, explicit, count uint64, observedExplicit bool) uint64 {
 	if cluster == nil {
 		panic(mosi.NetworkError)
 	}
-	request := clusterIDRequest{t.schema.Name, t.Name, explicit, count}
+	request := clusterIDRequest{Database: t.schema.Name, Table: t.Name, Identity: t.RuntimeIdentity, Explicit: explicit, Count: count, ObservedExplicit: observedExplicit}
 	reply, err := cluster.reserveIDs(cluster.ctx, request)
 	if err != nil {
 		panic(err)
 	}
 	// This is only an advisory local high-water snapshot. Future reservations
 	// always consult the current schema owner, including after a handover.
-	t.reserveLocalAutoIncrement(reply.Base+count, 0)
+	t.mergeImportedAllocator(reply.State, reply.Base+count)
 	return reply.Base
 }
 
@@ -47,7 +50,7 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 			err = fmt.Errorf("%v", failure)
 		}
 	}()
-	if !cluster.databases[request.Database] || request.Table == "" {
+	if !cluster.databases[request.Database] || request.Table == "" || request.Identity == "" || (request.Read && (request.Count != 0 || request.Explicit != 0 || request.ObservedExplicit)) {
 		return reply, fmt.Errorf("invalid cluster ID reservation")
 	}
 	owner, err := cluster.locate(ctx, mosiResource{Database: request.Database})
@@ -66,6 +69,16 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 	if db == nil {
 		return reply, fmt.Errorf("ID reservation database disappeared")
 	}
+	if !request.Read {
+		target := db.tables.Get(request.Table)
+		if target == nil || target.RuntimeIdentity != request.Identity {
+			return reply, fmt.Errorf("ID reservation table generation disappeared")
+		}
+		// Legacy row-WAL recovery owns ordinary native reads before entering
+		// schema coordination. A row callback needing another reservation must
+		// never wait for a coordinator which itself waits for that row's shard.
+		target.prepareAllocatorRecovery()
+	}
 	// Reservation changes the atomic runtime counter, not the logical schema.
 	// Reuse the owner's existing directory transition boundary so a handover
 	// cannot copy the old counter between reservation and its durable checkpoint.
@@ -79,10 +92,15 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 	}
 	defer releaseCoordination()
 	t := db.tables.Get(request.Table)
-	if t == nil {
-		return reply, fmt.Errorf("ID reservation table disappeared")
+	if t == nil || t.RuntimeIdentity != request.Identity {
+		return reply, fmt.Errorf("ID reservation table generation disappeared")
 	}
-	reply.Base = t.reserveLocalAutoIncrement(request.Explicit, request.Count)
+	if request.Read {
+		reply.State = t.localTableAllocator()
+		return reply, nil
+	}
+	reply.Base = t.reserveLocalTableIDs(request.Explicit, request.Count, request.ObservedExplicit)
+	reply.State = t.localTableAllocator()
 	// Persist reservations before acknowledging: other nodes can commit their
 	// allocated IDs without returning the allocator's shard WAL to this node.
 	// An interrupted request may leave a gap and must never be blindly replayed.
@@ -142,7 +160,7 @@ func (r *replicationManager) mergeClusterInsertTopology(previous, incoming *tabl
 		}
 		cell.current.Store(next)
 	}
-	previous.reserveLocalAutoIncrement(atomic.LoadUint64(&incoming.Auto_increment), 0)
+	previous.mergeImportedAllocator(incoming.localTableAllocator(), incoming.localTableAllocator().High)
 	previous.mu.Lock()
 	defer previous.mu.Unlock()
 	for _, shard := range after.shards[len(before.shards):] {
