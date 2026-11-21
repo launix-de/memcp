@@ -352,6 +352,9 @@ func (tx *TxContext) acquireCatalogPublication() {
 		if len(appendDDL) != 0 && appendDDL[len(appendDDL)-1] == t {
 			continue
 		}
+		if tx.retainedColumnDDL(t) {
+			continue
+		}
 		// Successful staging retained the validated lease and proved no own
 		// endpoint rows. Decision admission has drained builders/producers, so this
 		// wait holds no input that maintenance needs in order to finish.
@@ -481,6 +484,12 @@ func (tx *TxContext) prepareCatalogDecision() error {
 	}
 	if _, untrusted := record.foreignValidationFacts(); untrusted {
 		record.Format = 18
+	}
+	for _, d := range record.ColumnAppends {
+		if d.Initialization != nil {
+			record.Format = 19
+			break
+		}
 	}
 	if len(record.ColumnAppends) != 0 || len(record.NativeDeclarations) != 0 || len(record.ColumnDeclarations) != 0 || len(record.ColumnPropertyRemovals) != 0 || len(record.Checks) != 0 || len(record.ColumnDefaults) != 0 || len(record.CheckDrops) != 0 {
 		commit.publicPublication = db.preparePublicConstraintPublication(record.Checks, record.ColumnDefaults, record.ColumnDeclarations, record.ColumnAppends, record.ColumnPropertyRemovals, record.CheckDrops, record.NativeDeclarations, record.Version, tx.publicConstraintPrograms(), tx.publicCatalogChanges())

@@ -237,6 +237,15 @@ func (changes *publicCatalogChanges) refreshMemoryLocked() {
 	directories += allocatedMap(changes.viewsHighWater, views != nil && views.tables != nil)
 	directories += allocatedMap(changes.viewsHighWater, views != nil && views.keys != nil)
 	directories += allocatedMap(changes.viewsHighWater, views != nil && views.nullColumns != nil)
+	directories += allocatedMap(changes.viewsHighWater, views != nil && views.appendedColumns != nil)
+	if views != nil {
+		for _, fields := range views.appendedColumns {
+			directories += allocatedMap(len(fields), fields != nil)
+		}
+		for _, fields := range views.nullColumns {
+			directories += allocatedMap(len(fields), fields != nil)
+		}
+	}
 	directories += allocatedMap(changes.columnWritersHighWater, views != nil && views.columnWriters != nil)
 	directories += allocatedMap(changes.checkedWritersHighWater, views != nil && views.checkedWriters != nil)
 	directories += allocatedMap(changes.blockedWritersHighWater, views != nil && views.blockedWriters != nil)

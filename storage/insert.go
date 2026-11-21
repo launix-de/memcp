@@ -640,7 +640,7 @@ func (s *storageShard) mutationGuard(tx *TxContext) *uniqueWriteGuard {
 	}
 }
 
-func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext, input *nativeMutationInput) (*uniqueWriteGuard, uint32, bool) {
+func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext, input *nativeMutationInput, initializedColumns *nativeColumnInitialInput) (*uniqueWriteGuard, uint32, bool) {
 	keys := mutationUniqueKeys(s.t, input)
 	if activeReplication(s.t.schema) == nil && ((input != nil && len(input.beforeUpdate) != 0) || (input == nil && len(s.t.Triggers) != 0 && len(s.t.GetTriggers(BeforeUpdate, nil)) != 0)) {
 		guard := s.mutationGuard(tx)
@@ -648,7 +648,7 @@ func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext, input *nativeMut
 		s.mu.RLock()
 		defer s.mu.RUnlock()
 		if (tx == nil || tx.Mode != TxACID) && s.deletions.Get(uint(id)) {
-			current, found := s.resolveVisiblePrimaryRecidLocked(id, input)
+			current, found := s.resolveVisiblePrimaryRecidLocked(id, input, tx, initializedColumns)
 			if !found {
 				guard.release()
 				return nil, id, false
@@ -675,13 +675,13 @@ func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext, input *nativeMut
 	read := func() bool {
 		if (tx == nil || tx.Mode != TxACID) && s.deletions.Get(uint(id)) {
 			var found bool
-			id, found = s.resolveVisiblePrimaryRecidLocked(id, input)
+			id, found = s.resolveVisiblePrimaryRecidLocked(id, input, tx, initializedColumns)
 			if !found {
 				return false
 			}
 		}
 		for i, column := range columns {
-			values[i] = s.rowValueByRecidLocked(id, column)
+			values[i] = s.rowValueByRecidLocked(id, column, tx, initializedColumns)
 		}
 		return true
 	}

@@ -165,7 +165,8 @@ func (g colGetter) persistentValue(recid uint32, tx *TxContext) scm.Scmer {
 }
 
 type StorageIndex struct {
-	Cols []string // sort equal-cols alphabetically, so similar conditions are canonical
+	columnInput *nativeColumnInitialInput // immutable input; never a request/Tx owner
+	Cols        []string                  // sort equal-cols alphabetically, so similar conditions are canonical
 	// ColMapCols[i] and ColMapFn[i] are set for computed index columns (col starts with ".").
 	// Both are nil for raw columns.
 	ColMapCols [][]string  // per-column source col names; nil entry means raw column
@@ -382,6 +383,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 			releaseIndexGetters(getters)
 		}
 	}()
+	input := s.t.initializedColumnInput(tx)
 	for i, col := range s.Cols {
 		if !s.columnIsSorted(i) && isScanPseudoColName(col) {
 			continue
@@ -402,6 +404,12 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 				mapSources[j] = cs
 				deltaSlots[j] = s.deltaReaderSlot(mc, cs)
 				mapColReaders[j] = newCachedColumnReaderTx(cs, tx, true, ReadAuto|readOperatorOwned)
+				if usesInitialColumn(input, mc) {
+					deltaSlots[j] = -1
+					ReleaseColumnReader(mapColReaders[j])
+					mapColReaders[j] = nil
+					mapColReaders[j] = s.t.ColumnReaderTx(tx, mc, true, ReadAuto|readOperatorOwned)
+				}
 			}
 			mapFn := s.ColMapFn[i]
 			fn := scm.PrepareSerialProc(mapFn)
@@ -413,6 +421,12 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 				hints = ReadCompressed
 			}
 			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true, hints|readOperatorOwned), source: cs, deltaSlot: s.deltaReaderSlot(col, cs)}
+			if usesInitialColumn(input, col) {
+				getters[i].deltaSlot = -1
+				ReleaseColumnReader(getters[i].raw)
+				getters[i].raw = nil
+				getters[i].raw = s.t.ColumnReaderTx(tx, col, true, hints|readOperatorOwned)
+			}
 		}
 	}
 	complete = true
@@ -603,7 +617,11 @@ func (idx *StorageIndex) String() string {
 }
 
 // getDeltaValue returns the raw column value for a delta row.
-func (s *StorageIndex) getDeltaValue(data []scm.Scmer, col string) scm.Scmer {
+func (s *StorageIndex) getDeltaValue(data []scm.Scmer, col string, recid int) scm.Scmer {
+	if value, ok := initialColumnValue(s.columnInput, col, recid-int(s.t.main_count)); ok {
+		return value
+	}
+
 	colpos, ok := s.t.deltaColumns[col]
 	if ok && colpos < len(data) {
 		return data[colpos]
@@ -726,7 +744,7 @@ func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid u
 		if state.precomputedDelta {
 			deltaVal = delta.data[i]
 		} else {
-			deltaVal = s.getDeltaValue(delta.data, s.Cols[i])
+			deltaVal = s.getDeltaValue(delta.data, s.Cols[i], delta.itemid)
 		}
 		if s.lessAt(i, mainVal, deltaVal) {
 			return -1
@@ -769,7 +787,7 @@ func (s *StorageIndex) prepareCollationKeys(state *storageIndexState, pair index
 			if state.precomputedDelta {
 				value = pair.data[colIdx]
 			} else {
-				value = s.getDeltaValue(pair.data, s.Cols[colIdx])
+				value = s.getDeltaValue(pair.data, s.Cols[colIdx], pair.itemid)
 			}
 		} else if pair.reference == nil {
 			value = pair.data[colIdx]
@@ -841,7 +859,7 @@ func effectiveBoundaryInclusiveness(cols scanAccess, indexBounds *scanIndexBound
 
 func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
 	privateInput := false
-	if columns := tx.pendingNullColumns(t.t); len(columns) != 0 {
+	if columns := tx.pendingAppendedColumns(t.t); len(columns) != 0 {
 		for i := 0; i < cols.len(); i++ {
 			_, direct := columns[cols.boundaryColumn(i)]
 			privateInput = privateInput || direct
@@ -965,6 +983,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 			}
 		}
 		index := new(StorageIndex)
+		index.columnInput = t.initializedColumnInput(tx)
 		index.Cols = make([]string, indexCols)
 		index.ColMapCols = make([][]string, indexCols)
 		index.ColMapFn = make([]scm.Scmer, indexCols)
@@ -1258,6 +1277,7 @@ func rebuildIndexes(candidates []*StorageIndex, t2 *storageShard, allowNative bo
 	// 1. Attach the snapshotted metadata to the new shard.
 	for _, candidate := range candidates {
 		candidate.t = t2
+		candidate.columnInput = nil // the successor materialized its own physical values
 	}
 
 	// 2. Prefix dedup: sort by len(Cols) descending so longer indexes absorb shorter ones
@@ -1597,7 +1617,7 @@ func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext) {
 			} else if state.precomputedDelta {
 				av = a.data[colIdx]
 			} else {
-				av = s.getDeltaValue(a.data, s.Cols[colIdx])
+				av = s.getDeltaValue(a.data, s.Cols[colIdx], a.itemid)
 			}
 			if b.itemid == -1 {
 				if b.reference == nil {
@@ -1608,7 +1628,7 @@ func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext) {
 			} else if state.precomputedDelta {
 				bv = b.data[colIdx]
 			} else {
-				bv = s.getDeltaValue(b.data, s.Cols[colIdx])
+				bv = s.getDeltaValue(b.data, s.Cols[colIdx], b.itemid)
 			}
 			if colIdx < 64 && state.collationKeyFns[colIdx] != nil {
 				keyBit := uint64(1) << uint(colIdx)
@@ -2576,7 +2596,7 @@ start_scan:
 				if state.precomputedDelta {
 					return p.data[i]
 				}
-				return s.getDeltaValue(p.data, s.Cols[i])
+				return s.getDeltaValue(p.data, s.Cols[i], p.itemid)
 			})
 			if !inRange {
 				return !beyond

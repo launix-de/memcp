@@ -16,19 +16,28 @@ import "github.com/launix-de/memcp/scm"
 // packed slot or stored value: old generations already represent its NULLs.
 // A preceding or subsequent write to the same endpoint is not in this profile.
 type catalogColumnAppend struct {
-	Table      string                      `json:"table"`
-	Identity   string                      `json:"identity"`
-	Ordinal    int                         `json:"ordinal"`
-	Name       string                      `json:"name"`
-	Type       storedColumnType            `json:"type"`
-	EnumValues []string                    `json:"enum_values,omitempty"`
-	Properties columnDeclarationProperties `json:"properties,omitempty"`
-	Comment    string                      `json:"comment,omitempty"`
+	Table          string                       `json:"table"`
+	Identity       string                       `json:"identity"`
+	Ordinal        int                          `json:"ordinal"`
+	Name           string                       `json:"name"`
+	Type           storedColumnType             `json:"type"`
+	EnumValues     []string                     `json:"enum_values,omitempty"`
+	Properties     columnDeclarationProperties  `json:"properties,omitempty"`
+	Comment        string                       `json:"comment,omitempty"`
+	Initialization *catalogColumnInitialization `json:"initialization,omitempty"`
 }
 
 func (d catalogColumnAppend) column() *column {
-	c := &column{Name: d.Name, Typ: d.Type.Type, Typdimensions: append([]int(nil), d.Type.Dimensions...), AllowNull: true, Collation: d.Type.Collation, EnumValues: append([]string(nil), d.EnumValues...), DeclarationProperties: maps.Clone(d.Properties), Comment: d.Comment}
+	c := &column{Name: d.Name, Typ: d.Type.Type, Typdimensions: append([]int(nil), d.Type.Dimensions...), AllowNull: d.Type.Nullable, Collation: d.Type.Collation, EnumValues: append([]string(nil), d.EnumValues...), DeclarationProperties: maps.Clone(d.Properties), Comment: d.Comment}
+	if d.Initialization != nil {
+		c.Default, c.DefaultName = d.Initialization.Default, d.Initialization.DefaultName
+		c.InitialValue, c.InitialValues = d.Initialization.Value, maps.Clone(d.Initialization.Extents)
+	}
 	c.UpdateSanitizer()
+	if d.Initialization != nil && c.sanitizer != nil {
+		c.Default = c.sanitizer(c.Default)
+		c.InitialValue = c.sanitizer(c.InitialValue)
+	}
 	return c
 }
 
@@ -58,7 +67,7 @@ func (d *catalogColumnAppend) memory() uint {
 		return 0
 	}
 	// A decoded durable envelope owns independent scalar payloads as well.
-	return d.containers() + uint(len(d.Table)+len(d.Identity)) + columnAppendStrings(d.Name, d.Type.Type, d.Type.Collation, d.Comment, d.EnumValues, d.Properties)
+	return d.containers() + uint(len(d.Table)+len(d.Identity)) + columnAppendStrings(d.Name, d.Type.Type, d.Type.Collation, d.Comment, d.EnumValues, d.Properties) + d.Initialization.memory()
 }
 
 func (tx *TxContext) appendPublicColumn(t *table, name, typ string, dimensions []int, options []scm.Scmer) bool {
@@ -69,23 +78,34 @@ func (tx *TxContext) appendPublicColumn(t *table, name, typ string, dimensions [
 	}
 	for i := 0; i+1 < len(options); i += 2 {
 		switch scm.String(options[i]) {
-		case "null", "fill_existing", "name_ignorecase", "collate", "properties", "comment", "enum_values":
+		case "null", "fill_existing", "name_ignorecase", "collate", "properties", "comment", "enum_values", "default", "default_name":
 		default:
 			panic("transactional nullable append requires an ordinary column without default or computation")
 		}
 	}
 	definition := decodeColumnDefinition(name, typ, dimensions, options)
 	c := definition.column
-	if name == "" || !c.AllowNull || c.IsTemp || c.AutoIncrement || definition.hasDefault || len(definition.unique) != 0 {
+	if name == "" || c.IsTemp || c.AutoIncrement || len(definition.unique) != 0 || (!c.AllowNull && !definition.hasDefault) {
 		panic("transactional append requires a fresh nullable column without a default")
+	}
+	if definition.hasDefault {
+		if err := validateColumnInitialScalar(c.Default); err != nil {
+			panic(err)
+		}
+		if c.sanitizer != nil {
+			c.Default = c.sanitizer(c.Default)
+		}
+		if err := validateColumnInitialScalar(c.Default); err != nil {
+			panic(err)
+		}
 	}
 	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
 	return tx.stagePublicCatalogDeclaration(t.schema, catalogColumnKind, func(changes *publicCatalogChanges) bool {
-		return changes.stageColumnAppend(tx, t, c)
+		return changes.stageColumnAppend(tx, t, c, definition.hasDefault, definition.fillExisting)
 	})
 }
 
-func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, c *column) bool {
+func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, c *column, initialized, fillExisting bool) bool {
 	changes.mu.Lock()
 	defer changes.mu.Unlock()
 	defer changes.refreshMemoryLocked()
@@ -101,19 +121,37 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 			changes.publishViews(tx.publicForeignAmendments(), changes.views.Load().tables)
 		}
 	}()
-	tx.requireNoColumnAppendRows(t)
+	if !initialized {
+		tx.requireNoColumnAppendRows(t)
+	}
 	// The validated lease rejects old raw callbacks and closes new writer input
 	// before waiting for a rebuild's existing DDL owner. No schema, decision,
 	// shard or amendment mutex is retained during the wait. Construction still
 	// excludes rewind/decision, and every actual row entry checks that owner.
+	lease := changes.leases[t]
 	changes.mu.Unlock()
-	t.ddlMu.Lock()
+	if initialized {
+		lease.retainDDL(t, tx.transactionState)
+	} else if lease.ddlTable.Load() == nil {
+		t.ddlMu.Lock()
+	}
 	changes.mu.Lock()
-	defer t.ddlMu.Unlock()
+	if changes.leases[t] != lease {
+		panic("append constructor lost its native declaration lease while waiting")
+	}
+	if !initialized && lease.ddlTable.Load() == nil {
+		defer t.ddlMu.Unlock()
+	}
 	// Metadata/generations and retained guards can change during maintenance or
 	// another same-T constructor. Re-attest before publishing the private input.
 	t.guardCatalogDeclarationInput(tx.transactionState)
-	tx.requireNoColumnAppendRows(t)
+	if !initialized {
+		tx.requireNoColumnAppendRows(t)
+	}
+	var initialization *catalogColumnInitialization
+	if initialized {
+		initialization = captureColumnInitialization(tx, t, c, fillExisting)
+	}
 	access := changes.db.GetWrite(tx)
 	defer access.Release()
 	changes.db.schemalock.Lock()
@@ -141,11 +179,23 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 			return false
 		}
 	}
-	d := &catalogColumnAppend{Table: t.Name, Identity: t.RuntimeIdentity, Ordinal: len(columns), Name: c.Name, Type: storedColumnTypeOf(c), EnumValues: append([]string(nil), c.EnumValues...), Properties: maps.Clone(c.DeclarationProperties), Comment: c.Comment}
+	if c.DefaultName != "" {
+		if changes.db.hasDeclarationNameLocked(c.DefaultName, nil) || tx.pendingUniqueDeclarationName(c.DefaultName) {
+			panic("declaration name already exists: " + c.DefaultName)
+		}
+		for _, view := range changes.views.Load().tables {
+			for _, previous := range view.metadata.columnNames.declarations {
+				if strings.EqualFold(previous.DefaultName, c.DefaultName) {
+					panic("declaration name already exists: " + c.DefaultName)
+				}
+			}
+		}
+	}
+	d := &catalogColumnAppend{Table: t.Name, Identity: t.RuntimeIdentity, Ordinal: len(columns), Name: c.Name, Type: storedColumnTypeOf(c), EnumValues: append([]string(nil), c.EnumValues...), Properties: maps.Clone(c.DeclarationProperties), Comment: c.Comment, Initialization: initialization}
 	columns = append(append([]*column(nil), columns...), c)
 	view, bytes := replaceStoredColumnMetadata(t, base, columns)
 	amendment := &catalogStoredColumnAmendment{appendDeclaration: d, table: t, columns: columns, previous: changes.views.Load().tables[t], columnBytes: storedColumnBytes(c) + columnAppendStrings(c.Name, c.Typ, c.Collation, c.Comment, c.EnumValues, c.DeclarationProperties)}
-	amendment.retainedBytes = uint(unsafe.Sizeof(*amendment)) + uint(cap(columns))*uint(unsafe.Sizeof((*column)(nil))) + amendment.columnBytes + bytes + d.containers() + 128
+	amendment.retainedBytes = uint(unsafe.Sizeof(*amendment)) + uint(cap(columns))*uint(unsafe.Sizeof((*column)(nil))) + amendment.columnBytes + bytes + d.containers() + d.Initialization.containers() + 128
 	history := appendCatalogDeclarationHistory(tx.publicForeignAmendments(), catalogDeclarationAmendment{column: amendment})
 	views := maps.Clone(changes.views.Load().tables)
 	views[t] = view
@@ -294,7 +344,7 @@ func validateColumnAppendShape(appends []catalogColumnAppend) error {
 	identities := make(map[string]string)
 	for _, d := range appends {
 		key := d.Table + "\x00" + scm.CaseFoldKey(d.Name)
-		if d.Table == "" || d.Name == "" || d.Ordinal < 0 || seen[key] || d.Type.Type == "" || !d.Type.Nullable || d.Type.Collation == "" || !utf8.ValidString(d.Table) || !utf8.ValidString(d.Name) || !utf8.ValidString(d.Type.Type) || !utf8.ValidString(d.Type.Collation) || !utf8.ValidString(d.Comment) {
+		if d.Table == "" || d.Name == "" || d.Ordinal < 0 || seen[key] || d.Type.Type == "" || (!d.Type.Nullable && d.Initialization == nil) || d.Type.Collation == "" || !utf8.ValidString(d.Table) || !utf8.ValidString(d.Name) || !utf8.ValidString(d.Type.Type) || !utf8.ValidString(d.Type.Collation) || !utf8.ValidString(d.Comment) {
 			return fmt.Errorf("invalid native nullable append")
 		}
 		if identity, err := uuid.Parse(d.Identity); err != nil || identity == uuid.Nil {
@@ -302,6 +352,11 @@ func validateColumnAppendShape(appends []catalogColumnAppend) error {
 		}
 		if previous, found := last[d.Table]; found && (d.Ordinal != previous+1 || identities[d.Table] != d.Identity) {
 			return fmt.Errorf("nullable append lost its ordered predecessor")
+		}
+		if d.Initialization != nil {
+			if err := validateColumnInitialization(d); err != nil {
+				return err
+			}
 		}
 		seen[key], last[d.Table], identities[d.Table] = true, d.Ordinal, d.Identity
 	}
