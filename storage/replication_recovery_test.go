@@ -435,6 +435,91 @@ func TestReplicationRecoveredDataDoesNotAcquireColdCatalogPermissions(t *testing
 	}
 }
 
+func TestReplicationPreparedSuccessorKeepsLaterWALAcrossRestart(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "prepared_successor_wal", 3)
+	config, _ := CreateTable(tbl.schema.Name, "config", Safe, false)
+	for _, name := range []string{"node", "key", "value"} {
+		config.CreateColumn(name, "text", nil, nil)
+	}
+	createTableKey(config, uniqueKey{Id: "PRIMARY", Cols: []string{"node", "key"}}, nil)
+	tbl.schema.rebuild(true, false, false, tbl)
+	original := tbl.ActiveShards()[0]
+	anchor := append([]byte(nil), engine.ReadSchema()...)
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(4), scm.NewString("before-handover")}}, nil, scm.NewNil(), false, nil)
+	r := replicaRecoveryFixture()
+	r.master, r.config = false, config
+	resource := original.replicationResource()
+	content, err := r.prepareResource(resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content == resource.Shard {
+		t.Fatal("fixture did not prepare a successor")
+	}
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("acknowledged-after-handover")}}, nil, scm.NewNil(), false, nil)
+	if string(engine.ReadSchema()) != string(anchor) {
+		t.Fatal("data preparation checkpointed the independent catalog")
+	}
+	cold := newDatabase()
+	cold.Name, cold.persistence, cold.srState = tbl.schema.Name, engine, COLD
+	cold.ensureLoaded()
+	defer cold.closeTransactionLog()
+	restarted := replicaRecoveryFixture()
+	restarted.id, restarted.master = r.id, false
+	if err := restarted.loadConfig(cold.tables.Get("config")); err != nil {
+		t.Fatal(err)
+	}
+	backup, exists := restarted.backups[restarted.resourceKey(resource)]
+	if !exists || backup.Content != content {
+		t.Fatal("prepared successor disappeared from durable local placement")
+	}
+	if len(restarted.directory.Records) != 0 {
+		t.Fatal("placement restored MOSI permissions without live peer proof")
+	}
+	databases.Set(cold.Name, cold)
+	defer databases.Set(cold.Name, tbl.schema)
+	found := false
+	for _, record := range restarted.recoveryInventory(replicaAuth{Databases: map[string]bool{cold.Name: true}}) {
+		if record.Resource == backup.Resource {
+			found = true
+			if record.Content != content || record.State != "" || len(record.Forwards) == 0 {
+				t.Fatal("cold inventory lost the completed successor or manufactured rights", record)
+			}
+		}
+	}
+	if !found || len(restarted.directory.Records) != 0 {
+		t.Fatal("cold inventory omitted placement or restored permissions")
+	}
+	access := cold.tables.Get(tbl.Name).ActiveShards()[0].GetRead(nil, false)
+	defer access.Release()
+	if access.shard.uuid.String() != content || access.shard.Count() != 5 {
+		t.Fatal("restart lost writes acknowledged on the prepared successor", access.shard.Count())
+	}
+}
+
+func TestReplicationPreparedNamespaceFailureKeepsLaterWALRecoverable(t *testing.T) {
+	tbl, engine := createDurabilityTestTable(t, "prepared_namespace_failure", 3)
+	tbl.schema.rebuild(true, false, false, tbl)
+	resource := tbl.ActiveShards()[0].replicationResource()
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(4), scm.NewString("before-failure")}}, nil, scm.NewNil(), false, nil)
+	barrier := &catalogNamespaceBarrier{PersistenceEngine: engine, before: func() { panic("injected source namespace failure") }}
+	tbl.schema.persistence = barrier
+	defer func() { tbl.schema.persistence = engine }()
+	r := replicaRecoveryFixture()
+	if _, err := r.prepareResource(resource); err == nil {
+		t.Fatal("source namespace failure was ignored")
+	}
+	if barrier.calls != 1 || len(r.backups) != 0 {
+		t.Fatal("incomplete source placement was published")
+	}
+	tbl.schema.persistence = engine
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(99), scm.NewString("acknowledged-after-failure")}}, nil, scm.NewNil(), false, nil)
+	reopened := reloadTableFromPersistence(t, tbl.schema.Name, engine)
+	if count := reopened.ActiveShards()[0].Count(); count != 5 {
+		t.Fatal("failed preparation lost a subsequently acknowledged write", count)
+	}
+}
+
 func TestReplicationIdentityUsesLocalSettingsCheckpoint(t *testing.T) {
 	oldBase := Basepath
 	settingsMu.Lock()

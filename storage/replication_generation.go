@@ -381,16 +381,26 @@ func (r *replicationManager) prepareResource(resource mosiResource) (content str
 		reader.Close()
 	}
 	rebuilt := shard.rebuild(force)
-	if rebuilt != shard {
-		if err := r.replaceShard(resource, shard, rebuilt); err != nil {
-			return "", err
-		}
-	}
 	if table.PersistencyMode != Memory && table.PersistencyMode != Cache && table.Name != ".blobs" {
 		if _, valid := readBlobManifest(rebuilt.home().persistence.ReadColumn(rebuilt.uuid.String(), blobManifestColumn)); !valid {
 			if _, valid := backfillBlobManifest(rebuilt, true); !valid {
 				return "", fmt.Errorf("invalid shard blob manifest")
 			}
+		}
+	}
+	if rebuilt != shard {
+		if r.cluster == nil && !isCatalogResource(resource) && table.PersistencyMode != Memory && table.PersistencyMode != Cache {
+			// The source keeps this generation too: writes acknowledged after
+			// reclaim append to its WAL, even if the tenant root still names
+			// its predecessor. Persist local placement before publishing it;
+			// preparing a handover must not checkpoint independent catalog rows.
+			rebuilt.home().persistence.SyncNamespace()
+			if err := r.saveBackup(resource, rebuilt.uuid.String()); err != nil {
+				return "", err
+			}
+		}
+		if err := r.replaceShard(resource, shard, rebuilt); err != nil {
+			return "", err
 		}
 	}
 	c.current.Store(rebuilt)
