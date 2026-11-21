@@ -3851,10 +3851,11 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 	// capture starting row index for undo logging
 	firstNewRecid := t.main_count + uint32(len(t.deltaRows()))
 	firstNewInsertIdx := len(t.deltaRows()) // for capturing actual rows after insertDataset fills auto-increment
+	input := currentTx.mutationInputFor(t.t)
+	declarations := mutationColumns(t.t, currentTx, input)
 	var triggerInsertRows []dataset
 	t.insertDataset(columns, values, onFirstInsertId, validatedSchema, currentTx)
 	if fireTriggers && len(t.t.Triggers) > 0 && (t.t.statementTriggerEvents.Load() == 0 || t.t.hasNonStatementTriggers.Load()) {
-		declarations := t.t.columnDeclarations()
 		newRows := t.deltaRows()[firstNewInsertIdx:]
 		triggerInsertRows = make([]dataset, len(newRows))
 		for i, deltaRow := range newRows {
@@ -3922,7 +3923,6 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 		t.logfile.Flush(true) // write barrier; no tx means immediate sync
 	}
 	if eventWriter != nil {
-		declarations := t.t.columnDeclarations()
 		// Fix the accepted range before releasing the source lock. A concurrent
 		// append is never part of this physical INSERT's logical event.
 		accepted := t.deltaRows()[firstNewInsertIdx : firstNewInsertIdx+len(values)]
@@ -3947,7 +3947,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 			t.mu.Unlock()
 			defer t.lockForMutation(currentTx, uniqueGuard)
 			for _, row := range triggerInsertRows {
-				uniqueGuard.after(uniqueAfterTrigger{table: t.t, timing: AfterInsert, new: row, tx: currentTx})
+				uniqueGuard.after(uniqueAfterTrigger{table: t.t, timing: AfterInsert, new: row, tx: currentTx, input: input})
 			}
 		}()
 	}

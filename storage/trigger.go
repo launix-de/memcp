@@ -839,11 +839,19 @@ func (t *table) SetTriggerTarget(name string, target *table, acquire func(*TxCon
 
 // rowToDict converts a dataset to a dict with column names
 func (t *table) rowToDict(row dataset) scm.Scmer {
+	return t.rowToDictInput(row, nil)
+}
+
+func (t *table) rowToDictInput(row dataset, input *nativeMutationInput) scm.Scmer {
 	if row == nil {
 		return scm.NewNil()
 	}
-	fd := scm.NewFastDictValue(len(t.Columns))
-	for i, col := range t.Columns {
+	columns := t.Columns
+	if input != nil {
+		columns = input.columns
+	}
+	fd := scm.NewFastDictValue(len(columns))
+	for i, col := range columns {
 		if i < len(row) {
 			fd.Set(scm.NewString(col.Name), row[i], nil)
 		}
@@ -923,12 +931,12 @@ func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset, tx
 		var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
 		switch timing {
 		case BeforeInsert, AfterInsert:
-			newDict = t.rowToDict(newRow)
+			newDict = t.rowToDictInput(newRow, input)
 		case BeforeDelete, AfterDelete:
-			oldDict = t.rowToDict(oldRow)
+			oldDict = t.rowToDictInput(oldRow, input)
 		case BeforeUpdate, AfterUpdate:
-			oldDict = t.rowToDict(oldRow)
-			newDict = t.rowToDict(newRow)
+			oldDict = t.rowToDictInput(oldRow, input)
+			newDict = t.rowToDictInput(newRow, input)
 		case AfterInvalidate:
 			// no row data — column-level invalidation propagation
 		}
@@ -1011,9 +1019,9 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 			for _, row := range rows {
 				var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
 				if isOld {
-					oldDict = t.rowToDict(row)
+					oldDict = t.rowToDictInput(row, input)
 				} else {
-					newDict = t.rowToDict(row)
+					newDict = t.rowToDictInput(row, input)
 				}
 				tr := tr
 				go func() {
@@ -1052,9 +1060,9 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 							for _, row := range rows {
 								var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
 								if isOld {
-									oldDict = t.rowToDict(row)
+									oldDict = t.rowToDictInput(row, input)
 								} else {
-									newDict = t.rowToDict(row)
+									newDict = t.rowToDictInput(row, input)
 								}
 								scm.Apply(tr.Func, oldDict, newDict, session, txContextScmer(tx))
 							}
@@ -1072,9 +1080,9 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 			for _, row := range rows {
 				var oldDict, newDict scm.Scmer = scm.NewNil(), scm.NewNil()
 				if isOld {
-					oldDict = t.rowToDict(row)
+					oldDict = t.rowToDictInput(row, input)
 				} else {
-					newDict = t.rowToDict(row)
+					newDict = t.rowToDictInput(row, input)
 				}
 				func() {
 					var sp Savepoint

@@ -50,7 +50,8 @@ func (operation *nativeMutationOperation) declareEffect(t *table, descriptor nat
 	effect := &nativeMutationEffect{target: t, event: descriptor.event, columns: scm.NewSlice(values), programs: programs}
 	if len(programs) != 0 {
 		effect.replacement = programs[0].replacement
-		effect.old, effect.new = newNativeTransitionRelation(t), newNativeTransitionRelation(t)
+		declarations := mutationColumns(t, operation.invocation, operation.invocation.mutationInputFor(t))
+		effect.old, effect.new = newNativeTransitionRelation(t, declarations), newNativeTransitionRelation(t, declarations)
 	}
 	operation.mu.Lock()
 	defer operation.mu.Unlock()
