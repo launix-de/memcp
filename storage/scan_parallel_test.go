@@ -1229,12 +1229,25 @@ func TestReserveIDsPersistedPrefixRecovery(t *testing.T) {
 	block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(100)).Slice()
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{block[0], scm.NewString("only first ID persisted")}}, nil, scm.NewNil(), false, nil)
 	reloaded := reloadTableFromPersistence(t, "treserveidprefix", persistence)
-	if atomic.LoadUint64(&reloaded.Auto_increment) != 1 {
-		t.Fatal("a persisted prefix made its unlogged unused suffix durable")
+	if atomic.LoadUint64(&reloaded.Auto_increment) != 100 {
+		t.Fatal("accepted unused reservations were lost after prefix recovery")
+	}
+	row := reloaded.scan(nil, scm.NewSlice(nil), nil, nil,
+		scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }), []string{"id", "payload"},
+		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewSlice([]scm.Scmer{a[1], a[2]}) }), scm.NewNil(),
+		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			if a[0].IsNil() {
+				return a[1]
+			}
+			return a[0]
+		}), false)
+	if reloaded.CountExact() != 1 || !row.IsSlice() || len(row.Slice()) != 2 ||
+		row.Slice()[0].Int() != 1 || row.Slice()[1].String() != "only first ID persisted" {
+		t.Fatalf("allocator recovery changed the persisted row: %v", row)
 	}
 	next := scm.Apply(reserve, NewTableScmer(reloaded), scm.NewInt(1)).Slice()
-	if next[0].Int() != 2 || next[1].Int() != 2 {
-		t.Fatalf("unlogged suffix was not recovered from persisted IDs: %v", next)
+	if next[0].Int() != 101 || next[1].Int() != 101 {
+		t.Fatalf("accepted unused suffix was reused after recovery: %v", next)
 	}
 }
 

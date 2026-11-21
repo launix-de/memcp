@@ -8,6 +8,7 @@ import "fmt"
 import "time"
 import "bytes"
 import "context"
+import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
@@ -172,7 +173,7 @@ func (r *replicationManager) mergeClusterInsertTopology(previous, incoming *tabl
 		}
 		cell.current.Store(next)
 	}
-	previous.mergeImportedAllocator(incoming.localTableAllocator(), incoming.localTableAllocator().High)
+	previous.mergeImportedAllocator(incoming.localTableAllocator(), atomic.LoadUint64(&incoming.Auto_increment))
 	previous.mu.Lock()
 	defer previous.mu.Unlock()
 	for _, shard := range after.shards[len(before.shards):] {
