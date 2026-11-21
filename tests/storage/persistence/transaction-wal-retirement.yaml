@@ -9,8 +9,16 @@ setup:
 - sql: CREATE TABLE wal_retirement_rows(id INT PRIMARY KEY,value INT)
 - sql: INSERT wal_retirement_rows VALUES(1,10),(2,20)
 - scm: (rebuild (table "memcp-tests" false "wal_retirement_rows" false nil) true false nil true)
+- sql: DROP TABLE IF EXISTS wal_retirement_pressure_cs
+- sql: CREATE TABLE wal_retirement_pressure_cs(id INT PRIMARY KEY,value INT)
+- sql: INSERT wal_retirement_pressure_cs VALUES(1,10),(2,20)
+- sql: DROP TABLE IF EXISTS wal_retirement_pressure_acid
+- sql: CREATE TABLE wal_retirement_pressure_acid(id INT PRIMARY KEY,value INT)
+- sql: INSERT wal_retirement_pressure_acid VALUES(1,10),(2,20)
 cleanup:
 - sql: DROP TABLE IF EXISTS wal_retirement_rows
+- sql: DROP TABLE IF EXISTS wal_retirement_pressure_cs
+- sql: DROP TABLE IF EXISTS wal_retirement_pressure_acid
 test_cases:
 - name: A no-change input followed by rebuilds retains its original commit WAL
   timeout: 15
@@ -76,3 +84,61 @@ test_cases:
 - name: Recovery preserves exact committed and rolled back values
   sql: SELECT id,value FROM wal_retirement_rows ORDER BY id
   expect: {rows: 2,data: [{id: 1,value: 11},{id: 2,value: 20}]}
+- name: Pending CS checkpoint inputs survive actual persisted-payload pressure until commit
+  scm: "(begin\n (define limit (settings \"MaxPersistBytes\"))\n (define target (table \"memcp-tests\" false \"wal_retirement_pressure_cs\" false nil))\n (define\
+    \ owner (newsession)) (owner \"username\" \"root\") (owner \"schema\" \"memcp-tests\") (tx_begin owner)\n (try (lambda () (begin\n  (define tx (owner \"__memcp_tx\"\
+    ))\n  (tsql_execute_statement tx \"memcp-tests\" \"UPDATE wal_retirement_pressure_cs SET value=33 WHERE id=1\" owner (lambda (_row) true) (lambda (_fields) true))\n\
+    \  (rebuild target true false tx true)\n  /* The existing cache registration has a one-second minimum idle lifetime. */\n  (sleep 1.1)\n  (settings \"MaxPersistBytes\"\
+    \ 1)\n  (settings \"MaxPersistBytes\" limit)\n  (tx_commit owner)\n  (sort (scan nil target '() '() '() (lambda () true) '(\"id\" \"value\")\n   (lambda (acc\
+    \ id value) (append acc (list id value))) '()\n   (lambda (left right) (merge (list left right))) false)\n   (lambda (left right) (< (car left) (car right))))))\n\
+    \  (lambda (cause) (begin (settings \"MaxPersistBytes\" limit) (tx_rollback owner) (error cause)))))"
+  timeout: 15
+  expect:
+    result:
+    - - 1
+      - 33
+    - - 2
+      - 20
+  cleanup:
+  - scm: (settings "MaxPersistBytes" 0)
+- name: Pending ACID checkpoint inputs survive actual persisted-payload pressure until commit
+  scm: "(begin\n (define limit (settings \"MaxPersistBytes\"))\n (define target (table \"memcp-tests\" false \"wal_retirement_pressure_acid\" false nil))\n (define\
+    \ owner (newsession)) (owner \"username\" \"root\") (owner \"schema\" \"memcp-tests\") (tx_begin_acid owner)\n (try (lambda () (begin\n  (define tx (owner \"\
+    __memcp_tx\"))\n  (tsql_execute_statement tx \"memcp-tests\" \"UPDATE wal_retirement_pressure_acid SET value=33 WHERE id=1\" owner (lambda (_row) true) (lambda\
+    \ (_fields) true))\n  (rebuild target true false tx true)\n  /* The existing cache registration has a one-second minimum idle lifetime. */\n  (sleep 1.1)\n  (settings\
+    \ \"MaxPersistBytes\" 1)\n  (settings \"MaxPersistBytes\" limit)\n  (tx_commit owner)\n  (sort (scan nil target '() '() '() (lambda () true) '(\"id\" \"value\"\
+    )\n   (lambda (acc id value) (append acc (list id value))) '()\n   (lambda (left right) (merge (list left right))) false)\n   (lambda (left right) (< (car left)\
+    \ (car right))))))\n  (lambda (cause) (begin (settings \"MaxPersistBytes\" limit) (tx_rollback owner) (error cause)))))"
+  timeout: 15
+  expect:
+    result:
+    - - 1
+      - 33
+    - - 2
+      - 20
+  cleanup:
+  - scm: (settings "MaxPersistBytes" 0)
+- name: Lose the process after pressure-protected checkpoint commits
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Recover pressure-protected original decisions
+  action: restart
+- name: Recover exact CS values after pre-forward pressure
+  sql: SELECT id,value FROM wal_retirement_pressure_cs ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 33
+    - id: 2
+      value: 20
+- name: Recover exact ACID values after pre-forward pressure
+  sql: SELECT id,value FROM wal_retirement_pressure_acid ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 33
+    - id: 2
+      value: 20

@@ -345,6 +345,12 @@ func (s *storageShard) catchUpRebuildLocked(next *storageShard, snapshotInsertCo
 		}
 	}
 	s.nextPendingVisibility = nil
+	// CS inserts that arrived after the initial snapshot have no per-coordinate
+	// visibility message. Enroll their actual original owner before publication
+	// so the successor's WAL/payload cannot be evicted before a later undo.
+	for owner := range s.visibilityOwners() {
+		owner.retainVisibilityProjection(next)
+	}
 }
 
 func (s *storageShard) setNextTranslation(m map[uint32]uint32) {
@@ -1044,6 +1050,21 @@ func (s *storageShard) persistenceInUse() bool {
 	return s.activeTransactions.Load() != 0 || s.cacheReaders.Load() != 0
 }
 
+// Pending masks exclude eviction of a CURRENT checkpoint before its first
+// later undo/forwarding write. Retired intermediates remain discardable: their
+// non-owning projections must not retain obsolete compressed payloads or WALs.
+func (s *storageShard) pendingVisibility() bool {
+	if generation := s.generation.Load(); generation != nil && generation.retired.Load() {
+		return false
+	}
+	active := false
+	s.visibilityProjections.Range(func(key, _ any) bool {
+		active = !key.(*transactionState).visibilityClosed.Load()
+		return !active
+	})
+	return active
+}
+
 // mayDelegate describes the caller's ability to consume a shard-local result.
 // Native catalog/uniqueness/maintenance readers need local payload; physical
 // operator consumers can catch delegation and ship their complete invocation.
@@ -1271,7 +1292,7 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	if !s.mu.TryLock() {
 		return false // shard is in use, skip eviction
 	}
-	if s.cacheReaders.Load() != 0 {
+	if s.persistenceInUse() || s.pendingVisibility() {
 		s.mu.Unlock()
 		return false // preparation/scan owns columns even outside its row lock
 	}
@@ -1317,7 +1338,7 @@ func (s *storageShard) evictionOffer(currentSize int64) evictionOffer {
 		return evictionOffer{}
 	}
 	defer s.mu.RUnlock()
-	if s.cacheReaders.Load() != 0 {
+	if s.persistenceInUse() || s.pendingVisibility() {
 		return evictionOffer{}
 	}
 	if s.state() == WRITE && s.main_count == 0 && len(s.deltaRows()) == 0 {
@@ -1433,7 +1454,7 @@ func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	if !s.mu.TryLock() {
 		return false // shard is in use, retry later
 	}
-	if s.cacheReaders.Load() != 0 {
+	if s.persistenceInUse() || s.pendingVisibility() {
 		s.mu.Unlock()
 		return false
 	}
