@@ -1967,6 +1967,38 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 
 				acidMode := currentTx != nil && currentTx.Mode == TxACID
 				uniqueCheckNeeded := keys != nil && uniqueColsChanged
+				acquireUpdateKeys := func(needed uniqueWriteGuard) {
+					if !exactUpdate || uniqueGuard != nil && (uniqueGuard.mutation == nil || uniqueGuard.held) {
+						// Borrowed collision ownership keeps its existing nonblocking
+						// extension contract; it may already hold other key stripes.
+						if uniqueGuard == nil {
+							if !needed.tryLock() {
+								panic(sqldb.NewSQLError1(1213, "40001", "Concurrent UNIQUE key change; retry transaction"))
+							}
+							needed.ownedShard = t
+							retainedUnique, uniqueGuard = &needed, &needed
+						} else {
+							uniqueGuard.extend(needed.mask)
+						}
+						return
+					}
+					// A first stripe miss can be another row sharing this bounded
+					// hash domain. Wait without the physical mutex, after RHS/BEFORE,
+					// rather than treating ordinary parallel work as a row conflict.
+					if uniqueGuard == nil {
+						needed.ownedShard = t
+						retainedUnique, uniqueGuard = &needed, &needed
+					} else {
+						uniqueGuard.mask = needed.mask
+					}
+					t.runWithWriteLockReleased(currentTx, uniqueGuard.lock)
+					if currentTx.transactionState != originalState || currentTx.State != TxActive {
+						panic("native mutation callback lost its original transaction")
+					}
+					if !currentTx.IsVisible(t, targetIdx) {
+						panic(sqldb.NewSQLError1(1213, "40001", "Concurrent row replacement; retry transaction"))
+					}
+				}
 				if exactUpdate && len(keys) != 0 && !uniqueCheckNeeded {
 					payloadCols, payloadRow := buildPayload()
 					oldRow := make([]scm.Scmer, len(payloadCols))
@@ -1974,15 +2006,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						oldRow[i] = t.rowValueByRecidLocked(targetIdx, name, currentTx, initializedColumns)
 					}
 					needed := t.t.guardUniqueWrites(payloadCols, [][]scm.Scmer{payloadRow, oldRow}, false, 0, currentTx, input)
-					if uniqueGuard == nil {
-						if !needed.tryLock() {
-							panic(sqldb.NewSQLError1(1213, "40001", "Concurrent UNIQUE key change; retry transaction"))
-						}
-						needed.ownedShard = t
-						retainedUnique, uniqueGuard = &needed, &needed
-					} else {
-						uniqueGuard.extend(needed.mask)
-					}
+					acquireUpdateKeys(needed)
 				}
 
 				// unique constraint checking
@@ -1995,16 +2019,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					needed := t.t.guardUniqueWrites(payloadCols, [][]scm.Scmer{payloadRow}, false, 0, currentTx, input)
 					oldKeys := t.t.guardUniqueWrites(payloadCols, [][]scm.Scmer{oldRow}, false, 0, currentTx, input)
 					needed.mask.include(oldKeys.mask)
-					if uniqueGuard == nil {
-						if !needed.tryLock() {
-							panic(sqldb.NewSQLError1(1213, "40001", "Concurrent UNIQUE key change; retry transaction"))
-						}
-						needed.ownedShard = t
-						retainedUnique = &needed
-						uniqueGuard = &needed
-					} else {
-						uniqueGuard.extend(needed.mask)
-					}
+					acquireUpdateKeys(needed)
 					wasDeletedBefore := t.deletions.Get(uint(targetIdx))
 					t.deletions.Set(uint(targetIdx), true)
 					checked := false
