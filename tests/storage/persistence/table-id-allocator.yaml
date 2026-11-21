@@ -11,6 +11,8 @@ setup:
 - scm: (dropdatabase "memcp-tests-allocator-authority" true)
 - sql: DROP PROCEDURE IF EXISTS allocator_read_current
 - sql: DROP FUNCTION IF EXISTS allocator_current_function
+- sql: DROP FUNCTION IF EXISTS allocator_current_local
+- sql: DROP FUNCTION IF EXISTS allocator_current_wrapper
 - sql: DROP VIEW IF EXISTS allocator_joined_view
 - sql: DROP TABLE IF EXISTS allocator_seeded
 - sql: DROP TABLE IF EXISTS allocator_unused
@@ -32,6 +34,8 @@ cleanup:
 - scm: (dropdatabase "memcp-tests-allocator-authority" true)
 - sql: DROP PROCEDURE IF EXISTS allocator_read_current
 - sql: DROP FUNCTION IF EXISTS allocator_current_function
+- sql: DROP FUNCTION IF EXISTS allocator_current_local
+- sql: DROP FUNCTION IF EXISTS allocator_current_wrapper
 - sql: DROP VIEW IF EXISTS allocator_joined_view
 - sql: DROP TABLE IF EXISTS allocator_seeded
 - sql: DROP TABLE IF EXISTS allocator_unused
@@ -80,25 +84,39 @@ test_cases:
   session_id: allocator-rollback
   steps:
   - sql: BEGIN TRANSACTION
+    session_id: allocator-rollback
   - sql: INSERT allocator_seeded(value) VALUES(3)
+    session_id: allocator-rollback
   - sql: SELECT IDENT_CURRENT('allocator_seeded') AS current_value,COUNT(*) AS n FROM allocator_seeded
+    session_id: allocator-rollback
     expect: {rows: 1, data: [{current_value: 57,n: 3}]}
   - sql: ROLLBACK
+    session_id: allocator-rollback
   - sql: SELECT IDENT_CURRENT('allocator_seeded') AS current_value,COUNT(*) AS n FROM allocator_seeded
+    session_id: allocator-rollback
     expect: {rows: 1, data: [{current_value: 57,n: 2}]}
 - name: Savepoint rewind retains consumed IDs and complete row values
   session_id: allocator-savepoint
   steps:
   - sql: BEGIN TRANSACTION
+    session_id: allocator-savepoint
   - sql: INSERT allocator_seeded(value) VALUES(4)
+    session_id: allocator-savepoint
   - sql: SAVE TRANSACTION allocator_point
+    session_id: allocator-savepoint
   - sql: INSERT allocator_seeded(value) VALUES(5)
+    session_id: allocator-savepoint
   - sql: ROLLBACK TRANSACTION allocator_point
+    session_id: allocator-savepoint
   - sql: INSERT allocator_seeded(value) VALUES(6)
+    session_id: allocator-savepoint
   - sql: COMMIT
+    session_id: allocator-savepoint
   - sql: SELECT id,value FROM allocator_seeded ORDER BY id
+    session_id: allocator-savepoint
     expect: {rows: 4, data: [{id: 55,value: 1},{id: 56,value: 2},{id: 58,value: 4},{id: 60,value: 6}]}
   - sql: SELECT IDENT_CURRENT('allocator_seeded') AS current_value
+    session_id: allocator-savepoint
     expect: {rows: 1, data: [{current_value: 60}]}
 - name: Failed UNIQUE insert consumes the identity before rejecting the row
   session_id: allocator-failure
@@ -181,14 +199,14 @@ test_cases:
       (createdatabase "memcp-tests-allocator-authority" true)
       (run admin "memcp-tests-allocator-authority" "DROP TABLE IF EXISTS allocator_secured")
       (run admin "memcp-tests-allocator-authority" "CREATE TABLE allocator_secured(id INT IDENTITY(501,1),value INT)")
-      (run admin "memcp-tests" "GRANT CONNECT TO allocator_metadata_reader")
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO allocator_metadata_reader" nil))
       (define reader (newsession))
       (reader "username" "allocator_metadata_reader")
       (reader "__tsql_principal_id" (tsql_account_id "allocator_metadata_reader"))
       (define first (run reader "memcp-tests" "SELECT IDENT_CURRENT('[memcp-tests-allocator-authority].dbo.allocator_secured') AS current_value"))
-      (run admin "memcp-tests-allocator-authority" "GRANT CONNECT TO allocator_metadata_reader")
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests-allocator-authority`.* TO allocator_metadata_reader" nil))
       (define allowed (run reader "memcp-tests" "SELECT IDENT_CURRENT('[memcp-tests-allocator-authority].dbo.allocator_secured') AS current_value"))
-      (run admin "memcp-tests-allocator-authority" "REVOKE CONNECT FROM allocator_metadata_reader")
+      (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests-allocator-authority`.* FROM allocator_metadata_reader" nil))
       (define revoked (run reader "memcp-tests" "SELECT IDENT_CURRENT('[memcp-tests-allocator-authority].dbo.allocator_secured') AS current_value"))
       (list (first "current_value") (allowed "current_value") (revoked "current_value")))
   expect: {result: [null,501,null]}
@@ -199,8 +217,7 @@ test_cases:
       (eval (parse_sql "memcp-tests" "DROP USER allocator_metadata_reader" nil))
       (eval (parse_sql "memcp-tests" "CREATE USER allocator_metadata_reader IDENTIFIED BY 'new-allocator-pw'" nil))
       (define admin (newsession)) (admin "username" "root")
-      (tsql_execute_request "memcp-tests-allocator-authority" "GRANT CONNECT TO allocator_metadata_reader"
-        admin nil 0 (lambda (row) true) (lambda fields true))
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests-allocator-authority`.* TO allocator_metadata_reader" nil))
       (define fresh (list "allocator_metadata_reader" (tsql_account_id "allocator_metadata_reader")))
       (define old_result (tsql_ident_current_rows "memcp-tests-allocator-authority" old "allocator_secured" nil '()))
       (define new_result (tsql_ident_current_rows "memcp-tests-allocator-authority" fresh "allocator_secured" nil '()))
@@ -271,6 +288,16 @@ test_cases:
   steps:
   - sql: CREATE FUNCTION allocator_current_function() RETURNS NUMERIC(38,0) AS BEGIN RETURN IDENT_CURRENT('dbo.allocator_native'); END
   - sql: SELECT dbo.allocator_current_function() AS current_value
+    expect: {rows: 1, data: [{current_value: 104}]}
+- name: A scalar initializer retains its relational intrinsic and declared local value
+  steps:
+  - sql: CREATE FUNCTION allocator_current_local() RETURNS NUMERIC(38,0) AS BEGIN DECLARE @current NUMERIC(38,0)=IDENT_CURRENT('dbo.allocator_native'); RETURN @current; END
+  - sql: SELECT dbo.allocator_current_local() AS current_value
+    expect: {rows: 1, data: [{current_value: 104}]}
+- name: A scalar wrapper keeps the relational dependency of its guarded callee
+  steps:
+  - sql: CREATE FUNCTION allocator_current_wrapper() RETURNS NUMERIC(38,0) AS BEGIN RETURN dbo.allocator_current_function(); END
+  - sql: SELECT dbo.allocator_current_wrapper() AS current_value
     expect: {rows: 1, data: [{current_value: 104}]}
 
 - name: Invalid native observation capabilities fail before any allocator or row change
