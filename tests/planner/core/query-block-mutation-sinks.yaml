@@ -1,0 +1,193 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: SELECT and mutation sinks consume the same complete logical query blocks
+setup:
+- sql: CREATE TABLE qb_write_values(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO qb_write_values VALUES(1,10),(2,20),(3,30),(4,40)
+- sql: CREATE TABLE qb_write_source(id INT PRIMARY KEY)
+- sql: INSERT INTO qb_write_source VALUES(1),(2),(3),(4)
+- sql: CREATE TABLE qb_write_mysql(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO qb_write_mysql VALUES(1,10),(2,NULL),(3,30)
+- sql: CREATE TABLE qb_write_pg(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO qb_write_pg VALUES(1,10),(2,NULL),(3,30)
+- sql: CREATE TABLE qb_write_tds(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO qb_write_tds VALUES(1,10),(2,NULL),(3,30)
+cleanup:
+- sql: DROP TABLE qb_write_tds
+- sql: DROP TABLE qb_write_pg
+- sql: DROP TABLE qb_write_mysql
+- sql: DROP TABLE qb_write_source
+- sql: DROP TABLE qb_write_values
+test_cases:
+- name: UPDATE consumes a completed scalar-stage query
+  scm: |-
+    (begin
+      (define session (newsession))
+      (with_query_request session nil 0 "complete query mutation" (lambda (statement)
+        (statement "complete query mutation" false (lambda (tx) (begin
+          (define ag (list 1 (quote +) 0))
+          (define stage (make_group_stage "write-count" (list "rows" "memcp-tests" "qb_write_source" false nil)
+            '() '(1) (list ag) nil '() '() nil nil '()))
+          (define query (make_query_block "memcp-tests" (list (list "t" "memcp-tests" "qb_write_values" false nil)
+            (list "totals" "memcp-tests" (make_stage_output_relation "write-count") false
+              (list (quote equal??) (list (quote get_column) "totals" false "k0" false) 1)))
+            (list "value" (list (quote get_column) "totals" false (aggregate_col_name ag) false))
+            (list (quote <) (list (quote get_column) "t" false "id" false) 3) nil nil nil nil nil '() (list stage) '()))
+          (eval (build_dml_plan "qb_write_values" "t" query (newsession) tx))))))))
+  expect:
+    result: 2
+- name: The retained scalar dependency supplies exact mutation values
+  sql: SELECT id,value FROM qb_write_values ORDER BY id
+  expect: &id001
+    rows: 4
+    data:
+    - id: 1
+      value: 4
+    - id: 2
+      value: 4
+    - id: 3
+      value: 30
+    - id: 4
+      value: 40
+- name: The native transaction owns rollback of a completed-stage UPDATE
+  scm: |-
+    (begin
+      (define session (newsession))
+      (tx_begin session)
+      (define affected
+        (with_query_request session nil 0 "complete query mutation" (lambda (statement)
+          (statement "complete query mutation" false (lambda (tx) (begin
+            (define ag (list 1 (quote +) 0))
+            (define stage (make_group_stage "write-count" (list "rows" "memcp-tests" "qb_write_source" false nil)
+              '() '(1) (list ag) nil '() '() nil nil '()))
+            (define query (make_query_block "memcp-tests" (list (list "t" "memcp-tests" "qb_write_values" false nil)
+              (list "totals" "memcp-tests" (make_stage_output_relation "write-count") false
+                (list (quote equal??) (list (quote get_column) "totals" false "k0" false) 1)))
+              (list "value" (list (quote +) 6 (list (quote get_column) "totals" false (aggregate_col_name ag) false)))
+              (list (quote <) (list (quote get_column) "t" false "id" false) 3) nil nil nil nil nil '() (list stage) '()))
+            (eval (build_dml_plan "qb_write_values" "t" query (newsession) tx))))))))
+      (tx_rollback session)
+      affected)
+  expect:
+    result: 2
+- name: Rollback retains all original public mutation values
+  sql: SELECT id,value FROM qb_write_values ORDER BY id
+  expect: *id001
+- name: DELETE consumes the same completed-stage source and predicate
+  scm: |-
+    (begin
+      (define session (newsession))
+      (with_query_request session nil 0 "complete query mutation" (lambda (statement)
+        (statement "complete query mutation" false (lambda (tx) (begin
+          (define ag (list 1 (quote +) 0))
+          (define stage (make_group_stage "write-count" (list "rows" "memcp-tests" "qb_write_source" false nil)
+            '() '(1) (list ag) nil '() '() nil nil '()))
+          (define query (make_query_block "memcp-tests" (list (list "t" "memcp-tests" "qb_write_values" false nil)
+            (list "totals" "memcp-tests" (make_stage_output_relation "write-count") false
+              (list (quote equal??) (list (quote get_column) "totals" false "k0" false) 1)))
+            nil
+            (list (quote and) (list (quote >) (list (quote get_column) "t" false "id" false) 2) (list (quote equal??) (list (quote get_column) "totals" false (aggregate_col_name ag) false) 4)) nil nil nil nil nil '() (list stage) '()))
+          (eval (build_dml_plan "qb_write_values" "t" query (newsession) tx))))))))
+  expect:
+    result: 2
+- name: DELETE publishes only the selected target identities
+  sql: SELECT id,value FROM qb_write_values ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 4
+    - id: 2
+      value: 4
+- name: sql UPDATE retains expression and NULL semantics
+  syntax: sql
+  sql: UPDATE qb_write_mysql SET value=CASE WHEN value IS NULL THEN 7 ELSE value+2 END WHERE id<=2
+  expect:
+    affected_rows: 2
+- name: sql UPDATE emits exact stored values
+  syntax: sql
+  sql: SELECT id,value FROM qb_write_mysql ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 12
+    - id: 2
+      value: 7
+    - id: 3
+      value: 30
+- name: sql DELETE retains the selected row domain
+  syntax: sql
+  sql: DELETE FROM qb_write_mysql WHERE value<20
+  expect:
+    affected_rows: 2
+- name: sql DELETE leaves the exact complement
+  syntax: sql
+  sql: SELECT id,value FROM qb_write_mysql ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 3
+      value: 30
+- name: postgresql UPDATE retains expression and NULL semantics
+  syntax: postgresql
+  sql: UPDATE qb_write_pg SET value=CASE WHEN value IS NULL THEN 7 ELSE value+2 END WHERE id<=2
+  expect:
+    affected_rows: 2
+- name: postgresql UPDATE emits exact stored values
+  syntax: postgresql
+  sql: SELECT id,value FROM qb_write_pg ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 12
+    - id: 2
+      value: 7
+    - id: 3
+      value: 30
+- name: postgresql DELETE retains the selected row domain
+  syntax: postgresql
+  sql: DELETE FROM qb_write_pg WHERE value<20
+  expect:
+    affected_rows: 2
+- name: postgresql DELETE leaves the exact complement
+  syntax: postgresql
+  sql: SELECT id,value FROM qb_write_pg ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 3
+      value: 30
+- name: tsql UPDATE retains expression and NULL semantics
+  syntax: tsql
+  sql: UPDATE qb_write_tds SET value=CASE WHEN value IS NULL THEN 7 ELSE value+2 END WHERE id<=2
+  expect:
+    affected_rows: 2
+- name: tsql UPDATE emits exact stored values
+  syntax: tsql
+  sql: SELECT id,value FROM qb_write_tds ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 12
+    - id: 2
+      value: 7
+    - id: 3
+      value: 30
+- name: tsql DELETE retains the selected row domain
+  syntax: tsql
+  sql: DELETE FROM qb_write_tds WHERE value<20
+  expect:
+    affected_rows: 2
+- name: tsql DELETE leaves the exact complement
+  syntax: tsql
+  sql: SELECT id,value FROM qb_write_tds ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 3
+      value: 30
