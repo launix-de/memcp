@@ -1,0 +1,372 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Generated metadata inputs retain original visibility without making scratch population a user row phase
+setup:
+- sql: DROP TABLE IF EXISTS generated_commit_child
+- sql: DROP TABLE IF EXISTS generated_commit_parent
+- sql: DROP PROCEDURE IF EXISTS generated_commit_probe
+- sql: CREATE TABLE generated_commit_parent(id INT NOT NULL PRIMARY KEY,code INT NOT NULL)
+- sql: CREATE TABLE generated_commit_child(id INT NOT NULL PRIMARY KEY,parent_id INT NOT NULL)
+- sql: INSERT generated_commit_parent VALUES(1,17)
+- sql: INSERT generated_commit_child VALUES(1,1)
+- sql: CREATE PROCEDURE generated_commit_probe AS SELECT 17 AS value
+- sql: DROP TABLE IF EXISTS generated_rollback_child
+- sql: DROP TABLE IF EXISTS generated_rollback_parent
+- sql: DROP PROCEDURE IF EXISTS generated_rollback_probe
+- sql: CREATE TABLE generated_rollback_parent(id INT NOT NULL PRIMARY KEY,code INT NOT NULL)
+- sql: CREATE TABLE generated_rollback_child(id INT NOT NULL PRIMARY KEY,parent_id INT NOT NULL)
+- sql: INSERT generated_rollback_parent VALUES(1,17)
+- sql: INSERT generated_rollback_child VALUES(1,1)
+- sql: CREATE PROCEDURE generated_rollback_probe AS SELECT 17 AS value
+- sql: DROP TABLE IF EXISTS generated_source_child
+- sql: DROP TABLE IF EXISTS generated_source_parent
+- sql: DROP PROCEDURE IF EXISTS generated_source_probe
+- sql: CREATE TABLE generated_source_parent(id INT NOT NULL PRIMARY KEY,code INT NOT NULL)
+- sql: CREATE TABLE generated_source_child(id INT NOT NULL PRIMARY KEY,parent_id INT NOT NULL)
+- sql: INSERT generated_source_parent VALUES(1,17)
+- sql: INSERT generated_source_child VALUES(1,1)
+- sql: CREATE PROCEDURE generated_source_probe AS SELECT 17 AS value
+- sql: DROP TABLE IF EXISTS generated_metadata_child
+- sql: DROP TABLE IF EXISTS generated_metadata_parent
+- sql: DROP PROCEDURE IF EXISTS generated_metadata_probe
+- sql: CREATE TABLE generated_metadata_parent(id INT NOT NULL PRIMARY KEY,code INT NOT NULL)
+- sql: CREATE TABLE generated_metadata_child(id INT NOT NULL PRIMARY KEY,parent_id INT NOT NULL)
+- sql: INSERT generated_metadata_parent VALUES(1,17)
+- sql: INSERT generated_metadata_child VALUES(1,1)
+- sql: CREATE PROCEDURE generated_metadata_probe AS SELECT 17 AS value
+- sql: DROP TABLE IF EXISTS generated_private_child
+- sql: DROP TABLE IF EXISTS generated_private_parent
+- sql: DROP PROCEDURE IF EXISTS generated_private_probe
+- sql: CREATE TABLE generated_private_parent(id INT NOT NULL PRIMARY KEY,code INT NOT NULL)
+- sql: CREATE TABLE generated_private_child(id INT NOT NULL PRIMARY KEY,parent_id INT NOT NULL)
+- sql: INSERT generated_private_parent VALUES(1,17)
+- sql: INSERT generated_private_child VALUES(1,1)
+cleanup:
+- sql: DROP TABLE IF EXISTS generated_commit_child
+- sql: DROP TABLE IF EXISTS generated_commit_parent
+- sql: DROP PROCEDURE IF EXISTS generated_commit_probe
+- sql: DROP TABLE IF EXISTS generated_rollback_child
+- sql: DROP TABLE IF EXISTS generated_rollback_parent
+- sql: DROP PROCEDURE IF EXISTS generated_rollback_probe
+- sql: DROP TABLE IF EXISTS generated_source_child
+- sql: DROP TABLE IF EXISTS generated_source_parent
+- sql: DROP PROCEDURE IF EXISTS generated_source_probe
+- sql: DROP TABLE IF EXISTS generated_metadata_child
+- sql: DROP TABLE IF EXISTS generated_metadata_parent
+- sql: DROP PROCEDURE IF EXISTS generated_metadata_probe
+- sql: DROP TABLE IF EXISTS generated_private_child
+- sql: DROP TABLE IF EXISTS generated_private_parent
+- sql: DROP PROCEDURE IF EXISTS generated_private_probe
+test_cases:
+- name: Metadata probes then source removal and FK share the original commit
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: SELECT name FROM sys.objects WHERE type='P' AND name='generated_commit_probe'
+      expect:
+        rows: 1
+        data:
+        - name: generated_commit_probe
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='U' AND name IN ('generated_commit_parent','generated_commit_child')
+      expect:
+        rows: 1
+        data:
+        - n: 2
+    - connection: owner
+      sql: DROP PROCEDURE generated_commit_probe
+    - connection: owner
+      sql: ALTER TABLE generated_commit_child ADD CONSTRAINT generated_commit_reference FOREIGN KEY(parent_id) REFERENCES generated_commit_parent(id) ON
+        UPDATE CASCADE
+    - connection: owner
+      sql: INSERT generated_commit_child VALUES(2,1)
+    - connection: owner
+      sql: UPDATE generated_commit_parent SET id=2 WHERE id=1
+    - connection: owner
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_commit_parent p JOIN generated_commit_child c ON
+        p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 2
+        data:
+        - parent_id: 2
+          code: 17
+          child_id: 1
+          reference_id: 2
+        - parent_id: 2
+          code: 17
+          child_id: 2
+          reference_id: 2
+    - connection: observer
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_commit_parent p JOIN generated_commit_child c ON
+        p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 1
+        data:
+        - parent_id: 1
+          code: 17
+          child_id: 1
+          reference_id: 1
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name='generated_commit_probe'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name='generated_commit_probe'
+      expect:
+        rows: 1
+        data:
+        - n: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='generated_commit_reference'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_commit_parent p JOIN generated_commit_child c ON
+        p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 2
+        data:
+        - parent_id: 2
+          code: 17
+          child_id: 1
+          reference_id: 2
+        - parent_id: 2
+          code: 17
+          child_id: 2
+          reference_id: 2
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name='generated_commit_probe'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='generated_commit_reference'
+      expect:
+        rows: 1
+        data:
+        - n: 1
+- name: Rollback restores original source and rows after metadata then source and FK
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: SELECT name FROM sys.objects WHERE type='P' AND name='generated_rollback_probe'
+      expect:
+        rows: 1
+        data:
+        - name: generated_rollback_probe
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='U' AND name IN ('generated_rollback_parent','generated_rollback_child')
+      expect:
+        rows: 1
+        data:
+        - n: 2
+    - connection: owner
+      sql: DROP PROCEDURE generated_rollback_probe
+    - connection: owner
+      sql: ALTER TABLE generated_rollback_child ADD CONSTRAINT generated_rollback_reference FOREIGN KEY(parent_id) REFERENCES generated_rollback_parent(id)
+        ON UPDATE CASCADE
+    - connection: owner
+      sql: INSERT generated_rollback_child VALUES(2,1)
+    - connection: owner
+      sql: UPDATE generated_rollback_parent SET id=2 WHERE id=1
+    - connection: owner
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_rollback_parent p JOIN generated_rollback_child c
+        ON p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 2
+        data:
+        - parent_id: 2
+          code: 17
+          child_id: 1
+          reference_id: 2
+        - parent_id: 2
+          code: 17
+          child_id: 2
+          reference_id: 2
+    - connection: observer
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_rollback_parent p JOIN generated_rollback_child c
+        ON p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 1
+        data:
+        - parent_id: 1
+          code: 17
+          child_id: 1
+          reference_id: 1
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name='generated_rollback_probe'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name='generated_rollback_probe'
+      expect:
+        rows: 1
+        data:
+        - n: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='generated_rollback_reference'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_rollback_parent p JOIN generated_rollback_child c
+        ON p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 1
+        data:
+        - parent_id: 1
+          code: 17
+          child_id: 1
+          reference_id: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name='generated_rollback_probe'
+      expect:
+        rows: 1
+        data:
+        - n: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='generated_rollback_reference'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: observer
+      sql: EXEC generated_rollback_probe
+      expect:
+        rows: 1
+        data:
+        - value: 17
+- name: Source removal without a relational probe remains declaration only
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: DROP PROCEDURE generated_source_probe
+    - connection: owner
+      sql: ALTER TABLE generated_source_child ADD CONSTRAINT generated_source_reference FOREIGN KEY(parent_id) REFERENCES generated_source_parent(id) ON
+        UPDATE CASCADE
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: owner
+      sql: UPDATE generated_source_parent SET id=2 WHERE id=1
+    - connection: owner
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_source_parent p JOIN generated_source_child c ON
+        p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 1
+        data:
+        - parent_id: 2
+          code: 17
+          child_id: 1
+          reference_id: 2
+- name: Metadata count without source removal preserves later enforcement admission
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE type='U' AND name IN ('generated_metadata_parent','generated_metadata_child')
+      expect:
+        rows: 1
+        data:
+        - n: 2
+    - connection: owner
+      sql: ALTER TABLE generated_metadata_child ADD CONSTRAINT generated_metadata_reference FOREIGN KEY(parent_id) REFERENCES generated_metadata_parent(id)
+        ON UPDATE CASCADE
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: owner
+      sql: UPDATE generated_metadata_parent SET id=2 WHERE id=1
+    - connection: owner
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_metadata_parent p JOIN generated_metadata_child c
+        ON p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 1
+        data:
+        - parent_id: 2
+          code: 17
+          child_id: 1
+          reference_id: 2
+- name: Metadata producer sees original private declarations before isolated scratch fill
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE PROCEDURE generated_private_probe AS SELECT 29 AS value
+    - connection: owner
+      sql: SELECT name FROM sys.objects WHERE type='P' AND name='generated_private_probe'
+      expect:
+        rows: 1
+        data:
+        - name: generated_private_probe
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name='generated_private_probe'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: ALTER TABLE generated_private_child ADD CONSTRAINT generated_private_reference FOREIGN KEY(parent_id) REFERENCES generated_private_parent(id)
+        ON UPDATE CASCADE
+    - connection: owner
+      sql: INSERT generated_private_child VALUES(2,1)
+    - connection: owner
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_private_parent p JOIN generated_private_child c ON
+        p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 2
+        data:
+        - parent_id: 1
+          code: 17
+          child_id: 1
+          reference_id: 1
+        - parent_id: 1
+          code: 17
+          child_id: 2
+          reference_id: 1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name='generated_private_probe'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: observer
+      sql: SELECT p.id AS parent_id,p.code,c.id AS child_id,c.parent_id AS reference_id FROM generated_private_parent p JOIN generated_private_child c ON
+        p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 1
+        data:
+        - parent_id: 1
+          code: 17
+          child_id: 1
+          reference_id: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='generated_private_reference'
+      expect:
+        rows: 1
+        data:
+        - n: 0
