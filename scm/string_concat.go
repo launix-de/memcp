@@ -1,29 +1,27 @@
 // Copyright (C) 2026 Carl-Philip Hänsch
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Package stringconcat owns the immutable concat-pool format. Keeping the codec
-// below both storage and scm lets runtime values retain it without an import cycle.
-package stringconcat
+package scm
 
 import "io"
 import "bytes"
-import "math/bits"
 import "unsafe"
+import "math/bits"
 import "encoding/binary"
 
-const MaxOffset = uint64(1<<56 - 1)
+const maxStringConcatOffset = uint64(1<<56 - 1)
 
-// Buffer contains raw byte spans and concat entries in the same immutable pool.
+// StringConcatCompression contains raw byte spans and concat entries in the same immutable pool.
 // An entry is [byte length, (span offset, span length)*, 0]. Word 1 instead of
 // a span offset denotes one inline raw string of the declared length, then 0.
 // Words use unsigned base-128 continuation bytes. Raw spans never refer to other entries.
-type Buffer struct {
+type StringConcatCompression struct {
 	data []byte
 }
 
 // Unsigned base-128 words reserve the high bit as a continuation marker.
-func word(dst []byte, value uint64) []byte { return binary.AppendUvarint(dst, value) }
-func readWord(data []byte, pos *int) uint64 {
+func concatWord(dst []byte, value uint64) []byte { return binary.AppendUvarint(dst, value) }
+func readConcatWord(data []byte, pos *int) uint64 {
 	if *pos >= len(data) {
 		panic("truncated concat word")
 	}
@@ -41,7 +39,7 @@ func readWord(data []byte, pos *int) uint64 {
 
 // Published pools have already been validated. The hot cursor decoder only
 // reads words; malformed input is rejected by the loading caller's Validate.
-func poolWord(data []byte, pos *int) uint64 {
+func concatPoolWord(data []byte, pos *int) uint64 {
 	if value := data[*pos]; value < 128 {
 		*pos++
 		return uint64(value)
@@ -50,7 +48,7 @@ func poolWord(data []byte, pos *int) uint64 {
 	*pos += n
 	return value
 }
-func wordSize(v uint64) int {
+func concatWordSize(v uint64) int {
 	n := (bits.Len64(v) + 6) / 7
 	if n == 0 {
 		return 1
@@ -58,32 +56,32 @@ func wordSize(v uint64) int {
 	return n
 }
 
-func (b *Buffer) Strlen(offset uint64) int {
+func (b *StringConcatCompression) Strlen(offset uint64) int {
 	if offset > uint64(len(b.data)) {
 		panic("concat offset out of range")
 	}
 	p := int(offset)
-	n := poolWord(b.data, &p)
+	n := concatPoolWord(b.data, &p)
 	if n > uint64(int(^uint(0)>>1)) {
 		panic("concat string too large")
 	}
 	return int(n)
 }
 
-func (b *Buffer) Size() uint { return uint(unsafe.Sizeof(*b)) + uint(cap(b.data)) }
+func (b *StringConcatCompression) Size() uint { return uint(unsafe.Sizeof(*b)) + uint(cap(b.data)) }
 
-// Cursor borrows immutable literal spans. Copies are independent and require no
+// stringConcatCursor borrows immutable literal spans. Copies are independent and require no
 // stack of references, decoder workspace, locks, or allocations.
-type Cursor struct {
-	buffer    *Buffer
+type stringConcatCursor struct {
+	buffer    *StringConcatCompression
 	pos       int
 	remaining int
 	span      []byte
 }
 
-func (c *Cursor) Reset(b *Buffer, offset uint64) int {
-	*c = Cursor{buffer: b, pos: int(offset)}
-	c.remaining = int(poolWord(b.data, &c.pos))
+func (c *stringConcatCursor) Reset(b *StringConcatCompression, offset uint64) int {
+	*c = stringConcatCursor{buffer: b, pos: int(offset)}
+	c.remaining = int(concatPoolWord(b.data, &c.pos))
 	if c.remaining != 0 && c.pos < len(b.data) && b.data[c.pos] == 1 {
 		c.pos++
 		c.span = b.data[c.pos : c.pos+c.remaining]
@@ -92,7 +90,7 @@ func (c *Cursor) Reset(b *Buffer, offset uint64) int {
 	return c.remaining
 }
 
-func (c *Cursor) Chunk() []byte {
+func (c *stringConcatCursor) Chunk() []byte {
 	if c.remaining == 0 {
 		return nil
 	}
@@ -102,15 +100,15 @@ func (c *Cursor) Chunk() []byte {
 	return c.span
 }
 
-func (c *Cursor) loadSpan() {
-	offset := poolWord(c.buffer.data, &c.pos)
-	length := poolWord(c.buffer.data, &c.pos)
+func (c *stringConcatCursor) loadSpan() {
+	offset := concatPoolWord(c.buffer.data, &c.pos)
+	length := concatPoolWord(c.buffer.data, &c.pos)
 	c.span = c.buffer.data[offset : offset+length]
 }
 
-func (c *Cursor) Advance(n int) { c.span = c.span[n:]; c.remaining -= n }
+func (c *stringConcatCursor) Advance(n int) { c.span = c.span[n:]; c.remaining -= n }
 
-func (c *Cursor) Skip(n int) {
+func (c *stringConcatCursor) Skip(n int) {
 	if n < 0 || n > c.remaining {
 		panic("concat slice bounds")
 	}
@@ -122,8 +120,8 @@ func (c *Cursor) Skip(n int) {
 }
 
 // Direct returns a borrowed Go string for a single contiguous literal span.
-func (b *Buffer) Direct(offset uint64) (string, bool) {
-	var c Cursor
+func (b *StringConcatCompression) Direct(offset uint64) (string, bool) {
+	var c stringConcatCursor
 	c.Reset(b, offset)
 	chunk := c.Chunk()
 	if len(chunk) != c.remaining {
@@ -132,8 +130,8 @@ func (b *Buffer) Direct(offset uint64) (string, bool) {
 	return unsafe.String(unsafe.SliceData(chunk), len(chunk)), true
 }
 
-func (b *Buffer) Append(offset uint64, dst []byte) []byte {
-	var c Cursor
+func (b *StringConcatCompression) Append(offset uint64, dst []byte) []byte {
+	var c stringConcatCursor
 	c.Reset(b, offset)
 	if cap(dst)-len(dst) < c.remaining {
 		next := make([]byte, len(dst), len(dst)+c.remaining)
@@ -148,7 +146,7 @@ func (b *Buffer) Append(offset uint64, dst []byte) []byte {
 	return dst
 }
 
-func (b *Buffer) Extract(offset uint64) string {
+func (b *StringConcatCompression) Extract(offset uint64) string {
 	if s, ok := b.Direct(offset); ok {
 		return s
 	}
@@ -157,71 +155,75 @@ func (b *Buffer) Extract(offset uint64) string {
 	return unsafe.String(unsafe.SliceData(dst), len(dst))
 }
 
-type span struct{ offset, end int }
+type concatSpan struct{ offset, end int }
 
-// Builder's trigram index addresses only literal spans, never concat metadata.
+// StringConcatBuilder's trigram index addresses only literal spans, never concat metadata.
 // It is discarded on Finish. An integer trigram key avoids allocating map keys.
-type Builder struct {
-	buffer   Buffer
-	grams    map[uint32][]span
+type StringConcatBuilder struct {
+	buffer   StringConcatCompression
+	grams    map[uint32][]concatSpan
 	inserted []uint32
 	sampling bool
 }
 
-func Raw(text string) *Buffer { builder := new(Builder); builder.Add(text); return builder.Finish() }
-
-// NewBuilder reserves a small entry directory without reserving the full text.
-func NewBuilder(entries int) *Builder {
-	return &Builder{buffer: Buffer{data: make([]byte, 0, entries*16)}, grams: make(map[uint32][]span)}
+func rawStringConcatPool(text string) *StringConcatCompression {
+	builder := new(StringConcatBuilder)
+	builder.Add(text)
+	return builder.Finish()
 }
 
-// NewSamplingBuilder uses the ordinary wire format with a bounded search index.
+// NewStringConcatBuilder reserves a small entry directory without reserving the full text.
+func NewStringConcatBuilder(entries int) *StringConcatBuilder {
+	return &StringConcatBuilder{buffer: StringConcatCompression{data: make([]byte, 0, entries*16)}, grams: make(map[uint32][]concatSpan)}
+}
+
+// NewSamplingStringConcatBuilder uses the ordinary wire format with a bounded search index.
 // At most 8192 trigrams and four offsets per trigram participate in matching.
 // Its conservative matches are suitable for a small compression-choice probe.
-func NewSamplingBuilder(entries int) *Builder {
-	b := NewBuilder(entries)
+func NewSamplingStringConcatBuilder(entries int) *StringConcatBuilder {
+	b := NewStringConcatBuilder(entries)
 	b.sampling = true
 	return b
 }
 
 // Len returns encoded bytes built so far, excluding the temporary search index.
-func (b *Builder) Len() int { return len(b.buffer.data) }
+func (b *StringConcatBuilder) Len() int { return len(b.buffer.data) }
 
-func gram(s string) uint32 { return uint32(s[0])<<16 | uint32(s[1])<<8 | uint32(s[2]) }
+func concatGram(s string) uint32 { return uint32(s[0])<<16 | uint32(s[1])<<8 | uint32(s[2]) }
 
-func (b *Builder) literal(s string) span {
+func (b *StringConcatBuilder) literal(s string) concatSpan {
 	off := len(b.buffer.data)
 	b.buffer.data = append(b.buffer.data, s...)
 	end := len(b.buffer.data)
 	if b.grams == nil {
-		return span{off, end}
+		return concatSpan{off, end}
 	}
 	if b.sampling {
 		for i := 0; i+3 <= len(s); i++ {
-			key := gram(s[i:])
+			key := concatGram(s[i:])
 			items := b.grams[key]
 			if len(items) >= 4 || len(items) == 0 && len(b.grams) >= 8192 {
 				continue
 			}
-			b.grams[key] = append(items, span{off + i, end})
+			b.grams[key] = append(items, concatSpan{off + i, end})
 			b.inserted = append(b.inserted, key)
 		}
-		return span{off, end}
+		return concatSpan{off, end}
 	}
 	for i := 0; i+3 <= len(s); i++ {
-		key := gram(s[i:])
-		b.grams[key] = append(b.grams[key], span{off + i, end})
+		key := concatGram(s[i:])
+		b.grams[key] = append(b.grams[key], concatSpan{off + i, end})
 		b.inserted = append(b.inserted, key)
 	}
-	return span{off, end}
+	return concatSpan{off, end}
 }
 
-func (b *Builder) match(s string) span {
-	best := span{}
+func (b *StringConcatBuilder) match(s string) concatSpan {
+	best := concatSpan{}
 	if len(s) < 3 {
 		return best
 	}
-	for _, candidate := range b.grams[gram(s)] {
+	for _, candidate := range b.grams[concatGram(s)] {
 		n := min(len(s), candidate.end-candidate.offset)
 		if n <= best.end-best.offset {
 			continue
@@ -231,25 +233,25 @@ func (b *Builder) match(s string) span {
 			i++
 		}
 		if i > best.end-best.offset {
-			best = span{candidate.offset, candidate.offset + i}
+			best = concatSpan{candidate.offset, candidate.offset + i}
 		}
 		if i == len(s) {
 			break
 		}
 	}
-	if n := best.end - best.offset; n <= wordSize(uint64(best.offset))+wordSize(uint64(n)) {
-		return span{}
+	if n := best.end - best.offset; n <= concatWordSize(uint64(best.offset))+concatWordSize(uint64(n)) {
+		return concatSpan{}
 	}
 	return best
 }
 
-func (b *Builder) Add(s string) uint64 {
+func (b *StringConcatBuilder) Add(s string) uint64 {
 	b.inserted = b.inserted[:0]
 	base := len(b.buffer.data)
 	// The first entry starts at zero. Its raw payload starts after its length
 	// word and the reserved inline marker, so zero/one can never be span offsets.
 	if len(b.buffer.data) == 0 {
-		b.buffer.data = word(b.buffer.data, uint64(len(s)))
+		b.buffer.data = concatWord(b.buffer.data, uint64(len(s)))
 		if len(s) > 0 {
 			b.buffer.data = append(b.buffer.data, 1)
 			b.literal(s)
@@ -257,7 +259,7 @@ func (b *Builder) Add(s string) uint64 {
 		b.buffer.data = append(b.buffer.data, 0)
 		return 0
 	}
-	var local [16]span
+	var local [16]concatSpan
 	parts := local[:0]
 	literalStart := 0
 	for i := 0; i < len(s); {
@@ -275,7 +277,7 @@ func (b *Builder) Add(s string) uint64 {
 	}
 	if len(parts) == 0 {
 		offset := uint64(len(b.buffer.data))
-		b.buffer.data = word(b.buffer.data, uint64(len(s)))
+		b.buffer.data = concatWord(b.buffer.data, uint64(len(s)))
 		if len(s) > 0 {
 			b.buffer.data = append(b.buffer.data, 1)
 			b.literal(s)
@@ -287,17 +289,17 @@ func (b *Builder) Add(s string) uint64 {
 		parts = append(parts, b.literal(s[literalStart:]))
 	}
 	offset := uint64(len(b.buffer.data))
-	if offset > MaxOffset {
+	if offset > maxStringConcatOffset {
 		panic("concat pool exceeds 56-bit offset")
 	}
 	var scratch [128]byte
-	sequence := word(scratch[:0], uint64(len(s)))
+	sequence := concatWord(scratch[:0], uint64(len(s)))
 	for _, p := range parts {
-		sequence = word(sequence, uint64(p.offset))
-		sequence = word(sequence, uint64(p.end-p.offset))
+		sequence = concatWord(sequence, uint64(p.offset))
+		sequence = concatWord(sequence, uint64(p.end-p.offset))
 	}
 	sequence = append(sequence, 0)
-	if len(b.buffer.data)-base+len(sequence) >= wordSize(uint64(len(s)))+len(s)+2 && len(s) > 0 {
+	if len(b.buffer.data)-base+len(sequence) >= concatWordSize(uint64(len(s)))+len(s)+2 && len(s) > 0 {
 		// Retire this private attempt before choosing raw, including all index
 		// entries for discarded literal spans. No unreachable payload is retained.
 		for i := len(b.inserted) - 1; i >= 0; i-- {
@@ -313,7 +315,7 @@ func (b *Builder) Add(s string) uint64 {
 		b.inserted = b.inserted[:0]
 		b.buffer.data = b.buffer.data[:base]
 		offset = uint64(base)
-		b.buffer.data = word(b.buffer.data, uint64(len(s)))
+		b.buffer.data = concatWord(b.buffer.data, uint64(len(s)))
 		b.buffer.data = append(b.buffer.data, 1)
 		b.literal(s)
 		b.buffer.data = append(b.buffer.data, 0)
@@ -324,18 +326,18 @@ func (b *Builder) Add(s string) uint64 {
 	return offset
 }
 
-func (b *Builder) Finish() *Buffer {
+func (b *StringConcatBuilder) Finish() *StringConcatCompression {
 	b.buffer.data = append([]byte(nil), b.buffer.data...)
 	result := b.buffer
 	b.grams = nil
 	b.inserted = nil
-	b.buffer = Buffer{}
+	b.buffer = StringConcatCompression{}
 	return &result
 }
 
 // WriteTo writes only the immutable pool. Entry offsets live with the owning
 // column or wire values; no build index or decoded cache is persisted.
-func (b *Buffer) WriteTo(w io.Writer) {
+func (b *StringConcatCompression) WriteTo(w io.Writer) {
 	if err := binary.Write(w, binary.LittleEndian, uint64(len(b.data))); err != nil {
 		panic(err)
 	}
@@ -344,33 +346,33 @@ func (b *Buffer) WriteTo(w io.Writer) {
 	}
 }
 
-func Read(r io.Reader) *Buffer {
+func ReadStringConcatBuffer(r io.Reader) *StringConcatCompression {
 	var length uint64
 	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
 		panic(err)
 	}
-	if length > MaxOffset || length > uint64(int(^uint(0)>>1)) {
+	if length > maxStringConcatOffset || length > uint64(int(^uint(0)>>1)) {
 		panic("invalid concat pool size")
 	}
 	var data bytes.Buffer
 	if _, err := io.CopyN(&data, r, int64(length)); err != nil {
 		panic(err)
 	}
-	b := &Buffer{data: data.Bytes()}
+	b := &StringConcatCompression{data: data.Bytes()}
 	if len(b.data) != int(length) {
 		panic("truncated concat pool")
 	}
 	return b
 }
 
-func (b *Buffer) Validate(offset uint64) {
+func (b *StringConcatCompression) Validate(offset uint64) {
 	if offset >= uint64(len(b.data)) {
 		panic("invalid concat entry offset")
 	}
 	p := int(offset)
-	remaining := readWord(b.data, &p)
+	remaining := readConcatWord(b.data, &p)
 	for remaining > 0 {
-		ref := readWord(b.data, &p)
+		ref := readConcatWord(b.data, &p)
 		if ref == 1 {
 			if remaining > uint64(len(b.data)-p) {
 				panic("truncated raw concat entry")
@@ -379,13 +381,13 @@ func (b *Buffer) Validate(offset uint64) {
 			remaining = 0
 			break
 		}
-		length := readWord(b.data, &p)
+		length := readConcatWord(b.data, &p)
 		if ref < 2 || length == 0 || length > remaining || ref > uint64(len(b.data)) || length > uint64(len(b.data))-ref {
 			panic("invalid concat span")
 		}
 		remaining -= length
 	}
-	if readWord(b.data, &p) != 0 {
+	if readConcatWord(b.data, &p) != 0 {
 		panic("missing concat terminator")
 	}
 }

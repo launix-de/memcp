@@ -1,16 +1,16 @@
 // Copyright (C) 2026 Carl-Philip Hänsch
 // SPDX-License-Identifier: GPL-3.0-or-later
-package stringconcat
+package scm
 
-import "bytes"
 import "sync"
+import "bytes"
 import "testing"
 import "strings"
 import "math/rand"
 
 func TestSamplingPoolBoundsAndRoundtrip(t *testing.T) {
 	random := rand.New(rand.NewSource(1729))
-	builder := NewSamplingBuilder(8)
+	builder := NewSamplingStringConcatBuilder(8)
 	texts := []string{strings.Repeat("common report ÄÖß\n", 300), strings.Repeat("common report ÄÖß\n", 299) + "changed"}
 	for i := 0; i < 8; i++ {
 		data := make([]byte, 32768)
@@ -46,7 +46,7 @@ func TestPoolRoundtripAndSeek(t *testing.T) {
 		random.Read(data)
 		texts = append(texts, string(data), "common report prefix "+string(data[:10])+" common report suffix")
 	}
-	builder := NewBuilder(0)
+	builder := NewStringConcatBuilder(0)
 	offsets := make([]uint64, len(texts))
 	for i, text := range texts {
 		offsets[i] = builder.Add(text)
@@ -54,15 +54,15 @@ func TestPoolRoundtripAndSeek(t *testing.T) {
 	pool := builder.Finish()
 	var wire bytes.Buffer
 	pool.WriteTo(&wire)
-	restored := Read(&wire)
-	for _, pool := range []*Buffer{pool, restored} {
+	restored := ReadStringConcatBuffer(&wire)
+	for _, pool := range []*StringConcatCompression{pool, restored} {
 		for i, text := range texts {
 			pool.Validate(offsets[i])
 			if pool.Strlen(offsets[i]) != len(text) || pool.Extract(offsets[i]) != text {
 				t.Fatalf("entry %d changed", i)
 			}
 			for _, start := range []int{0, len(text) / 2, len(text)} {
-				var cursor Cursor
+				var cursor stringConcatCursor
 				cursor.Reset(pool, offsets[i])
 				cursor.Skip(start)
 				var out []byte
@@ -80,7 +80,7 @@ func TestPoolRoundtripAndSeek(t *testing.T) {
 }
 
 func TestPoolNoReadAllocations(t *testing.T) {
-	b := NewBuilder(0)
+	b := NewStringConcatBuilder(0)
 	a := b.Add("common prefix long literal common suffix")
 	c := b.Add("common prefix another literal common suffix")
 	pool := b.Finish()
@@ -118,10 +118,10 @@ func TestPoolNoReadAllocations(t *testing.T) {
 }
 
 func TestWordsAndMalformedEntries(t *testing.T) {
-	for _, value := range []uint64{0, 1, 127, 128, 16383, 16384, 1 << 32, MaxOffset, ^uint64(0)} {
-		data := word(nil, value)
+	for _, value := range []uint64{0, 1, 127, 128, 16383, 16384, 1 << 32, maxStringConcatOffset, ^uint64(0)} {
+		data := concatWord(nil, value)
 		p := 0
-		if got := readWord(data, &p); got != value || p != len(data) {
+		if got := readConcatWord(data, &p); got != value || p != len(data) {
 			t.Fatalf("word %d", value)
 		}
 	}
@@ -132,13 +132,13 @@ func TestWordsAndMalformedEntries(t *testing.T) {
 					t.Errorf("accepted corrupt entry %x", data)
 				}
 			}()
-			(&Buffer{data: data}).Validate(0)
+			(&StringConcatCompression{data: data}).Validate(0)
 		}()
 	}
 }
 
 func TestPoolLongestLiteralMatch(t *testing.T) {
-	b := NewBuilder(4)
+	b := NewStringConcatBuilder(4)
 	b.Add("initial reserved payload")
 	text := "abc-common-1234567890-tail!"
 	b.literal("abc-common-1234567890-tail?")
@@ -152,7 +152,7 @@ func TestPoolLongestLiteralMatch(t *testing.T) {
 
 func TestPoolConcatScratchOverflow(t *testing.T) {
 	random := rand.New(rand.NewSource(38012))
-	b := NewBuilder(81)
+	b := NewStringConcatBuilder(81)
 	parts := make([]string, 80)
 	for i := range parts {
 		data := make([]byte, 24)
@@ -167,7 +167,7 @@ func TestPoolConcatScratchOverflow(t *testing.T) {
 	offset := b.Add(text)
 	pool := b.Finish()
 	pool.Validate(offset)
-	var cursor Cursor
+	var cursor stringConcatCursor
 	cursor.Reset(pool, offset)
 	spans := 0
 	for len(cursor.Chunk()) > 0 {

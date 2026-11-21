@@ -3,14 +3,13 @@
 package storage
 
 import "unsafe"
-import "github.com/launix-de/memcp/scm"
 import "encoding/binary"
 import "github.com/pierrec/lz4/v4"
-import "github.com/launix-de/memcp/storage/stringconcat"
+import "github.com/launix-de/memcp/scm"
 
-// StringConcatCompression is shared with the Scheme runtime through the
-// dependency-free codec package. Strlen, Extract and Append borrow the pool.
-type StringConcatCompression = stringconcat.Buffer
+// StringConcatCompression uses the Scheme runtime's immutable concat pool.
+// Strlen, Extract and Append borrow the pool without copying.
+type StringConcatCompression = scm.StringConcatCompression
 
 func (s *StorageString) normalizeLegacyDictionary() {
 	if !s.compressed {
@@ -41,7 +40,7 @@ func (s *StorageString) CompressDictionary() bool {
 	if s.format != FormatRaw {
 		return false
 	}
-	builder := stringconcat.NewBuilder(int(s.starts.count))
+	builder := scm.NewStringConcatBuilder(int(s.starts.count))
 	offsets := make([]uint64, s.starts.count)
 	nulls := make([]bool, s.starts.count)
 	for i := uint32(0); uint64(i) < s.starts.count; i++ {
