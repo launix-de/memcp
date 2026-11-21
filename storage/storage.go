@@ -4198,7 +4198,18 @@ func Init(en scm.Env) {
 					if a[1].String() == "constraints" {
 						return snapshot.metadata.constraints
 					}
-					return snapshot.metadata.declarations
+					// The descriptive packet carries the visibility of this native
+					// generation, never its owner capability. An unpublished source
+					// cannot be consumed by a transactionless maintained computation.
+					if t.committedAt(t.schema.catalogView().version) {
+						return snapshot.metadata.declarations
+					}
+					declarations := snapshot.metadata.declarations.Slice()
+					result := make([]scm.Scmer, len(declarations)+2)
+					copy(result, declarations)
+					result[len(declarations)] = scm.NewString("visibility")
+					result[len(declarations)+1] = scm.NewString("transaction")
+					return scm.NewSlice(result)
 				}
 				if (len(a) == 2 || len(a) == 3) && a[1].IsString() && a[1].String() == "columns" {
 					var tx *TxContext
