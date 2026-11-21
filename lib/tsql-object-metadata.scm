@@ -1263,7 +1263,7 @@ scalar-query cardinality error. Restrict this owner to these constructions. */
 invocation producer. It never borrows a session identity or a SHOW estimate.
 Unknown historical provenance is a supported-profile error, distinct from
 SQL NULL for a missing/inaccessible/nonidentity object. */
-(define tsql_ident_current_rows (close_procedure ((lambda (parse_name qualifier visible relation view_name find_view parse_integer query_block? qb_sources state_reader)
+(define tsql_ident_current_rows (close_procedure ((lambda (parse_name qualifier visible relation view_name find_view parse_integer query_block? qb_sources state_reader decode_ir restore_code restore_layout)
 	(lambda (context actor name tx options) (begin
 		(define value (if (nil? name) nil (begin
 			(define address (try (lambda () (parse_name name)) (lambda (_invalid_address) nil)))
@@ -1276,7 +1276,8 @@ SQL NULL for a missing/inaccessible/nonidentity object. */
 							(define view (view_name database (nth address 2) tx))
 							(if (nil? view) nil (begin
 								(define recipe (find_view tx database view))
-								(define query (nth recipe 2))
+								(define serialized (nth recipe 2))
+								(define query (if (nil? serialized) nil (restore_layout (restore_code (decode_ir serialized)))))
 								/* The documented joined-view rule has an actual logical
 								join proof; other view lineage needs its own contract. */
 								(if (and (query_block? query) (> (count (qb_sources query)) 1)) nil
@@ -1295,7 +1296,8 @@ SQL NULL for a missing/inaccessible/nonidentity object. */
 										(parse_integer current)))))))))))))
 		(list (list value)))))
 	tsql_object_name_parts tsql_qualifier_database tsql_metadata_visible? tsql_native_relation_handle
-	tsql_view_name sql_find_view tsql_parse_integer query_block? qb_sources table_id_state)))
+	tsql_view_name sql_find_view tsql_parse_integer query_block? qb_sources table_id_state
+	json_decode_scmer restore_storage_code sql_restore_source_layout)))
 (define tsql_ident_current_query (lambda (database name planning tx) (begin
 	(define alias (binding_fresh_alias (binding_collect_string_catalog name '()) "__tsql_identity_current"))
 	(define names '("current_value"))
