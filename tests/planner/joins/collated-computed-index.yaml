@@ -19,7 +19,7 @@ test_cases:
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
-      '("label") (list (quote lambda) (list (quote label))
+      (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "alpha " " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
@@ -31,7 +31,7 @@ test_cases:
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
-      '("label") (list (quote lambda) (list (quote label))
+      (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "σ" " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
@@ -44,7 +44,7 @@ test_cases:
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
-      '("label") (list (quote lambda) (list (quote label))
+      (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "k" " +$" "") "LATIN1_GENERAL_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
@@ -57,7 +57,7 @@ test_cases:
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
-      '("label") (list (quote lambda) (list (quote label))
+      (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "i" " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
@@ -69,7 +69,7 @@ test_cases:
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
-      '("label") (list (quote lambda) (list (quote label))
+      (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "alpha" " +$" "") "utf8mb4_bin"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
@@ -80,7 +80,7 @@ test_cases:
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
-      '("label") (list (quote lambda) (list (quote label))
+      (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace nil " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
@@ -90,7 +90,7 @@ test_cases:
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
-      '("label") (list (quote lambda) (list (quote label))
+      (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace "alpha" " +$" "") (list regexp_replace (quote label) " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
@@ -102,7 +102,7 @@ test_cases:
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
-      '("label") (list (quote lambda) (list (quote label))
+      (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list (list (quote lambda) (list (quote value)) (quote value)) (quote label)) (list regexp_replace "alpha" " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
@@ -114,7 +114,7 @@ test_cases:
     (begin
      (define run (eval (list (quote lambda) (list (quote session)) (compile_scan_plan (quote scan) nil
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
-      '("label") (list (quote lambda) (list (quote label))
+      (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace (list (quote session) "needle") " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false))))
@@ -139,19 +139,19 @@ test_cases:
     (list
     (sort (eval (compile_scan_plan (quote scan) nil
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
-      '("label") (list (quote lambda) (list (quote label))
+      (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) "^." "") (list regexp_replace "lpha" " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
     (sort (eval (compile_scan_plan (quote scan) nil
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
-      '("label") (list (quote lambda) (list (quote label))
+      (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "alpha " " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
     (sort (eval (compile_scan_plan (quote scan) nil
       (list (quote table) "memcp-tests" false "collated_scan_rows" false)
-      '("label") (list (quote lambda) (list (quote label))
+      (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) "^." "") (list regexp_replace "lpha" " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <))
@@ -165,7 +165,7 @@ test_cases:
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
       (list (quote table) "memcp-tests" false "collated_scan_empty" false)
-      '("label") (list (quote lambda) (list (quote label))
+      (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "alpha " "[" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
@@ -176,7 +176,7 @@ test_cases:
     (begin
      (define lookup (eval (list (quote lambda) (list (quote needle)) (compile_scan_plan (quote scan_exists) nil
      (list (quote table) "memcp-tests" false "collated_scan_work" false)
-     '("object_name" "permission_name")
+     (list (quote quote) '("object_name" "permission_name"))
      (list (quote lambda) (list (quote object_name) (quote permission_name))
       (list (quote and)
        (list equal_collate (list regexp_replace (quote object_name) " +$" "")
@@ -189,6 +189,8 @@ test_cases:
   warmup: 0
   timing_samples: 3
   timing_aggregation: total
+  threshold_ms: 5000
+  performance_rows: 1000
 cleanup:
 - sql: DROP TABLE IF EXISTS collated_scan_work
 - sql: DROP TABLE IF EXISTS collated_scan_rows
