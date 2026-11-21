@@ -42,7 +42,8 @@ func (s tableAllocatorState) validate() error {
 	if err != nil || id == uuid.Nil || id.String() != s.Table || s.Version != 1 ||
 		(s.StartKnown && (s.Start == 0 || s.Start > math.MaxInt64)) ||
 		(!s.StartKnown && s.Start != 0) || (s.Issued && !s.IssuedKnown) ||
-		(s.HighAllocated && (!s.IssuedKnown || !s.Issued)) ||
+		(s.HighAllocated && (!s.IssuedKnown || !s.Issued || s.High == 0 || (s.StartKnown && s.High < s.Start))) ||
+		(s.StartKnown && s.High < s.Start-1) ||
 		(s.IssuedKnown && !s.Issued && (!s.StartKnown || s.High != s.Start-1)) {
 		return fmt.Errorf("invalid native table allocator state")
 	}
@@ -256,6 +257,15 @@ func (t *table) prepareAllocatorRecovery() {
 		return
 	}
 	snapshot := t.allocatorSnapshot()
+	if snapshot != nil {
+		if err := snapshot.validate(); err != nil || snapshot.Table != t.RuntimeIdentity {
+			panic("invalid native table allocator schema provenance")
+		}
+	} else {
+		if err := (tableAllocatorState{Version: 1, Table: t.RuntimeIdentity}).validate(); err != nil {
+			panic(err)
+		}
+	}
 	if snapshot == nil || !snapshot.IssuedKnown {
 		for _, shard := range t.ActiveShards() {
 			access := shard.GetRead(nil, false)
@@ -291,13 +301,69 @@ func (t *table) loadAllocatorAuthorityLocked() tableAllocatorState {
 	return state
 }
 
-// Called only at a table's batch preparation / explicit reservation owner.
-// No shard lock, UNIQUE stripe or row callback is acquired by this operation.
-// The existing persistence lifecycle boundary excludes MOVE/DB retirement.
+// This pure arithmetic is shared by RAM-only CAS and durable WAL publication.
+// Inputs come from validated immutable producers; there is no row/catalog work.
+func tableAllocatorReservation(previous tableAllocatorState, high, explicit, generated uint64, observedExplicit bool) (uint64, tableAllocatorState, bool) {
+	if high > previous.High {
+		previous.High, previous.HighAllocated = high, false
+		previous.IssuedKnown = previous.Issued
+	}
+	base := max(previous.High, explicit)
+	if generated > 0 && (base > math.MaxInt64 || generated > math.MaxInt64-base) {
+		panic("generated ID block exceeds native integer capacity")
+	}
+	if generated == 0 && base == previous.High && (!observedExplicit || previous.Issued) {
+		return base, previous, false
+	}
+	next := previous
+	next.High = base + generated
+	next.IssuedKnown, next.Issued = true, true
+	// A nonadvancing explicit input proves an observed ID, but not a
+	// highwater allocated by this counter. Preserve that distinction as data;
+	// each frontend owns its identity/sequence interpretation.
+	next.HighAllocated = generated > 0 || explicit > previous.High || (previous.Issued && previous.HighAllocated)
+	return base, next, true
+}
 
+// No-WAL engines retain per-table CAS admission. They must not acquire a
+// database-global log/mutex merely to publish volatile allocator provenance.
+func (t *table) reserveVolatileAutoIncrement(explicit, generated uint64, observedExplicit bool) uint64 {
+	for {
+		current := t.allocator.Load()
+		previous := tableAllocatorState{Version: 1, Table: t.RuntimeIdentity}
+		if current != nil {
+			previous = *current
+		} else if t.Allocator != nil {
+			previous = *t.Allocator
+		}
+		base, next, changed := tableAllocatorReservation(previous, atomic.LoadUint64(&t.Auto_increment), explicit, generated, observedExplicit)
+		if !changed {
+			return base
+		}
+		if t.allocator.CompareAndSwap(current, &next) {
+			t.mergeRecoveredAutoIncrement(next.High)
+			return base
+		}
+	}
+}
+
+// Called only at a table's batch preparation / explicit reservation owner.
+// Callers release physical shard locks before entry; ordinary INSERT prepares
+// before target write/UNIQUE ownership. Lifecycle admission excludes MOVE/Drop.
 func (t *table) reserveLocalAutoIncrement(explicit, generated uint64, observedExplicit bool) uint64 {
 	t.prepareAllocatorRecovery()
 	db := t.schema
+	if failure := db.allocatorFailure.Load(); failure != nil {
+		panic(*failure)
+	}
+	// Already supplied/reserved IDs add no facts. The immutable accepted
+	// witness makes this a linearizable no-op, including under concurrent WAL.
+	if snapshot := t.allocatorSnapshot(); generated == 0 && snapshot != nil && explicit <= snapshot.High && (!observedExplicit || snapshot.Issued) {
+		return snapshot.High
+	}
+	if t.PersistencyMode != Safe && t.PersistencyMode != Logged {
+		return t.reserveVolatileAutoIncrement(explicit, generated, observedExplicit)
+	}
 	if !db.persistenceLifecycle.TryRLock() {
 		panic("database maintenance in progress; retry table ID reservation")
 	}
@@ -310,50 +376,32 @@ func (t *table) reserveLocalAutoIncrement(explicit, generated uint64, observedEx
 	}
 	previous := t.loadAllocatorAuthorityLocked()
 	var base uint64
+	var next tableAllocatorState
 	for {
 		high := atomic.LoadUint64(&t.Auto_increment)
-		if high > previous.High {
-			previous.High, previous.HighAllocated = high, false
-			previous.IssuedKnown = previous.Issued
-		}
-		base = max(previous.High, explicit)
-		if generated > 0 && (base > math.MaxInt64 || generated > math.MaxInt64-base) {
-			panic("generated ID block exceeds native integer capacity")
-		}
-		if generated == 0 && base == previous.High && (!observedExplicit || previous.Issued) {
+		var changed bool
+		base, next, changed = tableAllocatorReservation(previous, high, explicit, generated, observedExplicit)
+		if !changed {
 			return base
 		}
-		if atomic.CompareAndSwapUint64(&t.Auto_increment, high, base+generated) {
+		if atomic.CompareAndSwapUint64(&t.Auto_increment, high, next.High) {
 			break
 		}
 	}
-	next := previous
-	next.High = base + generated
-	next.IssuedKnown, next.Issued = true, true
-	// A nonadvancing explicit input proves an observed ID, but not a
-	// highwater allocated by this counter. Preserve that distinction as data;
-	// each frontend owns its identity/sequence interpretation.
-	next.HighAllocated = generated > 0 || explicit > previous.High || (previous.Issued && previous.HighAllocated)
-	if err := next.validate(); err != nil {
-		panic(err)
-	}
 	// Consume before I/O: an ambiguous failure may have persisted the frame.
 	// Further allocation fails closed until recovery re-establishes authority.
-	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
-		if err := persistenceCall(func() {
-			db.transactionLog.Write(LogEntryTableAllocator{next})
-			db.transactionLog.Flush(t.PersistencyMode == Safe)
-		}); err != nil {
-			db.allocatorFailure.Store(&err)
-			panic(err)
-		}
-		if err := db.acceptTableAllocator(next); err != nil {
-			panic(err)
-		}
+	if err := persistenceCall(func() {
+		db.transactionLog.Write(LogEntryTableAllocator{next})
+		db.transactionLog.Flush(t.PersistencyMode == Safe)
+	}); err != nil {
+		db.allocatorFailure.Store(&err)
+		panic(err)
 	}
-	// Lock-free observers see only the accepted generation. The separate
-	// compatibility highwater already consumed the range before I/O; failure
-	// latches it closed, but must not publish unaccepted issued/high facts.
+	if err := db.acceptTableAllocator(next); err != nil {
+		panic(err)
+	}
+	// Lock-free observers see only accepted issued/high facts. The compatibility
+	// highwater consumed the range before I/O but never grants that proof.
 	t.allocator.Store(&next)
 	return base
 }
