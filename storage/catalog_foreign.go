@@ -103,7 +103,7 @@ func (snapshot *foreignMaintenanceSnapshot) validateLocked() {
 // this owner are rejected by ordinary catalog admission before native effects.
 type publicCatalogViews struct {
 	keys            map[*table][]uniqueKey
-	checkedWriters  map[*table]struct{}
+	checkedWriters  map[*table]nativeMutationInputProfile
 	history         []catalogDeclarationAmendment
 	blockedWriters  map[*table]struct{}
 	tables          map[*table]*tableShowColumnsSnapshot

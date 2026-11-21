@@ -1635,7 +1635,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			panic("native mutation callback does not match its declared UPDATE operation")
 		}
 		keys := mutationUniqueKeys(t.t, input)
-		if input != nil && (input.event != nativeMutationUpdate || len(a) == 0) {
+		if input != nil && (len(a) == 0 && input.event != nativeMutationDelete || len(a) != 0 && input.event != nativeMutationUpdate) {
 			panic("private declaration input requires its checked UPDATE producer")
 		}
 		if t.t.mutationReadOnly {
@@ -2163,13 +2163,13 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						if uniqueGuard != nil {
 							uniqueGuard.releaseKeys()
 						}
-						beforeDeleteOk = t.t.ExecuteBeforeDeleteTriggers(triggerDeletedRow, currentTx)
+						beforeDeleteOk = t.t.ExecuteBeforeDeleteTriggers(triggerDeletedRow, currentTx, input, declarations)
 					})
 				} else {
 					if uniqueGuard != nil {
 						uniqueGuard.releaseKeys()
 					}
-					beforeDeleteOk = t.t.ExecuteBeforeDeleteTriggers(triggerDeletedRow, currentTx)
+					beforeDeleteOk = t.t.ExecuteBeforeDeleteTriggers(triggerDeletedRow, currentTx, input, declarations)
 				}
 				if !beforeDeleteOk {
 					return scm.NewBool(false) // trigger aborted delete
@@ -2243,10 +2243,10 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					batch.Add(triggerDeletedRow)
 				} else if alreadyLocked {
 					t.runWithWriteLockReleased(currentTx, func() {
-						uniqueGuard.after(uniqueAfterTrigger{table: t.t, timing: AfterDelete, old: triggerDeletedRow, tx: currentTx})
+						uniqueGuard.after(uniqueAfterTrigger{table: t.t, timing: AfterDelete, old: triggerDeletedRow, tx: currentTx, input: input})
 					})
 				} else {
-					uniqueGuard.after(uniqueAfterTrigger{table: t.t, timing: AfterDelete, old: triggerDeletedRow, tx: currentTx})
+					uniqueGuard.after(uniqueAfterTrigger{table: t.t, timing: AfterDelete, old: triggerDeletedRow, tx: currentTx, input: input})
 				}
 			}
 		}

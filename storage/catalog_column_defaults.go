@@ -341,6 +341,28 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	nullColumns := make(map[*table]map[string]struct{})
 	appendedColumns := make(map[*table]map[string]*column)
 	dropped := make(map[*table]struct{})
+	tablesCloned := false
+	statementInput := func(t *table) {
+		blocked[t] = struct{}{}
+		guarded[t] = true
+		if tables[t] == nil {
+			// The committed producer initialized this immutable input. Clone only
+			// its directory, never repair metadata from a consumer or row callback.
+			if !tablesCloned {
+				tables = maps.Clone(tables)
+				tablesCloned = true
+			}
+			tables[t] = t.showColumnsSnapshot.Load()
+		}
+	}
+	// Savepoint rewind retains these existing reservation/endpoint resources.
+	// A headless slot selects its exact baseline; it has no durable amendment.
+	// Keep checked input until decision rather than waiting on our own lease or
+	// releasing a layout lease adopted by a successful sibling constructor.
+	statementInputs := changes.statementInputTables()
+	for t := range statementInputs {
+		statementInput(t)
+	}
 	for _, entry := range history {
 		if key := entry.publicKey; key != nil {
 			keys[key.table] = key.keys
@@ -373,7 +395,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 			}
 		}
 		if amendment := entry.statementTrigger; amendment != nil {
-			blocked[amendment.slot.table] = struct{}{}
+			statementInput(amendment.slot.table)
 		}
 		if amendment := entry.column; amendment != nil {
 			if amendment.appendDeclaration != nil {
@@ -411,7 +433,8 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	for t := range blocked {
 		delete(writers, t)
 	}
-	checked := checkedCatalogWriters(history)
+	checked := checkedCatalogWriters(history, statementInputs)
+	changes.viewsHighWater = max(changes.viewsHighWater, len(tables))
 	changes.checkedWritersHighWater = max(changes.checkedWritersHighWater, len(checked))
 	changes.columnWritersHighWater = max(changes.columnWritersHighWater, len(writers))
 	changes.blockedWritersHighWater = max(changes.blockedWritersHighWater, len(blocked))

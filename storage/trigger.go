@@ -1371,16 +1371,16 @@ func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset, tx *TxContex
 // oldRow: the row being deleted (all columns in table order)
 // Returns true if delete should proceed, false to abort.
 // Panics from triggers propagate to the caller.
-func (t *table) ExecuteBeforeDeleteTriggers(oldRow dataset, tx *TxContext) bool {
+func (t *table) ExecuteBeforeDeleteTriggers(oldRow dataset, tx *TxContext, input *nativeMutationInput, declarations []*column) bool {
 	tx = nativeRowTriggerInvocation(tx)
-	triggers := t.GetTriggers(BeforeDelete, nil)
+	triggers := t.mutationTriggers(BeforeDelete, input)
 	if len(triggers) == 0 {
 		return true
 	}
 
 	// Build column names from table
-	columns := make([]string, len(t.Columns))
-	for i, col := range t.Columns {
+	columns := make([]string, len(declarations))
+	for i, col := range declarations {
 		columns[i] = col.Name
 	}
 

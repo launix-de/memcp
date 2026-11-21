@@ -7,6 +7,26 @@ import "unsafe"
 import "errors"
 import "github.com/launix-de/memcp/scm"
 
+// An immutable statement-trigger-only input can use every existing DML event.
+// Inputs that change row layout/key/FK contracts retain their earlier bound.
+type nativeMutationInputProfile uint8
+
+const (
+	nativeDeclarationRowInput nativeMutationInputProfile = iota + 1
+	nativeStatementTriggerRowInput
+)
+
+func (views *publicCatalogViews) mutationEventAllowed(t *table, event nativeMutationEvent) bool {
+	switch views.checkedWriters[t] {
+	case nativeDeclarationRowInput:
+		return event == nativeMutationInsert || event == nativeMutationUpdate
+	case nativeStatementTriggerRowInput:
+		return event == nativeMutationInsert || event == nativeMutationUpdate || event == nativeMutationDelete
+	default:
+		return false
+	}
+}
+
 // This is one immutable logical target input of an admitted native producer.
 // It owns no table facade, physical index, row identity or independent decision.
 // The existing statement lease/drain retains its native target and declarations.
@@ -26,6 +46,8 @@ type nativeMutationInput struct {
 	afterInsert  []TriggerDescription
 	beforeUpdate []TriggerDescription
 	afterUpdate  []TriggerDescription
+	beforeDelete []TriggerDescription
+	afterDelete  []TriggerDescription
 	memory       *publicCatalogMemory
 	bytes        uint64
 }
@@ -154,27 +176,33 @@ func (tx *TxContext) mutationInputFor(t *table) *nativeMutationInput {
 }
 
 // Source/history and descriptors come from the same immutable publication.
-// New enforcing programs outside the bounded retirement/key/column profile
-// continue to prohibit writes; they are not silently treated as committed.
-func checkedCatalogWriters(history []catalogDeclarationAmendment) map[*table]struct{} {
-	result, blocked := make(map[*table]struct{}), make(map[*table]struct{})
+// Statement programs use the same later-producer admission; other enforcing
+// programs outside this bounded input still prohibit writes.
+func checkedCatalogWriters(history []catalogDeclarationAmendment, statements map[*table]struct{}) map[*table]nativeMutationInputProfile {
+	result, blocked := make(map[*table]nativeMutationInputProfile), make(map[*table]struct{})
+	// Rewound heads still have their original reserved slot/declaration lease.
+	// The later checked owner binds its actual baseline programs, not a dropped
+	// historical recipe. Current endpoint amendments below retain every veto.
+	for t := range statements {
+		result[t] = nativeStatementTriggerRowInput
+	}
 	for _, entry := range history {
 		if key := entry.publicKey; key != nil {
-			result[key.table] = struct{}{}
+			result[key.table] = nativeDeclarationRowInput
 		}
 		if drop := entry.foreignDrop; drop != nil {
 			for _, t := range drop.endpoints {
 				if t != nil {
-					result[t] = struct{}{}
+					result[t] = nativeDeclarationRowInput
 				}
 			}
 		}
-		if c := entry.column; c != nil && c.declaration != nil {
-			result[c.table] = struct{}{}
+		if c := entry.column; c != nil {
+			result[c.table] = nativeDeclarationRowInput
 		}
 		if c := entry.column; c != nil && c.appendDeclaration != nil {
 			if c.appendDeclaration.Initialization != nil {
-				result[c.table] = struct{}{}
+				result[c.table] = nativeDeclarationRowInput
 			} else {
 				blocked[c.table] = struct{}{}
 			}
@@ -191,7 +219,9 @@ func checkedCatalogWriters(history []catalogDeclarationAmendment) map[*table]str
 			}
 		}
 		if tr := entry.statementTrigger; tr != nil {
-			blocked[tr.slot.table] = struct{}{}
+			if _, found := result[tr.slot.table]; !found {
+				result[tr.slot.table] = nativeStatementTriggerRowInput
+			}
 		}
 		if drop := entry.tableDrop; drop != nil {
 			blocked[drop.table] = struct{}{}
@@ -213,7 +243,7 @@ func checkedCatalogWriters(history []catalogDeclarationAmendment) map[*table]str
 }
 
 func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, event nativeMutationEvent) *nativeMutationInput {
-	if source == nil || tx.privateMutationSource(t) != source || source.tables[t] == nil {
+	if source == nil || tx.privateMutationSource(t) != source || source.tables[t] == nil || !source.mutationEventAllowed(t, event) {
 		panic("native mutation input lost its private declaration source")
 	}
 	operation := tx.mutationOperation
@@ -289,13 +319,17 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 	input.afterInsert = t.GetTriggers(AfterInsert, retired)
 	input.beforeUpdate = t.GetTriggers(BeforeUpdate, retired)
 	input.afterUpdate = t.GetTriggers(AfterUpdate, retired)
+	if event == nativeMutationDelete {
+		input.beforeDelete = t.GetTriggers(BeforeDelete, retired)
+		input.afterDelete = t.GetTriggers(AfterDelete, retired)
+	}
 	if tx.privateMutationSource(t) != source {
 		panic("private declaration input changed while preparing its programs")
 	}
 	// Only the new header/vector containers belong to this producer. Column,
 	// key, FK-string and compiled-program payloads retain their existing owners.
 	input.bytes = uint64(unsafe.Sizeof(*input)) + uint64(cap(input.foreign))*uint64(unsafe.Sizeof(foreignKey{})) +
-		uint64(cap(input.beforeInsert)+cap(input.afterInsert)+cap(input.beforeUpdate)+cap(input.afterUpdate))*uint64(unsafe.Sizeof(TriggerDescription{}))
+		uint64(cap(input.beforeInsert)+cap(input.afterInsert)+cap(input.beforeUpdate)+cap(input.afterUpdate)+cap(input.beforeDelete)+cap(input.afterDelete))*uint64(unsafe.Sizeof(TriggerDescription{}))
 	input.memory = tx.publicCatalogChanges().memory
 	input.memory.mutationInputBytes.Add(input.bytes)
 	return input
@@ -322,6 +356,10 @@ func (t *table) mutationTriggers(timing TriggerTiming, input *nativeMutationInpu
 			return input.beforeUpdate
 		case AfterUpdate:
 			return input.afterUpdate
+		case BeforeDelete:
+			return input.beforeDelete
+		case AfterDelete:
+			return input.afterDelete
 		}
 	}
 	return t.GetTriggers(timing, nil)

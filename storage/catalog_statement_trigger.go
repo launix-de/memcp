@@ -43,12 +43,12 @@ func (tx *TxContext) stageStatementTrigger(t *table, definition *statementTrigge
 	if tx == nil || tx.transactionState == nil {
 		panic("statement trigger declaration requires an active native transaction")
 	}
-	finish := tx.beginCatalogConstruction(catalogEnforcementConstruction, t)
+	finish := tx.beginCatalogConstruction(catalogStatementTriggerConstruction, t)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
 	if tx.State != TxActive || tx.decisionStarted || tx.coordinator != nil || tx.catalogIntents.Load() != nil {
 		panic("statement trigger declaration requires a local public catalog transaction")
 	}
-	return tx.stagePublicCatalogDeclaration(t.schema, catalogEnforcementKind, func(changes *publicCatalogChanges) bool {
+	return tx.stagePublicCatalogDeclaration(t.schema, catalogStatementTriggerKind, func(changes *publicCatalogChanges) bool {
 		return changes.stageStatementTrigger(tx, t, definition, name, replace, mustExist, ignore, expected)
 	})
 }
@@ -64,22 +64,33 @@ func (changes *publicCatalogChanges) stageStatementTrigger(tx *TxContext, t *tab
 	newLease := lease == nil
 	if newLease {
 		var err error
-		lease, err = t.writeAdmission.admit(scanQueryContext(tx, context.Background()), tx.transactionState, tableCatalogDeclarationAdmission, false)
+		lease, err = t.writeAdmission.admit(scanQueryContext(tx, context.Background()), tx.transactionState, tableValidatedDeclarationAdmission, false)
 		if err != nil {
 			panic(err)
 		}
 	}
 	accepted, reserved := false, false
+	// A completed earlier producer is not re-executed. Retained raw callbacks
+	// cannot bypass the new program input; checked producers bind it afresh.
+	restoreInput := func() {}
 	defer func() {
 		if !accepted {
+			restoreInput()
 			if reserved {
 				t.releaseDeclarationTrigger(tx.transactionState, name)
 			}
 			if newLease {
+				if changes.leases[t] == lease {
+					delete(changes.leases, t)
+				}
+				if changes.anchor == lease {
+					changes.anchor = nil
+				}
 				_ = lease.Close()
 			}
 		}
 	}()
+	restoreInput = t.guardCatalogDeclarationInput(tx.transactionState)
 	db := changes.db
 	access := db.GetWrite(tx)
 	defer access.Release()
@@ -201,7 +212,6 @@ func (changes *publicCatalogChanges) stageStatementTrigger(tx *TxContext, t *tab
 	t.setStatementTriggerLocked(definition)
 	t.mu.Unlock()
 	tx.catalogAmendments.Store(&history)
-	changes.publishViews(history, changes.views.Load().tables)
 	if newLease {
 		changes.leases[t] = lease
 		changes.leasesHighWater = max(changes.leasesHighWater, len(changes.leases))
@@ -211,8 +221,36 @@ func (changes *publicCatalogChanges) stageStatementTrigger(tx *TxContext, t *tab
 			changes.anchor = lease
 		}
 	}
+	changes.publishViews(history, changes.views.Load().tables)
 	accepted = true
 	return true
+}
+
+// Caller owns changes.mu. A retained reservation is an actual resource owned
+// by this original transaction, even when savepoint rewind leaves no live head.
+// Attest it once before deriving the immutable checked-input directory.
+func (changes *publicCatalogChanges) statementInputTables() map[*table]struct{} {
+	if len(changes.statementTriggers) == 0 {
+		return nil
+	}
+	inputs := make(map[*table]struct{}, len(changes.statementTriggers))
+	for _, slot := range changes.statementTriggers {
+		t := slot.table
+		lease := changes.leases[t]
+		if changes.owner == nil || t.schema != changes.db || GetDatabase(changes.db.Name) != changes.db ||
+			changes.db.tables.Get(slot.tableName) != t || t.RuntimeIdentity != slot.identity || lease == nil {
+			panic("statement trigger input lost its retained native endpoint")
+		}
+		owner := &t.writeAdmission
+		owner.mu.Lock()
+		valid := lease.owner == owner && lease.transaction == changes.owner && lease.declaration && owner.declaration == changes.owner
+		owner.mu.Unlock()
+		if !valid {
+			panic("statement trigger input lost its original declaration lease")
+		}
+		inputs[t] = struct{}{}
+	}
+	return inputs
 }
 
 // Exact reservation admission precedes this non-failing header publication.
