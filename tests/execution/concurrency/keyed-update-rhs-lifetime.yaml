@@ -4,6 +4,7 @@ metadata:
   isolated: true
   description: UPDATE evaluates scalar producers before key admission and replaces only its original physical version
 setup:
+- sql: DROP TABLE IF EXISTS rhs_guard_initialized
 - sql: DROP TRIGGER IF EXISTS rhs_guard_log_before
 - sql: DROP TRIGGER IF EXISTS rhs_guard_before
 - sql: DROP TABLE IF EXISTS rhs_guard_log
@@ -20,6 +21,8 @@ setup:
 # the cold nested-cache case does not depend on an accidental stripe collision.
 - sql: INSERT INTO rhs_guard_log VALUES(0,1,999,'old1'),(2,2,888,'old2')
 - sql: INSERT INTO rhs_guard_version VALUES(1,10)
+- sql: CREATE TABLE rhs_guard_initialized(id INT PRIMARY KEY,source_id INT,value INT)
+- sql: INSERT INTO rhs_guard_initialized VALUES(0,1,10)
 - scm: |
     (begin
       (define run (lambda (mode rebuild_first repeat_own) (begin
@@ -262,7 +265,31 @@ test_cases:
   sql: SELECT id,value FROM rhs_guard_version ORDER BY id
   expect:
     data: [{id: 3, value: 5}, {id: 4, value: 7}]
+- name: Actual checked UPDATE and INSERT retain a private initialized column through statement drain
+  tds:
+    statements:
+    - connection: rhs_initialized_owner
+      sql: BEGIN TRANSACTION; ALTER TABLE rhs_guard_initialized ADD introduced INT NOT NULL DEFAULT(7)
+    - connection: rhs_initialized_owner
+      sql: UPDATE rhs_guard_initialized SET value=(SELECT MAX(s.date1) FROM rhs_guard_source s WHERE s.ID=rhs_guard_initialized.source_id) WHERE id=0
+    - connection: rhs_initialized_owner
+      sql: INSERT INTO rhs_guard_initialized(id,source_id,value) VALUES(3,2,11)
+    - connection: rhs_initialized_owner
+      sql: SELECT id,source_id,value,introduced FROM rhs_guard_initialized ORDER BY id
+      expect: {data: [{id: 0, source_id: 1, value: 3000, introduced: 7}, {id: 3, source_id: 2, value: 11, introduced: 7}]}
+    - connection: rhs_initialized_observer
+      sql: SELECT id,source_id,value FROM rhs_guard_initialized ORDER BY id
+      expect: {data: [{id: 0, source_id: 1, value: 10}]}
+    - connection: rhs_initialized_owner
+      sql: ROLLBACK TRANSACTION
+    - connection: rhs_initialized_observer
+      sql: SELECT id,source_id,value FROM rhs_guard_initialized ORDER BY id
+      expect: {data: [{id: 0, source_id: 1, value: 10}]}
+    - connection: rhs_initialized_observer
+      sql: SELECT COUNT(*) AS introduced_columns FROM sys.columns WHERE object_id=OBJECT_ID(N'rhs_guard_initialized') AND name=N'introduced'
+      expect: {data: [{introduced_columns: 0}]}
 cleanup:
+- sql: DROP TABLE IF EXISTS rhs_guard_initialized
 - sql: DROP TRIGGER IF EXISTS rhs_guard_log_before
 - scm: (globalvars "__rhs_guard_version_control" nil)
 - sql: DROP TRIGGER IF EXISTS rhs_guard_before
