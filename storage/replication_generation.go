@@ -11,8 +11,6 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 
 package storage
 
-import "sync/atomic"
-
 import "io"
 import "fmt"
 import "sync"
