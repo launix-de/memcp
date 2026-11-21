@@ -5,6 +5,11 @@ metadata:
   isolated: true
   description: Durable statement trigger state preserves SQL effects and native constraints
 setup:
+- sql: DROP TABLE IF EXISTS trigger_footprint_grandchild
+- sql: DROP TABLE IF EXISTS trigger_footprint_child
+- sql: DROP TABLE IF EXISTS trigger_footprint_parent
+- sql: DROP TABLE IF EXISTS trigger_footprint_audit
+- sql: DROP TABLE IF EXISTS trigger_footprint_direct
 - sql: CREATE TABLE trigger_state_input(id INT PRIMARY KEY)
 - sql: CREATE TABLE trigger_state_log(id INT)
 - sql: CREATE TABLE trigger_state_other(id INT PRIMARY KEY)
@@ -210,7 +215,8 @@ test_cases:
         (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
           (scan bound target '() '() '() (lambda () true) '("$update")
             (lambda (count update) (begin (update '("id" 2)) (+ count 1))) 0 +)))
-        false)) (lambda (_cause) true)))
+        false)) (lambda (cause)
+          (strlike (string (failure_value cause)) "%native UPDATE assignment is outside its declared columns: id%"))))
       (define values (scan tx target '() '() '() (lambda () true) '("id" "value")
         (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
       (define result (list rejected (nil? (owner "before_called")) values))
