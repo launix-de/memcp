@@ -33,7 +33,7 @@ func bindConstraintDefinition(parent *TxContext, session scm.Scmer) *constraintD
 		panic("constraint definition requires a local native invocation")
 	}
 	binding := &TxContext{transactionState: state, Session: session, SessionState: parent.SessionState,
-		invocationContext: parent.invocationContext, fanoutOwner: parent}
+		invocationContext: parent.invocationContext, fanoutOwner: parent, postAbort: parent.postAbort}
 	if parent.fanoutOwner != nil {
 		binding.fanoutOwner = parent.fanoutOwner
 	}

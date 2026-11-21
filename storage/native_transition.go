@@ -230,8 +230,9 @@ func (relation *nativeTransitionRelation) publish(scope *relationScope, root *na
 // The descriptor is immutable and exists only while a completion may consume
 // these results. Clone/serialization cannot manufacture a native invocation.
 type nativeTransitionReadAccess struct {
-	scope *relationScope
-	root  *nativeMutationOperation
+	scope        *relationScope
+	root         *nativeMutationOperation
+	continuation *nativeAbortContinuation
 }
 
 // ReadAccess owns this borrow until the actual shard reader returns. It closes
@@ -247,14 +248,22 @@ func (relation *nativeTransitionRelation) borrowRead(tx *TxContext) *relationSco
 		tx = coordinates.public
 	}
 	access := relation.access.Load()
-	if access == nil || tx == nil || tx.mutationOperation == nil {
+	if access == nil || tx == nil {
 		panic("native transition relation is outside its completion scope")
 	}
-	operation := tx.mutationOperation
-	operation.mu.Lock()
-	valid := operation.invocation == tx && operation.state == tx.transactionState && !operation.closed &&
-		!operation.producerDone && operation.completionRoot == access.root
-	operation.mu.Unlock()
+	valid := false
+	if access.continuation != nil {
+		continuation := access.continuation
+		continuation.owner.mu.Lock()
+		valid = tx.postAbort == continuation && continuation.active && continuation.leaf != nil &&
+			continuation.leaf.transactionState == tx.transactionState && tx.queryActive.Load()
+		continuation.owner.mu.Unlock()
+	} else if operation := tx.mutationOperation; operation != nil {
+		operation.mu.Lock()
+		valid = operation.invocation == tx && operation.state == tx.transactionState && !operation.closed &&
+			!operation.producerDone && operation.completionRoot == access.root
+		operation.mu.Unlock()
+	}
 	if !valid {
 		panic("native transition reader has no live completion invocation")
 	}
@@ -262,7 +271,7 @@ func (relation *nativeTransitionRelation) borrowRead(tx *TxContext) *relationSco
 	// descriptor cannot race past retirement merely because the pointer matched.
 	access.scope.mu.Lock()
 	defer access.scope.mu.Unlock()
-	if access.scope.closing {
+	if access.scope.closing || relation.access.Load() != access {
 		panic("native transition relation is retiring")
 	}
 	access.scope.active++

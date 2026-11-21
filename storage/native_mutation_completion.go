@@ -27,7 +27,7 @@ func (operation *nativeMutationOperation) newCompletionBinding(effect *nativeMut
 		panic("native completion lost its original statement owner")
 	}
 	binding := &TxContext{transactionState: state, Session: parent.Session, SessionState: parent.SessionState,
-		remoteObject: parent.remoteObject, invocationContext: parent.invocationContext, fanoutOwner: parent.fanoutOwner, relationData: parent.relationData}
+		remoteObject: parent.remoteObject, invocationContext: parent.invocationContext, fanoutOwner: parent.fanoutOwner, relationData: parent.relationData, postAbort: parent.postAbort}
 	binding.querySeq.Store(parent.querySeq.Load())
 	binding.queryInfo.Store(parent.queryInfo.Load())
 	binding.statementGeneration.Store(statementGenerationCounter.Add(1))
@@ -35,6 +35,7 @@ func (operation *nativeMutationOperation) newCompletionBinding(effect *nativeMut
 	child := newNativeMutationOperationLocked(state, binding)
 	child.localOrigin, child.undoOwner, child.completionRoot, child.abortAllowed = operation.localOrigin, undo, undo, true
 	child.completionColumns = effect.columns
+	child.completionEffect = effect
 	if effect.replacement {
 		child.replacementTarget, child.replacementEvent = effect.target, effect.event
 	}
@@ -145,15 +146,36 @@ func nativeMutationFailure(value any) error {
 }
 
 func (operation *nativeMutationOperation) closeEffectScope() {
+	operation.mu.Lock()
+	scope := operation.effectScope
+	operation.mu.Unlock()
+	if scope != nil {
+		if continuation := operation.retainedAbortScope(scope); continuation != nil {
+			// Revoke under the SAME reader-admission owner and drain readers
+			// before Undo, without closing/reopening the scope's monotone gate.
+			scope.mu.Lock()
+			for _, effect := range operation.effectOrder {
+				if effect.old != nil {
+					effect.old.access.Store(nil)
+					effect.new.access.Store(nil)
+				}
+			}
+			for scope.active != 0 {
+				scope.cond.Wait()
+			}
+			scope.mu.Unlock()
+			// Keep the exact handoff pointer through a possible Undo retry.
+			// Otherwise a second completion pass could take ordinary cleanup
+			// and clear the retained transition payload before first resume.
+			return
+		}
+	}
 	for _, effect := range operation.effectOrder {
 		if effect.old != nil {
 			effect.old.access.Store(nil)
 			effect.new.access.Store(nil)
 		}
 	}
-	operation.mu.Lock()
-	scope := operation.effectScope
-	operation.mu.Unlock()
 	if scope != nil {
 		scope.close()
 		operation.mu.Lock()

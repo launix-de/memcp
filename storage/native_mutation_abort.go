@@ -11,9 +11,15 @@ import "github.com/launix-de/memcp/scm"
 // A terminal control transfer owns no state/Session/operation reference. The
 // pending fact belongs to the actual operation, even if Scheme catches this
 // value. Frontends classify the type, never an error-message substring.
-type nativeTransactionAbortTransfer struct{ transactionID uint64 }
+type nativeTransactionAbortTransfer struct {
+	transactionID       uint64
+	continuationFailure any
+}
 
 func (transfer *nativeTransactionAbortTransfer) Error() string {
+	if transfer.continuationFailure != nil {
+		return fmt.Sprintf("native transaction abort completed; continuation failed: %v", transfer.continuationFailure)
+	}
 	return "native transaction abort requested by statement completion"
 }
 
@@ -29,7 +35,7 @@ func isNativeTransactionAbortTransfer(value any) bool {
 	return errors.As(failure, &transfer)
 }
 
-func (tx *TxContext) requestMutationAbort() {
+func (tx *TxContext) requestMutationAbort(callback, payload scm.Scmer) {
 	if tx == nil || tx.mutationOperation == nil {
 		panic("transaction abort transfer requires a native completion invocation")
 	}
@@ -43,6 +49,9 @@ func (tx *TxContext) requestMutationAbort() {
 	operation.mu.Unlock()
 	if !allowed {
 		panic("transaction abort transfer requires a native completion invocation")
+	}
+	if !callback.IsNil() {
+		operation.prepareAbortContinuation(callback, payload)
 	}
 	root.mu.Lock()
 	if root.state != state || root.statement == nil || root.statement.finished {
@@ -122,14 +131,36 @@ func initMutationAbortBuiltins(en *scm.Env) {
 	}, Type: &scm.TypeDescriptor{Kind: "func", Description: "borrows the native producer's immutable declared assignment names from its actual completion invocation",
 		Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "list"}}})
 	scm.Declare(en, &scm.Declaration{Name: "request_transaction_abort", Fn: func(a ...scm.Scmer) scm.Scmer {
-		if len(a) != 1 {
-			panic("request_transaction_abort requires its native completion invocation")
+		if len(a) < 1 || len(a) > 3 {
+			panic("request_transaction_abort requires completion and optional continuation/payload")
 		}
-		scmerToTxContext(a[0]).requestMutationAbort()
+		callback, payload := scm.NewNil(), scm.NewNil()
+		if len(a) > 1 {
+			callback = a[1]
+		}
+		if len(a) > 2 {
+			payload = a[2]
+		}
+		scmerToTxContext(a[0]).requestMutationAbort(callback, payload)
 		return scm.NewNil()
 	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true,
-		Description: "requests terminal whole-transaction rollback after the native statement producer and callbacks have drained",
-		Params:      []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
+		Description: "requests whole-transaction rollback after native drain, optionally transferring materialized completion inputs to one post-retirement callback; its fresh execution capability admits ordinary independent statement decisions",
+		Params:      []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}, {Kind: "func", Label: "continuation", Optional: true}, {Kind: "any", Label: "payload", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
+	scm.Declare(en, &scm.Declaration{Name: "transaction_abort_failure", Fn: func(a ...scm.Scmer) scm.Scmer {
+		if len(a) != 1 {
+			panic("transaction_abort_failure requires one failure")
+		}
+		value := a[0].Any()
+		failure, ok := value.(error)
+		var transfer *nativeTransactionAbortTransfer
+		if ok && errors.As(failure, &transfer) && transfer.continuationFailure != nil {
+			if data, ok := transfer.continuationFailure.(scm.Scmer); ok {
+				return data
+			}
+			return scm.NewAny(transfer.continuationFailure)
+		}
+		return scm.NewNil()
+	}, Type: &scm.TypeDescriptor{Kind: "func", Const: true, Description: "projects an actual post-abort continuation failure without erasing terminal disposition or granting execution authority", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "failure"}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
 	scm.Declare(en, &scm.Declaration{Name: "transaction_abort_transfer?", Fn: func(a ...scm.Scmer) scm.Scmer {
 		if len(a) != 1 {
 			panic(fmt.Errorf("transaction_abort_transfer? requires one failure value"))

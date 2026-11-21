@@ -245,7 +245,8 @@ type transactionState struct {
 // TxContext binds a native transaction to one invocation's execution resources.
 type TxContext struct {
 	*transactionState
-	declarationInput *nativeMutationInput // actual checked producer only; never serialized or adopted
+	declarationInput *nativeMutationInput     // actual checked producer only; never serialized or adopted
+	postAbort        *nativeAbortContinuation // immutable fresh-execution authority, never an original-T reset
 	// Replication bindings are session-executor-owned, never shared by readers.
 	// Native shard transaction generations supply the ownership-transfer drain.
 	replicationActive   bool
@@ -298,7 +299,7 @@ func NewTxContext(mode TxMode) *TxContext {
 // newInvocation binds the same native transaction to a separate execution
 // scope. It does not copy visibility masks or create a new transaction ID.
 func (tx *TxContext) newInvocation() *TxContext {
-	invocation := &TxContext{transactionState: tx.transactionState, Session: tx.Session, remoteObject: tx.remoteObject, relationData: tx.relationData}
+	invocation := &TxContext{transactionState: tx.transactionState, Session: tx.Session, remoteObject: tx.remoteObject, relationData: tx.relationData, postAbort: tx.postAbort}
 	invocation.fanoutLimit.Store(int32(runtime.GOMAXPROCS(0)))
 	if tx.relationData != nil {
 		invocation.fanoutOwner = tx
@@ -313,6 +314,9 @@ func (tx *TxContext) newInvocation() *TxContext {
 // Rollback leave the object parked in its Scheme session so the next statement
 // can reuse it without retaining any state from the completed transaction.
 func (tx *TxContext) reset(mode TxMode) {
+	if tx.postAbort != nil {
+		panic("post-decision execution cannot be rebound")
+	}
 	if err := tx.withMutationDecision("transaction reset", func(previous *TxContext) error {
 		return tx.bindingAttempt.resetBinding(previous, mode, tx.Session)
 	}); err != nil {
@@ -324,6 +328,9 @@ func (tx *TxContext) reset(mode TxMode) {
 // OLD state's finalizer. A busy attempt retains that slot through marker repair;
 // it never prepares a decision or follows a newer executor state.
 func (tx *TxContext) beginSessionTransaction(session scm.Scmer, mode TxMode) {
+	if tx.postAbort != nil {
+		panic("post-decision execution cannot open a replacement transaction")
+	}
 	if err := tx.withMutationDecision("BEGIN", func(previous *TxContext) error {
 		if previous != nil {
 			if previous.decisionPending() {

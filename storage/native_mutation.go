@@ -31,8 +31,10 @@ type nativeMutationOperation struct {
 	completing        bool
 	completionRoot    *nativeMutationOperation // private completion-derived child admission
 	abortAllowed      bool
-	completionColumns scm.Scmer // immutable producer facts, ONLY on a completion invocation
-	replacementTarget *table    // direct completion invocation only; not inherited by nested producers
+	completionColumns scm.Scmer                // immutable producer facts, ONLY on a completion invocation
+	completionEffect  *nativeMutationEffect    // actual materialized completion input; never supplied by Scheme
+	abortContinuation *nativeAbortContinuation // one post-decision transfer on this outer owner
+	replacementTarget *table                   // direct completion invocation only; not inherited by nested producers
 	replacementEvent  nativeMutationEvent
 	transitionEffects bool
 	rowTriggerChild   *nativeMutationOperation
@@ -189,6 +191,7 @@ func (operation *nativeMutationOperation) resumeDrained() bool {
 	state := operation.state
 	if state == nil {
 		operation.mu.Unlock()
+		operation.finishAbortContinuation()
 		return true
 	}
 	state.mu.Lock()
@@ -214,6 +217,7 @@ func (operation *nativeMutationOperation) resumeDrained() bool {
 func (operation *nativeMutationOperation) closeOwned() {
 	invocation := operation.sealAndDrain()
 	if invocation == nil {
+		operation.finishAbortContinuation()
 		return
 	}
 	var workFailure any
@@ -244,11 +248,17 @@ func (operation *nativeMutationOperation) closeOwned() {
 	operation.joinChildren()
 	operation.completeEffects()
 	aborting := operation.undoOwner == nil && operation.abortRequested()
+	finalizationHeld := false
+	defer func() {
+		if finalizationHeld {
+			invocation.finalizationMu.Unlock()
+		}
+	}()
 	if aborting {
 		// No live frame/producer can own this finalizer. Other session controls
 		// either report Busy before decision or wait without holding our locks.
 		invocation.finalizationMu.Lock()
-		defer invocation.finalizationMu.Unlock()
+		finalizationHeld = true
 	}
 	// A failed undo keeps this SAME operation and all target leases alive for
 	// the existing query cleanup retry. Never release the writer exclusion in
@@ -259,13 +269,22 @@ func (operation *nativeMutationOperation) closeOwned() {
 	operation.mu.Unlock()
 	operation.release()
 	if aborting {
-		// The row rollback and native producer retirement are complete. Existing
-		// resource cleanup now owns failures/retry, with no live callback rights.
-		if failure := invocation.finishResourceCommit(); failure != nil {
-			panic(failure)
-		}
-		if !invocation.Session.IsNil() {
-			scm.Apply(invocation.Session, scm.NewString("transaction"), scm.NewNil())
+		operation.mu.Lock()
+		continuation := operation.abortContinuation
+		operation.mu.Unlock()
+		if continuation != nil {
+			invocation.finalizationMu.Unlock()
+			finalizationHeld = false
+			operation.finishAbortContinuation()
+		} else {
+			// The row rollback and native producer retirement are complete. Existing
+			// resource cleanup now owns failures/retry, with no live callback rights.
+			if failure := invocation.finishResourceCommit(); failure != nil {
+				panic(failure)
+			}
+			if !invocation.Session.IsNil() {
+				scm.Apply(invocation.Session, scm.NewString("transaction"), scm.NewNil())
+			}
 		}
 	}
 	if workFailure != nil && outcome == nil {
@@ -327,10 +346,12 @@ func (operation *nativeMutationOperation) release() {
 	operation.undoOwner = nil
 	operation.completionRoot = nil
 	operation.completionColumns = scm.NewNil()
+	operation.completionEffect = nil
 	operation.replacementTarget = nil
 	operation.replacementEvent = 0
 	operation.effects = nil
 	operation.effectOrder = nil
+	operation.effectScope = nil
 	state.mu.Unlock()
 	operation.mu.Unlock()
 	if parent := operation.parent; parent != nil {

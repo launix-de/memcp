@@ -37,28 +37,18 @@ Persistent DDL remains outside native mutation callbacks. */
 		((symbol !begin) formula _completion) (tsql_trigger_temporary_drop_formula? formula)
 		_ false)))
 
-/* The first completion profile has no autonomous transaction after ROLLBACK.
-An aborting branch cannot have an externally observable suffix, even PRINT.
-Only the exact invocation-local option cleanup below may follow it. Validate
-BOTH IF arms before combining their facts.
-Loops containing an abort and TRY/CATCH are explicit unsupported profiles; this
-does not replace the existing module interpreter or its ordinary SQL leaves. */
-/* A static NOCOUNT setter is invocation-local and restored at module exit.
-It may remain on the normal path after a possible abort only if no observing
-leaf follows it. Keep the actual command; never discard arbitrary SET or SQL.
-The proof consumes the ordinary parser's retained option members. Older
-statement recipes recover those members through the same complete SET grammar. */
+/* Control remains frontend syntax. Native transfer now resumes an admitted
+source continuation after whole original-T Undo. Scope-bearing commands still
+need their explicit lifetime profile; no old session/controller is retained. */
 (define tsql_trigger_option_cleanup? (lambda (schema command) (match command
 	'("set-options" options _enabled)
 	(reduce options (lambda (allowed option) (and allowed (equal? option "NOCOUNT"))) true)
 	'("statement" text) (tsql_trigger_option_cleanup? schema (tsql_set_options_probe text))
 	_ false)))
 (define tsql_trigger_commands_abort? (lambda (schema commands in_loop module)
-	(reduce commands (lambda (aborts command)
-		(if aborts
-			(if (tsql_trigger_option_cleanup? schema command) true
-				(error "executable trigger suffix after ROLLBACK is not supported"))
-			(tsql_trigger_command_abort? schema command in_loop module))) false)))
+	(reduce commands (lambda (aborts command) (begin
+		(define current (tsql_trigger_command_abort? schema command in_loop module))
+		(or aborts current))) false)))
 (define tsql_trigger_command_abort? (lambda (schema command in_loop module) (match command
 	'("recovery" text) (if module
 		(error "transaction control in a trigger-invoked module is not supported")
@@ -69,9 +59,9 @@ statement recipes recover those members through the same complete SET grammar. *
 	'("if" _condition yes no) (begin
 		(define yes_aborts (tsql_trigger_command_abort? schema yes in_loop module))
 		(define no_aborts (if (nil? no) false (tsql_trigger_command_abort? schema no in_loop module)))
-		/* Native abort transfer never resumes its selected branch. Only an IF
-		whose alternatives both abort makes the enclosing suffix unreachable. */
-		(and yes_aborts no_aborts))
+		/* A possible abort needs the continuation profile even when the other
+		arm returns normally. Both arms above are validated before this fact. */
+		(or yes_aborts no_aborts))
 	'("while" _condition body) (begin
 		(tsql_trigger_command_abort? schema body true module)
 		false)
@@ -113,7 +103,8 @@ statement recipes recover those members through the same complete SET grammar. *
 hide ROLLBACK from the outer trigger continuation. Reject recovery throughout
 that module BEFORE its first leaf; only direct terminal trigger abort is owned. */
 (define tsql_validate_trigger_body (lambda (schema commands module) (begin
-	(tsql_trigger_commands_abort? schema commands false module)
+	(define aborts (tsql_trigger_commands_abort? schema commands false module))
+	(if (and aborts (not module)) (tsql_validate_trigger_abort_lifetimes schema commands) true)
 	commands)))
 
 /* Keep error control explicit. ROLLBACK receives its diagnostic immediately
@@ -125,14 +116,17 @@ an uncaught error is sent once. Both retain the ordinary module interpreter. */
 		(define command (nth commands index))
 		(match command
 			'("raiserror" arguments) (begin
-				(if (< (+ index 1) (count commands)) true
-					(error "trigger RAISERROR currently requires an immediately following terminal ROLLBACK or RETURN"))
-				(match (nth commands (+ index 1))
+				/* PRINT/NOCOUNT keep their actual ordered execution. They no
+				longer prevent the same explicit ROLLBACK/RETURN diagnostic path. */
+				(define following (find (map (produceN (- (count commands) (+ index 1)))
+					(lambda (offset) (nth commands (+ index 1 offset))))
+					(lambda (next) (and (not (equal? (car next) "print"))
+						(not (tsql_trigger_option_cleanup? schema next)))) nil))
+				(match following
 					'("recovery" text) (tsql_trigger_recovery_abort? schema text)
 					'("return" nil) true
-					_ (error "trigger RAISERROR currently requires an immediately following terminal ROLLBACK or RETURN"))
-				(list "trigger-raiserror" arguments
-					(match (nth commands (+ index 1)) '("return" nil) true _ false)))
+					_ (error "trigger RAISERROR requires its explicit ROLLBACK or RETURN diagnostic path"))
+				(list "trigger-raiserror" arguments (match following '("return" nil) true _ false)))
 			'("recovery" text) (begin (tsql_trigger_recovery_abort? schema text) (list "trigger-rollback"))
 			'("block" body) (list "block" (tsql_prepare_trigger_commands schema body))
 			'("if" condition yes no) (list "if" condition

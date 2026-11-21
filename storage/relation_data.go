@@ -125,6 +125,7 @@ func copyRelationExecution(public *TxContext, state *transactionState) *TxContex
 		invocationContext: public.invocationContext}
 	if state == public.transactionState {
 		context.remoteObject, context.remoteInvocation = public.remoteObject, public.remoteInvocation
+		context.postAbort = public.postAbort
 	}
 	context.querySeq.Store(public.querySeq.Load())
 	context.queryInfo.Store(public.queryInfo.Load())

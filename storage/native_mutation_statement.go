@@ -240,7 +240,9 @@ func (operation *nativeMutationOperation) finishStatement() any {
 	if state.checkedMutation != operation {
 		panic("native statement undo lost its transaction owner")
 	}
-	state.checkedMutation = nil
+	if !statement.abort || operation.abortContinuation == nil {
+		state.checkedMutation = nil
+	}
 	statement.finished = true
 	statement.tables = nil
 	statement.savepoint = Savepoint{}

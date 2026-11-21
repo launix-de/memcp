@@ -534,7 +534,7 @@ func TestRestoredComputeDependencyTriggersRefreshGuards(t *testing.T) {
 			src.mu.Unlock()
 			// Exercise lazy compilation too: cached native/vector code from the
 			// restored body must not survive replacement of its scalar procedure.
-			src.GetTriggers(AfterUpdate, nil)
+			src.GetTriggers(AfterUpdate, nil, nativeAllTriggers)
 			before := make([]string, len(src.Triggers))
 			for i, tr := range src.Triggers {
 				before[i] = tr.Name

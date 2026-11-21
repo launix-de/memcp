@@ -315,13 +315,14 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 	}
 	input := &nativeMutationInput{target: t, owner: tx.transactionState, event: event,
 		columns: source.tables[t].metadata.columnNames.declarations, unique: uniqueKeysInView(t, source.keys), foreign: foreign}
-	input.beforeInsert = t.GetTriggers(BeforeInsert, retired)
-	input.afterInsert = t.GetTriggers(AfterInsert, retired)
-	input.beforeUpdate = t.GetTriggers(BeforeUpdate, retired)
-	input.afterUpdate = t.GetTriggers(AfterUpdate, retired)
+	profile := nativeTriggerProfileFor(tx)
+	input.beforeInsert = t.GetTriggers(BeforeInsert, retired, profile)
+	input.afterInsert = t.GetTriggers(AfterInsert, retired, profile)
+	input.beforeUpdate = t.GetTriggers(BeforeUpdate, retired, profile)
+	input.afterUpdate = t.GetTriggers(AfterUpdate, retired, profile)
 	if event == nativeMutationDelete {
-		input.beforeDelete = t.GetTriggers(BeforeDelete, retired)
-		input.afterDelete = t.GetTriggers(AfterDelete, retired)
+		input.beforeDelete = t.GetTriggers(BeforeDelete, retired, profile)
+		input.afterDelete = t.GetTriggers(AfterDelete, retired, profile)
 	}
 	if tx.privateMutationSource(t) != source {
 		panic("private declaration input changed while preparing its programs")
@@ -342,7 +343,7 @@ func (input *nativeMutationInput) release() {
 	}
 }
 
-func (t *table) mutationTriggers(timing TriggerTiming, input *nativeMutationInput) []TriggerDescription {
+func (t *table) mutationTriggers(timing TriggerTiming, input *nativeMutationInput, tx *TxContext) []TriggerDescription {
 	if input != nil {
 		if input.target != t {
 			panic("native mutation input belongs to another target")
@@ -362,7 +363,7 @@ func (t *table) mutationTriggers(timing TriggerTiming, input *nativeMutationInpu
 			return input.afterDelete
 		}
 	}
-	return t.GetTriggers(timing, nil)
+	return t.GetTriggers(timing, nil, nativeTriggerProfileFor(tx))
 }
 
 // All callers bind the input during setup. Row callbacks retain this immutable

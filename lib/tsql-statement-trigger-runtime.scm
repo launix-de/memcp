@@ -122,11 +122,7 @@ ordinary connection marker before this language-specific message is raised. */
 		(if (transaction_abort_transfer? failure) (begin
 			(tsql_transaction_clear (tsql_connection_session session))
 			(session "__tsql_transaction_end" 3)
-			(define text "The transaction ended in the trigger. The batch has been aborted.")
-			(if (session "wire_metadata")
-				(error (tds_diagnostic_error (list "number" 3609 "state" 1 "severity" 16
-					"text" text "server" "MemCP" "procedure" "" "line" 1)))
-				(tsql_raise_error 3609 text 1)))
+			(tsql_raise_completed_trigger_abort session (transaction_abort_failure failure)))
 			(match (tsql_diagnostic_failure_value failure)
 				'("tsql-error" number text state severity)
 				(if (session "wire_metadata")

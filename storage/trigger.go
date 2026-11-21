@@ -557,7 +557,7 @@ func compileTriggerForUse(schemaName, tableName string, trigger *TriggerDescript
 }
 
 // GetTriggers returns all triggers for a specific timing
-func (t *table) GetTriggers(timing TriggerTiming, retired map[nativeTriggerSlot]struct{}) []TriggerDescription {
+func (t *table) GetTriggers(timing TriggerTiming, retired map[nativeTriggerSlot]struct{}, profile nativeTriggerProfile) []TriggerDescription {
 	t.mu.Lock()
 	result := make([]TriggerDescription, 0, len(t.Triggers))
 	type lazyTrigger struct {
@@ -568,6 +568,9 @@ func (t *table) GetTriggers(timing TriggerTiming, retired map[nativeTriggerSlot]
 	}
 	lazy := make([]lazyTrigger, 0)
 	for i, tr := range t.Triggers {
+		if profile == nativeInternalTriggers && isUserTrigger(tr) {
+			continue
+		}
 		if tr.Timing != timing {
 			continue
 		}
@@ -916,7 +919,7 @@ func (t *table) beforeInsertOutputColumns(dict scm.Scmer, columns []string, decl
 // on panic the savepoint is rolled back before re-panicking.
 // Triggers with Async=true are launched in a background goroutine (fire-and-forget).
 func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset, tx *TxContext, input *nativeMutationInput) {
-	triggers := t.mutationTriggers(timing, input)
+	triggers := t.mutationTriggers(timing, input, tx)
 	if len(triggers) != 0 {
 		tx = nativeRowTriggerInvocation(tx)
 	}
@@ -1002,7 +1005,7 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 		}
 		return
 	}
-	triggers := t.mutationTriggers(timing, input)
+	triggers := t.mutationTriggers(timing, input, tx)
 	tx = nativeRowTriggerInvocation(tx)
 	for _, tr := range triggers {
 		if tr.Func.IsNil() {
@@ -1146,7 +1149,7 @@ func (t *table) rowToDictWithColumns(row dataset, columns []string) scm.Scmer {
 // ExecuteTableLifecycleTriggers executes non-row-level table lifecycle triggers.
 // These are non-row-level triggers: OLD and NEW are both nil.
 func (t *table) ExecuteTableLifecycleTriggers(timing TriggerTiming, tx *TxContext) {
-	triggers := t.GetTriggers(timing, nil)
+	triggers := t.GetTriggers(timing, nil, nativeTriggerProfileFor(tx))
 	session := txSessionScmer(tx)
 	for _, tr := range triggers {
 		if tr.Func.IsNil() {
@@ -1316,7 +1319,7 @@ func (t *table) validateFinalInsertRows(columns []string, values [][]scm.Scmer, 
 // newRow: the row with changes applied (all columns in table order)
 // Returns the modified newRow. Panics from triggers propagate to the caller.
 func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset, tx *TxContext, input *nativeMutationInput, declarations []*column) (dataset, []TriggerDescription) {
-	triggers := t.mutationTriggers(BeforeUpdate, input)
+	triggers := t.mutationTriggers(BeforeUpdate, input, tx)
 	tx = nativeRowTriggerInvocation(tx)
 	if len(triggers) == 0 {
 		return newRow, nil
@@ -1373,7 +1376,7 @@ func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset, tx *TxContex
 // Panics from triggers propagate to the caller.
 func (t *table) ExecuteBeforeDeleteTriggers(oldRow dataset, tx *TxContext, input *nativeMutationInput, declarations []*column) bool {
 	tx = nativeRowTriggerInvocation(tx)
-	triggers := t.mutationTriggers(BeforeDelete, input)
+	triggers := t.mutationTriggers(BeforeDelete, input, tx)
 	if len(triggers) == 0 {
 		return true
 	}

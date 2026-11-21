@@ -13,6 +13,9 @@ func newNativeMutationBinding(parent *TxContext, executionSession scm.Scmer) (*n
 	if parent == nil {
 		return nil, fmt.Errorf("native mutation producer requires an actual transaction")
 	}
+	if parent.postAbort != nil {
+		parent.postAbort.requireProducer(parent)
+	}
 	if parent.mutationOperation != nil {
 		return newNestedNativeMutationBinding(parent, executionSession)
 	}
@@ -27,6 +30,12 @@ func newNativeMutationBinding(parent *TxContext, executionSession scm.Scmer) (*n
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	// A continuation facade is an actual leaf query, never the ordinary
+	// standalone-control profile. Pair its last admission with endStatement's
+	// same state owner so no producer misses the retained work directory.
+	if parent.postAbort != nil && !parent.queryActive.Load() {
+		return nil, fmt.Errorf("post-decision statement is draining")
+	}
 	if state.mutationAdmissionClosed || state.checkedMutation != nil {
 		return nil, newNativeMutationBusyError(state, "mutation entry")
 	}
@@ -40,7 +49,7 @@ func newNativeMutationBinding(parent *TxContext, executionSession scm.Scmer) (*n
 	// never temporarily installed on the reusable parent executor. Caller-provided
 	// context data does NOT turn an imported/synthetic invocation into a local one.
 	binding := &TxContext{transactionState: state, Session: executionSession, SessionState: parent.SessionState,
-		remoteObject: parent.remoteObject, invocationContext: parent.invocationContext, relationData: parent.relationData}
+		remoteObject: parent.remoteObject, invocationContext: parent.invocationContext, relationData: parent.relationData, postAbort: parent.postAbort}
 	binding.fanoutOwner = parent
 	if parent.fanoutOwner != nil {
 		binding.fanoutOwner = parent.fanoutOwner
@@ -100,7 +109,7 @@ func newNestedNativeMutationBinding(parent *TxContext, executionSession scm.Scme
 		executionSession = parent.Session
 	}
 	binding := &TxContext{transactionState: state, Session: executionSession, SessionState: parent.SessionState,
-		remoteObject: parent.remoteObject, invocationContext: parent.invocationContext, fanoutOwner: parent.fanoutOwner, relationData: parent.relationData}
+		remoteObject: parent.remoteObject, invocationContext: parent.invocationContext, fanoutOwner: parent.fanoutOwner, relationData: parent.relationData, postAbort: parent.postAbort}
 	binding.querySeq.Store(parent.querySeq.Load())
 	binding.statementGeneration.Store(parent.statementGeneration.Load())
 	binding.queryInfo.Store(parent.queryInfo.Load())

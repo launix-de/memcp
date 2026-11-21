@@ -79,7 +79,13 @@ func (tx *TxContext) acquireMutationDecisionAttempt(operation string) (*nativeMu
 					err = fmt.Errorf("native statement undo retry failed: %v", resumeFailure)
 				}
 			}
-			if !tx.Session.IsNil() {
+			// A drained abort may retain only its completion/cleanup marker.
+			// It has no active transaction for a concurrent recovery attempt to
+			// advertise again while post-decision language work is running.
+			attempt.state.mu.Lock()
+			active := attempt.state.State == TxActive
+			attempt.state.mu.Unlock()
+			if active && !tx.Session.IsNil() {
 				var markerFailure any
 				func() {
 					defer func() { markerFailure = recover() }()
@@ -131,7 +137,7 @@ func (attempt *nativeMutationBindingAttempt) resumeCheckedUndo() bool {
 // that same lock for the captured fields. No work/reader lists are copied.
 func (tx *TxContext) captureMutationDecisionLocked(state *transactionState) *TxContext {
 	decision := &TxContext{transactionState: state, Session: tx.Session, SessionState: tx.SessionState,
-		invocationContext: tx.invocationContext, remoteObject: tx.remoteObject, decisionExecutor: tx}
+		invocationContext: tx.invocationContext, remoteObject: tx.remoteObject, decisionExecutor: tx, postAbort: tx.postAbort}
 	decision.querySeq.Store(tx.querySeq.Load())
 	decision.statementGeneration.Store(tx.statementGeneration.Load())
 	decision.queryInfo.Store(tx.queryInfo.Load())
@@ -143,6 +149,9 @@ func (tx *TxContext) captureMutationDecisionLocked(state *transactionState) *TxC
 // original finalizer AND executor slot. Old resources retire before publication;
 // a failed prefix leaves the old slot intact and retryable.
 func (attempt *nativeMutationBindingAttempt) resetBinding(previous *TxContext, mode TxMode, session scm.Scmer) error {
+	if attempt.executor.postAbort != nil {
+		return fmt.Errorf("post-decision execution cannot be rebound")
+	}
 	if previous != nil {
 		if previous.decisionPending() {
 			return fmt.Errorf("transaction commit outcome is unknown; retry COMMIT")
@@ -192,7 +201,7 @@ func (tx *TxContext) beginMutationBindingAttempt(operation string) (*nativeMutat
 		scope := state.resourceScope()
 		scope.mu.Lock()
 		state.mu.Lock()
-		if state.mutationOperations != 0 || state.mutationSavepoints != 0 || state.relationDataOrigins != 0 || scope.constructing != 0 || (scope.deciding && state.mutationDecisionAttempts == 0 && state.mutationSavepoints == 0 && state.State == TxActive && !state.decisionStarted) {
+		if state.checkedMutation != nil || state.mutationOperations != 0 || state.mutationSavepoints != 0 || state.relationDataOrigins != 0 || scope.constructing != 0 || (scope.deciding && state.mutationDecisionAttempts == 0 && state.mutationSavepoints == 0 && state.State == TxActive && !state.decisionStarted) {
 			failure := newNativeMutationBusyError(state, operation)
 			if scope.constructing != 0 {
 				failure.reason = "transaction resource initialization is still active"

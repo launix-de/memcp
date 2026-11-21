@@ -1533,10 +1533,12 @@ labels, declaration scope and existing statement dispatcher. */
 	syntax; compilation never captures this call's SQL or native execution state. */
 	(define flow (tsql_script_cache (json_encode (list "control-flow" commands)) nil
 		(lambda (_tx) (tsql_flow_commands commands nil nil nil (list nil (list) (list) 0 nil)))))
+	(tsql_run_bound_flow flow (car flow) statement session resultrow resultfields))))
+(define tsql_run_bound_flow (lambda (flow start statement session resultrow resultfields) (begin
 	(define nodes (cadr flow))
 	(define labels (nth flow 2))
 	(define scope (tsql_identity_scope session))
-	(cadr (for (list (car flow) 0)
+	(cadr (for (list start 0)
 		(lambda (pc _result) (not (nil? pc)))
 		(lambda (pc _previous) (begin
 			(define node (nodes (string pc)))
@@ -1563,6 +1565,7 @@ labels, declaration scope and existing statement dispatcher. */
 						(session "__tsql_rowcount" 0)
 						(list (if answer yes no) (if preserve_result _previous 0)))
 					'("reset") (list (cadr node) 0)
+					'("trigger-rollback") (list nil (tsql_trigger_rollback_at flow (cadr node) statement session))
 					_ (list (cadr node) (tsql_run_command command statement session resultrow resultfields)))))
 			(define next (if (session "__tsql_noexec") (nth node 3) (match (scope "__tsql_transfer")
 				'("goto" label) (if (has_assoc? labels label)
@@ -3451,6 +3454,7 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 (import "tsql-dynamic-cursors.scm")
 (import "tsql-statement-triggers.scm")
 (import "tsql-statement-trigger-runtime.scm")
+(import "tsql-trigger-continuation.scm")
 (import "tsql-noexec.scm")
 /* The operator supplies files only at startup. The transport receives PEM
 values, and no certificate/key path enters frontend sessions or SQL metadata. */

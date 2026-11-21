@@ -189,6 +189,9 @@ func (t *table) statementTriggerProgramsFor(event nativeMutationEvent, tx *TxCon
 	timing := AfterStatement
 	if !bypassReplacement {
 		for _, header := range headers {
+			if nativeTriggerProfileFor(tx) == nativeInternalTriggers && isUserTrigger(header) {
+				continue
+			}
 			if header.Timing == ReplaceStatement && !header.Disabled {
 				for _, name := range header.StatementEvents {
 					if name == event.String() {
@@ -199,6 +202,9 @@ func (t *table) statementTriggerProgramsFor(event nativeMutationEvent, tx *TxCon
 		}
 	}
 	for _, header := range headers {
+		if nativeTriggerProfileFor(tx) == nativeInternalTriggers && isUserTrigger(header) {
+			continue
+		}
 		if header.Timing != timing || header.Disabled {
 			continue
 		}

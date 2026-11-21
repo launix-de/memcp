@@ -724,6 +724,9 @@ func (origin *TxContext) BindClusterInvocation(value scm.Scmer) (scm.Scmer, erro
 }
 
 func (tx *TxContext) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
+	if tx.postAbort != nil {
+		return scm.NewNil(), fmt.Errorf("post-decision execution requires its actual local continuation authority")
+	}
 	if tx.relationData != nil {
 		return scm.NewNil(), fmt.Errorf("independent private execution views cannot be serialized")
 	}

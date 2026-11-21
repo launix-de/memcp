@@ -4415,7 +4415,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 	defer t.endContributionMutation()
 
 	columns, values = t.prepareInsertDefaults(columns, values, validatedSchema.declarations)
-	earlyTriggers, finalValidators := splitBeforeInsertTriggers(t.mutationTriggers(BeforeInsert, input))
+	earlyTriggers, finalValidators := splitBeforeInsertTriggers(t.mutationTriggers(BeforeInsert, input, currentTx))
 	columns, values = t.ExecuteBeforeInsertTriggers(columns, values, earlyTriggers, isIgnore, currentTx, validatedSchema.declarations)
 	validateInsertColumns(columns, validatedSchema.declarations)
 	// sanitize values (per-row recovery for INSERT IGNORE)
@@ -5386,7 +5386,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 							}
 						}
 						if mutating {
-							if activeReplication(t.schema) == nil && len(t.Triggers) != 0 && len(t.mutationTriggers(BeforeUpdate, guard.input)) != 0 {
+							if activeReplication(t.schema) == nil && len(t.Triggers) != 0 && len(t.mutationTriggers(BeforeUpdate, guard.input, currentTx)) != 0 {
 								batchMask := guard.mask
 								// Never wait for a native writer while retaining a stripe.
 								guard.releaseKeys()
@@ -5427,7 +5427,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 									panic(uniqueReadRetry{})
 								}
 							}
-							if callbackGuard != nil && len(keys) > 1 && (len(t.Triggers) == 0 || len(t.mutationTriggers(BeforeUpdate, guard.input)) == 0) {
+							if callbackGuard != nil && len(keys) > 1 && (len(t.Triggers) == 0 || len(t.mutationTriggers(BeforeUpdate, guard.input, currentTx)) == 0) {
 								// Different constraints can collide with the same stored
 								// row. Include that row's canonical keys before reading
 								// callback values, not just this INSERT's proposed keys.
