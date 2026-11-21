@@ -8154,6 +8154,204 @@ short-circuit ordering in the physical tree instead of encoding SQL shapes. */
 		(filter (coalesceNil sources '()) (lambda (src)
 			(contains? required (source_alias src)))))))
 
+/* A rejected match is different from a unique lookup. A top-level IS NULL
+test of a declared NOT NULL RHS column rejects every matched LEFT row, even
+when the lookup has duplicates or its SQL relation is coarser than its key.
+Only the single NULL-extended row can survive. Retain the complete ON/WHERE
+probe: neither partial key matches nor additional residuals are removed.
+The declaration remains a query guard; samples cannot prove non-nullability. */
+(define ordered_join_antipresence_marker (lambda (src remaining_sources condition tx)
+	(if (or (not (single_source? remaining_sources))
+		(source_outer? src) (not (source_is_native_table? src))) nil
+		(begin
+			(define lookup (car remaining_sources))
+			(if (or (not (source_outer? lookup)) (not (source_is_native_table? lookup))) nil
+				(begin
+					(define marker (find (split_and_terms condition) (lambda (term)
+						(match term
+							(cons head args) (and (equal? (count args) 1)
+								(or (expression_equal? head (quote nil?)) (identical? head nil?)
+									(expression_equal? head (quote sql_is_null)))
+								(not (nil? (direct_column_name_for_alias lookup (car args)))))
+							_ false)) nil))
+					(define column (if (nil? marker) nil (direct_column_name_for_alias lookup (cadr marker))))
+					(if (or (nil? column) (not (expression_equal? (get_assoc (coalesceNil (source_column_declaration lookup column false) '()) "Null" nil) false))) nil marker)))))))
+
+/* Surviving anti rows are 0:1, but a residual ON predicate can still inspect
+an entire duplicate bucket. Only a COMPLETE conjunction of native text point
+comparisons supports the first-match probe below. No key uniqueness or raw
+collation injectivity is inferred. Every other ON shape keeps unknown access
+work and the established full join consumer. */
+(define ordered_join_antipresence_points (lambda (sources default_alias driver lookup)
+	(begin
+		(define on (coalesceNil (source_join_expr lookup) true))
+		(define columns (join_cols_for_alias sources default_alias (source_alias lookup) (list on)))
+		(define params (map columns (lambda (column) (scan_callback_symbol_for_alias (source_alias lookup) column))))
+		(define points (map (split_and_terms on) (lambda (term) (begin
+			/* Reuse the common computed-text equality mapper. Its literal-pattern
+			validation, native equality relation and retained residual are unchanged. */
+			(define lowered (mark_outer_join_symbols sources (source_alias lookup)
+				(lower_column_expr_for_join_truth_context sources default_alias term nil)))
+			(define computed (scan_plan_comparison lowered params columns))
+			(if (and (not (nil? computed)) (equal? (computed "kind") "equal")
+				(not (nil? (computed "order"))) (expression_equal? (computed "retain_residual") true)
+				(not (empty_list? (join_cols_for_alias sources default_alias (source_alias driver) (list term))))
+				(empty_list? (query_expr_session_reads term))) computed
+				(match term
+					(cons head args) (if (and
+						(or (expression_equal? head (quote sql_compare)) (identical? head sql_compare))
+						(equal? (count args) 4) (has? '("equal?" "equal??") (nth args 3)))
+						(begin
+							(define left (car args))
+							(define right (cadr args))
+							(define lookup_left (direct_column_name_for_alias lookup left))
+							(define driver_right (direct_column_name_for_alias driver right))
+							(define swapped (or (nil? lookup_left) (nil? driver_right)))
+							(define column (if swapped (direct_column_name_for_alias lookup right) lookup_left))
+							(define value (if swapped left right))
+							(define driver_column (if swapped (direct_column_name_for_alias driver left) driver_right))
+							(define left_info (sql_expr_info sources left))
+							(define right_info (sql_expr_info sources right))
+							(define collation (sql_merge_collation (sql_info_collation left_info) (sql_info_collation right_info)))
+							(define name (if (nil? collation) "bin" (car collation)))
+							(if (and (not (nil? column)) (not (nil? driver_column))
+								(has? '("CHAR" "VARCHAR") (sql_info_type left_info))
+								(has? '("CHAR" "VARCHAR") (sql_info_type right_info))
+								(parameter_access_native_relation? (nth args 2) left right sources))
+								(begin
+									(define binding (lower_column_expr_for_join_in_context sources default_alias value nil))
+									(append (scan_plan_boundary "equal" (list column '() nil) binding binding true true true true name true)
+										"order" (collate name false) "order_metadata" (concat name ":asc") "retain_residual" true)) nil)) nil)
+					_ nil))))))
+		(if (or (empty_list? points) (not (reduce points (lambda (known point) (and known (not (nil? point)))) true)))
+			nil (if (equal? (count points) (count (merge_unique (list (map points (lambda (point) (point "column"))))))) points nil)))))
+
+/* The complete ON has exactly the point comparisons described above. Native
+presence stops at its first visible complete match, including duplicate keys;
+original SQL comparisons remain residuals. NULL operands cannot match. The
+nontext branch preserves the original dynamic comparison without an unsafe
+lexical restriction; declared SQL text storage is what prices the point lane.
+WHERE consumes the ordinary single NULL-extended RHS tuple only after absence. */
+(define ordered_join_antipresence_probe (lambda (sources default_alias lookup points condition probe_rows)
+	(begin
+		(define on (coalesceNil (source_join_expr lookup) true))
+		(define columns (join_cols_for_alias sources default_alias (source_alias lookup) (list on)))
+		(define callback (list (quote lambda) (map columns (lambda (column)
+			(scan_callback_symbol_for_alias (source_alias lookup) column)))
+			(mark_outer_join_symbols sources (source_alias lookup)
+				(lower_column_expr_for_join_truth_context sources default_alias on probe_rows))))
+		(define values (map points (lambda (point) (point "lower"))))
+		(define packed (scan_plan_pack points '()))
+		(define mapped (filter points (lambda (point) (not (nil? (point "mapper"))))))
+		(define access (scan_access_schema (car packed) (if (empty_list? mapped) '() ((car mapped) "map_columns")) nil false columns))
+		(define exists (list (quote if)
+			(cons (quote or) (map values (lambda (value) (list (quote nil?) value)))) false
+			(cons (quote and) (map values (lambda (value) (list (quote string?) value))))
+			(list (quote scan_exists) (physical_query_tx_symbol) (source_table_expr lookup)
+				(list (quote quote) access) (scan_plan_values (cadr packed)) (quoted_runtime_list columns) callback)
+			(compile_scan_plan (quote scan_exists) (physical_query_tx_symbol) (source_table_expr lookup)
+				(quoted_runtime_list columns) callback)))
+		(define null_columns (join_cols_for_alias sources default_alias (source_alias lookup) (list condition)))
+		(define null_test (cons (list (quote lambda) (map null_columns (lambda (column)
+			(scan_callback_symbol_for_alias (source_alias lookup) column)))
+			(lower_column_expr_for_join_truth_context sources default_alias condition probe_rows))
+			(map null_columns (lambda (_column) nil))))
+		(list (quote and) (list (quote not) exists) null_test))))
+
+/* Compare the existing eager ordered queue with the existing disjoint-batch
+consumer. NULL extension has no base-table null frequency: use the common
+unknown-predicate prior for its acceptance ESTIMATE, not RHS null statistics
+or the ratio of unrelated table populations. This is never a row-count proof.
+The full predicate/probe remains in the chosen consumer and can exhaust the
+complete input. No index/shard readiness participates in the choice. */
+/* Reuse evaluates this same selected-access formula with current published
+row counts and actual scalar input bytes. Count changes alone are not a cache
+invalidation certificate; only the existing cost/observation budget decides. */
+(define ordered_join_antipresence_batch_work (lambda (driver_rows lookup_rows target density row_ns seek_row_ns input_bytes)
+	(begin
+		(define visited (min driver_rows (/ target density)))
+		(define batches (ordered_batch_count_estimate target visited))
+		(define steps (membership_integer_log2_ceil_from (max 1 lookup_rows) 1 0))
+		(+ (* batches (+ planner_membership_ordered_scan_invocation_ns
+			planner_membership_scan_invocation_ns planner_membership_recset_startup_ns))
+			(* visited (+ row_ns (* 3 planner_membership_recset_build_row_ns)
+				planner_membership_downstream_probe_row_ns (* steps seek_row_ns)
+				(* input_bytes planner_membership_broad_text_match_byte_ns)))))))
+
+(define ordered_join_antipresence_choice (lambda (sources default_alias src remaining_sources condition output_exprs order_items offset limit planning_session tx)
+	(if (or (nil? planning_session) (not (number? limit)) (<= limit 0)
+		(not (number? offset)) (< offset 0)
+		(ordered_join_lookup_values_required? remaining_sources default_alias output_exprs order_items)) nil
+		(begin
+			(define marker (ordered_join_antipresence_marker src remaining_sources condition tx))
+			(define points (if (nil? marker) nil (ordered_join_antipresence_points sources default_alias src (car remaining_sources))))
+			(define scalar (if (nil? points) nil (parameter_access_merge_work
+				/* Driver-local WHERE terms run in the batch prefilter and again
+				in the complete NULL-extended test. Charging the full WHERE twice
+				covers that repeated work without weakening either boundary. */
+				(map (merge (list output_exprs (list condition condition) (map sources source_join_expr) (map order_items car)))
+					(lambda (expr) (parameter_access_scalar_work expr sources))))))
+			(define statistics (if (nil? scalar) '() (map sources (lambda (source)
+				(table_planner_statistics (table (source_schema source) false (source_relation source) false tx))))))
+			(define rows (map statistics (lambda (stats) (stats "row_count"))))
+			(if (or (nil? scalar) (not (equal? (count rows) 2))
+				(not (reduce statistics (lambda (known stats)
+					(and known (expression_equal? (stats "has_read_program") false))) true))
+				(not (reduce rows (lambda (known value) (and known (number? value) (>= value 0))) true))) nil
+				(begin
+					(define driver_rows (car rows))
+					/* sql_bind_catalog_declarations already owns the actual original-T
+					declaration guard. Do not add a public/nil-T metadata proof. */
+					(define density (planner_estimate_planning_value (planner_unknown_selectivity_estimate) 0.1))
+					(define visited (min driver_rows (/ (+ offset limit) density)))
+					(define batches (ordered_batch_count_estimate (+ offset limit) visited))
+					(define input_terms (parameter_access_input_terms (nth scalar 2)))
+					(define input_bytes (parameter_access_input_bytes input_terms planning_session))
+					(define row_ns (+ planner_membership_scan_row_ns
+						(* (car scalar) planner_membership_expression_operation_row_ns)
+						(* (nth scalar 1) planner_membership_broad_text_match_byte_ns)))
+					(define on_work (parameter_access_scalar_work (source_join_expr (car remaining_sources)) sources))
+					/* The native point search still compares keys along the RHS tree.
+					Charge its actual population, declared byte work and the existing
+					calibrated invocation overhead; do not equate output with visits. */
+					(define seek_steps (membership_integer_log2_ceil_from (max 1 (cadr rows)) 1 0))
+					(define seek_row_ns (+ (* (car on_work) planner_membership_expression_operation_row_ns)
+						(* (nth on_work 1) planner_membership_broad_text_match_byte_ns)))
+					(define probe_cost (planner_cost_add (planner_membership_downstream_probe_cost visited)
+						(planner_cost 0 (* visited seek_steps seek_row_ns) 0 0 0 0 0 0 visited 0.35) visited 0.35))
+					(define eager_probe_cost (planner_cost_add (planner_membership_downstream_probe_cost visited)
+						/* The old complete LEFT reduction has no early anti-presence
+						brake: an unknown duplicate class can require the entire RHS. */
+						(planner_cost 0 (* visited (cadr rows) seek_row_ns) 0 0 0 0 0 0 visited 0.35) visited 0.35))
+					(define eager (planner_cost_add eager_probe_cost
+						(planner_cost planner_membership_ordered_scan_invocation_ns (* driver_rows row_ns)
+							0 0 0 (* driver_rows planner_membership_recset_build_row_ns) (* driver_rows 4) 0 visited 0.35)
+						visited 0.35))
+					(define batch (planner_cost_add probe_cost
+						(planner_cost (* batches (+ planner_membership_ordered_scan_invocation_ns
+							planner_membership_scan_invocation_ns planner_membership_recset_startup_ns))
+							(* visited row_ns) 0 0 0 (* visited 3 planner_membership_recset_build_row_ns)
+							(* visited 12) 0 visited 0.35) visited 0.35))
+					(define chosen (if (planner_cost_better? batch eager) "ordered_batch_accept" "ordered_postfilter"))
+					(define cost (if (equal? chosen "ordered_batch_accept") batch eager))
+					(define scalar_rows (if (equal? chosen "ordered_batch_accept") visited driver_rows))
+					(planner_record_physical_decision (list
+						(list "decision_id" (concat "ordered_antipresence:" (source_alias src)))
+						(list "decision" "ordered_antipresence") (list "chosen" chosen)
+						(list "reason" "complete_queue_vs_disjoint_acceptance_work")
+						(list "inputs" (list (list "driver_rows" driver_rows) (list "lookup_rows" (cadr rows))
+							(list "estimated_visited_rows" visited) (list "estimated_acceptance_source" "unknown_predicate_prior")
+							(list "estimated_batches" batches)))
+						(list "alternatives" (list
+							(list (list "plan" "ordered_postfilter") (list "cost" (planner_cost_explain eager)))
+							(list (list "plan" "ordered_batch_accept") (list "cost" (planner_cost_explain batch)))))) planning_session)
+					(if (or (nil? input_bytes) (not (equal? chosen "ordered_batch_accept"))) nil
+						(list chosen cost scalar_rows input_terms rows
+							(* scalar_rows input_bytes planner_membership_broad_text_match_byte_ns) points
+							(list (+ offset limit) density row_ns seek_row_ns)))))))))
+
+
+
 /* Carrier costing happens at one scan-tree edge, but rejecting LEFT JOIN
 sources may already sit in its continuation. Derive them from the complete
 source catalog; exclude only the driver and the membership stage whose carrier
@@ -8760,7 +8958,21 @@ until the caller has selected this physical alternative. */
 				true
 				(quote ordered_join_stream) planning_session (planner_context_tx facts))))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
-		(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
+		(define antipresence_conditions (merge (list (split_and_terms final_condition)
+			(merge (map ordered_sources (lambda (source) (split_and_terms (coalesceNil (source_join_expr source) true))))))))
+		(define antipresence (if (and (nil? membership) (empty_list? stages)
+			(not (empty_list? driver_order_items)) (empty_list? remaining_order_items)
+			/* A physical tree may retain additional predicates. This descriptor
+			cannot omit a condition that its original ON/WHERE does not own. */
+			(reduce (split_and_terms (join_optimizer_node_condition (join_optimizer_tree_predicates plan)))
+				(lambda (covered term) (and covered (or (expression_equal? term true)
+					(not (nil? (find antipresence_conditions (lambda (candidate) (expression_equal? term candidate)) nil)))))) true))
+			(ordered_join_antipresence_choice ordered_sources default_alias src remaining_sources
+				final_condition output_exprs order_items offset limit planning_session (planner_context_tx facts)) nil))
+		(define antipresence_batch (and (not (nil? antipresence))
+			(equal? (car antipresence) "ordered_batch_accept")))
+		(define use_batch_accept (or antipresence_batch (equal? membership_strategy "ordered_batch_accept")))
+
 		/* A scalar truth carrier over the complete driver would defeat adaptive
 		batching. When the batch alternative wins, keep the scalar marker in the
 		predicate and lower it with the batch cardinality inside scan_recset. */
@@ -8845,9 +9057,12 @@ until the caller has selected this physical alternative. */
 		(define acceptance_plan (join_optimizer_tree_without_aliases
 			remaining_plan removed_acceptance_aliases))
 		(define acceptance_needed_exprs (merge (list
-			(list remaining_condition)
+			(list (if antipresence_batch final_condition remaining_condition))
 			(source_join_exprs acceptance_sources))))
-		(define acceptance_probe (if defer_complex_acceptance true
+		(define acceptance_probe (if antipresence_batch
+			(ordered_join_antipresence_probe all_sources default_alias (car remaining_sources)
+				(nth antipresence 6) final_condition acceptance_probe_work_rows)
+			defer_complex_acceptance true
 			(if (empty_list? acceptance_sources)
 				(lower_column_expr_for_join_truth_context
 					all_sources default_alias remaining_condition acceptance_probe_work_rows)
@@ -8875,7 +9090,7 @@ until the caller has selected this physical alternative. */
 			acceptance_probe))
 		(define batch_filter (if use_batch_accept
 			(ordered_batch_filter_expr all_sources default_alias src condition
-				(list membership) '() acceptance_probe_work_rows acceptance_cols acceptance_probe
+				(if (nil? membership) '() (list membership)) '() acceptance_probe_work_rows acceptance_cols acceptance_probe
 				planning_session)
 			nil))
 		(if (and use_batch_accept (nil? batch_filter))
@@ -8888,7 +9103,7 @@ until the caller has selected this physical alternative. */
 		(define row_expr (list (quote stream_emit) emit_value
 			(value_builder projection_probe_work_rows scalar_probe)))
 		(define mapcols (join_cols_for_alias all_sources default_alias alias carrier_needed_exprs))
-		(define projection (if projected_join_projection_elidable
+		(define projection (if (or projected_join_projection_elidable antipresence_batch)
 			row_expr
 			(build_join_scan_pipeline_using_recipe
 				schema all_sources remaining_plan default_alias carrier_needed_exprs
@@ -8948,6 +9163,14 @@ until the caller has selected this physical alternative. */
 			(if use_batch_accept 0 offset) (if use_batch_accept -1 limit)
 			reduce_expr neutral_expr
 			(list (quote lambda) (list emit_value) scan_expr)))
+		/* This is a compile-local cost result from the branch actually emitted,
+		not a semantic permission or a persistent plan certificate. The root recorder
+		accepts it only for the same complete flat source/predicate/projection/window.
+		Nested probes cannot overwrite an unrelated outer query's work model. */
+		(if (nil? antipresence) nil
+			(planning_session "__memcp_queryplan_selected_access_work"
+				(cons (list ordered_sources final_condition output_exprs order_items offset_value limit_value antipresence)
+					(coalesceNil (planning_session "__memcp_queryplan_selected_access_work") '()))))
 		(wrap_membership_recset_bindings
 			(if (nil? branch_candidates) '() branch_bindings)
 			(if use_membership_keyset
@@ -14533,6 +14756,192 @@ compilation break-even estimate smaller and hide a later specialization. */
 Width describes a value, not a row subset. Only native bounded CHAR/VARCHAR,
 literals and current scalar inputs can prove text width; opaque values decline.
 Every byte term is charged both during candidate choice and at invocation reuse. */
+(define parameter_access_merge_work (lambda (profiles)
+	(if (reduce profiles (lambda (unknown profile) (or unknown (nil? profile))) false) nil
+		(list
+			(reduce profiles (lambda (total profile) (+ total (car profile))) 0)
+			(reduce profiles (lambda (total profile) (+ total (nth profile 1))) 0.0)
+			(merge (map profiles (lambda (profile) (nth profile 2)))) nil '()))))
+
+(define parameter_access_column_width (lambda (sources expr)
+	(match expr
+		((symbol get_column) alias alias_ci column column_ci) (begin
+			(define src (source_for_alias sources nil alias alias_ci))
+			(define meta (if (or (nil? src) (not (source_is_native_table? src))) nil
+				(source_column_declaration src column column_ci)))
+			(if (or (nil? meta) (not (expression_equal? (meta "Computed") false))) nil (begin
+				(define type (toUpper (meta "RawType")))
+				(define dimensions (coalesceNil (meta "Dimensions") '()))
+				(if (and (has? '("CHAR" "VARCHAR") type) (not (empty_list? dimensions))
+					(number? (car dimensions)) (> (car dimensions) 0)) (* 4.0 (car dimensions))
+					(has? '("BOOL" "BOOLEAN" "BIT" "INT" "INTEGER" "BIGINT" "SMALLINT" "TINYINT"
+						"FLOAT" "REAL" "DOUBLE" "DECIMAL" "NUMERIC" "DATE" "DATETIME" "TIMESTAMP") type) 0.0 nil))))
+		_ nil)))
+
+(define parameter_access_native_relation? (lambda (relation left right sources)
+	(begin
+		(define collation (sql_merge_collation
+			(sql_info_collation (sql_expr_info sources left))
+			(sql_info_collation (sql_expr_info sources right))))
+		(define name (if (nil? collation) "bin" (car collation)))
+		(or (identical? relation (collate name false))
+			(match relation
+				(list factory declared reverse) (and (identical? factory collate)
+					(expression_equal? declared name) (expression_equal? reverse false))
+				_ false)))))
+
+(define parameter_access_comparison_work (lambda (profiles passes)
+	(if (reduce profiles (lambda (unknown profile)
+		(or unknown (nil? profile) (and (not (nil? profile)) (nil? (nth profile 3))))) false) nil
+		(begin
+			(define merged (parameter_access_merge_work profiles))
+			/* Include NULL/type tests, operator dispatch and Boolean work, not
+			just the final native comparison. Byte passes remain explicit. */
+			(list (+ 24 (car merged))
+				(+ (nth merged 1) (* passes (reduce profiles (lambda (bytes profile) (+ bytes (nth profile 3))) 0.0)))
+				(merge (list (nth merged 2) (merge (map (produceN passes) (lambda (_pass)
+					(merge (map profiles (lambda (profile) (nth profile 4))))))))) 0.0 '())))))
+
+(define parameter_access_scalar_head (lambda (raw)
+	(begin
+		(define head (expression_syntax raw))
+		(define known (find (list
+			(list (quote not) not) (list (quote nil?) nil?) (list (quote string?) string?)
+			(list (quote coalesceNil) coalesceNil) (list (quote equal?) equal?) (list (quote equal??) equal??)
+			(list (quote <) <) (list (quote >) >) (list (quote <=) <=) (list (quote >=) >=))
+			(lambda (pair) (identical? head (cadr pair))) nil))
+		(if (nil? known) head (car known)))))
+
+(define parameter_access_scalar_work (lambda (expr sources)
+	(begin
+		(define input (query_session_read_expr expr))
+		(if (and (not (nil? input)) (expression_equal? (car input) (quote session)) (string? (cadr input)))
+			(list 1 0.0 '() 0.0 (list (cadr input)))
+			(sql_column_ref? expr) (begin
+				(define width (parameter_access_column_width sources expr))
+				(if (nil? width) nil (list 1 0.0 '() width '())))
+			(match expr
+				((symbol sql_type_expr) formula _type _collation) (parameter_access_scalar_work formula sources)
+				((symbol quote) value) (if (or (nil? value) (string? value) (number? value)
+					(expression_equal? value true) (expression_equal? value false))
+					(list 0 0.0 '() (if (string? value) (strlen value) 0.0) '()) nil)
+				(cons raw_head args) (begin
+					(define head (parameter_access_scalar_head raw_head))
+					(if (and (or (identical? head regexp_replace) (expression_equal? head (quote regexp_replace)))
+						(equal? (count args) 3) (expression_equal? (nth args 1) " +$") (expression_equal? (nth args 2) ""))
+						(begin
+							(define value (parameter_access_scalar_work (car args) sources))
+							(define input_type (sql_info_type (sql_expr_info sources (car args))))
+							(if (or (nil? value) (nil? (nth value 3))
+								(not (or (sql_text_type? input_type) (equal? input_type "NULL")))) nil
+								/* Native regexp_replace compiles its literal pattern per call. */
+								(list (+ 2 (car value)) (+ (nth value 1) (nth value 3))
+									(merge (list (nth value 2) (nth value 4))) (nth value 3) (nth value 4))))
+						(and (or (identical? head equal_collate) (expression_equal? head (quote equal_collate)))
+							(equal? (count args) 3) (string? (nth args 2)))
+						(parameter_access_comparison_work
+							(map (list (car args) (cadr args)) (lambda (part) (parameter_access_scalar_work part sources))) 2)
+						(and (or (identical? head sql_compare) (expression_equal? head (quote sql_compare)))
+							(equal? (count args) 4) (has? '("equal?" "equal??" "<" ">" "<=" ">=") (nth args 3))
+							(parameter_access_native_relation? (nth args 2) (car args) (cadr args) sources))
+						(parameter_access_comparison_work
+							(map (list (car args) (cadr args)) (lambda (part) (parameter_access_scalar_work part sources)))
+							(if (has? '("equal?" "equal??") (nth args 3)) 2 1))
+						(and (equal? (count args) 2)
+							(parameter_access_native_relation? head (car args) (cadr args) sources))
+						(parameter_access_comparison_work (map args (lambda (part) (parameter_access_scalar_work part sources))) 1)
+						(and (symbol? head) (has? (list 'equal? 'equal?? '< '> '<= '>=) head) (equal? (count args) 2))
+						(parameter_access_comparison_work (map args (lambda (part) (parameter_access_scalar_work part sources))) 2)
+						(and (expression_equal? head (quote if)) (not (equal? (count args) 3))) nil
+						(and (symbol? head) (has? (list 'and 'or 'not 'if 'equal? 'equal?? '< '> '<= '>= 'nil?
+							'string? 'coalesceNil 'sql_is_null 'sql_is_not_null 'sql_not 'sql_and 'sql_or) head))
+						(begin
+							(define profiles (map args (lambda (part) (parameter_access_scalar_work part sources))))
+							(define merged (parameter_access_merge_work profiles))
+							(if (nil? merged) nil (begin
+								(define values (if (expression_equal? head (quote coalesceNil)) profiles
+									(if (and (expression_equal? head (quote if)) (equal? (count profiles) 3)) (cdr profiles) '())))
+								(define bounded (reduce values (lambda (known value) (and known (number? (nth value 3)))) true))
+								(define truth_inputs (if (expression_equal? head (quote if)) (list (car profiles))
+									(if (has? (list 'and 'or 'not 'sql_not 'sql_and 'sql_or) head) profiles '())))
+								(list (+ (count args) (car merged))
+									(+ (nth merged 1) (reduce truth_inputs (lambda (width value) (+ width (nth value 3))) 0.0))
+									(merge (list (nth merged 2) (merge (map truth_inputs (lambda (value) (nth value 4))))))
+									(if bounded (reduce values (lambda (width value) (+ width (nth value 3))) 0.0) nil)
+									(if bounded (merge (map values (lambda (value) (nth value 4)))) '())))))
+						nil))
+				_ (if (or (nil? expr) (string? expr) (number? expr)
+					(expression_equal? expr true) (expression_equal? expr false))
+					(list 0 0.0 '() (if (string? expr) (strlen expr) 0.0) '()) nil))))))
+
+(define parameter_access_input_terms (lambda (keys)
+	(begin
+		(define counts (newsession))
+		(map keys (lambda (key) (counts key (+ 1 (coalesceNil (counts key) 0)))))
+		(map (sort (counts) <) (lambda (key) (list key (counts key)))))))
+
+(define parameter_access_input_bytes (lambda (terms session)
+	(reduce terms (lambda (total term) (begin
+		(define value (session (car term)))
+		(if (nil? total) nil
+			(string? value) (+ total (* (cadr term) (+ 0.0 (strlen value))))
+			(or (nil? value) (number? value) (expression_equal? value true) (expression_equal? value false)) total
+			nil))) 0.0)))
+
+
+
+/* A reusable candidate needs a priced, closed work domain. This initial
+profile covers flat native joins and scalar column/Boolean work, not opaque
+procedures, grouped carriers or relation-free arbitrary projections. Count the
+full Cartesian domain deliberately: parameter selectivity cannot make this
+compilation break-even estimate smaller and hide a later specialization. */
+(define parameter_access_matches_root? (lambda (access root)
+	(and (expression_equal? (nth access 1) (qb_where root))
+		(expression_equal? (nth access 2) (extract_assoc (qb_fields root) (lambda (_title expr) expr)))
+		(expression_equal? (nth access 3) (qb_order root))
+		(expression_equal? (coalesceNil (nth access 4) 0) (coalesceNil (qb_offset root) 0))
+		(expression_equal? (coalesceNil (nth access 5) -1) (coalesceNil (qb_limit root) -1))
+		(expression_equal?
+			(sort (car access) (lambda (left right) (< (source_alias left) (source_alias right))))
+			(sort (qb_sources root) (lambda (left right) (< (source_alias left) (source_alias right))))))))
+
+(define parameter_access_for_root (lambda (ir planning_session)
+	(begin
+		(define root (ir_root ir))
+		(if (or (nil? planning_session) (not (query_block? root))
+			(not (empty_list? (ir_stages ir))) (not (empty_list? (qb_group root)))
+			(not (empty_list? (qb_hidden root))) (query_block_has_aggregates? root)) nil
+			(find (coalesceNil (planning_session "__memcp_queryplan_selected_access_work") '())
+				(lambda (access) (parameter_access_matches_root? access root)) nil)))))
+
+(define parameter_access_work_profile (lambda (access)
+	(begin
+		(define selected (nth access 6))
+		(list (quote native-ordered-access)
+			(map (car access) (lambda (source) (list (source_schema source) (source_relation source))))
+			(nth selected 7) (nth selected 3)))))
+
+(define parameter_access_reuse_work (lambda (profile session tx)
+	(begin
+		(define statistics (map (nth profile 1) (lambda (source)
+			(begin
+				(define handle (table (car source) false (cadr source) false tx))
+				(if (nil? handle) nil (table_planner_statistics handle))))))
+		(define rows (map statistics (lambda (stats) (if (nil? stats) nil (stats "row_count")))))
+		(define bytes (parameter_access_input_bytes (nth profile 3) session))
+		(if (or (nil? bytes) (not (equal? (count rows) 2))
+			(not (reduce rows (lambda (known row) (and known (number? row) (>= row 0))) true))
+			(not (reduce statistics (lambda (known stats)
+				(and known (if (nil? stats) false (expression_equal? (stats "has_read_program") false)))) true))) nil
+			(begin
+				(define formula (nth profile 2))
+				(define work (ordered_join_antipresence_batch_work (car rows) (cadr rows)
+					(car formula) (cadr formula) (nth formula 2) (nth formula 3) bytes))
+				(define visited (min (car rows) (/ (car formula) (cadr formula))))
+				/* Match Root's existing [admission-work, additional-byte-work] API. */
+				(list work (* visited bytes planner_membership_broad_text_match_byte_ns)))))))
+
+
 (define parameter_plan_merge_scalar_work (lambda (profiles)
 	(if (reduce profiles (lambda (unknown profile) (or unknown (nil? profile))) false) nil
 		(list
@@ -14658,6 +15067,7 @@ current scalar once. No input expression or caller procedure is evaluated. */
 
 (define parameter_plan_work_cost (lambda (profile session tx)
 	(if (nil? profile) nil
+		(expression_equal? (car profile) (quote native-ordered-access)) (parameter_access_reuse_work profile session tx)
 		(begin
 			(define statistics (map (car profile) (lambda (src)
 				(table_planner_statistics (table (source_schema src) false (source_relation src) false tx)))))
@@ -14692,11 +15102,16 @@ current scalar once. No input expression or caller procedure is evaluated. */
 (define record_parameter_plan_execution_cost (lambda (ir planning_session)
 	(if (nil? planning_session) nil
 		(begin
-			(planning_session "__memcp_queryplan_candidate_cost" (parameter_plan_execution_cost ir))
-			(planning_session "__memcp_queryplan_parameter_work" (parameter_plan_work_profile ir))))))
+			(define access (parameter_access_for_root ir planning_session))
+			(define selected (if (nil? access) nil (nth access 6)))
+			(planning_session "__memcp_queryplan_candidate_cost"
+				(if (nil? selected) (parameter_plan_execution_cost ir) (nth selected 1)))
+			(planning_session "__memcp_queryplan_parameter_work"
+				(if (nil? access) (parameter_plan_work_profile ir) (parameter_access_work_profile access)))))))
 
 (define neumann_compile_pipeline (lambda (ast planning_session tx result_consumer finalizer)
 	(begin
+		(if (nil? planning_session) nil (planning_session "__memcp_queryplan_selected_access_work" '()))
 		(tx_check tx)
 		(define ast (planner_bind_parameter_window ast planning_session))
 		/* Constant columns are a relational equivalence, independent of the
@@ -14746,6 +15161,7 @@ current scalar once. No input expression or caller procedure is evaluated. */
 		plan)))
 (define neumann_compile_ir_pipeline (lambda (ir planning_session tx result_consumer finalizer)
 	(begin
+		(if (nil? planning_session) nil (planning_session "__memcp_queryplan_selected_access_work" '()))
 		(tx_check tx)
 		(define ir (make_ir (ir_kind ir)
 			(planner_bind_parameter_window (ir_root ir) planning_session)

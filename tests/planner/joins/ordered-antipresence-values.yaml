@@ -1,0 +1,380 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  syntax: mysql
+  description: Ordered LEFT anti-presence retains complete matches NULL extension multiplicity and residual truth
+setup:
+- sql: DROP TABLE IF EXISTS ordered_anti_points
+- sql: DROP TABLE IF EXISTS ordered_anti_nullable
+- sql: DROP TABLE IF EXISTS ordered_anti_lookup
+- sql: DROP TABLE IF EXISTS ordered_anti_driver
+- sql: CREATE TABLE ordered_anti_driver(id INT PRIMARY KEY,key_a VARCHAR(20) COLLATE utf8mb4_general_ci,key_b INT,flag
+    INT)
+- sql: CREATE TABLE ordered_anti_lookup(marker INT NOT NULL,key_a VARCHAR(20) COLLATE utf8mb4_general_ci,key_b INT,enabled
+    INT)
+- sql: CREATE TABLE ordered_anti_nullable(marker INT,key_a VARCHAR(20) COLLATE utf8mb4_general_ci,key_b INT)
+- sql: INSERT INTO ordered_anti_driver VALUES(1,'Alpha',1,0),(2,'Alpha',2,0),(3,'beta',3,0),(4,NULL,1,1),(5,'gamma',5,1),(6,'delta',6,0),(7,'ALPHA',1,0)
+- sql: INSERT INTO ordered_anti_lookup VALUES(11,'alpha',1,1),(12,'ALPHA',1,1),(13,'Alpha',99,1),(14,'BETA',3,0),(15,'GAMMA',5,1),(16,NULL,1,1)
+- sql: INSERT INTO ordered_anti_nullable VALUES(NULL,'alpha',1),(NULL,'ALPHA',1),(20,'gamma',5)
+- sql: CREATE TABLE ordered_anti_points(marker INT NOT NULL,key_a VARCHAR(20) COLLATE utf8mb4_general_ci,key_b VARCHAR(20)
+    COLLATE utf8mb4_general_ci)
+- sql: INSERT INTO ordered_anti_points VALUES(1,'alpha','AlPhA'),(2,'ALPHA','alpha'),(3,'alpha','AlPhA'),(4,'ALPHA','alpha'),(5,'alpha','AlPhA'),(6,'ALPHA','alpha'),(7,'alpha','AlPhA'),(8,'ALPHA','alpha'),(9,'alpha','AlPhA'),(10,'ALPHA','alpha'),(11,'alpha','AlPhA'),(12,'ALPHA','alpha'),(13,'alpha','AlPhA'),(14,'ALPHA','alpha'),(15,'alpha','AlPhA'),(16,'ALPHA','alpha'),(17,'alpha','AlPhA'),(18,'ALPHA','alpha'),(19,'alpha','AlPhA'),(20,'ALPHA','alpha'),(21,'alpha','AlPhA'),(22,'ALPHA','alpha'),(23,'alpha','AlPhA'),(24,'ALPHA','alpha'),(25,'alpha','AlPhA'),(26,'ALPHA','alpha'),(27,'alpha','AlPhA'),(28,'ALPHA','alpha'),(29,'alpha','AlPhA'),(30,'ALPHA','alpha'),(31,'alpha','AlPhA'),(32,'ALPHA','alpha'),(33,'alpha','AlPhA'),(34,'ALPHA','alpha'),(35,'alpha','AlPhA'),(36,'ALPHA','alpha'),(37,'alpha','AlPhA'),(38,'ALPHA','alpha'),(39,'alpha','AlPhA'),(40,'ALPHA','alpha'),(41,'alpha','AlPhA'),(42,'ALPHA','alpha'),(43,'alpha','AlPhA'),(44,'ALPHA','alpha'),(45,'alpha','AlPhA'),(46,'ALPHA','alpha'),(47,'alpha','AlPhA'),(48,'ALPHA','alpha'),(49,'alpha','AlPhA'),(50,'ALPHA','alpha'),(51,'alpha','AlPhA'),(52,'ALPHA','alpha'),(53,'alpha','AlPhA'),(54,'ALPHA','alpha'),(55,'alpha','AlPhA'),(56,'ALPHA','alpha'),(57,'alpha','AlPhA'),(58,'ALPHA','alpha'),(59,'alpha','AlPhA'),(60,'ALPHA','alpha'),(61,'alpha','AlPhA'),(62,'ALPHA','alpha'),(63,'alpha','AlPhA'),(64,'ALPHA','alpha'),(65,'alpha','AlPhA'),(66,'ALPHA','alpha'),(67,'alpha','AlPhA'),(68,'ALPHA','alpha'),(69,'alpha','AlPhA'),(70,'ALPHA','alpha'),(71,'alpha','AlPhA'),(72,'ALPHA','alpha'),(73,'alpha','AlPhA'),(74,'ALPHA','alpha'),(75,'alpha','AlPhA'),(76,'ALPHA','alpha'),(77,'alpha','AlPhA'),(78,'ALPHA','alpha'),(79,'alpha','AlPhA'),(80,'ALPHA','alpha'),(81,'alpha','AlPhA'),(82,'ALPHA','alpha'),(83,'alpha','AlPhA'),(84,'ALPHA','alpha'),(85,'alpha','AlPhA'),(86,'ALPHA','alpha'),(87,'alpha','AlPhA'),(88,'ALPHA','alpha'),(89,'alpha','AlPhA'),(90,'ALPHA','alpha'),(91,'alpha','AlPhA'),(92,'ALPHA','alpha'),(93,'alpha','AlPhA'),(94,'ALPHA','alpha'),(95,'alpha','AlPhA'),(96,'ALPHA','alpha'),(97,'alpha','AlPhA'),(98,'ALPHA','alpha'),(99,'alpha','AlPhA'),(100,'ALPHA','alpha'),(101,'alpha','AlPhA'),(102,'ALPHA','alpha'),(103,'alpha','AlPhA'),(104,'ALPHA','alpha'),(105,'alpha','AlPhA'),(106,'ALPHA','alpha'),(107,'alpha','AlPhA'),(108,'ALPHA','alpha'),(109,'alpha','AlPhA'),(110,'ALPHA','alpha'),(111,'alpha','AlPhA'),(112,'ALPHA','alpha'),(113,'alpha','AlPhA'),(114,'ALPHA','alpha'),(115,'alpha','AlPhA'),(116,'ALPHA','alpha'),(117,'alpha','AlPhA'),(118,'ALPHA','alpha'),(119,'alpha','AlPhA'),(120,'ALPHA','alpha'),(121,'alpha','AlPhA'),(122,'ALPHA','alpha'),(123,'alpha','AlPhA'),(124,'ALPHA','alpha'),(125,'alpha','AlPhA'),(126,'ALPHA','alpha'),(127,'alpha','AlPhA'),(128,'ALPHA','alpha'),(129,'alpha','AlPhA'),(130,'ALPHA','alpha'),(131,'alpha','AlPhA'),(132,'ALPHA','alpha'),(133,'alpha','AlPhA'),(134,'ALPHA','alpha'),(135,'alpha','AlPhA'),(136,'ALPHA','alpha'),(137,'alpha','AlPhA'),(138,'ALPHA','alpha'),(139,'alpha','AlPhA'),(140,'ALPHA','alpha'),(141,'alpha','AlPhA'),(142,'ALPHA','alpha'),(143,'alpha','AlPhA'),(144,'ALPHA','alpha'),(145,'alpha','AlPhA'),(146,'ALPHA','alpha'),(147,'alpha','AlPhA'),(148,'ALPHA','alpha'),(149,'alpha','AlPhA'),(150,'ALPHA','alpha'),(151,'alpha','AlPhA'),(152,'ALPHA','alpha'),(153,'alpha','AlPhA'),(154,'ALPHA','alpha'),(155,'alpha','AlPhA'),(156,'ALPHA','alpha'),(157,'alpha','AlPhA'),(158,'ALPHA','alpha'),(159,'alpha','AlPhA'),(160,'ALPHA','alpha'),(161,'alpha','AlPhA'),(162,'ALPHA','alpha'),(163,'alpha','AlPhA'),(164,'ALPHA','alpha'),(165,'alpha','AlPhA'),(166,'ALPHA','alpha'),(167,'alpha','AlPhA'),(168,'ALPHA','alpha'),(169,'alpha','AlPhA'),(170,'ALPHA','alpha'),(171,'alpha','AlPhA'),(172,'ALPHA','alpha'),(173,'alpha','AlPhA'),(174,'ALPHA','alpha'),(175,'alpha','AlPhA'),(176,'ALPHA','alpha'),(177,'alpha','AlPhA'),(178,'ALPHA','alpha'),(179,'alpha','AlPhA'),(180,'ALPHA','alpha'),(181,'alpha','AlPhA'),(182,'ALPHA','alpha'),(183,'alpha','AlPhA'),(184,'ALPHA','alpha'),(185,'alpha','AlPhA'),(186,'ALPHA','alpha'),(187,'alpha','AlPhA'),(188,'ALPHA','alpha'),(189,'alpha','AlPhA'),(190,'ALPHA','alpha'),(191,'alpha','AlPhA'),(192,'ALPHA','alpha'),(193,'alpha','AlPhA'),(194,'ALPHA','alpha'),(195,'alpha','AlPhA'),(196,'ALPHA','alpha'),(197,'alpha','AlPhA'),(198,'ALPHA','alpha'),(199,'alpha','AlPhA'),(200,'ALPHA','alpha'),(201,'alpha','AlPhA'),(202,'ALPHA','alpha'),(203,'alpha','AlPhA'),(204,'ALPHA','alpha'),(205,'alpha','AlPhA'),(206,'ALPHA','alpha'),(207,'alpha','AlPhA'),(208,'ALPHA','alpha'),(209,'alpha','AlPhA'),(210,'ALPHA','alpha'),(211,'alpha','AlPhA'),(212,'ALPHA','alpha'),(213,'alpha','AlPhA'),(214,'ALPHA','alpha'),(215,'alpha','AlPhA'),(216,'ALPHA','alpha'),(217,'alpha','AlPhA'),(218,'ALPHA','alpha'),(219,'alpha','AlPhA'),(220,'ALPHA','alpha'),(221,'alpha','AlPhA'),(222,'ALPHA','alpha'),(223,'alpha','AlPhA'),(224,'ALPHA','alpha'),(225,'alpha','AlPhA'),(226,'ALPHA','alpha'),(227,'alpha','AlPhA'),(228,'ALPHA','alpha'),(229,'alpha','AlPhA'),(230,'ALPHA','alpha'),(231,'alpha','AlPhA'),(232,'ALPHA','alpha'),(233,'alpha','AlPhA'),(234,'ALPHA','alpha'),(235,'alpha','AlPhA'),(236,'ALPHA','alpha'),(237,'alpha','AlPhA'),(238,'ALPHA','alpha'),(239,'alpha','AlPhA'),(240,'ALPHA','alpha'),(241,'alpha','AlPhA'),(242,'ALPHA','alpha'),(243,'alpha','AlPhA'),(244,'ALPHA','alpha'),(245,'alpha','AlPhA'),(246,'ALPHA','alpha'),(247,'alpha','AlPhA'),(248,'ALPHA','alpha'),(249,'alpha','AlPhA'),(250,'ALPHA','alpha'),(251,'alpha','AlPhA'),(252,'ALPHA','alpha'),(253,'alpha','AlPhA'),(254,'ALPHA','alpha'),(255,'alpha','AlPhA'),(256,'ALPHA','alpha'),(257,'alpha','AlPhA'),(258,'ALPHA','alpha'),(259,'alpha','AlPhA'),(260,'ALPHA','alpha'),(261,'alpha','AlPhA'),(262,'ALPHA','alpha'),(263,'alpha','AlPhA'),(264,'ALPHA','alpha'),(265,'alpha','AlPhA'),(266,'ALPHA','alpha'),(267,'alpha','AlPhA'),(268,'ALPHA','alpha'),(269,'alpha','AlPhA'),(270,'ALPHA','alpha'),(271,'alpha','AlPhA'),(272,'ALPHA','alpha'),(273,'alpha','AlPhA'),(274,'ALPHA','alpha'),(275,'alpha','AlPhA'),(276,'ALPHA','alpha'),(277,'alpha','AlPhA'),(278,'ALPHA','alpha'),(279,'alpha','AlPhA'),(280,'ALPHA','alpha'),(281,'alpha','AlPhA'),(282,'ALPHA','alpha'),(283,'alpha','AlPhA'),(284,'ALPHA','alpha'),(285,'alpha','AlPhA'),(286,'ALPHA','alpha'),(287,'alpha','AlPhA'),(288,'ALPHA','alpha'),(289,'alpha','AlPhA'),(290,'ALPHA','alpha'),(291,'alpha','AlPhA'),(292,'ALPHA','alpha'),(293,'alpha','AlPhA'),(294,'ALPHA','alpha'),(295,'alpha','AlPhA'),(296,'ALPHA','alpha'),(297,'alpha','AlPhA'),(298,'ALPHA','alpha'),(299,'alpha','AlPhA'),(300,'ALPHA','alpha'),(301,'alpha','AlPhA'),(302,'ALPHA','alpha'),(303,'alpha','AlPhA'),(304,'ALPHA','alpha'),(305,'alpha','AlPhA'),(306,'ALPHA','alpha'),(307,'alpha','AlPhA'),(308,'ALPHA','alpha'),(309,'alpha','AlPhA'),(310,'ALPHA','alpha'),(311,'alpha','AlPhA'),(312,'ALPHA','alpha'),(313,'alpha','AlPhA'),(314,'ALPHA','alpha'),(315,'alpha','AlPhA'),(316,'ALPHA','alpha'),(317,'alpha','AlPhA'),(318,'ALPHA','alpha'),(319,'alpha','AlPhA'),(320,'ALPHA','alpha'),(321,'alpha','AlPhA'),(322,'ALPHA','alpha'),(323,'alpha','AlPhA'),(324,'ALPHA','alpha'),(325,'alpha','AlPhA'),(326,'ALPHA','alpha'),(327,'alpha','AlPhA'),(328,'ALPHA','alpha'),(329,'alpha','AlPhA'),(330,'ALPHA','alpha'),(331,'alpha','AlPhA'),(332,'ALPHA','alpha'),(333,'alpha','AlPhA'),(334,'ALPHA','alpha'),(335,'alpha','AlPhA'),(336,'ALPHA','alpha'),(337,'alpha','AlPhA'),(338,'ALPHA','alpha'),(339,'alpha','AlPhA'),(340,'ALPHA','alpha'),(341,'alpha','AlPhA'),(342,'ALPHA','alpha'),(343,'alpha','AlPhA'),(344,'ALPHA','alpha'),(345,'alpha','AlPhA'),(346,'ALPHA','alpha'),(347,'alpha','AlPhA'),(348,'ALPHA','alpha'),(349,'alpha','AlPhA'),(350,'ALPHA','alpha'),(351,'alpha','AlPhA'),(352,'ALPHA','alpha'),(353,'alpha','AlPhA'),(354,'ALPHA','alpha'),(355,'alpha','AlPhA'),(356,'ALPHA','alpha'),(357,'alpha','AlPhA'),(358,'ALPHA','alpha'),(359,'alpha','AlPhA'),(360,'ALPHA','alpha'),(361,'alpha','AlPhA'),(362,'ALPHA','alpha'),(363,'alpha','AlPhA'),(364,'ALPHA','alpha'),(365,'alpha','AlPhA'),(366,'ALPHA','alpha'),(367,'alpha','AlPhA'),(368,'ALPHA','alpha'),(369,'alpha','AlPhA'),(370,'ALPHA','alpha'),(371,'alpha','AlPhA'),(372,'ALPHA','alpha'),(373,'alpha','AlPhA'),(374,'ALPHA','alpha'),(375,'alpha','AlPhA'),(376,'ALPHA','alpha'),(377,'alpha','AlPhA'),(378,'ALPHA','alpha'),(379,'alpha','AlPhA'),(380,'ALPHA','alpha'),(381,'alpha','AlPhA'),(382,'ALPHA','alpha'),(383,'alpha','AlPhA'),(384,'ALPHA','alpha'),(385,'alpha','AlPhA'),(386,'ALPHA','alpha'),(387,'alpha','AlPhA'),(388,'ALPHA','alpha'),(389,'alpha','AlPhA'),(390,'ALPHA','alpha'),(391,'alpha','AlPhA'),(392,'ALPHA','alpha'),(393,'alpha','AlPhA'),(394,'ALPHA','alpha'),(395,'alpha','AlPhA'),(396,'ALPHA','alpha'),(397,'alpha','AlPhA'),(398,'ALPHA','alpha'),(399,'alpha','AlPhA'),(400,'ALPHA','alpha'),(401,'alpha','AlPhA'),(402,'ALPHA','alpha'),(403,'alpha','AlPhA'),(404,'ALPHA','alpha'),(405,'alpha','AlPhA'),(406,'ALPHA','alpha'),(407,'alpha','AlPhA'),(408,'ALPHA','alpha'),(409,'alpha','AlPhA'),(410,'ALPHA','alpha'),(411,'alpha','AlPhA'),(412,'ALPHA','alpha'),(413,'alpha','AlPhA'),(414,'ALPHA','alpha'),(415,'alpha','AlPhA'),(416,'ALPHA','alpha'),(417,'alpha','AlPhA'),(418,'ALPHA','alpha'),(419,'alpha','AlPhA'),(420,'ALPHA','alpha'),(421,'alpha','AlPhA'),(422,'ALPHA','alpha'),(423,'alpha','AlPhA'),(424,'ALPHA','alpha'),(425,'alpha','AlPhA'),(426,'ALPHA','alpha'),(427,'alpha','AlPhA'),(428,'ALPHA','alpha'),(429,'alpha','AlPhA'),(430,'ALPHA','alpha'),(431,'alpha','AlPhA'),(432,'ALPHA','alpha'),(433,'alpha','AlPhA'),(434,'ALPHA','alpha'),(435,'alpha','AlPhA'),(436,'ALPHA','alpha'),(437,'alpha','AlPhA'),(438,'ALPHA','alpha'),(439,'alpha','AlPhA'),(440,'ALPHA','alpha'),(441,'alpha','AlPhA'),(442,'ALPHA','alpha'),(443,'alpha','AlPhA'),(444,'ALPHA','alpha'),(445,'alpha','AlPhA'),(446,'ALPHA','alpha'),(447,'alpha','AlPhA'),(448,'ALPHA','alpha'),(449,'alpha','AlPhA'),(450,'ALPHA','alpha'),(451,'alpha','AlPhA'),(452,'ALPHA','alpha'),(453,'alpha','AlPhA'),(454,'ALPHA','alpha'),(455,'alpha','AlPhA'),(456,'ALPHA','alpha'),(457,'alpha','AlPhA'),(458,'ALPHA','alpha'),(459,'alpha','AlPhA'),(460,'ALPHA','alpha'),(461,'alpha','AlPhA'),(462,'ALPHA','alpha'),(463,'alpha','AlPhA'),(464,'ALPHA','alpha'),(465,'alpha','AlPhA'),(466,'ALPHA','alpha'),(467,'alpha','AlPhA'),(468,'ALPHA','alpha'),(469,'alpha','AlPhA'),(470,'ALPHA','alpha'),(471,'alpha','AlPhA'),(472,'ALPHA','alpha'),(473,'alpha','AlPhA'),(474,'ALPHA','alpha'),(475,'alpha','AlPhA'),(476,'ALPHA','alpha'),(477,'alpha','AlPhA'),(478,'ALPHA','alpha'),(479,'alpha','AlPhA'),(480,'ALPHA','alpha'),(481,'alpha','AlPhA'),(482,'ALPHA','alpha'),(483,'alpha','AlPhA'),(484,'ALPHA','alpha'),(485,'alpha','AlPhA'),(486,'ALPHA','alpha'),(487,'alpha','AlPhA'),(488,'ALPHA','alpha'),(489,'alpha','AlPhA'),(490,'ALPHA','alpha'),(491,'alpha','AlPhA'),(492,'ALPHA','alpha'),(493,'alpha','AlPhA'),(494,'ALPHA','alpha'),(495,'alpha','AlPhA'),(496,'ALPHA','alpha'),(497,'alpha','AlPhA'),(498,'ALPHA','alpha'),(499,'alpha','AlPhA'),(500,'ALPHA','alpha'),(501,'alpha','AlPhA'),(502,'ALPHA','alpha'),(503,'alpha','AlPhA'),(504,'ALPHA','alpha'),(505,'alpha','AlPhA'),(506,'ALPHA','alpha'),(507,'alpha','AlPhA'),(508,'ALPHA','alpha'),(509,'alpha','AlPhA'),(510,'ALPHA','alpha'),(511,'alpha','AlPhA'),(512,'ALPHA','alpha'),(513,'alpha','AlPhA'),(514,'ALPHA','alpha'),(515,'alpha','AlPhA'),(516,'ALPHA','alpha'),(517,'alpha','AlPhA'),(518,'ALPHA','alpha'),(519,'alpha','AlPhA'),(520,'ALPHA','alpha'),(521,'alpha','AlPhA'),(522,'ALPHA','alpha'),(523,'alpha','AlPhA'),(524,'ALPHA','alpha'),(525,'alpha','AlPhA'),(526,'ALPHA','alpha'),(527,'alpha','AlPhA'),(528,'ALPHA','alpha'),(529,'alpha','AlPhA'),(530,'ALPHA','alpha'),(531,'alpha','AlPhA'),(532,'ALPHA','alpha'),(533,'alpha','AlPhA'),(534,'ALPHA','alpha'),(535,'alpha','AlPhA'),(536,'ALPHA','alpha'),(537,'alpha','AlPhA'),(538,'ALPHA','alpha'),(539,'alpha','AlPhA'),(540,'ALPHA','alpha'),(541,'alpha','AlPhA'),(542,'ALPHA','alpha'),(543,'alpha','AlPhA'),(544,'ALPHA','alpha'),(545,'alpha','AlPhA'),(546,'ALPHA','alpha'),(547,'alpha','AlPhA'),(548,'ALPHA','alpha'),(549,'alpha','AlPhA'),(550,'ALPHA','alpha'),(551,'alpha','AlPhA'),(552,'ALPHA','alpha'),(553,'alpha','AlPhA'),(554,'ALPHA','alpha'),(555,'alpha','AlPhA'),(556,'ALPHA','alpha'),(557,'alpha','AlPhA'),(558,'ALPHA','alpha'),(559,'alpha','AlPhA'),(560,'ALPHA','alpha'),(561,'alpha','AlPhA'),(562,'ALPHA','alpha'),(563,'alpha','AlPhA'),(564,'ALPHA','alpha'),(565,'alpha','AlPhA'),(566,'ALPHA','alpha'),(567,'alpha','AlPhA'),(568,'ALPHA','alpha'),(569,'alpha','AlPhA'),(570,'ALPHA','alpha'),(571,'alpha','AlPhA'),(572,'ALPHA','alpha'),(573,'alpha','AlPhA'),(574,'ALPHA','alpha'),(575,'alpha','AlPhA'),(576,'ALPHA','alpha'),(577,'alpha','AlPhA'),(578,'ALPHA','alpha'),(579,'alpha','AlPhA'),(580,'ALPHA','alpha'),(581,'alpha','AlPhA'),(582,'ALPHA','alpha'),(583,'alpha','AlPhA'),(584,'ALPHA','alpha'),(585,'alpha','AlPhA'),(586,'ALPHA','alpha'),(587,'alpha','AlPhA'),(588,'ALPHA','alpha'),(589,'alpha','AlPhA'),(590,'ALPHA','alpha'),(591,'alpha','AlPhA'),(592,'ALPHA','alpha'),(593,'alpha','AlPhA'),(594,'ALPHA','alpha'),(595,'alpha','AlPhA'),(596,'ALPHA','alpha'),(597,'alpha','AlPhA'),(598,'ALPHA','alpha'),(599,'alpha','AlPhA'),(600,'ALPHA','alpha'),(601,'alpha','AlPhA'),(602,'ALPHA','alpha'),(603,'alpha','AlPhA'),(604,'ALPHA','alpha'),(605,'alpha','AlPhA'),(606,'ALPHA','alpha'),(607,'alpha','AlPhA'),(608,'ALPHA','alpha'),(609,'alpha','AlPhA'),(610,'ALPHA','alpha'),(611,'alpha','AlPhA'),(612,'ALPHA','alpha'),(613,'alpha','AlPhA'),(614,'ALPHA','alpha'),(615,'alpha','AlPhA'),(616,'ALPHA','alpha'),(617,'alpha','AlPhA'),(618,'ALPHA','alpha'),(619,'alpha','AlPhA'),(620,'ALPHA','alpha'),(621,'alpha','AlPhA'),(622,'ALPHA','alpha'),(623,'alpha','AlPhA'),(624,'ALPHA','alpha'),(625,'alpha','AlPhA'),(626,'ALPHA','alpha'),(627,'alpha','AlPhA'),(628,'ALPHA','alpha'),(629,'alpha','AlPhA'),(630,'ALPHA','alpha'),(631,'alpha','AlPhA'),(632,'ALPHA','alpha'),(633,'alpha','AlPhA'),(634,'ALPHA','alpha'),(635,'alpha','AlPhA'),(636,'ALPHA','alpha'),(637,'alpha','AlPhA'),(638,'ALPHA','alpha'),(639,'alpha','AlPhA'),(640,'ALPHA','alpha'),(641,'alpha','AlPhA'),(642,'ALPHA','alpha'),(643,'alpha','AlPhA'),(644,'ALPHA','alpha'),(645,'alpha','AlPhA'),(646,'ALPHA','alpha'),(647,'alpha','AlPhA'),(648,'ALPHA','alpha'),(649,'alpha','AlPhA'),(650,'ALPHA','alpha'),(651,'alpha','AlPhA'),(652,'ALPHA','alpha'),(653,'alpha','AlPhA'),(654,'ALPHA','alpha'),(655,'alpha','AlPhA'),(656,'ALPHA','alpha'),(657,'alpha','AlPhA'),(658,'ALPHA','alpha'),(659,'alpha','AlPhA'),(660,'ALPHA','alpha'),(661,'alpha','AlPhA'),(662,'ALPHA','alpha'),(663,'alpha','AlPhA'),(664,'ALPHA','alpha'),(665,'alpha','AlPhA'),(666,'ALPHA','alpha'),(667,'alpha','AlPhA'),(668,'ALPHA','alpha'),(669,'alpha','AlPhA'),(670,'ALPHA','alpha'),(671,'alpha','AlPhA'),(672,'ALPHA','alpha'),(673,'alpha','AlPhA'),(674,'ALPHA','alpha'),(675,'alpha','AlPhA'),(676,'ALPHA','alpha'),(677,'alpha','AlPhA'),(678,'ALPHA','alpha'),(679,'alpha','AlPhA'),(680,'ALPHA','alpha'),(681,'alpha','AlPhA'),(682,'ALPHA','alpha'),(683,'alpha','AlPhA'),(684,'ALPHA','alpha'),(685,'alpha','AlPhA'),(686,'ALPHA','alpha'),(687,'alpha','AlPhA'),(688,'ALPHA','alpha'),(689,'alpha','AlPhA'),(690,'ALPHA','alpha'),(691,'alpha','AlPhA'),(692,'ALPHA','alpha'),(693,'alpha','AlPhA'),(694,'ALPHA','alpha'),(695,'alpha','AlPhA'),(696,'ALPHA','alpha'),(697,'alpha','AlPhA'),(698,'ALPHA','alpha'),(699,'alpha','AlPhA'),(700,'ALPHA','alpha'),(701,'alpha','AlPhA'),(702,'ALPHA','alpha'),(703,'alpha','AlPhA'),(704,'ALPHA','alpha'),(705,'alpha','AlPhA'),(706,'ALPHA','alpha'),(707,'alpha','AlPhA'),(708,'ALPHA','alpha'),(709,'alpha','AlPhA'),(710,'ALPHA','alpha'),(711,'alpha','AlPhA'),(712,'ALPHA','alpha'),(713,'alpha','AlPhA'),(714,'ALPHA','alpha'),(715,'alpha','AlPhA'),(716,'ALPHA','alpha'),(717,'alpha','AlPhA'),(718,'ALPHA','alpha'),(719,'alpha','AlPhA'),(720,'ALPHA','alpha'),(721,'alpha','AlPhA'),(722,'ALPHA','alpha'),(723,'alpha','AlPhA'),(724,'ALPHA','alpha'),(725,'alpha','AlPhA'),(726,'ALPHA','alpha'),(727,'alpha','AlPhA'),(728,'ALPHA','alpha'),(729,'alpha','AlPhA'),(730,'ALPHA','alpha'),(731,'alpha','AlPhA'),(732,'ALPHA','alpha'),(733,'alpha','AlPhA'),(734,'ALPHA','alpha'),(735,'alpha','AlPhA'),(736,'ALPHA','alpha'),(737,'alpha','AlPhA'),(738,'ALPHA','alpha'),(739,'alpha','AlPhA'),(740,'ALPHA','alpha'),(741,'alpha','AlPhA'),(742,'ALPHA','alpha'),(743,'alpha','AlPhA'),(744,'ALPHA','alpha'),(745,'alpha','AlPhA'),(746,'ALPHA','alpha'),(747,'alpha','AlPhA'),(748,'ALPHA','alpha'),(749,'alpha','AlPhA'),(750,'ALPHA','alpha'),(751,'alpha','AlPhA'),(752,'ALPHA','alpha'),(753,'alpha','AlPhA'),(754,'ALPHA','alpha'),(755,'alpha','AlPhA'),(756,'ALPHA','alpha'),(757,'alpha','AlPhA'),(758,'ALPHA','alpha'),(759,'alpha','AlPhA'),(760,'ALPHA','alpha'),(761,'alpha','AlPhA'),(762,'ALPHA','alpha'),(763,'alpha','AlPhA'),(764,'ALPHA','alpha'),(765,'alpha','AlPhA'),(766,'ALPHA','alpha'),(767,'alpha','AlPhA'),(768,'ALPHA','alpha'),(769,'alpha','AlPhA'),(770,'ALPHA','alpha'),(771,'alpha','AlPhA'),(772,'ALPHA','alpha'),(773,'alpha','AlPhA'),(774,'ALPHA','alpha'),(775,'alpha','AlPhA'),(776,'ALPHA','alpha'),(777,'alpha','AlPhA'),(778,'ALPHA','alpha'),(779,'alpha','AlPhA'),(780,'ALPHA','alpha'),(781,'alpha','AlPhA'),(782,'ALPHA','alpha'),(783,'alpha','AlPhA'),(784,'ALPHA','alpha'),(785,'alpha','AlPhA'),(786,'ALPHA','alpha'),(787,'alpha','AlPhA'),(788,'ALPHA','alpha'),(789,'alpha','AlPhA'),(790,'ALPHA','alpha'),(791,'alpha','AlPhA'),(792,'ALPHA','alpha'),(793,'alpha','AlPhA'),(794,'ALPHA','alpha'),(795,'alpha','AlPhA'),(796,'ALPHA','alpha'),(797,'alpha','AlPhA'),(798,'ALPHA','alpha'),(799,'alpha','AlPhA'),(800,'ALPHA','alpha'),(801,'alpha','AlPhA'),(802,'ALPHA','alpha'),(803,'alpha','AlPhA'),(804,'ALPHA','alpha'),(805,'alpha','AlPhA'),(806,'ALPHA','alpha'),(807,'alpha','AlPhA'),(808,'ALPHA','alpha'),(809,'alpha','AlPhA'),(810,'ALPHA','alpha'),(811,'alpha','AlPhA'),(812,'ALPHA','alpha'),(813,'alpha','AlPhA'),(814,'ALPHA','alpha'),(815,'alpha','AlPhA'),(816,'ALPHA','alpha'),(817,'alpha','AlPhA'),(818,'ALPHA','alpha'),(819,'alpha','AlPhA'),(820,'ALPHA','alpha'),(821,'alpha','AlPhA'),(822,'ALPHA','alpha'),(823,'alpha','AlPhA'),(824,'ALPHA','alpha'),(825,'alpha','AlPhA'),(826,'ALPHA','alpha'),(827,'alpha','AlPhA'),(828,'ALPHA','alpha'),(829,'alpha','AlPhA'),(830,'ALPHA','alpha'),(831,'alpha','AlPhA'),(832,'ALPHA','alpha'),(833,'alpha','AlPhA'),(834,'ALPHA','alpha'),(835,'alpha','AlPhA'),(836,'ALPHA','alpha'),(837,'alpha','AlPhA'),(838,'ALPHA','alpha'),(839,'alpha','AlPhA'),(840,'ALPHA','alpha'),(841,'alpha','AlPhA'),(842,'ALPHA','alpha'),(843,'alpha','AlPhA'),(844,'ALPHA','alpha'),(845,'alpha','AlPhA'),(846,'ALPHA','alpha'),(847,'alpha','AlPhA'),(848,'ALPHA','alpha'),(849,'alpha','AlPhA'),(850,'ALPHA','alpha'),(851,'alpha','AlPhA'),(852,'ALPHA','alpha'),(853,'alpha','AlPhA'),(854,'ALPHA','alpha'),(855,'alpha','AlPhA'),(856,'ALPHA','alpha'),(857,'alpha','AlPhA'),(858,'ALPHA','alpha'),(859,'alpha','AlPhA'),(860,'ALPHA','alpha'),(861,'alpha','AlPhA'),(862,'ALPHA','alpha'),(863,'alpha','AlPhA'),(864,'ALPHA','alpha'),(865,'alpha','AlPhA'),(866,'ALPHA','alpha'),(867,'alpha','AlPhA'),(868,'ALPHA','alpha'),(869,'alpha','AlPhA'),(870,'ALPHA','alpha'),(871,'alpha','AlPhA'),(872,'ALPHA','alpha'),(873,'alpha','AlPhA'),(874,'ALPHA','alpha'),(875,'alpha','AlPhA'),(876,'ALPHA','alpha'),(877,'alpha','AlPhA'),(878,'ALPHA','alpha'),(879,'alpha','AlPhA'),(880,'ALPHA','alpha'),(881,'alpha','AlPhA'),(882,'ALPHA','alpha'),(883,'alpha','AlPhA'),(884,'ALPHA','alpha'),(885,'alpha','AlPhA'),(886,'ALPHA','alpha'),(887,'alpha','AlPhA'),(888,'ALPHA','alpha'),(889,'alpha','AlPhA'),(890,'ALPHA','alpha'),(891,'alpha','AlPhA'),(892,'ALPHA','alpha'),(893,'alpha','AlPhA'),(894,'ALPHA','alpha'),(895,'alpha','AlPhA'),(896,'ALPHA','alpha'),(897,'alpha','AlPhA'),(898,'ALPHA','alpha'),(899,'alpha','AlPhA'),(900,'ALPHA','alpha'),(901,'alpha','AlPhA'),(902,'ALPHA','alpha'),(903,'alpha','AlPhA'),(904,'ALPHA','alpha'),(905,'alpha','AlPhA'),(906,'ALPHA','alpha'),(907,'alpha','AlPhA'),(908,'ALPHA','alpha'),(909,'alpha','AlPhA'),(910,'ALPHA','alpha'),(911,'alpha','AlPhA'),(912,'ALPHA','alpha'),(913,'alpha','AlPhA'),(914,'ALPHA','alpha'),(915,'alpha','AlPhA'),(916,'ALPHA','alpha'),(917,'alpha','AlPhA'),(918,'ALPHA','alpha'),(919,'alpha','AlPhA'),(920,'ALPHA','alpha'),(921,'alpha','AlPhA'),(922,'ALPHA','alpha'),(923,'alpha','AlPhA'),(924,'ALPHA','alpha'),(925,'alpha','AlPhA'),(926,'ALPHA','alpha'),(927,'alpha','AlPhA'),(928,'ALPHA','alpha'),(929,'alpha','AlPhA'),(930,'ALPHA','alpha'),(931,'alpha','AlPhA'),(932,'ALPHA','alpha'),(933,'alpha','AlPhA'),(934,'ALPHA','alpha'),(935,'alpha','AlPhA'),(936,'ALPHA','alpha'),(937,'alpha','AlPhA'),(938,'ALPHA','alpha'),(939,'alpha','AlPhA'),(940,'ALPHA','alpha'),(941,'alpha','AlPhA'),(942,'ALPHA','alpha'),(943,'alpha','AlPhA'),(944,'ALPHA','alpha'),(945,'alpha','AlPhA'),(946,'ALPHA','alpha'),(947,'alpha','AlPhA'),(948,'ALPHA','alpha'),(949,'alpha','AlPhA'),(950,'ALPHA','alpha'),(951,'alpha','AlPhA'),(952,'ALPHA','alpha'),(953,'alpha','AlPhA'),(954,'ALPHA','alpha'),(955,'alpha','AlPhA'),(956,'ALPHA','alpha'),(957,'alpha','AlPhA'),(958,'ALPHA','alpha'),(959,'alpha','AlPhA'),(960,'ALPHA','alpha'),(961,'alpha','AlPhA'),(962,'ALPHA','alpha'),(963,'alpha','AlPhA'),(964,'ALPHA','alpha'),(965,'alpha','AlPhA'),(966,'ALPHA','alpha'),(967,'alpha','AlPhA'),(968,'ALPHA','alpha'),(969,'alpha','AlPhA'),(970,'ALPHA','alpha'),(971,'alpha','AlPhA'),(972,'ALPHA','alpha'),(973,'alpha','AlPhA'),(974,'ALPHA','alpha'),(975,'alpha','AlPhA'),(976,'ALPHA','alpha'),(977,'alpha','AlPhA'),(978,'ALPHA','alpha'),(979,'alpha','AlPhA'),(980,'ALPHA','alpha'),(981,'alpha','AlPhA'),(982,'ALPHA','alpha'),(983,'alpha','AlPhA'),(984,'ALPHA','alpha'),(985,'alpha','AlPhA'),(986,'ALPHA','alpha'),(987,'alpha','AlPhA'),(988,'ALPHA','alpha'),(989,'alpha','AlPhA'),(990,'ALPHA','alpha'),(991,'alpha','AlPhA'),(992,'ALPHA','alpha'),(993,'alpha','AlPhA'),(994,'ALPHA','alpha'),(995,'alpha','AlPhA'),(996,'ALPHA','alpha'),(997,'alpha','AlPhA'),(998,'ALPHA','alpha'),(999,'alpha','AlPhA'),(1000,'ALPHA','alpha'),(1001,'alpha','AlPhA'),(1002,'ALPHA','alpha'),(1003,'alpha','AlPhA'),(1004,'ALPHA','alpha'),(1005,'alpha','AlPhA'),(1006,'ALPHA','alpha'),(1007,'alpha','AlPhA'),(1008,'ALPHA','alpha'),(1009,'alpha','AlPhA'),(1010,'ALPHA','alpha'),(1011,'alpha','AlPhA'),(1012,'ALPHA','alpha'),(1013,'alpha','AlPhA'),(1014,'ALPHA','alpha'),(1015,'alpha','AlPhA'),(1016,'ALPHA','alpha'),(1017,'alpha','AlPhA'),(1018,'ALPHA','alpha'),(1019,'alpha','AlPhA'),(1020,'ALPHA','alpha'),(1021,'alpha','AlPhA'),(1022,'ALPHA','alpha'),(1023,'alpha','AlPhA'),(1024,'ALPHA','alpha'),(1025,'beta','other'),(1026,'gamma','GAMMA'),(1027,NULL,NULL)
+test_cases:
+- name: Duplicate and partial RHS matches preserve the complete ordered anti output
+  sql: 'SELECT d.id,d.key_a,d.key_b FROM ordered_anti_driver d
+
+    LEFT JOIN ordered_anti_lookup r ON d.key_a=r.key_a AND d.key_b=r.key_b AND r.enabled=1
+
+    WHERE r.marker IS NULL ORDER BY d.id LIMIT 4
+
+    '
+  expect:
+    rows: 4
+    data:
+    - id: 2
+      key_a: Alpha
+      key_b: 2
+    - id: 3
+      key_a: beta
+      key_b: 3
+    - id: 4
+      key_a: null
+      key_b: 1
+    - id: 6
+      key_a: delta
+      key_b: 6
+- name: OFFSET counts accepted complete rows after all ON residuals
+  sql: 'SELECT d.id,d.key_a,d.key_b FROM ordered_anti_driver d
+
+    LEFT JOIN ordered_anti_lookup r ON d.key_a=r.key_a AND d.key_b=r.key_b AND r.enabled=1
+
+    WHERE r.marker IS NULL ORDER BY d.id LIMIT 2 OFFSET 1
+
+    '
+  expect:
+    rows: 2
+    data:
+    - id: 3
+      key_a: beta
+      key_b: 3
+    - id: 4
+      key_a: null
+      key_b: 1
+- name: A conjunctive anti marker retains the full OR residual
+  sql: 'SELECT d.id,d.key_a,d.key_b FROM ordered_anti_driver d
+
+    LEFT JOIN ordered_anti_lookup r ON d.key_a=r.key_a AND d.key_b=r.key_b AND r.enabled=1
+
+    WHERE r.marker IS NULL AND (d.id<=3 OR d.flag=1) ORDER BY d.id LIMIT 4
+
+    '
+  expect:
+    rows: 3
+    data:
+    - id: 2
+      key_a: Alpha
+      key_b: 2
+    - id: 3
+      key_a: beta
+      key_b: 3
+    - id: 4
+      key_a: null
+      key_b: 1
+- name: An OR in ON retains NULL and complete alternative matches
+  sql: 'SELECT d.id,d.key_a,d.key_b FROM ordered_anti_driver d
+
+    LEFT JOIN ordered_anti_lookup r ON (d.key_a=r.key_a OR d.key_b=r.key_b) AND r.enabled=1
+
+    WHERE r.marker IS NULL ORDER BY d.id LIMIT 4
+
+    '
+  expect:
+    rows: 2
+    data:
+    - id: 3
+      key_a: beta
+      key_b: 3
+    - id: 6
+      key_a: delta
+      key_b: 6
+- name: A nullable marker preserves duplicate matched NULL rows
+  sql: 'SELECT d.id,d.key_a,d.key_b FROM ordered_anti_driver d
+
+    LEFT JOIN ordered_anti_nullable r ON d.key_a=r.key_a AND d.key_b=r.key_b
+
+    WHERE r.marker IS NULL ORDER BY d.id LIMIT 8
+
+    '
+  expect:
+    rows: 8
+    data:
+    - id: 1
+      key_a: Alpha
+      key_b: 1
+    - id: 1
+      key_a: Alpha
+      key_b: 1
+    - id: 2
+      key_a: Alpha
+      key_b: 2
+    - id: 3
+      key_a: beta
+      key_b: 3
+    - id: 4
+      key_a: null
+      key_b: 1
+    - id: 6
+      key_a: delta
+      key_b: 6
+    - id: 7
+      key_a: ALPHA
+      key_b: 1
+    - id: 7
+      key_a: ALPHA
+      key_b: 1
+- name: A marker inside OR preserves matching row multiplicity
+  sql: 'SELECT d.id,d.key_a,d.key_b FROM ordered_anti_driver d
+
+    LEFT JOIN ordered_anti_lookup r ON d.key_a=r.key_a AND d.key_b=r.key_b AND r.enabled=1
+
+    WHERE r.marker IS NULL OR d.id=1 ORDER BY d.id LIMIT 6
+
+    '
+  expect:
+    rows: 6
+    data:
+    - id: 1
+      key_a: Alpha
+      key_b: 1
+    - id: 1
+      key_a: Alpha
+      key_b: 1
+    - id: 2
+      key_a: Alpha
+      key_b: 2
+    - id: 3
+      key_a: beta
+      key_b: 3
+    - id: 4
+      key_a: null
+      key_b: 1
+    - id: 6
+      key_a: delta
+      key_b: 6
+- name: RHS projections retain the actual NULL-extended values
+  sql: 'SELECT d.id,r.marker,r.key_a FROM ordered_anti_driver d
+
+    LEFT JOIN ordered_anti_lookup r ON d.key_a=r.key_a AND d.key_b=r.key_b AND r.enabled=1
+
+    WHERE r.marker IS NULL ORDER BY d.id LIMIT 4
+
+    '
+  expect:
+    rows: 4
+    data:
+    - id: 2
+      marker: null
+      key_a: null
+    - id: 3
+      marker: null
+      key_a: null
+    - id: 4
+      marker: null
+      key_a: null
+    - id: 6
+      marker: null
+      key_a: null
+- name: PostgreSQL ordered anti presence retains the same complete rows
+  syntax: psql
+  sql: 'SELECT d.id,d.key_a,d.key_b FROM ordered_anti_driver d
+
+    LEFT JOIN ordered_anti_lookup r ON d.key_a=r.key_a AND d.key_b=r.key_b AND r.enabled=1
+
+    WHERE r.marker IS NULL ORDER BY d.id LIMIT 4
+
+    '
+  expect:
+    rows: 4
+    data:
+    - id: 2
+      key_a: Alpha
+      key_b: 2
+    - id: 3
+      key_a: beta
+      key_b: 3
+    - id: 4
+      key_a: null
+      key_b: 1
+    - id: 6
+      key_a: delta
+      key_b: 6
+- name: TSQL ordered anti presence retains the same complete rows
+  syntax: tsql
+  sql: 'SELECT TOP (4) d.id,d.key_a,d.key_b FROM ordered_anti_driver d
+
+    LEFT JOIN ordered_anti_lookup r ON d.key_a=r.key_a AND d.key_b=r.key_b AND r.enabled=1
+
+    WHERE r.marker IS NULL ORDER BY d.id
+
+    '
+  expect:
+    rows: 4
+    data:
+    - id: 2
+      key_a: Alpha
+      key_b: 2
+    - id: 3
+      key_a: beta
+      key_b: 3
+    - id: 4
+      key_a: null
+      key_b: 1
+    - id: 6
+      key_a: delta
+      key_b: 6
+- name: Complete case-folded point anti presence stops at an actual duplicate match
+  sql: SELECT d.id,d.key_a,d.key_b FROM ordered_anti_driver d LEFT JOIN ordered_anti_points r ON d.key_a=r.key_a
+    WHERE r.marker IS NULL ORDER BY d.id LIMIT 4
+  expect:
+    rows: 2
+    data:
+    - id: 4
+      key_a: null
+      key_b: 1
+    - id: 6
+      key_a: delta
+      key_b: 6
+- name: Composite text points retain partial matches and actual NULL operands
+  sql: SELECT d.id,d.key_a,d.key_b FROM ordered_anti_driver d LEFT JOIN ordered_anti_points r ON d.key_a=r.key_a
+    AND d.key_a=r.key_b WHERE r.marker IS NULL ORDER BY d.id LIMIT 4
+  expect:
+    rows: 3
+    data:
+    - id: 3
+      key_a: beta
+      key_b: 3
+    - id: 4
+      key_a: null
+      key_b: 1
+    - id: 6
+      key_a: delta
+      key_b: 6
+- name: PostgreSQL point absence evaluates full WHERE on NULL extended lookup fields
+  syntax: psql
+  sql: SELECT d.id,d.key_a,d.key_b FROM ordered_anti_driver d LEFT JOIN ordered_anti_points r ON d.key_a=r.key_a
+    WHERE r.marker IS NULL AND COALESCE(r.marker,90)=90 AND (d.id>4 OR d.key_a IS NULL) ORDER BY d.id LIMIT 4
+  expect:
+    rows: 2
+    data:
+    - id: 4
+      key_a: null
+      key_b: 1
+    - id: 6
+      key_a: delta
+      key_b: 6
+- name: A recreated nullable declaration retains its duplicate rows under the same explicit plan cache
+  scm: "(begin\n  (define cache (newcachemap))\n  (define input (newsession))\n  (input \"username\" \"root\") (input\
+    \ \"schema\" \"memcp-tests\")\n  (define run (lambda (query) (begin\n    (define answer (newsession)) (answer\
+    \ \"rows\" (list))\n    (sql_execute_formula input nil\n      (cached_parse cache (list parse_sql) \"memcp-tests\"\
+    \ query nil \"root\" input true nil)\n      (lambda (row) (answer \"rows\" (append (answer \"rows\") row)))\
+    \ (lambda args true))\n    (answer \"rows\"))))\n  (define query \"SELECT d.id,d.key_a,d.key_b FROM ordered_anti_driver\
+    \ d\\nLEFT JOIN ordered_anti_lookup r ON d.key_a=r.key_a AND d.key_b=r.key_b AND r.enabled=1\\nWHERE r.marker\
+    \ IS NULL ORDER BY d.id LIMIT 4\")\n  (define before (run query))\n  (run \"DROP TABLE IF EXISTS ordered_anti_lookup\"\
+    )\n  (run \"CREATE TABLE ordered_anti_lookup(marker INT,key_a VARCHAR(20) COLLATE utf8mb4_general_ci,key_b INT,enabled\
+    \ INT)\")\n  (run \"INSERT INTO ordered_anti_lookup VALUES(NULL,'alpha',1,1),(NULL,'ALPHA',1,1),(15,'GAMMA',5,1)\"\
+    )\n  (list before (run query)))"
+  expect:
+    result:
+    - - - id
+        - 2
+        - key_a
+        - Alpha
+        - key_b
+        - 2
+      - - id
+        - 3
+        - key_a
+        - beta
+        - key_b
+        - 3
+      - - id
+        - 4
+        - key_a
+        - null
+        - key_b
+        - 1
+      - - id
+        - 6
+        - key_a
+        - delta
+        - key_b
+        - 6
+    - - - id
+        - 1
+        - key_a
+        - Alpha
+        - key_b
+        - 1
+      - - id
+        - 1
+        - key_a
+        - Alpha
+        - key_b
+        - 1
+      - - id
+        - 2
+        - key_a
+        - Alpha
+        - key_b
+        - 2
+      - - id
+        - 3
+        - key_a
+        - beta
+        - key_b
+        - 3
+- name: Original transaction private composite sources retain padded collated anti rows
+  syntax: tsql
+  sql: 'DROP TABLE IF EXISTS #anti_declared;
+
+    DROP TABLE IF EXISTS #anti_present;
+
+    BEGIN TRANSACTION;
+
+    CREATE TABLE #anti_declared(object_name VARCHAR(100) NOT NULL,permission_name VARCHAR(100) NOT NULL,PRIMARY
+    KEY(object_name,permission_name));
+
+    CREATE TABLE #anti_present(object_name VARCHAR(100) NOT NULL,permission_name VARCHAR(100) NOT NULL,PRIMARY KEY(object_name,permission_name));
+
+    INSERT #anti_declared VALUES(''Object_A'',''SELECT''),(''Object_A'',''UPDATE''),(''Object_B'',''SELECT''),(''Object_C'',''SELECT'');
+
+    INSERT #anti_present VALUES(''object_a '',''select ''),(''OBJECT_B'',''SELECT'');
+
+    SELECT TOP (4) d.object_name,d.permission_name FROM #anti_declared d
+
+    LEFT OUTER JOIN #anti_present r ON d.object_name COLLATE Latin1_General_CI_AS=r.object_name
+
+    AND d.permission_name COLLATE Latin1_General_CI_AS=r.permission_name
+
+    WHERE r.object_name IS NULL ORDER BY d.object_name,d.permission_name;
+
+    COMMIT;
+
+    DROP TABLE #anti_present;
+
+    DROP TABLE #anti_declared;
+
+    '
+  expect:
+    rows: 2
+    data:
+    - object_name: Object_A
+      permission_name: UPDATE
+    - object_name: Object_C
+      permission_name: SELECT
+cleanup:
+- sql: DROP TABLE IF EXISTS ordered_anti_points
+- sql: DROP TABLE IF EXISTS ordered_anti_nullable
+- sql: DROP TABLE IF EXISTS ordered_anti_lookup
+- sql: DROP TABLE IF EXISTS ordered_anti_driver
