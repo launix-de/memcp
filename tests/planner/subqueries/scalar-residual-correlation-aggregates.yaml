@@ -218,3 +218,63 @@ test_cases:
       matched_rows: 1
       nonnull_rows: 0
       total: null
+- name: mysql ordered scalar rejoin preserves NULL residual bindings and SQL equality
+  syntax: mysql
+  sql: |-
+    SELECT caller.id,
+      (SELECT entry.id FROM residual_values entry
+       WHERE caller.group_key IS NULL OR entry.group_key=caller.group_key
+       ORDER BY entry.id LIMIT 1) AS first_match,
+      (SELECT entry.id FROM residual_values entry
+       WHERE entry.group_key=caller.group_key ORDER BY entry.id LIMIT 1) AS equal_match,
+      (SELECT entry.id FROM residual_values entry
+       WHERE entry.id<=caller.group_key ORDER BY entry.id DESC LIMIT 1) AS range_match
+    FROM residual_callers caller ORDER BY caller.id
+  expect:
+    rows: 5
+    data:
+    - {id: 1, first_match: 1, equal_match: 1, range_match: 1}
+    - {id: 2, first_match: 1, equal_match: 1, range_match: 1}
+    - {id: 3, first_match: 1, equal_match: null, range_match: null}
+    - {id: 4, first_match: 4, equal_match: 4, range_match: 2}
+    - {id: 5, first_match: 6, equal_match: 6, range_match: 6}
+- name: psql ordered scalar rejoin preserves NULL residual bindings and SQL equality
+  syntax: psql
+  sql: |-
+    SELECT caller.id,
+      (SELECT entry.id FROM residual_values entry
+       WHERE caller.group_key IS NULL OR entry.group_key=caller.group_key
+       ORDER BY entry.id LIMIT 1) AS first_match,
+      (SELECT entry.id FROM residual_values entry
+       WHERE entry.group_key=caller.group_key ORDER BY entry.id LIMIT 1) AS equal_match,
+      (SELECT entry.id FROM residual_values entry
+       WHERE entry.id<=caller.group_key ORDER BY entry.id DESC LIMIT 1) AS range_match
+    FROM residual_callers caller ORDER BY caller.id
+  expect:
+    rows: 5
+    data:
+    - {id: 1, first_match: 1, equal_match: 1, range_match: 1}
+    - {id: 2, first_match: 1, equal_match: 1, range_match: 1}
+    - {id: 3, first_match: 1, equal_match: null, range_match: null}
+    - {id: 4, first_match: 4, equal_match: 4, range_match: 2}
+    - {id: 5, first_match: 6, equal_match: 6, range_match: 6}
+- name: tsql ordered scalar rejoin preserves NULL residual bindings and SQL equality
+  syntax: tsql
+  sql: |-
+    SELECT caller.id,
+      (SELECT TOP (1) entry.id FROM residual_values entry
+       WHERE caller.group_key IS NULL OR entry.group_key=caller.group_key
+       ORDER BY entry.id) AS first_match,
+      (SELECT TOP (1) entry.id FROM residual_values entry
+       WHERE entry.group_key=caller.group_key ORDER BY entry.id) AS equal_match,
+      (SELECT TOP (1) entry.id FROM residual_values entry
+       WHERE entry.id<=caller.group_key ORDER BY entry.id DESC) AS range_match
+    FROM residual_callers caller ORDER BY caller.id
+  expect:
+    rows: 5
+    data:
+    - {id: 1, first_match: 1, equal_match: 1, range_match: 1}
+    - {id: 2, first_match: 1, equal_match: 1, range_match: 1}
+    - {id: 3, first_match: 1, equal_match: null, range_match: null}
+    - {id: 4, first_match: 4, equal_match: 4, range_match: 2}
+    - {id: 5, first_match: 6, equal_match: 6, range_match: 6}

@@ -2492,6 +2492,43 @@ would still have to project that value over the segment. */
 		(quote tx)
 		(list (quote lambda) (list (quote tx)) expr))))
 
+/* Both bounded scalar profiles bind their complete declared caller tuple
+before scanning. Substitution must close every executable outer reference;
+consumer admission separately proves those same values exist in its scope. */
+(define scalar_probe_executable_exprs (lambda (stage)
+	(list (gs_input stage) (qassoc_get (gs_facts stage) 'condition true)
+		(gs_aggregates stage) (gs_keys stage))))
+(define scalar_probe_input_closed? (lambda (stage)
+	(empty_list? (btw2025_expr_accessing_aliases (scalar_probe_executable_exprs stage)
+		(qassoc_get (gs_facts stage) 'btw2025_accessing_after_simple '())))))
+(define scalar_probe_bindings_supported? (lambda (stage) (begin
+	(define lookup (qassoc_get (gs_facts stage) 'lookup-keys '()))
+	(define domain (qassoc_get (gs_facts stage) 'btw2025_domain '()))
+	(define parameters (scoped_program_parameters (gs_id stage) lookup))
+	(define index (scalar_query_probe_param_index lookup lookup parameters))
+	(and (reduce domain (lambda (covered value)
+		(and covered (not (nil? (find lookup (lambda (key) (expression_equal? key value)) nil)))
+			(not (nil? (find (gs_domain stage) (lambda (key) (expression_equal? key value)) nil))))) true)
+		(scalar_probe_input_closed? (rewrite_scalar_query_probe_params index stage))))))
+(define scalar_probe_bindings_complete? (lambda (stage sources) (begin
+	(define lookup (qassoc_get (gs_facts stage) 'lookup-keys '()))
+	(define refs (btw2025_expr_outer_column_refs
+		(scalar_probe_executable_exprs stage) (list (gs_input stage)) sources))
+	(and (reduce (qassoc_get (gs_facts stage) 'btw2025_accessing_after_simple '())
+		(lambda (covered alias) (and covered (contains? (source_aliases sources) alias))) true)
+		(reduce refs (lambda (covered ref)
+			(and covered (not (nil? (find lookup (lambda (key) (expression_equal? key ref)) nil)))
+				(not (nil? (find (gs_domain stage) (lambda (key) (expression_equal? key ref)) nil))))) true)))))
+(define scalar_first_probe_supported? (lambda (stage)
+	(if (scalar_first_physical_probe_stage? stage) true
+		(and (scalar_first_probe_contract? stage)
+			(source_is_base_table? (gs_input stage))
+			(scalar_probe_bindings_supported? stage)))))
+(define scalar_first_probe_bindings_complete? (lambda (stage sources)
+	(if (scalar_first_physical_probe_stage? stage) true
+		(and (scalar_first_probe_supported? stage)
+			(scalar_probe_bindings_complete? stage sources)))))
+
 (define lower_table_scalar_first_probe_expr (lambda (sources default_alias src stage value_expr keys lookup_keys order_exprs dirs offset_value partition_limit tx_expr)
 	(begin
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
@@ -2526,10 +2563,19 @@ would still have to project that value over the segment. */
 
 (define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col all_stages probe_work_rows probe_semantics)
 	(begin
-		(if (not (or (scalar_first_physical_probe_stage? stage)
+		(if (not (or (scalar_first_probe_supported? stage)
 			(presence_probe_stage? stage)))
 			(neumann_fail "build_queryplan" "stage probe requires scalar_single first or presence stage")
 			true)
+		(define bind_caller (and (scalar_first_probe_contract? stage)
+			(not (scalar_first_physical_probe_stage? stage))))
+		(if (and bind_caller (not (scalar_first_probe_bindings_complete? stage sources)))
+			(neumann_fail "build_queryplan" "scalar first probe needs its complete caller bindings") true)
+		(define caller_lookup (qassoc_get (gs_facts stage) 'lookup-keys '()))
+		(define parameters (if bind_caller (scoped_program_parameters (gs_id stage) caller_lookup) '()))
+		(define stage (if bind_caller
+			(rewrite_scalar_query_probe_params
+				(scalar_query_probe_param_index caller_lookup caller_lookup parameters) stage) stage))
 		(define src (gs_input stage))
 		(define raw_keys (gs_keys stage))
 		(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
@@ -2643,9 +2689,13 @@ would still have to project that value over the segment. */
 				(quote tx)
 				(list (quote lambda) (list (quote tx)) lowered))
 			lowered))
-		(if (scalar_first_probe_query_invariant? stage requested_col)
+		(define result (if (scalar_first_probe_query_invariant? stage requested_col)
 			(lower_query_invariant_scalar_first_probe_expr stage requested_col memoized_lowered)
-			memoized_lowered)))
+			memoized_lowered))
+		(if bind_caller
+			(cons (list 'lambda parameters result)
+				(map caller_lookup (lambda (value) (lower_column_expr_for_join sources default_alias value))))
+			result)))
 )
 
 (define range_group_cache_mutexes (newcachemap (lambda (_key) (mutex))))
@@ -3857,42 +3907,16 @@ probe. */
 					planning_session)
 				(if (equal? chosen lookup_kind) lookup_expr scan_expr)))))))
 
-/* Residual base scalars have no eager carrier before their caller row. Bind
-the complete declared tuple before entering the existing bounded native scan. */
-(define scalar_cardinality_probe_executable_exprs (lambda (stage)
-	(list (gs_input stage) (qassoc_get (gs_facts stage) 'condition true)
-		(gs_aggregates stage) (gs_keys stage))))
-
-(define scalar_cardinality_probe_input_closed? (lambda (stage)
-	(empty_list? (btw2025_expr_accessing_aliases (scalar_cardinality_probe_executable_exprs stage)
-		(qassoc_get (gs_facts stage) 'btw2025_accessing_after_simple '())))))
-
 (define scalar_cardinality_probe_supported? (lambda (stage)
 	(if (scalar_cardinality_probe_stage? stage) true
-		(not (scalar_cardinality_probe_contract? stage)) false
-		(not (source_is_base_table? (gs_input stage))) false
-		(begin
-			(define lookup (qassoc_get (gs_facts stage) 'lookup-keys '()))
-			(define domain (qassoc_get (gs_facts stage) 'btw2025_domain '()))
-			(define parameters (scoped_program_parameters (gs_id stage) lookup))
-			(define index (scalar_query_probe_param_index lookup lookup parameters))
-			(and (reduce domain (lambda (covered value)
-				(and covered (not (nil? (find lookup (lambda (key) (expression_equal? key value)) nil)))
-					(not (nil? (find (gs_domain stage) (lambda (key) (expression_equal? key value)) nil))))) true)
-				(scalar_cardinality_probe_input_closed? (rewrite_scalar_query_probe_params index stage)))))))
+		(and (scalar_cardinality_probe_contract? stage)
+			(source_is_base_table? (gs_input stage))
+			(scalar_probe_bindings_supported? stage)))))
 
 (define scalar_cardinality_probe_bindings_complete? (lambda (stage sources)
 	(if (scalar_cardinality_probe_stage? stage) true
-		(not (scalar_cardinality_probe_supported? stage)) false
-		(begin
-			(define lookup (qassoc_get (gs_facts stage) 'lookup-keys '()))
-			(define refs (btw2025_expr_outer_column_refs
-				(scalar_cardinality_probe_executable_exprs stage) (list (gs_input stage)) sources))
-			(and (reduce (qassoc_get (gs_facts stage) 'btw2025_accessing_after_simple '())
-				(lambda (covered alias) (and covered (contains? (source_aliases sources) alias))) true)
-				(reduce refs (lambda (covered ref)
-					(and covered (not (nil? (find lookup (lambda (key) (expression_equal? key ref)) nil)))
-						(not (nil? (find (gs_domain stage) (lambda (key) (expression_equal? key ref)) nil))))) true))))))
+		(and (scalar_cardinality_probe_supported? stage)
+			(scalar_probe_bindings_complete? stage sources)))))
 
 (define lower_scalar_cardinality_probe_expr (lambda (sources default_alias stage requested_col)
 	(if (scalar_cardinality_probe_stage? stage)
@@ -9699,7 +9723,7 @@ retains its own count/overflow reducer when consumed through the same probe. */
 	(and (stage_output_relation? (source_relation src))
 		(begin
 			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
-			(scalar_first_physical_probe_stage? stage)))))
+			(scalar_first_probe_supported? stage)))))
 
 (define scalar_aggregate_probe_stage_output_source? (lambda (stages src)
 	(and (stage_output_relation? (source_relation src))
@@ -9928,7 +9952,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 					(scalar_aggregate_probe_stage? original))
 					original
 					(coalesceNil direct original)))
-				(if (or (scalar_first_physical_probe_stage? stage)
+				(if (or (scalar_first_probe_supported? stage)
 					(presence_probe_stage? stage)
 					(or (scalar_aggregate_probe_supported? stage)
 						(scalar_cardinality_probe_supported? stage)))
