@@ -6,6 +6,8 @@ metadata:
   requires_tds: true
   description: Owned CREATE generations and foreign declarations share the original transaction and durable decision
 setup:
+- sql: DROP TABLE IF EXISTS joint_fact_child
+- sql: DROP TABLE IF EXISTS joint_fact_parent
 - sql: DROP VIEW IF EXISTS joint_participant_view
 - sql: DROP TABLE IF EXISTS joint_participant_child
 - sql: DROP TABLE IF EXISTS joint_failed
@@ -38,7 +40,14 @@ setup:
 - sql: INSERT joint_published_child VALUES(10,1)
 - sql: CREATE TABLE joint_drop_old_a(id INT)
 - sql: CREATE TABLE joint_drop_old_b(id INT)
+- sql: CREATE TABLE joint_fact_parent(id SMALLINT NOT NULL PRIMARY KEY)
+- sql: CREATE TABLE joint_fact_child(id INT NOT NULL PRIMARY KEY,parent_id SMALLINT NULL)
+- sql: INSERT joint_fact_parent VALUES(0)
+- sql: INSERT joint_fact_child VALUES(1,NULL)
+- sql: ALTER TABLE joint_fact_child ADD CONSTRAINT joint_fact_reference FOREIGN KEY(parent_id) REFERENCES joint_fact_parent(id) ON UPDATE CASCADE
 cleanup:
+- sql: DROP TABLE IF EXISTS joint_fact_child
+- sql: DROP TABLE IF EXISTS joint_fact_parent
 - sql: DROP VIEW IF EXISTS joint_participant_view
 - sql: DROP TABLE IF EXISTS joint_participant_child
 - sql: DROP TABLE IF EXISTS joint_failed
@@ -64,6 +73,40 @@ cleanup:
 - sql: DROP TABLE IF EXISTS joint_audit
 - sql: DROP TABLE IF EXISTS joint_existing
 test_cases:
+- name: Foreign preconditions use the original transaction column declaration
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE joint_fact_child DROP CONSTRAINT joint_fact_reference
+    - connection: owner
+      sql: UPDATE joint_fact_child SET parent_id=0 WHERE parent_id IS NULL
+    - connection: owner
+      sql: ALTER TABLE joint_fact_child ALTER COLUMN parent_id SMALLINT NOT NULL
+    - connection: owner
+      sql: ALTER TABLE joint_fact_child ADD CONSTRAINT joint_fact_reference FOREIGN KEY(parent_id) REFERENCES joint_fact_parent(id) ON UPDATE CASCADE
+    - connection: owner
+      sql: SELECT c.parent_id,CAST(m.is_nullable AS INT) AS nullable FROM joint_fact_child c CROSS JOIN sys.columns m WHERE m.object_id=OBJECT_ID('joint_fact_child') AND m.name='parent_id'
+      expect:
+        rows: 1
+        data: [{parent_id: 0, nullable: 0}]
+    - connection: observer
+      sql: SELECT c.parent_id,CAST(m.is_nullable AS INT) AS nullable FROM joint_fact_child c CROSS JOIN sys.columns m WHERE m.object_id=OBJECT_ID('joint_fact_child') AND m.name='parent_id'
+      expect:
+        rows: 1
+        data: [{parent_id: null, nullable: 1}]
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: UPDATE joint_fact_parent SET id=1 WHERE id=0
+    - connection: observer
+      sql: SELECT c.parent_id,CAST(m.is_nullable AS INT) AS nullable FROM joint_fact_child c CROSS JOIN sys.columns m WHERE m.object_id=OBJECT_ID('joint_fact_child') AND m.name='parent_id'
+      expect:
+        rows: 1
+        data: [{parent_id: 1, nullable: 0}]
 - name: New child and parent enforce privately and publish with one original commit
   tds:
     statements:

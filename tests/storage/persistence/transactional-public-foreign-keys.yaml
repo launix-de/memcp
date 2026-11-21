@@ -115,6 +115,41 @@ test_cases:
         (equal? (count ((show child "constraints") "ForeignKeys")) 0)))
       (tx_rollback s) (and denied incomplete changed_declaration added private))
   expect: {result: true}
+- name: Stale public facts cannot replace the original owner private declaration
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin_acid s)
+      (define tx (s "__memcp_tx"))
+      (define child (table "memcp-tests" false "loaded_fk_pending" false tx))
+      (define parent (table "memcp-tests" false "loaded_fk_parent" false tx))
+      (define facts (lambda (handle name input) (begin
+        (define c (show handle "column" name false input))
+        (list (c "Field") (c "RawType") (c "Dimensions") (c "Collation") (c "Null") (c "Computed")))))
+      (define names '("code" "category"))
+      (define old (map names (lambda (name) (facts child name nil))))
+      (define target (map names (lambda (name) (facts parent name tx))))
+      (define previous (show child "column" "code" false tx))
+      (define declaration (lambda (nullable) (list (previous "RawType") (previous "Dimensions") nullable (previous "Collation"))))
+      (altercolumn child "code" "declaration" (list (declaration false) (declaration true)) tx)
+      (define rejected (try (lambda () (begin
+        (createforeignkey child "FK_private_facts" names parent names "restrict" "restrict" tx
+          (list "expected_child" old "expected_parent" target)) false))
+        (lambda (failure) (strlike (concat failure) "%foreign endpoint declaration changed before staging%"))))
+      (define before (list rejected ((show child "column" "code" false tx) "Null")
+        ((show child "column" "code" false nil) "Null") (count ((show child "constraints" tx) "ForeignKeys"))))
+      (define current (map names (lambda (name) (facts child name tx))))
+      (define added (createforeignkey child "FK_private_facts" names parent names "restrict" "restrict" tx
+        (list "expected_child" current "expected_parent" target)))
+      (define rows (lambda (input) (scan input child '() '() '() (lambda () true) '("id" "code" "category")
+        (lambda (acc id code category) (append acc (list id code category))) '()
+        (lambda (left right) (merge (list left right))) false)))
+      (define after (list added (count ((show child "constraints" tx) "ForeignKeys"))
+        (count ((show child "constraints") "ForeignKeys")) (rows tx)))
+      (tx_rollback s)
+      (list before after ((show child "column" "code" false nil) "Null")
+        (count ((show child "constraints") "ForeignKeys")) (rows nil)))
+  expect:
+    result: [[true,false,true,0],[true,1,0,[[1,9,beta]]],true,0,[[1,9,beta]]]
 - name: A later independent amendment succeeds on the savepoint-retired endpoints
   scm: |
     (begin

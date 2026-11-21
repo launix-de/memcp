@@ -453,10 +453,11 @@ func (state *publicCatalogChanges) validateStageLocked(tx *TxContext, child, par
 			panic("public declaration conflict: endpoint declaration changed")
 		}
 	}
-	validateCatalogForeign(db, declaration, tx.publicUniqueKeys(), tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState})
+	views := tx.publicDeclarationViews()
+	validateCatalogForeign(db, declaration, tx.publicUniqueKeys(), views, catalogForeignEndpointScope{owner: tx.transactionState})
 	fk := declaration.Foreign
 	if expected != nil {
-		expected.validate(child, parent, fk)
+		expected.validate(child, parent, fk, views)
 	}
 	if nativeDeclarationNameConflict(db, fk.Id, nil, tx.publicUniqueKeys(), nativeForeignDirectory(effectiveForeignDeclarations(db, tx.publicForeignAmendments())), true) {
 		panic("declaration name already exists: " + fk.Id)
@@ -1355,7 +1356,7 @@ func decodeForeignOptions(value scm.Scmer) (*foreignDeclarationExpectations, boo
 	}
 	return result, validateExisting
 }
-func (expected *foreignDeclarationExpectations) validate(child, parent *table, fk foreignKey) {
+func (expected *foreignDeclarationExpectations) validate(child, parent *table, fk foreignKey, views map[*table]*tableShowColumnsSnapshot) {
 	for endpoint, t := range []*table{child, parent} {
 		facts, names := expected.child, fk.Cols1
 		if endpoint == 1 {
@@ -1368,13 +1369,7 @@ func (expected *foreignDeclarationExpectations) validate(child, parent *table, f
 			if fact.name != names[i] {
 				panic("foreign expected column name does not match its declaration")
 			}
-			var current *column
-			for _, c := range t.Columns {
-				if c.Name == fact.name {
-					current = c
-					break
-				}
-			}
+			current := catalogColumnInView(t, fact.name, views)
 			if current == nil || current.Typ != fact.typ || current.Collation != fact.collation || current.AllowNull != fact.nullable || isRuntimeComputedColumn(current) != fact.computed || len(current.Typdimensions) != len(fact.dimensions) {
 				panic("foreign endpoint declaration changed before staging")
 			}
