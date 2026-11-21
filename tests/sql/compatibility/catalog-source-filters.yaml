@@ -268,10 +268,23 @@ test_cases:
       (define original (tsql_catalog_columns_query "memcp-tests" true))
       (define restricted (tsql_catalog_restrict_branch original "memcp-tests"
         (list "memcp-tests" "sys" "all_columns")))
-      (define native (car (union_branches restricted)))
-      (define selection (eval (metadata_source_selection_expr (car (qb_sources native)) (qb_where native))))
-      (define rows (info_schema_table_rows nil selection
-        (lambda (_db _name _tx) (error "self catalog restriction invoked native column production"))))
-      (and (expression_equal? selection false) (empty_list? rows)
-        (equal? (count (union_branches restricted)) (count (union_branches original)))))
+      (define relation (source_relation (car (qb_sources restricted))))
+      (define selection (eval (nth (nth relation 2) 4)))
+      (define producer (tsql_catalog_column_tuples_factory
+        (lambda (_db _tx _selection) (error "self catalog restriction invoked native column production"))
+        internal_column_name? tsql_native_relation_handle tsql_native_object_id tsql_catalog_default_field
+        tsql_virtual_catalog_declarations tsql_object_registry_id tsql_declared_byte_length))
+      (define rows (producer "memcp-tests" "root" nil selection true))
+      (define declaration (cadr (find tsql_virtual_catalog_declarations
+        (lambda (entry) (equal? (car entry) "all_columns")) nil)))
+      (define identity (tsql_object_registry_id "memcp-tests" "catalog:sys.all_columns"))
+      (define expected (mapIndex declaration (lambda (index column)
+        (list identity (car column) (+ index 1) nil 0 (nth column 3)
+          (tsql_declared_byte_length (list "RawType" (cadr column) "Dimensions" (nth column 2))) false))))
+      (define native_called (try
+        (lambda () (producer "memcp-tests" "root" nil nil false))
+        (lambda (failure) (strlike (concat failure) "%self catalog restriction invoked native column production%"))))
+      (and (equal? selection '("catalog" "all_columns")) (equal? rows expected)
+        (not (empty_list? rows)) (expression_equal? native_called true)
+        (equal? (count (qb_sources restricted)) (count (qb_sources original)))))
   expect: {result: true}
