@@ -6479,17 +6479,23 @@ that context explicitly; stored views refuse this scalar before publication. */
 	/* Ordered recursive assignment is a scalar fold over the existing engine
 	result stream. Project only its bounded column inputs; no row bag or SQL
 	interpreter is introduced, and source ordering/limits stay in the planner. */
+	(define tsql_assignment_source_plan (lambda (query targets reducer scalar_inputs)
+		(build_reducing_queryplan_term query (make_result_reduction + 0 +) planning_session tx
+			(lambda (plan) (begin
+				/* Conversion compilers introduce invocation reads such as LANGUAGE
+				and DATEFORMAT. The existing code finalizer sees these reads before
+				publication closes callbacks and makes their expressions opaque. */
+				(define inputs (map (query_expr_session_reads (list plan scalar_inputs)) cadr))
+				(list 'tsql_run_select_assignment 'session (list 'quote targets)
+					(list 'quote inputs) 'tx (list 'lambda (list 'resultrow 'session) plan) reducer))))))
 	(define tsql_assignment_plan (lambda (query targets) (begin
-		(define inputs (map (query_expr_session_reads query) cadr))
 		(define target_keys (map targets (lambda (name) (concat "__tsql_parameter:" name))))
 		(define target_positions (tsql_select_assignment_positions target_keys))
 		(define recursive (reduce (query_expr_session_reads (qb_fields query))
 			(lambda (found read) (or found (has? target_keys (cadr read)))) false))
 		(define ordered (not (empty_list? (coalesceNil (qb_order query) '()))))
 		(if (not (and recursive ordered))
-			(list 'tsql_run_select_assignment 'session (list 'quote targets)
-				(list 'quote inputs) 'tx (list 'lambda (list 'resultrow 'session)
-					(tsql_rowcount_query_plan query planning_session tx)) nil)
+			(tsql_assignment_source_plan query targets nil '())
 			(begin
 				(if (and (<= (count (qb_sources query)) 1)
 					(empty_list? (coalesceNil (qb_group query) '())) (nil? (qb_having query))
@@ -6535,9 +6541,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(define source (make_query_block (qb_schema query) (qb_sources query) (merge (list fields order_fields))
 					(qb_where query) nil nil order (qb_limit query) (qb_offset query)
 					(qb_hidden query) (qb_stages query) (qb_facts query)))
-				(list 'tsql_run_select_assignment 'session (list 'quote targets)
-					(list 'quote inputs) 'tx (list 'lambda (list 'resultrow 'session)
-						(tsql_rowcount_query_plan source planning_session tx)) reducer))))))
+				/* The reducer is already compiled and opaque. Its lowered scalar
+				values retain the same input reads before that compilation. */
+				(tsql_assignment_source_plan source targets reducer values))))))
 	/* SELECT, INSERT sources and diagnostics consume the same expanded relation.
 	A planning factory must never survive into EXPLAIN as executable row code. */
 	(define tsql_expand_select_query (lambda (query) (begin

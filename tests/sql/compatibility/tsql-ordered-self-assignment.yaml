@@ -4,6 +4,7 @@
 metadata:
   syntax: tsql
   isolated: true
+  requires_tds: true
   description: Ordered recursive SELECT assignment folds bounded scalar state after native ordering and limits
 setup:
 - sql: CREATE TABLE ordered_assignment_source(id INT PRIMARY KEY,label NVARCHAR(9))
