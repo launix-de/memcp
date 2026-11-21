@@ -2550,6 +2550,7 @@ func prepareMapReducerCallFrame(mr *ShardMapReducer) {
 // initReadMapReducer initializes an ordinary read-only mapper without the
 // per-column closures required by pseudo-column and mutation scans.
 func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, currentTx *TxContext) {
+	mr.columnInput = t.initializedColumnInput(currentTx)
 	mr.shard = t
 	mr.currentTx = currentTx
 	mr.mutationInput = currentTx.mutationInputFor(t.t)
