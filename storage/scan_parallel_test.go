@@ -1113,10 +1113,10 @@ func TestReserveIDsRejectsInvalidAndExhaustedBlocks(t *testing.T) {
 	}
 	// Legacy signed explicit IDs can leave a high unsigned recovery counter.
 	// Loading/advancing that state without generating values stays supported.
-	if base := tbl.reserveAutoIncrement(math.MaxUint64, 0); base != math.MaxUint64 {
+	if base := tbl.reserveAutoIncrement(math.MaxUint64, 0, true); base != math.MaxUint64 {
 		t.Fatalf("legacy recovery counter changed: %d", base)
 	}
-	requirePanic(t, func() { tbl.reserveAutoIncrement(0, 1) })
+	requirePanic(t, func() { tbl.reserveAutoIncrement(0, 1, false) })
 }
 
 func TestReserveIDsExplicitInsertAndCallback(t *testing.T) {

@@ -99,7 +99,7 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 		reply.State = t.localTableAllocator()
 		return reply, nil
 	}
-	reply.Base = t.reserveLocalTableIDs(request.Explicit, request.Count, request.ObservedExplicit)
+	reply.Base = t.reserveLocalAutoIncrement(request.Explicit, request.Count, request.ObservedExplicit)
 	reply.State = t.localTableAllocator()
 	// Persist reservations before acknowledging: other nodes can commit their
 	// allocated IDs without returning the allocator's shard WAL to this node.

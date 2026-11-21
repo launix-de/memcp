@@ -896,7 +896,7 @@ func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify 
 				explicit = max(explicit, uint64(id))
 			}
 		}
-		base := t.reserveTableIDs(explicit, generated, observedExplicit)
+		base := t.reserveAutoIncrement(explicit, generated, observedExplicit)
 		if generated > 0 && notify != nil {
 			notify(int64(base + 1))
 		}

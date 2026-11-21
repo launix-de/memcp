@@ -3877,7 +3877,7 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 		t.requireDeclaredColumnAlter(current, operation, value)
 		if operation == "auto_increment" && scm.ToInt(value) > 1 {
 			// This is the existing allocator update; no column clone owns it.
-			t.reserveAutoIncrement(uint64(scm.ToInt(value)), 0)
+			t.reserveAutoIncrement(uint64(scm.ToInt(value)), 0, false)
 		} else {
 			replacement := current
 			if !current.IsTemp && !isRuntimeComputedColumn(current) {
@@ -4259,15 +4259,11 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 
 // Reserve one generated-ID range per batch without taking the topology mutex
 // from inside a shard writer. Explicit IDs advance the same monotonic counter.
-func (t *table) reserveAutoIncrement(explicit, generated uint64) uint64 {
-	return t.reserveTableIDs(explicit, generated, explicit != 0)
-}
-
-func (t *table) reserveTableIDs(explicit, generated uint64, observedExplicit bool) uint64 {
+func (t *table) reserveAutoIncrement(explicit, generated uint64, observedExplicit bool) uint64 {
 	if sharedClusterSource(t) {
 		return activeNodeCluster().reserveInsertIDs(t, explicit, generated, observedExplicit)
 	}
-	return t.reserveLocalTableIDs(explicit, generated, observedExplicit)
+	return t.reserveLocalAutoIncrement(explicit, generated, observedExplicit)
 }
 
 // Insert chooses the native execution site before evaluating defaults, allocating
