@@ -1,0 +1,147 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: BEFORE callbacks normalize rows through the actual private column input
+setup:
+- sql: DROP TABLE IF EXISTS private_before_commit
+- sql: DROP TABLE IF EXISTS private_before_rollback
+- sql: DROP TABLE IF EXISTS private_before_dynamic
+- sql: CREATE TABLE private_before_commit(id INT PRIMARY KEY,legacy INT NULL)
+- sql: CREATE TABLE private_before_rollback(id INT PRIMARY KEY,legacy INT NULL)
+- sql: CREATE TABLE private_before_dynamic(id INT PRIMARY KEY,destination VARCHAR(8),payload INT,legacy INT NULL)
+- sql: INSERT private_before_commit VALUES(0,5)
+- sql: INSERT private_before_rollback VALUES(0,6)
+- sql: INSERT private_before_dynamic VALUES(0,'legacy',0,5)
+- scm: |
+    (begin
+      (map '("private_before_commit" "private_before_rollback") (lambda (name) (begin
+        (define target (table "memcp-tests" false name false nil))
+        (createtrigger target (concat name "_insert") "before_insert" "" ""
+          (lambda (OLD NEW session tx)
+            (if (equal? (get_assoc NEW "id") 1) (set_assoc NEW "legacy" 11) NEW)) true)
+        (createtrigger target (concat name "_update") "before_update" "" ""
+          (lambda (OLD NEW session tx)
+            (set_assoc NEW "legacy" (+ (coalesceNil (get_assoc OLD "legacy") 0) 100))) true))))
+      (createtrigger (table "memcp-tests" false "private_before_dynamic" false nil)
+        "private_before_dynamic_insert" "before_insert" "" ""
+        (lambda (OLD NEW session tx)
+          (set_assoc NEW (get_assoc NEW "destination") (get_assoc NEW "payload"))) true)
+      true)
+  expect: {result: true}
+test_cases:
+- name: Conditional BEFORE rows retain initialized and explicit cells through commit
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "private_before_commit" false tx))
+      (define private_rows (lambda (input)
+        (sort (scan input target '() '() '() (lambda () true) '("id" "legacy" "flag")
+          (lambda (rows id legacy flag) (merge rows (list (list id legacy flag)))) '() merge)
+          (lambda (a b) (< (car a) (car b))))))
+      (define public_rows (lambda (input)
+        (sort (scan input target '() '() '() (lambda () true) '("id" "legacy")
+          (lambda (rows id legacy) (merge rows (list (list id legacy)))) '() merge)
+          (lambda (a b) (< (car a) (car b))))))
+      (try (lambda () (begin
+        (createcolumn target "flag" "INT" '() '("null" false "default" 3) nil nil tx)
+        (with_table_mutation (list target) (list "insert" '()) tx owner (lambda (bound)
+          (insert target '("id" "flag") (list (list 1 17) (list 2 27)) '() nil false nil bound)))
+        (define normalized (private_rows tx))
+        (with_table_mutation (list target) (list "insert" '()) tx owner (lambda (bound)
+          (insert target '("id") (list (list 3)) '() nil false nil bound)))
+        (with_table_mutation (list target) (list "update" '("flag")) tx owner (lambda (bound)
+          (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+            (lambda (n update) (begin (update '("flag" 37)) (+ n 1))) 0 +)))
+        (define own (private_rows tx))
+        (define observer (public_rows nil))
+        (define state (tx_state tx))
+        (tx_commit owner)
+        (list normalized own observer state (private_rows nil))))
+        (lambda (cause) (begin
+          (try (lambda () (tx_rollback owner)) (lambda (_finished) true))
+          (error cause)))))
+  expect:
+    result:
+    - [[0, 5, 3], [1, 11, 17], [2, null, 27]]
+    - [[0, 5, 3], [1, 111, 37], [2, null, 27], [3, null, 3]]
+    - [[0, 5]]
+    - active
+    - [[0, 5, 3], [1, 111, 37], [2, null, 27], [3, null, 3]]
+- name: Conditional BEFORE rows retain initialized and explicit cells through rollback
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "private_before_rollback" false tx))
+      (define private_rows (lambda (input)
+        (sort (scan input target '() '() '() (lambda () true) '("id" "legacy" "flag")
+          (lambda (rows id legacy flag) (merge rows (list (list id legacy flag)))) '() merge)
+          (lambda (a b) (< (car a) (car b))))))
+      (define public_rows (lambda (input)
+        (sort (scan input target '() '() '() (lambda () true) '("id" "legacy")
+          (lambda (rows id legacy) (merge rows (list (list id legacy)))) '() merge)
+          (lambda (a b) (< (car a) (car b))))))
+      (try (lambda () (begin
+        (createcolumn target "flag" "INT" '() '("null" false "default" 3) nil nil tx)
+        (with_table_mutation (list target) (list "insert" '()) tx owner (lambda (bound)
+          (insert target '("id" "flag") (list (list 1 17) (list 2 27)) '() nil false nil bound)))
+        (define normalized (private_rows tx))
+        (with_table_mutation (list target) (list "insert" '()) tx owner (lambda (bound)
+          (insert target '("id") (list (list 3)) '() nil false nil bound)))
+        (with_table_mutation (list target) (list "update" '("flag")) tx owner (lambda (bound)
+          (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+            (lambda (n update) (begin (update '("flag" 37)) (+ n 1))) 0 +)))
+        (define own (private_rows tx))
+        (define observer (public_rows nil))
+        (define state (tx_state tx))
+        (tx_rollback owner)
+        (list normalized own observer state (public_rows nil))))
+        (lambda (cause) (begin
+          (try (lambda () (tx_rollback owner)) (lambda (_finished) true))
+          (error cause)))))
+  expect:
+    result:
+    - [[0, 6, 3], [1, 11, 17], [2, null, 27]]
+    - [[0, 6, 3], [1, 111, 37], [2, null, 27], [3, null, 3]]
+    - [[0, 6]]
+    - active
+    - [[0, 6]]
+- name: The committed SQL relation retains the complete trigger-modified row contracts
+  sql: SELECT id,legacy,flag FROM private_before_commit ORDER BY id
+  expect: {rows: 4,data: [{id: 0,legacy: 5,flag: 3},{id: 1,legacy: 111,flag: 37},{id: 2,legacy: null,flag: 27},{id: 3,legacy: null,flag: 3}]}
+- name: Rollback retires the private declaration while retaining the original SQL rows
+  sql: SELECT id,legacy FROM private_before_rollback ORDER BY id
+  expect: {rows: 1,data: [{id: 0,legacy: 6}]}
+- name: A preexisting data-directed BEFORE callback can supply a newly private field
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "private_before_dynamic" false tx))
+      (try (lambda () (begin
+        (createcolumn target "flag" "INT" '() '("null" true "default" 3 "fill_existing" false) nil nil tx)
+        (with_table_mutation (list target) (list "insert" '()) tx owner (lambda (bound)
+          (insert target '("id" "destination" "payload") (list (list 1 "flag" 27)) '() nil false nil bound)))
+        (define own (sort (scan tx target '() '() '() (lambda () true) '("id" "legacy" "flag")
+          (lambda (rows id legacy flag) (merge rows (list (list id legacy flag)))) '() merge)
+          (lambda (a b) (< (car a) (car b)))))
+        (define observer (scan nil target '() '() '() (lambda () true) '("id" "legacy")
+          (lambda (rows id legacy) (merge rows (list (list id legacy)))) '() merge))
+        (tx_commit owner)
+        (list own observer)))
+        (lambda (cause) (begin
+          (try (lambda () (tx_rollback owner)) (lambda (_finished) true))
+          (error cause)))))
+  expect: {result: [[[0, 5, null], [1, null, 27]], [[0, 5]]]}
+- name: A later ordinary INSERT still receives its actual declared default
+  sql: INSERT private_before_dynamic(id,destination,payload) VALUES(2,'legacy',12)
+- name: The supplied private value and later default remain distinct after publication
+  sql: SELECT id,destination,payload,legacy,flag FROM private_before_dynamic ORDER BY id
+  expect: {rows: 3,data: [{id: 0,destination: legacy,payload: 0,legacy: 5,flag: null},{id: 1,destination: flag,payload: 27,legacy: null,flag: 27},{id: 2,destination: legacy,payload: 12,legacy: 12,flag: 3}]}
+cleanup:
+- sql: DROP TABLE IF EXISTS private_before_commit
+- sql: DROP TABLE IF EXISTS private_before_rollback
+- sql: DROP TABLE IF EXISTS private_before_dynamic
