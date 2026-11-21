@@ -3160,6 +3160,12 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(if (source_is_base_table? source) source (error "write target must be a base table"))))))
 	(define tsql_write_sources (lambda (target sources)
 		(if (has? sources target) sources (cons target sources))))
+	/* Mutation changes the projection/sink, not the logical source query.
+	Keep every clause, dependency stage and source-scope fact for the common planner. */
+	(define tsql_write_query (lambda (query target values)
+		(make_query_block (source_schema target) (tsql_write_sources target (qb_sources query)) values
+			(qb_where query) (qb_group query) (qb_having query) (qb_order query)
+			(qb_limit query) (qb_offset query) (qb_hidden query) (qb_stages query) (qb_facts query))))
 	(define tsql_write_limit (parser (or
 		(parser '((atom "TOP" true) "(" (define n tsql_int) ")")
 			(if (< n 0) (error "DML TOP must be nonnegative") n))
@@ -3208,22 +3214,21 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(? tsql_query_hints)
 	) (lambda cte_arguments (begin
 			(define cte_bindings (if (empty_list? cte_arguments) '() (car cte_arguments)))
-			(define sources (map (merge (coalesceNil from '())) (lambda (source)
-				(tsql_finalize_sources source "source" cte_bindings '()))))
+			(define source_query (tsql_finalize_sources
+				(make_query_block schema (merge (coalesceNil from '())) nil (coalesceNil condition true)
+					nil nil nil limit nil nil nil nil) "query" cte_bindings '()))
+			(define sources (qb_sources source_query))
 			(if (and (nil? (car target))
 				(find cte_bindings (lambda (entry) (equal?? (car entry) (cadr target))) nil)
 				(not (find sources (lambda (source) (and (source_is_base_table? source)
 					(equal?? (source_alias source) (cadr target)))) nil)))
 				(error "write target must be a base table, not a CTE") true)
-			(define bound_condition (tsql_finalize_sources (coalesceNil condition true) "query" cte_bindings '()))
 			(define target (tsql_write_source target sources))
 			(if policy (policy (source_schema target) (source_relation target) true) true)
 			(define values (tsql_update_values target (tsql_finalize_sources cols "query" cte_bindings '())))
-			(if describe (tsql_describe_dml (source_schema target) (tsql_write_sources target sources)
-				values bound_condition)
-				(tsql_build_dml_plan (source_schema target) (source_relation target) (source_alias target)
-					(tsql_write_sources target sources) values
-					bound_condition nil limit nil planning_session tx))))))
+			(define query (tsql_write_query source_query target values))
+			(if describe (tsql_describe_dml query)
+				(tsql_build_dml_plan (source_relation target) (source_alias target) query planning_session tx))))))
 	(define tsql_delete (parser '(
 		(atom "DELETE" true)
 		(define limit tsql_write_limit)
@@ -3234,21 +3239,21 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(? tsql_query_hints)
 	) (lambda cte_arguments (begin
 			(define cte_bindings (if (empty_list? cte_arguments) '() (car cte_arguments)))
-			(define sources (map (merge (coalesceNil from '())) (lambda (source)
-				(tsql_finalize_sources source "source" cte_bindings '()))))
+			(define source_query (tsql_finalize_sources
+				(make_query_block schema (merge (coalesceNil from '())) nil (coalesceNil condition true)
+					nil nil nil limit nil nil nil nil) "query" cte_bindings '()))
+			(define sources (qb_sources source_query))
 			(if (and (nil? (car target))
 				(find cte_bindings (lambda (entry) (equal?? (car entry) (cadr target))) nil)
 				(not (find sources (lambda (source) (and (source_is_base_table? source)
 					(equal?? (source_alias source) (cadr target)))) nil)))
 				(error "write target must be a base table, not a CTE") true)
-			(define bound_condition (tsql_finalize_sources (coalesceNil condition true) "query" cte_bindings '()))
 			(define target (tsql_write_source target sources))
 			(if policy (policy (source_schema target) (source_relation target) true) true)
-			(if describe (tsql_describe_dml (source_schema target) (tsql_write_sources target sources)
-				(list "__prepare" (list (quote sql_type_expr) 1 "INT" nil)) bound_condition)
-				(tsql_build_dml_plan (source_schema target) (source_relation target) (source_alias target)
-					(tsql_write_sources target sources) nil bound_condition
-					nil limit nil planning_session tx))))))
+			(if describe (tsql_describe_dml (tsql_write_query source_query target
+				(list "__prepare" (list (quote sql_type_expr) 1 "INT" nil))))
+				(tsql_build_dml_plan (source_relation target) (source_alias target)
+					(tsql_write_query source_query target nil) planning_session tx))))))
 
 	(define tsql_truncate (parser '(
 		(atom "TRUNCATE" true) (? (atom "TABLE" true))
@@ -3259,7 +3264,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(define trunc_schema (tsql_qualifier_database schema2 schema frontend_options))
 			(cons '!begin (list
 				(list (quote checktablemaintenance) trunc_schema tbl "truncate")
-				(tsql_build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil planning_session tx)))
+				(tsql_build_dml_plan tbl nil (make_query_block trunc_schema
+					(list (list tbl trunc_schema tbl false nil)) nil true nil nil nil nil nil nil nil nil) planning_session tx)))
 	))))
 
 	(define tsql_insert_literal_cell (parser (or
@@ -3327,9 +3333,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(define value tsql_expression4)
 		) (list op value)) empty true))
 	) (reduce terms tsql_fold_additive a)))
-	(define tsql_describe_dml (lambda (database sources values condition) (begin
-		(define bound (tsql_describe_query (make_query_block database sources values condition
-			nil nil nil nil nil '() '() '()) policy planning_session))
+	(define tsql_describe_dml (lambda (query) (begin
+		(define bound (tsql_describe_query query policy planning_session))
 		(define fields (tsql_result_columns bound parameters))
 		(if (list? fields) (list (quote quote) '()) (error "invalid prepared mutation contract")))))
 	(define tsql_build_select_plan (lambda (query) (begin
@@ -3443,10 +3448,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(begin
 					(define typed_rows (map rows (lambda (row) (map (produceN (count columns))
 						(lambda (i) (tsql_assignment_expr (nth row i) (nth declarations i)))))))
-					(if describe (tsql_describe_dml database '()
+					(if describe (tsql_describe_dml (make_query_block database '()
 						(merge (map typed_rows (lambda (row)
 							(merge (map (produceN (count columns)) (lambda (i)
-								(list (nth columns i) (nth row i)))))))) true)
+								(list (nth columns i) (nth row i)))))))) true nil nil nil nil nil nil nil nil))
 						(tsql_identity_insert_statement database tbl identity explicit_columns columns
 							(tsql_native_insert_expr (quote __tsql_insert_target) identity columns (sql_insert_values_expr
 								(map typed_rows (lambda (row) (map row (lambda (value) (sql_type_formula '() value)))))) (count rows) true)))))

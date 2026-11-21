@@ -13581,7 +13581,7 @@ compilation break-even estimate smaller and hide a later specialization. */
 		(planner_guard_star_columns query planning_session)
 		(neumann_compile_pipeline query planning_session tx))))
 
-(define build_dml_plan (lambda (schema tbl tblalias all_defs cols condition order limit offset planning_session tx)
+(define build_dml_plan (lambda (tbl tblalias query planning_session tx)
 	(begin
 		/* Cached statements already own the shared compile accumulator. Direct
 		formulas (including source-defined trigger statements) need the same
@@ -13596,25 +13596,26 @@ compilation break-even estimate smaller and hide a later specialization. */
 			(planning_session "__memcp_queryplan_guard_conditions")))
 		(define compile_session (if collected planning_session
 			(sql_queryplan_compile_session (coalesceNil planning_session (newsession)) tx)))
+		(define schema (qb_schema query))
+		(define all_defs (qb_sources query))
+		(define condition (qb_where query))
 		(define comparison_declarations (filter (sql_mutation_contract_declarations all_defs (cons (coalesceNil condition true) (source_join_exprs all_defs))) (lambda (item) (not (nil? item)))))
-		(define query (make_query_block
-			schema
-			all_defs
-			cols
-			(coalesceNil condition true)
-			'() nil
-			(coalesceNil order '())
-			limit
-			offset
-			'() '()
-			(list (list (quote dml) true) (list (quote dml_target_alias) tblalias)
-				(list (quote comparison-declarations) comparison_declarations)
-				(list (quote mutation_planning_session) compile_session)
-				/* Binding erases BOOLEAN callback operand contracts. Capture
-				the frontend triples first; only plain formulas execute. */
-				(list (quote comparison-contracts) (merge (map
-					(cons (coalesceNil condition true) (source_join_exprs all_defs))
-					(lambda (expr) (sql_mutation_comparison_contracts all_defs expr))))))))
+		/* SELECT, UPDATE and DELETE carry the same logical query block into the
+		planner. Mutation adds its sink contract; source scopes, hidden columns
+		and dependency stages continue to belong to the original query. */
+		(define facts (reduce (list
+			(list (quote dml) true) (list (quote dml_target_alias) tblalias)
+			(list (quote comparison-declarations) comparison_declarations)
+			(list (quote mutation_planning_session) compile_session)
+			/* Binding erases BOOLEAN callback operand contracts. Capture the
+			frontend triples first; only plain formulas execute. */
+			(list (quote comparison-contracts) (merge (map
+				(cons (coalesceNil condition true) (source_join_exprs all_defs))
+				(lambda (expr) (sql_mutation_comparison_contracts all_defs expr))))))
+			(lambda (facts entry) (qassoc_set facts (car entry) (cadr entry))) (qb_facts query)))
+		(define query (make_query_block schema all_defs (qb_fields query) condition
+			(qb_group query) (qb_having query) (qb_order query) (qb_limit query) (qb_offset query)
+			(qb_hidden query) (qb_stages query) facts))
 		(define formula (neumann_compile_ir_pipeline
 			(ir_with_return (decorrelate_logical_query query) (list (quote dml) schema tbl))
 			planning_session tx))
@@ -13640,9 +13641,9 @@ compilation break-even estimate smaller and hide a later specialization. */
 			planning_session tx))))
 
 (define sql_truncate (lambda (schema tbl planning_session tx)
-	(build_dml_plan schema tbl nil
-		(list (list tbl schema tbl false nil))
-		nil true nil nil nil planning_session tx)))
+	(build_dml_plan tbl nil
+				(make_query_block schema (list (list tbl schema tbl false nil)) nil true
+					nil nil nil nil nil nil nil nil) planning_session tx)))
 
 (define explain_union_ir_metadata (lambda (ir)
 	(begin
