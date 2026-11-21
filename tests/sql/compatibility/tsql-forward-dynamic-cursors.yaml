@@ -10,7 +10,40 @@ metadata:
 setup:
 - sql: CREATE TABLE forward_dynamic_public(id INT PRIMARY KEY,value INT)
 - sql: INSERT forward_dynamic_public VALUES(1,10),(3,30)
+- sql: DROP PROCEDURE IF EXISTS cursor_group_boundary
+- sql: |
+    CREATE PROCEDURE cursor_group_boundary @tenant INT AS
+    BEGIN
+      SET NOCOUNT ON;
+      CREATE TABLE #work(tenant INT,item INT,period INT,kind INT,assignment INT);
+      INSERT #work VALUES(1,1,202301,2,9),(1,1,202201,2,8),(1,2,202401,3,6),(1,2,202301,3,7),(2,1,202101,4,5);
+      SELECT tenant,item,period,kind,assignment INTO #summary FROM #work WHERE tenant=-1 AND item=-1;
+      DECLARE @tenant_now INT,@item_now INT,@period_now INT,@kind_now INT,@assignment_now INT;
+      DECLARE @tenant_before INT,@item_before INT,@period_before INT,@kind_before INT,@assignment_before INT;
+      SELECT @tenant_before=-1,@item_before=-1,@kind_before=0,@period_before=0,@assignment_before=0;
+      DECLARE boundary_cursor CURSOR FOR
+        SELECT tenant,item,period,kind,assignment FROM #work WHERE tenant=@tenant ORDER BY tenant,item,period;
+      OPEN boundary_cursor;
+      FETCH NEXT FROM boundary_cursor INTO @tenant_now,@item_now,@period_now,@kind_now,@assignment_now;
+      WHILE @@FETCH_STATUS=0
+      BEGIN
+        IF NOT(@tenant_before=@tenant_now AND @item_before=@item_now AND @kind_before=@kind_now)
+        BEGIN
+          INSERT #summary(tenant,item,period,kind,assignment)
+            SELECT @tenant_before,@item_before,@period_before,@kind_before,@assignment_before;
+          SELECT @tenant_before=@tenant_now,@item_before=@item_now,@kind_before=@kind_now,
+                 @period_before=@period_now,@assignment_before=@assignment_now;
+        END;
+        FETCH NEXT FROM boundary_cursor INTO @tenant_now,@item_now,@period_now,@kind_now,@assignment_now;
+      END;
+      CLOSE boundary_cursor;
+      DEALLOCATE boundary_cursor;
+      INSERT #summary(tenant,item,period,kind,assignment)
+        SELECT @tenant_before,@item_before,@period_before,@kind_before,@assignment_before;
+      SELECT tenant,item,period,kind,assignment FROM #summary WHERE tenant>=0 ORDER BY tenant,item,period;
+    END
 cleanup:
+- sql: DROP PROCEDURE IF EXISTS cursor_group_boundary
 - sql: DROP TABLE IF EXISTS forward_dynamic_public
 - sql: DROP TABLE IF EXISTS forward_dynamic_replaced
 test_cases:
@@ -223,3 +256,24 @@ test_cases:
     DECLARE c CURSOR FOR SELECT r.value FROM #nullable_left l LEFT JOIN #nullable_right r ON l.id=r.parent WHERE r.value IS NULL ORDER BY l.id;
     OPEN c; FETCH NEXT FROM c; FETCH NEXT FROM c; DEALLOCATE c;
   expect: {rows: 2, data: [{value: null, ROWSTAT: 1}, {value: null, ROWSTAT: 1}]}
+
+- name: An ordered unkeyed procedure cursor preserves first rows at group boundaries
+  sql: EXEC cursor_group_boundary @tenant=1
+  expect:
+    rows: 2
+    data:
+    - {tenant: 1, item: 1, period: 202201, kind: 2, assignment: 8}
+    - {tenant: 1, item: 2, period: 202301, kind: 3, assignment: 7}
+- name: A second invocation rebuilds temporary cursor sources for its actual parameter
+  sql: EXEC cursor_group_boundary @tenant=2
+  expect: {rows: 1, data: [{tenant: 2, item: 1, period: 202101, kind: 4, assignment: 5}]}
+- name: Repeating the first invocation retains complete temporary membership and ordering
+  sql: EXEC cursor_group_boundary @tenant=1
+  expect:
+    rows: 2
+    data:
+    - {tenant: 1, item: 1, period: 202201, kind: 2, assignment: 8}
+    - {tenant: 1, item: 2, period: 202301, kind: 3, assignment: 7}
+- name: An empty unkeyed cursor invocation creates no fabricated group
+  sql: EXEC cursor_group_boundary @tenant=NULL
+  expect: {rows: 0, data: []}
