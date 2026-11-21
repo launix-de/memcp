@@ -108,3 +108,33 @@ GITHUB_WORKSPACE="$PWD" bash candidate/tests/storage/persistence/upgrade-run.sh
 
 Optional `UPGRADE_API_PORT` and `UPGRADE_MYSQL_PORT` values select isolated
 ports. Full-suite validation remains a CI responsibility.
+
+
+## Table allocator provenance
+
+The native table allocator now persists a version 1 `allocator` schema member
+and checksummed `allocator-v1` database-authority WAL records. The state binds
+the table UUID, actual configured start, known/unknown issued state, highwater
+as monotone UUID-bound facts. No second counter infers issue order.
+SAFE reservations are flushed before acknowledgement;
+LOGGED retains process-crash durability. Unused accepted intervals survive row
+rollback and savepoint rewind. MEMORY and SLOPPY keep their existing durability
+contracts. Checkpoint and storage MOVE preserve the same authority records.
+
+Historical `Auto_increment` fields remain readable. They prove only a
+highwater, not the original start or whether that start has been issued. The
+reader does not assign a guessed seed. Native `table_id_state` exposes unknown
+facts explicitly; TSQL `IDENT_CURRENT` reports unsupported provenance rather
+than confusing it with SQL NULL for a missing or inaccessible object. A later
+real reservation can establish its actual current value without claiming the
+unknown historical start. New constructors persist their real start.
+
+This is a new writer format; older binaries are not supported writers of data
+containing the new allocator authority. The UUID-bound cluster allocator uses
+explicit request/reply version 2. It rejects an older unversioned request rather
+than allocating by a potentially reused table name. The historical row/WAL
+readers remain unchanged. Independent noncluster replication writers retain
+their existing highwater merge; this does not establish a global current-value
+owner, so the new observation API rejects that scope explicitly.
+`table-id-allocator.yaml` supplies current-writer value, rollback, crash, checkpoint and name-reuse controls; predecessor-writer
+provenance coverage remains a separate qualification obligation.

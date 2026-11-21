@@ -499,7 +499,7 @@ func TestClusterCounterReservationKeepsSharedSchemaOwner(t *testing.T) {
 	defer sharedClusterMounts.Store(mounts)
 	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
 	defer nodeScans.Store(service)
-	reply, err := cluster.reserveIDs(context.Background(), clusterIDRequest{Database: tbl.schema.Name, Table: tbl.Name, Count: 8})
+	reply, err := cluster.reserveIDs(context.Background(), clusterIDRequest{Database: tbl.schema.Name, Table: tbl.Name, Identity: tbl.RuntimeIdentity, Count: 8})
 	if err != nil || reply.Base != 0 {
 		t.Fatalf("reserve: %+v %v", reply, err)
 	}
@@ -542,7 +542,7 @@ func TestClusterCounterCheckpointDuringLocalSchemaUpgrade(t *testing.T) {
 	defer nodeScans.Store(service)
 	releaseCoordination := cell.coordinate(context.Background())
 	defer releaseCoordination()
-	tbl.reserveLocalAutoIncrement(0, 8)
+	tbl.reserveLocalTableIDs(0, 8, false)
 	pending, action := cell.ownstate.Request(mosi.M)
 	if action != mosi.Send || pending.Retained() != mosi.O {
 		t.Fatal("fixture did not start an O-to-M upgrade")

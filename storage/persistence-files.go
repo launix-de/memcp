@@ -599,6 +599,8 @@ func (s *FileStorage) ReplayLog(shard string, readOnly bool) (map[string]struct{
 				}
 				if len(b) == 0 && err == nil {
 					// nop
+				} else if bytes.HasPrefix(b, []byte("allocator-v1 ")) {
+					replay <- decodeTableAllocatorRecord(string(b[len("allocator-v1 "):]))
 				} else if bytes.HasPrefix(b, []byte("sequence-v1 ")) {
 					replay <- decodeSequenceRecord(string(b[len("sequence-v1 "):]))
 				} else if bytes.HasPrefix(b, []byte("insert-v2 ")) || bytes.HasPrefix(b, []byte("insert-hidden-v2 ")) {
@@ -862,6 +864,8 @@ func encodeFileLogEntry(logentry interface{}) []byte {
 		encodeFileInsert(&b, "insert-hidden ", l.txID, l.cols, l.values)
 	case LogEntryCommit:
 		fmt.Fprintf(&b, "commit-tx %s %s\n", l.txID, fileCommitChecksum(l.txID))
+	case LogEntryTableAllocator:
+		fmt.Fprintf(&b, "allocator-v1 %s\n", encodeTableAllocatorRecord(l))
 	case LogEntrySequence:
 		fmt.Fprintf(&b, "sequence-v1 %s\n", encodeSequenceRecord(l))
 	}

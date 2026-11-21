@@ -1259,6 +1259,66 @@ scalar-query cardinality error. Restrict this owner to these constructions. */
 			(list 'get_column alias false key false) (tsql_implicit_cast_expr value "INT" '()))
 		nil nil nil (if principal nil 1) nil '() '() '())))))
 
+/* IDENT_CURRENT reads a native allocator observation at its authorized
+invocation producer. It never borrows a session identity or a SHOW estimate.
+Unknown historical provenance is a supported-profile error, distinct from
+SQL NULL for a missing/inaccessible/nonidentity object. */
+(define tsql_ident_current_rows (close_procedure ((lambda (parse_name qualifier visible relation view_name find_view parse_integer query_block? qb_sources state_reader)
+	(lambda (context actor name tx options) (begin
+		(define value (if (nil? name) nil (begin
+			(define address (try (lambda () (parse_name name)) (lambda (_invalid_address) nil)))
+			(if (nil? address) nil (begin
+				(define database (database_name (qualifier (car address) context options) true))
+				(if (or (nil? database) (not (equal?? (cadr address) "dbo"))
+					(not (visible actor database true))) nil (begin
+						(define native (relation database (nth address 2) tx))
+						(if (nil? native) (begin
+							(define view (view_name database (nth address 2) tx))
+							(if (nil? view) nil (begin
+								(define recipe (find_view tx database view))
+								(define query (nth recipe 2))
+								/* The documented joined-view rule has an actual logical
+								join proof; other view lineage needs its own contract. */
+								(if (and (query_block? query) (> (count (qb_sources query)) 1)) nil
+									(error "IDENT_CURRENT view identity lineage is not supported")))))
+							(begin
+								(define identity (find (show native "columns" tx)
+									(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
+								(if (nil? identity) nil (begin
+									(define observation (state_reader native tx))
+									(define issued (observation "issued"))
+									(define current (if (nil? issued) nil
+										(not issued) (observation "start")
+										(observation "high_allocated") (observation "high") nil))
+									(if (nil? current)
+										(error "IDENT_CURRENT allocator provenance is unavailable for this table")
+										(parse_integer current)))))))))))))
+		(list (list value)))))
+	tsql_object_name_parts tsql_qualifier_database tsql_metadata_visible? tsql_native_relation_handle
+	tsql_view_name sql_find_view tsql_parse_integer query_block? qb_sources table_id_state)))
+(define tsql_ident_current_query (lambda (database name planning tx) (begin
+	(define alias (binding_fresh_alias (binding_collect_string_catalog name '()) "__tsql_identity_current"))
+	(define names '("current_value"))
+	(define columns (list (list "Field" "current_value" "RawType" "NUMERIC" "Dimensions" '(38 0) "Null" true)))
+	(define source (list alias database
+		(list 'table-function tsql_ident_current_rows
+			(list database (tsql_actor_formula) (tsql_implicit_cast_expr name "NVARCHAR" '(776)) 'tx
+				(list 'list "tsql_import_target" (list 'session "tsql_import_target")
+					"tsql_import_source" (list 'session "tsql_import_source"))) names)
+		false nil (list "columns" columns "constraints" '("Unique" () "ForeignKeys" ()) "lifetime" "invocation")))
+	(list 'inner_select (make_query_block database (list source)
+		(list "current_value" (list 'sql_type_expr (list 'get_column alias false "current_value" false)
+			(list "NUMERIC" '(38 0)) nil)) true nil nil nil nil nil '() '()
+		(list (list 'fresh_invocation true)))))))
+(define tsql_ident_current_call (lambda (database value)
+	(list 'sql_type_expr
+		(list 'tsql_relational_scalar_call
+			(close_procedure ((lambda (database lookup)
+				(lambda (arguments _outer_sources _policy planning tx)
+					(lookup database (car arguments) planning tx))) database tsql_ident_current_query))
+			(list value))
+		(list "NUMERIC" '(38 0)) nil)))
+
 /* Intrinsic arguments belong to the calling SQL scope. Reuse relational
 call expansion so unqualified names bind before a catalog source with the
 same column name is introduced by the lookup. The factory keeps syntax only.

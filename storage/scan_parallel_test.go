@@ -1163,15 +1163,15 @@ func TestReserveIDsRestartContract(t *testing.T) {
 		t.Fatalf("unexpected unused block %v", unused)
 	}
 	crashed := reloadTableFromPersistence(t, "treserveidrestart", persistence)
-	if atomic.LoadUint64(&crashed.Auto_increment) != 3 {
-		t.Fatal("pure reservation unexpectedly changed persistent state")
+	if atomic.LoadUint64(&crashed.Auto_increment) != 5 {
+		t.Fatal("accepted unused reservation was not retained by its independent WAL")
 	}
 	crashed.schema.save()
 	scm.Apply(reserve, NewTableScmer(crashed), scm.NewInt(2))
 	crashed.schema.save()
 	checkpointed := reloadTableFromPersistence(t, "treserveidrestart", persistence)
-	if atomic.LoadUint64(&checkpointed.Auto_increment) != 5 {
-		t.Fatal("existing schema checkpoint did not retain the reserved counter")
+	if atomic.LoadUint64(&checkpointed.Auto_increment) != 7 {
+		t.Fatal("schema checkpoint did not retain both independently durable reservations")
 	}
 }
 

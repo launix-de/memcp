@@ -94,7 +94,7 @@ func (cluster *nodeCluster) tryRead(ctx context.Context, resource mosiResource) 
 	resource = *c.resource.Load()
 	publication, action := c.ownstate.Request(mosi.S)
 	if action == mosi.Ready {
-		if restoreCommits && resource.Shard != "" {
+		if restoreCommits && resource != globalResource {
 			db := GetDatabase(resource.Database)
 			if db == nil {
 				panic(mosi.NetworkError)
@@ -481,7 +481,7 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 		}
 		publication, action := c.ownstate.Request(wanted)
 		if action == mosi.Ready {
-			if restoreCommits && resource.Shard != "" {
+			if restoreCommits && resource != globalResource {
 				// Restart recovery may establish local authority without a new
 				// reference packet. Restore native WAL commit proofs here too,
 				// before any backend content can be materialized.
@@ -850,6 +850,12 @@ func (cluster *nodeCluster) installReferenceSchema(source string, packet mosiPac
 		// The immutable native payload was installed before granting rights.
 	} else if packet.Resource.Shard == "" {
 		if err := r.installSchema(source, db.Name, db.persistence, data); err != nil {
+			return err
+		}
+		// The last schema checkpoint can predate an accepted independent ID
+		// reservation. Restore its UUID WAL before publishing this schema grant,
+		// even when no shard has ever been acquired by the new owner.
+		if err := db.importClusterCommits(source); err != nil {
 			return err
 		}
 	} else if packet.Capture == nil {

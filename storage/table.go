@@ -734,7 +734,10 @@ type table struct {
 	tableLockState      atomic.Int64                     // 0 = unlocked, -1 = WRITE, positive = READ count
 	tableLockReadOwners map[*scm.SessionState]uint32     // guarded by tableLockMu
 	_                   [32]byte                         // separate table locks from insert traffic
-	Auto_increment      uint64                           // atomic runtime accesses; next generated ID is this value plus one
+	Allocator           *tableAllocatorState             `json:"allocator,omitempty"` // immutable imported header, never a guessed legacy seed
+	allocator           atomic.Pointer[tableAllocatorState]
+	allocatorRecovery   atomic.Bool
+	Auto_increment      uint64 // atomic runtime accesses; next generated ID is this value plus one
 	Collation           string
 	Charset             string
 	Comment             string
@@ -1133,6 +1136,18 @@ func (t *table) MarshalJSON() ([]byte, error) {
 	// Reservations publish once per batch; snapshot the same counter without
 	// acquiring the topology mutex during schema persistence.
 	autoIncrement := atomic.LoadUint64(&t.Auto_increment)
+	allocator := t.allocatorSnapshot()
+	if allocator != nil {
+		if !allocator.IssuedKnown && autoIncrement > allocator.High {
+			// Legacy recovery can raise the historical highwater without
+			// inventing seed/issued provenance. Preserve that exact highwater
+			// when a checkpoint later retires its row WAL.
+			recovered := *allocator
+			recovered.High = autoIncrement
+			allocator = &recovered
+		}
+		autoIncrement = allocator.High
+	}
 	topology := t.schemaTopology.Load()
 	if topology == nil {
 		active := t.activeTopology()
@@ -1201,8 +1216,9 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		Ephemeral          bool   `json:"ephemeral,omitempty"`
 		ScopedSchema       bool   `json:"scoped_schema,omitempty"`
 		PersistencyMode    PersistencyMode
-		OnInit             *scm.Scmer `json:"oninit,omitempty"`
-		AutoIncrement      uint64     `json:"Auto_increment"`
+		OnInit             *scm.Scmer           `json:"oninit,omitempty"`
+		AutoIncrement      uint64               `json:"Auto_increment"`
+		Allocator          *tableAllocatorState `json:"allocator,omitempty"`
 		Collation          string
 		Charset            string
 		Comment            string
@@ -1250,6 +1266,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		PersistencyMode:    t.PersistencyMode,
 		OnInit:             t.OnInit.Load(),
 		AutoIncrement:      autoIncrement,
+		Allocator:          allocator,
 		Collation:          t.Collation,
 		Charset:            t.Charset,
 		Comment:            t.Comment,
@@ -1954,6 +1971,12 @@ func (t *table) evict(mode evictionMode, currentSize int64, freedByType *[numEvi
 // Schema metadata belongs to the table, never to every referencing shard.
 func (t *table) metadataMemory() uint {
 	size := uint(unsafe.Sizeof(*t)) + uint(len(t.Name))
+	if initial := t.Allocator; initial != nil {
+		size += uint(unsafe.Sizeof(*initial)) + uint(len(initial.Table))
+	}
+	if current := t.allocator.Load(); current != nil && current != t.Allocator {
+		size += uint(unsafe.Sizeof(*current)) + uint(len(current.Table))
+	}
 	size += t.writeAdmission.metadataMemory()
 	size += uint(t.triggerMemoryBytes.Load())
 	size += uint(t.foreignMemoryBytes.Load())
@@ -3819,6 +3842,9 @@ func cloneStoredColumnDeclaration(current *column) *column {
 // schema owner and immutable stored-column publication as complete declarations.
 // Cache/computed columns retain their existing descriptor/lifecycle identity.
 func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
+	if operation == "auto_increment" && scm.ToInt(value) > 1 {
+		t.prepareAllocatorRecovery()
+	}
 	if operation == "drop" {
 		return scm.NewBool(t.DropColumn(name))
 	}
@@ -3851,7 +3877,7 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 		t.requireDeclaredColumnAlter(current, operation, value)
 		if operation == "auto_increment" && scm.ToInt(value) > 1 {
 			// This is the existing allocator update; no column clone owns it.
-			atomic.StoreUint64(&t.Auto_increment, uint64(scm.ToInt(value)))
+			t.reserveAutoIncrement(uint64(scm.ToInt(value)), 0)
 		} else {
 			replacement := current
 			if !current.IsTemp && !isRuntimeComputedColumn(current) {
@@ -4234,28 +4260,14 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 // Reserve one generated-ID range per batch without taking the topology mutex
 // from inside a shard writer. Explicit IDs advance the same monotonic counter.
 func (t *table) reserveAutoIncrement(explicit, generated uint64) uint64 {
-	if sharedClusterSource(t) {
-		return activeNodeCluster().reserveInsertIDs(t, explicit, generated)
-	}
-	return t.reserveLocalAutoIncrement(explicit, generated)
+	return t.reserveTableIDs(explicit, generated, explicit != 0)
 }
 
-func (t *table) reserveLocalAutoIncrement(explicit, generated uint64) uint64 {
-	for {
-		previous := atomic.LoadUint64(&t.Auto_increment)
-		base := max(previous, explicit)
-		// Generated values use the runtime's signed integer carrier. Recovery of
-		// old explicit counters remains unchanged when no IDs are requested.
-		if generated > 0 && (base > math.MaxInt64 || generated > math.MaxInt64-base) {
-			panic("generated ID block exceeds native integer capacity")
-		}
-		if base == previous && generated == 0 {
-			return base
-		}
-		if atomic.CompareAndSwapUint64(&t.Auto_increment, previous, base+generated) {
-			return base
-		}
+func (t *table) reserveTableIDs(explicit, generated uint64, observedExplicit bool) uint64 {
+	if sharedClusterSource(t) {
+		return activeNodeCluster().reserveInsertIDs(t, explicit, generated, observedExplicit)
 	}
+	return t.reserveLocalTableIDs(explicit, generated, observedExplicit)
 }
 
 // Insert chooses the native execution site before evaluating defaults, allocating
@@ -4372,7 +4384,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 	}
 
 	var idsPrepared bool
-	columns, values, idsPrepared = t.prepareInsertIDs(columns, values, onFirstInsertId, t.activeTopology().dimensions, len(finalValidators) != 0)
+	columns, values, idsPrepared = t.prepareInsertIDs(columns, values, onFirstInsertId, validatedSchema.declarations)
 	if idsPrepared {
 		onFirstInsertId = nil
 	}
@@ -4506,7 +4518,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 		// Free routing may have switched to a newly published hash topology.
 		// Bind generated routing values to that retained publication as well.
 		if !idsPrepared {
-			columns, values, idsPrepared = t.prepareInsertIDs(columns, values, onFirstInsertId, dims, false)
+			columns, values, idsPrepared = t.prepareInsertIDs(columns, values, onFirstInsertId, validatedSchema.declarations)
 			if idsPrepared {
 				onFirstInsertId = nil
 			}

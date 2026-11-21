@@ -3900,6 +3900,26 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "table_id_state",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if len(a) != 2 {
+				panic("table_id_state expects a table and actual native transaction or nil")
+			}
+			t := TableFromScmer(a[0])
+			tx := scmerToTxContext(a[1])
+			if !a[1].IsNil() && tx == nil {
+				panic("table_id_state requires a native transaction capability or nil")
+			}
+			if t.schema == nil || GetDatabase(t.schema.Name) != t.schema || t.schema.GetTableForTx(t.Name, false, tx) != t {
+				panic("table allocator handle is outside its visible native generation")
+			}
+			return tableAllocatorObservation(t.currentTableAllocator())
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true,
+			Description: "Reads authoritative table UUID allocation provenance without reserving IDs. Unknown historical start/issued facts are returned as nil; the raw highwater and its actual allocation proof are separate fields; no row, metadata estimate or session identity is substituted. Reservations are nontransactional.",
+			Params:      []*scm.TypeDescriptor{{Kind: "table", Label: "table"}, {Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "list"}},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "reserve_ids",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
@@ -3916,13 +3936,10 @@ func Init(en scm.Env) {
 			if count == 0 {
 				return scm.NewSlice(nil)
 			}
-			if tx != nil {
-				tx.noteNativeRowAccess(t)
-			}
 			base := t.reserveAutoIncrement(0, count)
 			return scm.NewSlice([]scm.Scmer{scm.NewInt(int64(base + 1)), scm.NewInt(int64(base + count))})
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "reserves a disjoint ID block from the existing table counter; returns inclusive (first last), or an empty list for zero. Unused reservations have no independent WAL durability; restart retains checkpointed counters and IDs reconstructed from persisted inserted values.", HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "reserves a disjoint ID block from the existing table counter; returns inclusive (first last), or an empty list for zero. SAFE/LOGGED reservations have independent table-UUID WAL durability and survive rollback, savepoints and restart, including unused blocks. MEMORY/SLOPPY retain their existing engine durability guarantees.", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
 				{Kind: "int", Label: "count", Description: "nonnegative number of IDs to reserve"},
