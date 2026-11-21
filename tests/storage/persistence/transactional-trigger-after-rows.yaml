@@ -7,6 +7,12 @@ metadata:
   requires_tds: true
   description: Statement trigger amendments after actual rows retain the original transaction and affect only following events
 setup:
+- sql: DROP TABLE IF EXISTS late_trigger_insert
+- sql: DROP TABLE IF EXISTS late_trigger_insert_audit
+- sql: DROP TABLE IF EXISTS late_trigger_insert_prior
+- sql: DROP TABLE IF EXISTS late_trigger_delete
+- sql: DROP TABLE IF EXISTS late_trigger_delete_audit
+- sql: DROP TABLE IF EXISTS late_trigger_delete_prior
 - sql: DROP TABLE IF EXISTS late_trigger_read_committed
 - sql: DROP TABLE IF EXISTS late_trigger_read_committed_audit
 - sql: DROP TABLE IF EXISTS late_trigger_read_committed_prior
@@ -93,6 +99,16 @@ setup:
 - sql: CREATE TABLE late_trigger_read_committed_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
 - sql: INSERT late_trigger_read_committed_prior VALUES(1,10)
 - sql: CREATE TABLE late_trigger_read_committed_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: CREATE TABLE late_trigger_delete(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_delete VALUES(1,1)
+- sql: CREATE TABLE late_trigger_delete_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_delete_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_delete_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: CREATE TABLE late_trigger_insert(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_insert VALUES(1,1)
+- sql: CREATE TABLE late_trigger_insert_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_insert_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_insert_audit(id INT,old_value INT,new_value INT,phase INT)
 cleanup:
 - sql: DROP TABLE IF EXISTS late_trigger_unrelated
 - sql: DROP TABLE IF EXISTS late_trigger_unrelated_audit
@@ -124,6 +140,12 @@ cleanup:
 - sql: DROP TABLE IF EXISTS late_trigger_read_committed
 - sql: DROP TABLE IF EXISTS late_trigger_read_committed_audit
 - sql: DROP TABLE IF EXISTS late_trigger_read_committed_prior
+- sql: DROP TABLE IF EXISTS late_trigger_delete
+- sql: DROP TABLE IF EXISTS late_trigger_delete_audit
+- sql: DROP TABLE IF EXISTS late_trigger_delete_prior
+- sql: DROP TABLE IF EXISTS late_trigger_insert
+- sql: DROP TABLE IF EXISTS late_trigger_insert_audit
+- sql: DROP TABLE IF EXISTS late_trigger_insert_prior
 test_cases:
 - name: An unrelated row prefix and a new AFTER program share the original decision
   tds:
@@ -627,6 +649,114 @@ test_cases:
           old_value: 1
           new_value: 2
           phase: 10
+- name: A new AFTER DELETE program captures only its actual subsequent transition
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_delete_prior SET value=11 WHERE id=1
+    - connection: owner
+      sql: CREATE TRIGGER late_trigger_delete_program ON late_trigger_delete AFTER DELETE AS INSERT late_trigger_delete_audit
+        SELECT id,value,NULL,10 FROM deleted
+    - connection: owner
+      sql: DELETE FROM late_trigger_delete WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM late_trigger_delete ORDER BY id
+      expect:
+        rows: 0
+        data: &id001 []
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_delete_audit ORDER BY id
+      expect:
+        rows: 1
+        data: &id002
+        - id: 1
+          old_value: 1
+          new_value: null
+          phase: 10
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_delete ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 1
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_delete_audit ORDER BY id
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_delete ORDER BY id
+      expect:
+        rows: 0
+        data: *id001
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_delete_audit ORDER BY id
+      expect:
+        rows: 1
+        data: *id002
+- name: A new AFTER INSERT program captures only its actual subsequent transition
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_insert_prior SET value=11 WHERE id=1
+    - connection: owner
+      sql: CREATE TRIGGER late_trigger_insert_program ON late_trigger_insert AFTER INSERT AS INSERT late_trigger_insert_audit
+        SELECT id,NULL,value,10 FROM inserted
+    - connection: owner
+      sql: INSERT late_trigger_insert VALUES(2,2)
+    - connection: owner
+      sql: SELECT id,value FROM late_trigger_insert ORDER BY id
+      expect:
+        rows: 2
+        data: &id003
+        - id: 1
+          value: 1
+        - id: 2
+          value: 2
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_insert_audit ORDER BY id
+      expect:
+        rows: 1
+        data: &id004
+        - id: 2
+          old_value: null
+          new_value: 2
+          phase: 10
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_insert ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 1
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_insert_audit ORDER BY id
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_insert ORDER BY id
+      expect:
+        rows: 2
+        data: *id003
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_insert_audit ORDER BY id
+      expect:
+        rows: 1
+        data: *id004
 - name: Read committed row prefixes retain the same later trigger semantics
   tds:
     statements:
