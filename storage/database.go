@@ -840,16 +840,16 @@ func (db *database) saveLockedAndUnlock(mode schemaSaveMode, proposals ...*table
 
 // ensureLoaded loads schema.json into the database struct exactly once.
 func (db *database) ensureLoaded() {
-	db.loadOnce.Do(func() { db.initializeSchemaSnapshot(nil) })
+	db.loadOnce.Do(func() { db.initializeSchemaSnapshot(nil, false) })
 }
 
 // initializeSchemaSnapshot owns the unpublished database behind loadOnce.
 // A non-nil document is an accepted peer handover; nil opens the local anchor.
-func (db *database) initializeSchemaSnapshot(document []byte) {
+func (db *database) initializeSchemaSnapshot(document []byte, catalogSnapshot bool) []byte {
 	defer db.publishTableNamesLocked()
 	db.initializeTransactionLog()
 	if db.srState != COLD {
-		return
+		return nil
 	}
 	jsonbytes := document
 	if jsonbytes == nil {
@@ -859,7 +859,7 @@ func (db *database) initializeSchemaSnapshot(document []byte) {
 		// fresh/empty database
 		db.tables = NonLockingReadMap.NewReadMap[string, *table]()
 		db.srState = SHARED
-		return
+		return nil
 	}
 	if document != nil && readCatalogRoot(document) == nil {
 		// A cold cluster receiver initializes from the owner's accepted schema
@@ -882,11 +882,15 @@ func (db *database) initializeSchemaSnapshot(document []byte) {
 		db.catalogMu.Unlock()
 		jsonbytes = catalogDocumentFromRows(db.Name, &rows)
 	} else {
-		db.bootstrapCatalog(jsonbytes)
+		if catalogSnapshot {
+			db.catalogBootstrap.Do(func() {})
+		} else {
+			db.bootstrapCatalog(jsonbytes)
+		}
 		// The system_schema catalog takes precedence over the legacy document
 		// stored next to its root. A recognized root must be readable.
 		if root := readCatalogRoot(jsonbytes); root != nil {
-			if document, err := db.loadCatalogDocument(root); err == nil {
+			if document, err := db.loadCatalogDocument(root, catalogSnapshot); err == nil {
 				jsonbytes = document
 			} else {
 				panic(fmt.Errorf("authoritative catalog of database %s is unreadable: %w", db.Name, err))
@@ -926,6 +930,7 @@ func (db *database) initializeSchemaSnapshot(document []byte) {
 			registerCreatedTable(table)
 		}
 	}
+	return jsonbytes
 }
 
 // initializeTableAfterLoad prepares one unpublished runtime descriptor from its

@@ -570,6 +570,46 @@ func TestClusterObjectRepeatedImportSharesOneGCLifetime(t *testing.T) {
 	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
 }
 
+func TestClusterPacketNativeCatalogCompletesBeforeRootInstallation(t *testing.T) {
+	entered, resume := make(chan struct{}), make(chan struct{})
+	root, other := make(chan struct{}), make(chan struct{})
+	p := &mosiPeer{done: make(chan struct{}), packet: func(packet *mosiPacket) error {
+		switch packet.ID {
+		case "catalog":
+			close(entered)
+			<-resume
+		case "root":
+			close(root)
+		case "other":
+			close(other)
+		}
+		return nil
+	}}
+	defer func() { close(resume); p.packets.Wait() }()
+	if !p.dispatchPacket(&mosiPacket{ID: "catalog", Kind: "end", Resource: mosiResource{Database: "dependent", Table: catalogResourcePrefix + "columns", Shard: uuid.NewString()}}, 1, time.Time{}) {
+		t.Fatal("native dispatch failed")
+	}
+	<-entered
+	for _, packet := range []*mosiPacket{
+		{ID: "root", Kind: "end", Resource: mosiResource{Database: "dependent"}},
+		{ID: "other", Kind: "end", Resource: mosiResource{Database: "independent"}},
+	} {
+		if !p.dispatchPacket(packet, 1, time.Time{}) {
+			t.Fatal("schema dispatch failed")
+		}
+	}
+	select {
+	case <-other:
+	case <-time.After(time.Second):
+		t.Fatal("native installation blocked an unrelated database")
+	}
+	select {
+	case <-root:
+		t.Fatal("root installation overtook native catalog completion")
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
 func TestClusterPacketSchemaPublicationPrecedesDependentShard(t *testing.T) {
 	entered := make(chan struct{})
 	resume := make(chan struct{})

@@ -41,6 +41,7 @@ type replicaImport struct {
 	// Duplicate immutable columns are consumed without reopening their files.
 	knownContent bool
 	superseded   bool
+	discard      bool // authenticated obsolete background stream; no backend is opened
 	writer       io.WriteCloser
 	schema       bytes.Buffer
 	routes       bytes.Buffer
@@ -396,9 +397,10 @@ func (r *replicationManager) prepareResource(resource mosiResource) (content str
 	return rebuilt.uuid.String(), nil
 }
 
-// replaceShard publishes a point update to one table's immutable topology.
-// Old pointers and files remain owned by their existing snapshots; replication
-// does not mutate payload or introduce a second lock for that old content.
+// replaceShard publishes a point update to one table's immutable runtime topology.
+// The transfer owns its content/route backup; receiving data cannot checkpoint
+// or take write authority over the independent catalog partitions. Old pointers
+// and files remain owned by their existing snapshots.
 func (r *replicationManager) replaceShard(resource mosiResource, previous, replacement *storageShard) error {
 	if isCatalogResource(resource) {
 		return r.replaceCatalogShard(resource, previous, replacement)
@@ -431,7 +433,6 @@ func (r *replicationManager) replaceShard(resource mosiResource, previous, repla
 	table.Shards, table.PShards = replace(table.Shards), replace(table.PShards)
 	table.publishTopologyLocked()
 	table.mu.Unlock()
-	db.save(nil)
 	return nil
 }
 
@@ -857,7 +858,9 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 			}
 			r.forwardResource(route.From, route.To)
 		}
-		return r.installSchema(source, resource.Database, transfer.engine, transfer.schema.Bytes())
+		_, solicited := r.steps.Load(transfer.header.ID)
+		backup := r.master && r.cluster == nil && source != r.id && !solicited
+		return r.installSchema(source, resource.Database, transfer.engine, transfer.schema.Bytes(), backup)
 	}
 	actual := resource
 	actual.Shard = transfer.header.Content
@@ -983,7 +986,7 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 	return nil
 }
 
-func (r *replicationManager) installSchema(source, name string, engine PersistenceEngine, data []byte) error {
+func (r *replicationManager) installSchema(source, name string, engine PersistenceEngine, data []byte, backup bool) error {
 	native := readCatalogRoot(data) != nil
 	if !native {
 		data = stripCatalogRoot(data)
@@ -1033,7 +1036,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 	}
 	if db != nil {
 		if native || r.cluster != nil {
-			db.loadOnce.Do(func() { db.initializeSchemaSnapshot(data) })
+			db.loadOnce.Do(func() { db.initializeSchemaSnapshot(data, backup) })
 		} else {
 			db.ensureLoaded()
 		}
@@ -1064,11 +1067,45 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 	if native || r.cluster != nil {
 		replacement.persistence = clusterSchemaView{engine, data}
 	}
-	replacement.ensureLoaded()
+	var admittedDocument []byte
+	var admittedRoot *catalogRoot
+	var admittedRows catalogRows
+	if native && backup {
+		replacement.loadOnce.Do(func() { admittedDocument = replacement.initializeSchemaSnapshot(data, true) })
+	} else {
+		replacement.ensureLoaded()
+	}
 	replacement.persistence = engine
+	if native && r.cluster == nil {
+		if backup {
+			admittedRows = catalogRowsFromDocument(admittedDocument)
+		} else {
+			admittedRows = replacement.catalogRowsLocked()
+			admittedDocument = catalogDocumentFromRows(name, &admittedRows)
+		}
+		admittedRoot = readCatalogRoot(data)
+		// A transfer may resolve a checkpoint UUID to its admitted successor.
+		// Persist those completed immutable files, without compacting the remote
+		// owner's partitions or turning a safety copy into a local modifier.
+		for i, relation := range catalogRelations {
+			previous := admittedRoot.Shards[relation.name]
+			current := replacement.catalog.committed[i].uuid.String()
+			admittedRoot.Shards[relation.name] = current
+			if previous != current {
+				if admittedRoot.Forwards == nil {
+					admittedRoot.Forwards = make(map[string]string)
+				}
+				for from, to := range admittedRoot.Forwards {
+					if to == previous {
+						admittedRoot.Forwards[from] = current
+					}
+				}
+				admittedRoot.Forwards[previous] = current
+			}
+		}
+	}
 	if native && r.master && r.cluster == nil && source != r.id {
-		rows := replacement.catalogRowsLocked()
-		if _, err := validateReplicaSchema(catalogDocumentFromRows(name, &rows)); err != nil {
+		if _, err := validateReplicaSchema(admittedDocument); err != nil {
 			return err
 		}
 	}
@@ -1113,8 +1150,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 			r.restoreTableRoutes(table)
 			previous := db.tables.Get(table.Name)
 			if previous != nil && native && r.cluster == nil {
-				rows := replacement.catalogRowsLocked()
-				db.materializeCatalogTableLocked(previous, &rows)
+				db.materializeCatalogTableLocked(previous, &admittedRows)
 				previous.reserveLocalAutoIncrement(atomic.LoadUint64(&table.Auto_increment), 0)
 				resolve := func(shards []*storageShard) []*storageShard {
 					result := append([]*storageShard(nil), shards...)
@@ -1122,11 +1158,13 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 						if incoming == nil {
 							continue
 						}
+						// shardCell can publish an empty cell's first payload. Bind
+						// its immutable runtime table before that publication.
+						incoming.t = previous
 						cell := r.shardCell(incoming)
 						if current := cell.publishedShard(); current != nil && current.t == previous {
 							result[i] = current
 						} else {
-							incoming.t = previous
 							incoming.coherence.Store(cell)
 						}
 					}
@@ -1225,9 +1263,11 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 			db.schemalock.Lock()
 			schemaOwned = true
 		}
-		db.checkpointCatalogLocked()
+		db.catalogMu.Lock()
+		db.catalog.forwards = admittedRoot.Forwards
+		db.catalogMu.Unlock()
 		schemaOwned = false
-		db.commitSchemaLocked(true, db.schemalock.Unlock)
+		db.commitSchemaSnapshot(attachCatalogRoot(admittedDocument, admittedRoot), true, db.schemalock.Unlock)
 	}
 	return nil
 }
@@ -1646,7 +1686,9 @@ func (r *replicationManager) completeLocalShard(resource mosiResource) (string, 
 		}
 		return shard.uuid.String(), nil
 	}
-	db.ensureLoaded()
+	// This verifies surrendered local bytes before recovery publishes their
+	// rights. Decode column declarations privately, as for the hello inventory.
+	db.loadOnce.Do(func() { db.initializeSchemaSnapshot(nil, true) })
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	if resource.Shard == "" {
@@ -1656,22 +1698,19 @@ func (r *replicationManager) completeLocalShard(resource mosiResource) (string, 
 	if table == nil || table.PersistencyMode == Memory || table.PersistencyMode == Cache {
 		return "", nil
 	}
-	var current *storageShard
-	for _, shard := range table.ActiveShards() {
-		if shard != nil && shard.uuid.String() == resource.Shard {
-			current = shard
-			break
-		}
-	}
-	if current == nil {
-		return "", nil
-	}
-	content := current.uuid.String()
+	// The authenticated surrender names the completed physical generation.
+	// A schema root can still name its rebuild predecessor; requiring the Go
+	// projection to list this UUID would hide the recipient's newer files/WAL.
+	content := resource.Shard
 	for _, column := range table.columnDeclarations() {
 		if !column.Computor.IsNil() {
 			continue
 		}
 		reader := db.persistence.ReadColumn(content, column.Name)
+		if missing, ok := reader.(interface{ Missing() bool }); ok && missing.Missing() {
+			reader.Close()
+			return "", nil
+		}
 		var marker [1]byte
 		n, err := reader.Read(marker[:])
 		reader.Close()

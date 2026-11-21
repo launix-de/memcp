@@ -52,7 +52,11 @@ func (r *replicationManager) recoveryInventory(auth replicaAuth) []replicaRecord
 		if !validReplicaDatabase(db.Name) || !allowed(db.Name) {
 			continue
 		}
-		db.ensureLoaded()
+		// Inventory describes completed local bytes before the hello replies
+		// restore authority. Native GetRead here would recursively request the
+		// very permissions this handshake is reconstructing. Published query
+		// descriptors still require MOSI after this private snapshot is decoded.
+		db.loadOnce.Do(func() { db.initializeSchemaSnapshot(nil, true) })
 		schema := mosiResource{Database: db.Name}
 		content, err := r.schemaDigest(db.persistence.ReadSchema())
 		if err != nil {
@@ -208,7 +212,10 @@ func (r *replicationManager) recoverConnection(peer *mosiPeer, user string, auth
 		}
 		cell := r.resourceCell(record.Resource)
 		r.mu.Lock()
-		if _, exists := r.directory.Records[r.resourceKey(record.Resource)]; !exists {
+		// Cold native declarations can introduce an older placeholder before
+		// hello completes. Retain newer wire decisions, but install the master's
+		// recovered epoch instead of keeping that placeholder's initial epoch.
+		if current, exists := r.directory.Records[r.resourceKey(record.Resource)]; !exists || current.Epoch < record.Epoch {
 			r.directory.Records[r.resourceKey(record.Resource)] = record
 		}
 		r.mu.Unlock()
@@ -318,7 +325,9 @@ func (r *replicationManager) recoverPeer(ctx context.Context, id string, req rep
 }
 
 func (r *replicationManager) recoverResource(ctx context.Context, id string, reported replicaRecord) (replicaRecord, bool, error) {
-	r.restoreResourceRoutes(reported.Resource)
+	// The authenticated inventory supplies its native UUID routes. Loading Go
+	// declarations here would acquire catalog readers while the same reconnect
+	// is still reconstructing their authority, and turn a backup into a reader.
 	for _, route := range reported.Forwards {
 		if route.From.Database != reported.Resource.Database || route.To != reported.Resource {
 			return replicaRecord{}, false, fmt.Errorf("invalid recovery forwarding")
@@ -338,9 +347,9 @@ func (r *replicationManager) recoverResource(ctx context.Context, id string, rep
 	localGeneration := ""
 	if reported.State == "IO" && reported.Handoff == r.id {
 		r.mu.Lock()
-		_, backup := r.backups[r.resourceKey(resource)]
+		backup, known := r.backups[r.resourceKey(resource)]
 		r.mu.Unlock()
-		if !backup {
+		if !known || backup.Content != reported.Content {
 			var err error
 			localGeneration, err = r.completeLocalShard(resource)
 			if err != nil {

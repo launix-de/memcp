@@ -204,7 +204,7 @@ func buildDiskShard(db *database, relation catalogRelationID, rows [][]scm.Scmer
 }
 
 // loadDiskShard opens a persisted catalog shard of db.
-func loadDiskShard(owner, db *database, relation catalogRelationID, id uuid.UUID) *storageShard {
+func loadDiskShard(owner, db *database, relation catalogRelationID, id uuid.UUID, snapshot bool) *storageShard {
 	// Opening a historical root must not publish a stale stub over an already
 	// installed native successor. Bootstrap resolves identity only; GetRead
 	// below still acquires the existing MOSI permission before reading payload.
@@ -219,11 +219,19 @@ func loadDiskShard(owner, db *database, relation catalogRelationID, id uuid.UUID
 		resource := mosiResource{Database: owner.Name, Table: catalogResourcePrefix + catalogRelations[relation].name, Shard: id.String()}
 		if cell := r.lookupCell(resource); cell != nil {
 			if current := cell.publishedShard(); current != nil && current.catalogOwner == owner.Name {
-				return current
+				if !snapshot {
+					return current
+				}
+				// Backup admission reads a private descriptor for the completed
+				// content, including an admitted rebuild alias, never its live rights.
+				if current.uuid.String() == r.canonicalResource(resource).Shard {
+					id = current.uuid
+				}
 			}
 		}
 	}
 	shard := &storageShard{t: systemSchemaTables[relation], uuid: id, catalogHome: db, catalogOwner: owner.Name}
+	shard.catalogPrivate.Store(snapshot)
 	shard.columns = make(map[string]ColumnStorage)
 	shard.deltaColumns = make(map[string]int)
 	shard.deletions.Reset()
@@ -409,7 +417,7 @@ func readCatalogRootMember(data []byte) json.RawMessage {
 
 // loadCatalogDocument reads db's catalog shards named by root and returns
 // the equivalent schema document. They become the committed generation.
-func (db *database) loadCatalogDocument(root *catalogRoot) (document []byte, err error) {
+func (db *database) loadCatalogDocument(root *catalogRoot, snapshot bool) (document []byte, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("%v", r)
@@ -431,8 +439,8 @@ func (db *database) loadCatalogDocument(root *catalogRoot) (document []byte, err
 			home = catalogBackendDatabase()
 		}
 		committed[i] = db.catalog.live[i]
-		if committed[i] == nil || committed[i].uuid != id || committed[i].home() != home {
-			committed[i] = loadDiskShard(db, home, relation, id)
+		if snapshot || committed[i] == nil || committed[i].uuid != id || committed[i].home() != home {
+			committed[i] = loadDiskShard(db, home, relation, id, snapshot)
 		}
 		_, rows[i] = catalogShardRecords(committed[i], catalogRelationColumns(relation), nil)
 		if cell := committed[i].coherence.Load(); cell != nil {
@@ -449,6 +457,11 @@ func (db *database) loadCatalogDocument(root *catalogRoot) (document []byte, err
 		return nil, fmt.Errorf("catalog of %s lacks its database declaration", db.Name)
 	}
 	document = catalogDocumentFromRows(db.Name, &rows)
+	if snapshot {
+		for _, shard := range committed {
+			shard.catalogPrivate.Store(false) // published reads still require native MOSI rights
+		}
+	}
 	db.catalogMu.Lock()
 	db.catalog.committed = committed
 	db.catalog.committedFP = fingerprints
@@ -1206,10 +1219,15 @@ func (db *database) catalogShardIDs() []string {
 		owners = databases.GetAll()
 	}
 	for _, owner := range owners {
-		// System-backend deletion needs every tenant anchor as a proof. Opening
-		// those roots creates only shard stubs, never Go runtime definitions.
-		if db.Name == "system" && owner.srState == COLD {
-			owner.bootstrapCatalog(nil)
+		// Durable anchors own their files independently of runtime loading.
+		// A private snapshot can have completed catalogBootstrap before its
+		// descriptors are published; an empty projection is no deletion proof.
+		if owner.persistence != nil {
+			if root := readCatalogRoot(owner.persistence.ReadSchema()); root != nil && (root.Version >= 2 && db.Name == "system" || root.Version == 1 && owner == db) {
+				for _, id := range root.Shards {
+					ids = append(ids, id)
+				}
+			}
 		}
 		owner.catalogMu.Lock()
 		for _, shard := range owner.catalog.committed {
@@ -1284,7 +1302,7 @@ func (db *database) bootstrapCatalog(document []byte) {
 				if root.Version >= 2 {
 					home = catalogBackendDatabase()
 				}
-				shard := loadDiskShard(db, home, catalogRelationID(i), id)
+				shard := loadDiskShard(db, home, catalogRelationID(i), id, false)
 				db.catalog.live[i], db.catalog.committed[i] = shard, shard
 			}
 			publishCatalogShards(db.Name, &db.catalog.live)

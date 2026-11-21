@@ -1627,7 +1627,7 @@ func TestReplicationSharedSchemaKeepsNewerShard(t *testing.T) {
 	}
 	cell.current.Store(successor)
 	cell.ownstate.Publish(mosi.O)
-	if err := r.installSchema("peer", tbl.schema.Name, engine, older); err != nil {
+	if err := r.installSchema("peer", tbl.schema.Name, engine, older, false); err != nil {
 		t.Fatal(err)
 	}
 	if current := tbl.schema.tables.Get(tbl.Name).ActiveShards()[0]; current != successor || cell.current.Load() != successor {
@@ -1784,7 +1784,7 @@ func TestReplicationRejectsSlaveSchemaCode(t *testing.T) {
 		t.Fatal("slave-supplied trigger executed")
 	}
 	// The same native codec remains available to local/trusted code authorities.
-	if err := r.installSchema(r.id, resource.Database, tbl.schema.persistence, data); err != nil {
+	if err := r.installSchema(r.id, resource.Database, tbl.schema.persistence, data, false); err != nil {
 		t.Fatal(err)
 	}
 	trusted := GetDatabase("memcp-tests").GetTable("items")
