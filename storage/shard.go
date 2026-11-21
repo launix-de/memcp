@@ -1039,7 +1039,9 @@ func (s *storageShard) retainCacheRead() {
 
 func (s *storageShard) releaseCacheRead() {
 	if s.cacheReaders.Add(-1) == 0 {
-		s.t.signalTransactionDrain()
+		if s.t != nil {
+			s.t.signalTransactionDrain()
+		}
 		if sharedClusterSource(s.t) && !GlobalCache.canLoadClusterShard(s.t) {
 			GlobalCache.reclaimShardRAM(s.t)
 		}
