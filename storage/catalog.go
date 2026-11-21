@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -527,7 +528,10 @@ func catalogRowsFromDocument(document []byte) (rows catalogRows) {
 }
 
 // catalogRecord rebuilds the JSON record of one row.
-type catalogJSONEncoder struct{ strings map[string]json.RawMessage }
+type catalogJSONEncoder struct {
+	strings map[string]json.RawMessage
+	json    map[string]json.RawMessage
+}
 
 func (encoder *catalogJSONEncoder) string(value string) json.RawMessage {
 	if raw, present := encoder.strings[value]; present {
@@ -541,6 +545,18 @@ func (encoder *catalogJSONEncoder) string(value string) json.RawMessage {
 func (encoder *catalogJSONEncoder) cell(kind catalogKind, value scm.Scmer) json.RawMessage {
 	if kind == catalogText && !value.IsNil() {
 		return encoder.string(value.String())
+	}
+	if kind == catalogJSON && !value.IsNil() {
+		text := value.String()
+		if raw, present := encoder.json[text]; present {
+			return raw
+		}
+		if encoder.json == nil {
+			encoder.json = make(map[string]json.RawMessage)
+		}
+		raw := json.RawMessage(text)
+		encoder.json[text] = raw
+		return raw
 	}
 	return catalogRaw(kind, value)
 }
@@ -577,10 +593,16 @@ func (encoder *catalogJSONEncoder) appendRecord(dst []byte, record map[string]js
 		return append(dst, "null"...)
 	}
 	keys := make([]string, 0, len(record))
-	for key := range record {
+	size := 2
+	for key, value := range record {
 		keys = append(keys, key)
+		size += len(encoder.string(key)) + 2 + len(value)
+		if len(value) == 0 {
+			size += 4 // null
+		}
 	}
 	sort.Strings(keys)
+	dst = slices.Grow(dst, size)
 	dst = append(dst, '{')
 	for i, key := range keys {
 		if i != 0 {
@@ -614,9 +636,18 @@ func (encoder *catalogJSONEncoder) records(records []map[string]json.RawMessage)
 func (encoder *catalogJSONEncoder) appendRow(relation catalogRelationID, row []scm.Scmer) json.RawMessage {
 	r := &catalogRelations[relation]
 	offset := 1 + len(r.identity)
-	result := []byte{'{'}
+	values := make([]json.RawMessage, len(r.fields))
+	size := 2
 	for i, field := range r.fields {
 		if raw := encoder.cell(field.kind, row[offset+i]); raw != nil {
+			values[i] = raw
+			size += len(encoder.string(field.key)) + 2 + len(raw)
+		}
+	}
+	result := make([]byte, 0, size)
+	result = append(result, '{')
+	for i, field := range r.fields {
+		if raw := values[i]; raw != nil {
 			if len(result) != 1 {
 				result = append(result, ',')
 			}
@@ -632,11 +663,16 @@ func marshalCatalogRecords(records []json.RawMessage) json.RawMessage {
 	if records == nil {
 		return json.RawMessage("null")
 	}
-	result := []byte{'['}
-	for i, record := range records {
+	size := 2 + len(records)
+	for _, record := range records {
 		if record == nil {
 			panic("catalog misses a child record")
 		}
+		size += len(record)
+	}
+	result := make([]byte, 0, size)
+	result = append(result, '[')
+	for i, record := range records {
 		if i != 0 {
 			result = append(result, ',')
 		}

@@ -14,7 +14,6 @@ import (
 	"slices"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -198,9 +197,31 @@ func buildDiskShard(db *database, relation catalogRelationID, rows [][]scm.Scmer
 	shard := newCatalogShard(db, relation, rows)
 	shard.catalogHome = catalogBackendDatabase()
 	shard.catalogDurable = durable
-	rebuilt := shard.rebuild(true)
-	rebuilt.catalogDurable = false
-	return rebuilt
+	complete := false
+	defer func() {
+		if !complete {
+			discardUnpublishedShard(shard)
+		}
+	}()
+	// The source already is a dense private snapshot: it needs neither row-ID
+	// translation nor a live rebuild's forwarding/transaction handover.
+	for _, name := range catalogRelationColumns(relation) {
+		values := shard.columns[name].(*StorageSCMER).values
+		column := buildColumnStorage(shard.main_count, shard.home(), true, func(emit func(uint32, scm.Scmer)) {
+			for i, value := range values {
+				emit(uint32(i), value)
+			}
+		})
+		shard.columns[name] = column
+		writer := shard.home().persistence.WriteColumn(shard.uuid.String(), name)
+		column.Serialize(writer)
+		finishColumnWrite(writer, durable)
+	}
+	writeBlobManifest(shard)
+	shard.catalogDurable = false
+	shard.registerCachedStorage()
+	complete = true
+	return shard
 }
 
 // loadDiskShard opens a persisted catalog shard of db.
@@ -320,55 +341,55 @@ func catalogShardRecords(shard *storageShard, columns []string, tableOwners []st
 // catalogRowKey identifies a row by its kind-normalized encoding, so rows
 // read back from compressed storage compare equal to declaration edits.
 func catalogRowKey(fields []catalogField, row []scm.Scmer) string {
-	var b strings.Builder
-	var length [8]byte
-	var number [32]byte
+	return string(appendCatalogRowKey(nil, fields, row))
+}
+
+func appendCatalogRowKey(dst []byte, fields []catalogField, row []scm.Scmer) []byte {
 	for i, field := range fields {
 		cell := row[i]
 		if cell.IsNil() {
-			b.WriteByte(0)
+			dst = append(dst, 0)
 			continue
 		}
-		b.WriteByte(1)
-		var raw []byte
-		var text string
-		switch field.kind {
-		case catalogText, catalogJSON:
-			text = cell.String()
-		case catalogInt:
-			raw = strconv.AppendInt(number[:0], cell.Int(), 10)
-		case catalogBool:
+		dst = append(dst, 1)
+		if field.kind == catalogBool {
 			if scm.ToBool(cell) {
-				b.WriteByte(1)
+				dst = append(dst, 1)
 			} else {
-				b.WriteByte(0)
+				dst = append(dst, 0)
 			}
 			continue
-		case catalogFloat:
-			raw = strconv.AppendFloat(number[:0], cell.Float(), 'g', -1, 64)
-		case catalogList:
-			raw = catalogRaw(field.kind, cell)
 		}
-		binary.LittleEndian.PutUint64(length[:], uint64(len(raw)+len(text)))
-		b.Write(length[:])
-		b.Write(raw)
-		b.WriteString(text)
+		length := len(dst)
+		dst = append(dst, 0, 0, 0, 0, 0, 0, 0, 0)
+		switch field.kind {
+		case catalogText, catalogJSON:
+			dst = append(dst, cell.String()...)
+		case catalogInt:
+			dst = strconv.AppendInt(dst, cell.Int(), 10)
+		case catalogFloat:
+			dst = strconv.AppendFloat(dst, cell.Float(), 'g', -1, 64)
+		case catalogList:
+			dst = append(dst, catalogRaw(field.kind, cell)...)
+		}
+		binary.LittleEndian.PutUint64(dst[length:], uint64(len(dst)-length-8))
 	}
-	return b.String()
+	return dst
 }
 
 func catalogFingerprint(relation catalogRelationID, rows [][]scm.Scmer) [32]byte {
 	fields := catalogRelations[relation].columns()
 	hash := sha256.New()
 	var length [8]byte
+	var key []byte
 	for _, row := range rows {
-		key := catalogRowKey(fields, row)
+		key = appendCatalogRowKey(key[:0], fields, row)
 		binary.LittleEndian.PutUint64(length[:], uint64(len(key)))
 		hash.Write(length[:])
-		hash.Write([]byte(key))
+		hash.Write(key)
 	}
 	var result [32]byte
-	copy(result[:], hash.Sum(nil))
+	hash.Sum(result[:0])
 	return result
 }
 
