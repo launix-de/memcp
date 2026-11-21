@@ -2450,12 +2450,12 @@ func (t *table) buildColumnNamesSnapshot(columns []*column) *tableColumnNamesSna
 				}
 				input := initialByShard[identity]
 				if input == nil {
-					input = &nativeColumnInitialInput{fields: make(map[string]columnRecoveryValue)}
+					input = &nativeColumnInitialInput{fields: make(map[string]nativeColumnInitialValue)}
 					initialByShard[identity] = input
 					initialBytes += 128 + uint(unsafe.Sizeof(*input)) + 64
 				}
-				input.fields[c.Name] = columnRecoveryValue{Value: value, columnInitialExtent: extent}
-				initialBytes += 128 + scm.ComputeSize(value) - uint(unsafe.Sizeof(scm.Scmer{}))
+				input.fields[c.Name] = nativeColumnInitialValue{columnRecoveryValue: columnRecoveryValue{Value: value, columnInitialExtent: extent}, main: &StorageConst{value: value, count: uint64(extent.MainRows)}}
+				initialBytes += 128 + uint(unsafe.Sizeof(StorageConst{})) + scm.ComputeSize(value) - uint(unsafe.Sizeof(scm.Scmer{}))
 			}
 		}
 		computed := c.ComputorDefinition != nil
