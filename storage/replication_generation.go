@@ -1001,7 +1001,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 				}
 			}
 			if previous != nil && r.sameReplicaDeclaration(previous, table) {
-				previous.mergeImportedAllocator(table.localTableAllocator(), table.localTableAllocator().High)
+				previous.mergeImportedAllocator(table.localTableAllocator(), atomic.LoadUint64(&table.Auto_increment))
 				previous.CatalogVersion.Store(table.CatalogVersion.Load())
 				if r.cluster != nil {
 					for _, incoming := range table.ActiveShards() {
