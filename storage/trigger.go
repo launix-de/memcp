@@ -842,9 +842,11 @@ func (t *table) rowToDict(row dataset, input *nativeMutationInput) scm.Scmer {
 	if row == nil {
 		return scm.NewNil()
 	}
-	columns := t.Columns
+	var columns []*column
 	if input != nil {
 		columns = input.columns
+	} else {
+		columns = t.Columns
 	}
 	fd := scm.NewFastDictValue(len(columns))
 	for i, col := range columns {

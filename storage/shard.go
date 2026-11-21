@@ -1622,7 +1622,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
 		keys := mutationUniqueKeys(t.t, input)
-		if input != nil && len(a) == 0 {
+		if input != nil && (input.event != nativeMutationUpdate || len(a) == 0) {
 			panic("private declaration input requires its checked UPDATE producer")
 		}
 		if t.t.mutationReadOnly {
