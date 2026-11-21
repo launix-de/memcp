@@ -41,6 +41,9 @@ a nil-transaction invocation closes it directly. */
 A typed null coordinate makes SQL group identity injective for NULL versus
 zero/false/empty values without changing that native equality contract. */
 (define runtime_group_null_column (lambda (name) (concat "__group_null:" name)))
+/* Every caller populates a fresh native scope-owned GROUP/DISTINCT or UNION
+carrier. Source/key/operand expressions retain their actual query bindings;
+only the private scratch row mutation is outside the user transaction Undo. */
 (define runtime_group_insert_expr (lambda (target names values collision_columns collision null_keys)
 	(begin
 		(define parameters (mapIndex names (lambda (index _name)
@@ -55,7 +58,7 @@ zero/false/empty values without changing that native equality contract. */
 		(define insert (list 'insert target
 			(quoted_runtime_list (merge (list names (map null_keys runtime_group_null_column))))
 			(list 'list (runtime_cons_list_expr (merge (list row_values null_values))))
-			(quoted_runtime_list collision_columns) collision true nil (physical_query_tx_symbol)))
+			(quoted_runtime_list collision_columns) collision true nil nil))
 		(if (empty_list? null_keys) insert (cons (list 'lambda parameters insert) values)))))
 
 (define runtime_group_value_collation (lambda (src collations expr) (begin
@@ -243,9 +246,9 @@ session forwarding closure. Other calls remain at their original row boundary. *
 	(runtime_group_bind_domain stage
 		(list 'begin (if relation_input nil (list 'define '__runtime_group_input (source_scan_table_expr src condition)))
 			(list 'define name (list 'concat "." (list 'uuid) "#query-group"))
-			/* A native transaction retains row Undo and mutation leases for this
-			scratch relation too. Its existing resource owner retires the independent
-			scope after decision, rather than closing it during an active writer. */
+			/* Scratch rows have their own ordinary nil-writer visibility. The
+			original query still retains this exact scope through its decision, so
+			readers and any prepared carrier keep their existing native lifetime. */
 			(list 'define scope (list 'if (list 'nil? (physical_query_tx_symbol))
 				(list 'new_relation_scope (physical_query_session_symbol))
 				(list 'tx_get_or_compute_resource (physical_query_tx_symbol)
