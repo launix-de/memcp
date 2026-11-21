@@ -2000,6 +2000,12 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					panic(sqldb.NewSQLError1(1213, "40001", "Concurrent row replacement; retry transaction"))
 				}
 				if !result { // only do a write if something changed
+					// A matched UPDATE still dispatches AFTER callbacks. Preserve
+					// its final NEW values even when no replacement is necessary;
+					// a missing row would turn an unchanged FK key into NULL.
+					if withTrigger && triggerOldRow != nil {
+						triggerNewRow = schemaRowFromDelta(d2)
+					}
 					if attestReplacement {
 						locked := t.lockReplacementSuccessors(targetIdx, currentTx)
 						defer unlockReplacementSuccessors(locked)
