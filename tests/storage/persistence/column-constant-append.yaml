@@ -159,7 +159,7 @@ test_cases:
   sql: SELECT id,label,CASE WHEN label IS NULL THEN 1 ELSE 0 END AS null_flag FROM constant_append_text
   expect: {rows: 1,data: [{id: 11,label: '',null_flag: 0}]}
 - name: Effective alias nullability determines historical initialization
-  sql: BEGIN TRANSACTION; ALTER TABLE constant_append_alias ADD flag constant_append_required DEFAULT (4); COMMIT TRANSACTION
+  sql: ALTER TABLE constant_append_alias ADD flag constant_append_required DEFAULT (4)
 - name: An omitted syntactic NOT NULL still preserves the required alias default
   sql: SELECT id,flag FROM constant_append_alias
   expect: {rows: 1,data: [{id: 12,flag: 4}]}
