@@ -143,6 +143,44 @@ func TestCatalogNativeProposalsMatchLegacyDefinitions(t *testing.T) {
 	}
 }
 
+func TestCatalogRuntimeFilteringKeepsChildOrdinalsDense(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-runtime-ordinals", 0)
+	db := tbl.schema
+	tbl.Columns = []*column{
+		{Name: "runtime_first", IsTemp: true, RuntimeOnly: true},
+		{Name: "id", Typ: "INT"},
+		{Name: "runtime_middle", IsTemp: true, RuntimeOnly: true},
+		{Name: "value", Typ: "INT"},
+	}
+	tbl.Triggers = []TriggerDescription{
+		{Name: ".prejoin:runtime"},
+		{Name: "user_first"},
+		{Name: ".cache:runtime"},
+		{Name: "user_second"},
+	}
+	rows := catalogRowsFromTable(tbl)
+	// Legacy JSON and native reload both require dense child ordinals. Runtime
+	// programs can precede durable fields after a query followed by user DDL.
+	document := catalogDocumentFromRows(db.Name, &rows)
+	var restored catalogDocument
+	if err := json.Unmarshal(document, &restored); err != nil {
+		t.Fatal(err)
+	}
+	var definition struct {
+		Columns  []struct{ Name string }
+		Triggers []struct{ Name string }
+	}
+	if err := json.Unmarshal(restored.Tables[tbl.Name], &definition); err != nil {
+		t.Fatal(err)
+	}
+	if len(definition.Columns) != 2 || definition.Columns[0].Name != "id" || definition.Columns[1].Name != "value" {
+		t.Fatalf("runtime filtering changed durable columns: %+v", definition.Columns)
+	}
+	if len(definition.Triggers) != 2 || definition.Triggers[0].Name != "user_first" || definition.Triggers[1].Name != "user_second" {
+		t.Fatalf("runtime filtering changed durable triggers: %+v", definition.Triggers)
+	}
+}
+
 func TestCatalogRowsRoundTripLegacyDocument(t *testing.T) {
 	rows := catalogRowsFromDocument([]byte(catalogRoundTripDocument))
 	counts := map[catalogRelationID]int{
@@ -448,6 +486,7 @@ func TestCatalogDefinitionProposalsKeepRuntimeCachesLocal(t *testing.T) {
 			before := db.catalogRowsLocked()
 			db.schemalock.Unlock()
 			cache := db.newTable(".grp:local", Cache)
+			cache.RuntimeOnly = true
 			db.tables.Set(cache.Name, cache)
 			compute := &column{Name: "local_compute", Typ: "INT", IsTemp: true, RuntimeOnly: true, Computor: scm.NewSymbol("local_runtime_helper")}
 			tbl.Columns = append(tbl.Columns, compute)
@@ -478,7 +517,9 @@ func TestCatalogDefinitionProposalsKeepRuntimeCachesLocal(t *testing.T) {
 func TestCatalogCacheRebuildLeavesUnrelatedStatisticsUncheckpointed(t *testing.T) {
 	source, _ := createDurabilityTestTable(t, "catalog_cache_checkpoint_scope", 0)
 	db := source.schema
-	cache, _ := CreateTable(db.Name, ".grp:checkpoint_scope", Cache, false)
+	cache := db.newTable(".grp:checkpoint_scope", Cache)
+	cache.RuntimeOnly = true
+	db.tables.Set(cache.Name, cache)
 	db.ensureBlobTable()
 	before := readCatalogRoot(db.persistence.ReadSchema())
 	if before == nil {
@@ -499,6 +540,33 @@ func TestCatalogCacheRebuildLeavesUnrelatedStatisticsUncheckpointed(t *testing.T
 	after = readCatalogRoot(db.persistence.ReadSchema())
 	if after.Shards["tables"] == before.Shards["tables"] {
 		t.Fatal("source checkpoint lost its advisory statistics")
+	}
+}
+
+func TestCatalogRuntimeCacheRebuildDoesNotPublishLegacyMigration(t *testing.T) {
+	source, engine := createDurabilityTestTable(t, "catalog_runtime_cache_legacy", 0)
+	legacy := stripCatalogRoot(engine.ReadSchema())
+	engine.WriteSchema(legacy)
+	loaded := reloadTableFromPersistence(t, source.schema.Name, engine)
+	db := loaded.schema
+	databases.Set(db.Name, db)
+	defer databases.Set(source.schema.Name, source.schema)
+	cache := db.newTable(".grp:legacy", Cache)
+	cache.RuntimeOnly = true
+	db.tables.Set(cache.Name, cache)
+	counting := &countingSchemaWritePersistence{PersistenceEngine: db.persistence}
+	db.persistence = counting
+	if result := RebuildTable(cache, true, false); strings.Contains(result, "errors:") {
+		t.Fatal(result)
+	}
+	DropTable(db.Name, cache.Name, false)
+	if counting.calls.Load() != 0 || string(engine.ReadSchema()) != string(legacy) {
+		t.Fatal("physical query cache published a durable legacy catalog migration")
+	}
+	// A real source checkpoint still migrates and dual-writes the native root.
+	db.save(nil, loaded)
+	if readCatalogRoot(engine.ReadSchema()) == nil {
+		t.Fatal("source checkpoint did not persist its native catalog")
 	}
 }
 

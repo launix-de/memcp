@@ -1990,9 +1990,9 @@ outer joins. */
 					base_group_fill
 					(list (quote lambda) (list (symbol "__group_finalize_tx")) finalize_group_fill))))
 			(define create_options (if (nil? initial_fill_expr)
-				(quoted_runtime_list '("engine" "cache"))
+				(quoted_runtime_list '("engine" "cache" "runtime_only" true))
 				(list (quote list)
-					"engine" "cache"
+					"engine" "cache" "runtime_only" true
 					"oninit" (list (quote lambda) (list (quote tx)) initial_fill_expr))))
 			/* Every use must seed its own session-domain keys, even when another
 			stage owns creation of the shared physical carrier. */
@@ -11064,7 +11064,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define prepare_plan (list (quote !begin)
 			(list (quote group_cache_create) (qb_schema block) table_name
 				(prejoin_create_columns sources)
-				(list (quote list) "engine" "cache" "oninit"
+				(list (quote list) "engine" "cache" "runtime_only" true "oninit"
 					(list (quote lambda) (list (physical_query_tx_symbol)) initialize))
 				true (physical_query_tx_symbol))
 			(cons (quote !begin) (prejoin_computed_column_plans block fields table_name))))
