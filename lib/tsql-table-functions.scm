@@ -129,7 +129,7 @@ source alias cannot capture an argument owned by the caller's APPLY scope. */
 	consuming transaction. In particular, CTE exports belong to that input. */
 	(define syntax (parse_tsql database source nil
 		(tsql_relational_query_scope (tsql_ansi_planning_scope nil ansi) contracts quoted '()) nil))
-	(if (has? '(query-block union-block) (logical_op syntax)) true
+	(if (or (query_block? syntax) (union_block? syntax)) true
 		(error "inline table function requires a returned query"))
 	(list "identity" (list database (context "name")) "database" database
 		"parameters" parameters "ansi_nulls" ansi "contracts" contracts "quoted" quoted "source" source))))
