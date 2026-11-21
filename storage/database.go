@@ -641,7 +641,7 @@ func RebuildTable(tbl *table, all bool, repartition bool, tx *TxContext) tableRe
 		tbl.schema.persistenceLifecycle.RLock()
 	}
 	defer tbl.schema.persistenceLifecycle.RUnlock()
-	result := tbl.schema.rebuildWithLifecycle(all, repartition, true, tbl)
+	result := tbl.schema.rebuildWithLifecycle(all, repartition, true, tx, tbl)
 	if r := replication.Load(); r != nil && !r.master && validReplicaDatabase(tbl.schema.Name) {
 		defer func() { go replicationCheckpoint(tbl.schema.Name, "") }()
 	}
@@ -700,7 +700,7 @@ func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, include
 	}(); err != nil {
 		return []string{err.Error()}, false
 	}
-	result := db.rebuildWithLifecycle(all, repartition, includeEphemeral)
+	result := db.rebuildWithLifecycle(all, repartition, includeEphemeral, nil)
 	if r := replication.Load(); r != nil && !r.master && validReplicaDatabase(db.Name) {
 		defer func() { go replicationCheckpoint(db.Name, "") }()
 	}
@@ -1560,13 +1560,13 @@ func (db *database) ShowTables(transaction ...*TxContext) scm.Scmer {
 func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, only ...*table) rebuildDatabaseResult {
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
-	return db.rebuildWithLifecycle(all, repartition, includeEphemeral, only...)
+	return db.rebuildWithLifecycle(all, repartition, includeEphemeral, nil, only...)
 }
 
 // rebuildWithLifecycle requires a persistenceLifecycle read capability. The
 // public rebuild paths retain it through schema publication, so cleanup cannot
 // observe generation-private files in the build→publish interval.
-func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphemeral bool, only ...*table) rebuildDatabaseResult {
+func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphemeral bool, tx *TxContext, only ...*table) rebuildDatabaseResult {
 	if sharedClusterDatabase(db.Name) {
 		r := activeReplication(db)
 		if r.resourceCell(mosiResource{Database: db.Name}).ownstate.Phase() != mosi.M {
@@ -1644,7 +1644,16 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 			}
 			tableLocked := false
 			rebuildClaimed := false
-			ddlLocked := t.ddlMu.TryRLock()
+			// Only an actual transaction can own a retained declaration that
+			// this request would wait on itself. Legacy/global maintenance keeps
+			// its established table-local DDL wait contract.
+			ddlLocked := false
+			if tx == nil {
+				t.ddlMu.RLock()
+				ddlLocked = true
+			} else {
+				ddlLocked = t.ddlMu.TryRLock()
+			}
 			defer func() {
 				if ddlLocked {
 					t.ddlMu.RUnlock()
