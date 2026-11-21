@@ -104,11 +104,10 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 		}
 	}
 	pm := parsePersistencyMode(engine)
-	// Catalog publication is currently independent of transaction row
-	// decisions. Reject new persistent declarations before taking schema
-	// ownership, opening shard logs, or invoking initialization callbacks.
-	// Query caches and scope-owned RAM relations have separate native
-	// lifetime contracts; materialization must retain those contracts.
+	// Permanent declarations join an explicit transaction through its private
+	// catalog decision. An ordinary autocommit carrier publishes immediately
+	// and must not bypass an already entered public declaration decision.
+	// Query caches and scope-owned RAM relations retain their own lifetimes.
 	queryCache := pm == Cache && strings.HasPrefix(tblName, ".")
 	scopedMemory := ephemeral && pm == Memory && relationOwner != nil
 	construction := tx != nil && !queryCache && !scopedMemory
@@ -117,8 +116,16 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 		// Run after all schema/construction owners unwind, including a failed
 		// or no-op first constructor that allocated no native intent.
 		defer tx.retireUnacceptedLateCreatePhase()
+		if !staged && tx.publicCatalogEntered.Load() {
+			panic("public and private catalog declarations cannot be mixed")
+		}
 		done := tx.beginCatalogConstruction(catalogDeclarationConstruction)
 		defer done()
+		// Public phase entry shares the construction scope: repeat the carrier
+		// check after admission before any independently visible publication.
+		if !staged && tx.publicCatalogEntered.Load() {
+			panic("public and private catalog declarations cannot be mixed")
+		}
 	}
 	if staged && tx.coordinator != nil {
 		return tx.forwardCatalogCreate(a)

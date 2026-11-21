@@ -14,8 +14,8 @@ setup:
 - sql: DROP TABLE IF EXISTS joint_drop_new_a
 - sql: DROP TABLE IF EXISTS joint_drop_old_a
 - sql: DROP PROCEDURE IF EXISTS joint_source
-- sql: DROP TABLE IF EXISTS joint_overlay_parent
 - sql: DROP TABLE IF EXISTS joint_published_child
+- sql: DROP TABLE IF EXISTS joint_overlay_parent
 - sql: DROP TABLE IF EXISTS joint_rewind
 - sql: DROP TABLE IF EXISTS joint_source_child
 - sql: DROP TABLE IF EXISTS joint_unaccepted
@@ -47,8 +47,8 @@ cleanup:
 - sql: DROP TABLE IF EXISTS joint_drop_new_a
 - sql: DROP TABLE IF EXISTS joint_drop_old_a
 - sql: DROP PROCEDURE IF EXISTS joint_source
-- sql: DROP TABLE IF EXISTS joint_overlay_parent
 - sql: DROP TABLE IF EXISTS joint_published_child
+- sql: DROP TABLE IF EXISTS joint_overlay_parent
 - sql: DROP TABLE IF EXISTS joint_rewind
 - sql: DROP TABLE IF EXISTS joint_source_child
 - sql: DROP TABLE IF EXISTS joint_unaccepted
@@ -129,7 +129,7 @@ test_cases:
     error: true
     contains: foreign key constraint
 - name: Crash preserves the accepted joint decision
-  action: crash
+  scm: (crash)
   expect:
     interrupted_ok: true
 - name: Restart replays the accepted joint declaration and rows
@@ -589,7 +589,7 @@ test_cases:
     - present: 0
       foreign_count: 0
 - name: Crash discards the unaccepted joint decision
-  action: crash
+  scm: (crash)
   expect:
     interrupted_ok: true
 - name: Restart retains accepted joint sources and discards unaccepted names

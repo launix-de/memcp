@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
   isolated: true
-  description: Failed first public FK construction retires its resource while preserving the native metadata-only phase
+  description: Failed FK factories retire cleanly while accepted public declarations retain their actual native authority
 setup:
+- sql: DROP TABLE IF EXISTS phase_auto_child
+- sql: CREATE TABLE phase_auto_child(id INT PRIMARY KEY,parent_id INT)
 - sql: CREATE TABLE phase_parent(id INT PRIMARY KEY,code INT)
 - sql: CREATE TABLE phase_writer_child(id INT PRIMARY KEY,parent_id INT)
 - sql: CREATE TABLE phase_valid_child(id INT PRIMARY KEY,parent_id INT)
@@ -13,6 +15,7 @@ setup:
 - sql: INSERT INTO phase_valid_child VALUES(1,1)
 - sql: INSERT INTO phase_orphan_child VALUES(1,99)
 - sql: INSERT INTO phase_key_child VALUES(1,7)
+- sql: INSERT INTO phase_auto_child VALUES(1,1)
 cleanup:
 - sql: DROP TABLE IF EXISTS phase_forbidden_private
 - sql: DROP TABLE IF EXISTS phase_forbidden_auto
@@ -21,6 +24,7 @@ cleanup:
 - sql: DROP TABLE IF EXISTS phase_valid_child
 - sql: DROP TABLE IF EXISTS phase_orphan_child
 - sql: DROP TABLE IF EXISTS phase_key_child
+- sql: DROP TABLE IF EXISTS phase_auto_child
 - sql: DROP TABLE IF EXISTS phase_parent
 - scm: (droptable "memcp-tests" ".phase_constructor_cache" true)
 test_cases:
@@ -70,7 +74,7 @@ test_cases:
         (empty_list? ((show orphan "constraints") "ForeignKeys"))))
   expect: {result: true}
 
-- name: A failed first declaration keeps DML identity reservation and private CREATE excluded
+- name: A failed first declaration permits original DML rollback and a fresh corrected FK decision
   scm: |
     (begin
       (define owner (newsession)) (owner "username" "root") (tx_begin owner)
@@ -80,21 +84,24 @@ test_cases:
       (define rejected (try (lambda () (begin
         (createforeignkey child "FK_phase_missing_key" '("parent_code") parent '("code") "restrict" "restrict" tx) false))
         (lambda (failure) (strlike (concat failure) "%unique target%"))))
-      (define row_denied (try (lambda () (begin (insert parent '("id" "code") (list (list 98 98)) '() nil false nil tx) false))
-        (lambda (failure) (strlike (concat failure) "%metadata-only%"))))
-      (define ids_denied (try (lambda () (begin (reserve_ids parent 1 tx) false))
-        (lambda (failure) (strlike (concat failure) "%metadata-only%"))))
-      (define create_denied (try (lambda () (begin
-        (createtable "memcp-tests" "phase_forbidden_private" (list (list "column" "id" "INT" '() '())) '() false tx) false))
-        (lambda (failure) (strlike (concat failure) "%public and private%"))))
+      (define inserted (insert parent '("id" "code") (list (list 98 98)) '() nil false nil tx))
+      (define interval (reserve_ids parent 1 tx))
+      (define rows (lambda (input)
+        (sort (scan input parent '() '() '() (lambda () true) '("id" "code")
+          (lambda (acc id code) (append acc (list id code))) '()
+          (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+      (define before (list rejected inserted (list (count interval) (equal? (car interval) (cadr interval)) (> (car interval) 0))
+        (rows tx) (rows nil) (count ((show child "constraints" tx) "ForeignKeys"))))
+      (tx_rollback owner)
+      (define after (rows nil))
       (createkey parent "phase_corrected_key" true '("code"))
-      (createforeignkey child "FK_phase_missing_key" '("parent_code") parent '("code") "restrict" "restrict" tx)
+      (tx_begin owner)
+      (createforeignkey child "FK_phase_missing_key" '("parent_code") parent '("code") "restrict" "restrict" (owner "__memcp_tx"))
       (tx_commit owner)
-      (define committed_ids (scan nil parent '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +))
-      (and rejected row_denied ids_denied create_denied (equal? committed_ids 1)
-        (nil? (table "memcp-tests" false "phase_forbidden_private" false nil))
-        (equal? (count ((show child "constraints") "ForeignKeys")) 1)))
-  expect: {result: true}
+      (list before after (count ((show child "constraints") "ForeignKeys"))))
+  expect:
+    result: [[true,1,[2,true,true],[[1,7],[98,98]],[[1,7]],0],[[1,7]],1]
 
 - name: Rejected dirty promotion does not enter the metadata-only phase
   scm: |
@@ -104,10 +111,10 @@ test_cases:
       (define parent (table "memcp-tests" false "phase_parent" false tx))
       (define child (table "memcp-tests" false "phase_orphan_child" false tx))
       (define observed (scan tx parent '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +))
+      (define inserted (insert parent '("id" "code") (list (list 2 8)) '() nil false nil tx))
       (define rejected (try (lambda () (begin
         (createforeignkey child "FK_phase_dirty" '("parent_id") parent '("id") "restrict" "restrict" tx) false))
         (lambda (failure) (strlike (concat failure) "%precede native row access%"))))
-      (define inserted (insert parent '("id" "code") (list (list 2 8)) '() nil false nil tx))
       (tx_rollback owner)
       (define after (scan nil parent '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +))
       (and rejected (equal? observed 1) (equal? inserted 1) (equal? after 1)))
@@ -133,22 +140,34 @@ test_cases:
       (and rejected owned (nil? (table "memcp-tests" false "phase_reset_private" false nil))))
   expect: {result: true}
 
-- name: A native autocommit carrier cannot CREATE permanent tables after failed FK construction
+- name: An accepted public FK blocks ownerless writes and immediate permanent CREATE while allowing its cache
   scm: |
     (begin
       (define owner (newsession)) (owner "username" "root") (owner "schema" "memcp-tests")
       (define result (with_autocommit owner nil 0 "native public declaration phase" (lambda (tx) (begin
-        (define child (table "memcp-tests" false "phase_orphan_child" false tx))
+        (define child (table "memcp-tests" false "phase_auto_child" false tx))
         (define parent (table "memcp-tests" false "phase_parent" false tx))
-        (define rejected (try (lambda () (begin
-          (createforeignkey child "FK_phase_auto" '("parent_id") parent '("id") "restrict" "restrict" tx) false))
-          (lambda (failure) (strlike (concat failure) "%existing child row has no parent%"))))
+        (createforeignkey child "FK_phase_auto" '("parent_id") parent '("id") "restrict" "restrict" tx)
+        (define row_denied (try (lambda () (begin (insert parent '("id" "code") (list (list 97 97)) '() nil false nil tx) false))
+          (lambda (failure) (strlike (concat failure) "%metadata-only%"))))
+        (define ids_denied (try (lambda () (begin (reserve_ids parent 1 tx) false))
+          (lambda (failure) (strlike (concat failure) "%metadata-only%"))))
         (define denied (try (lambda () (begin
           (createtable "memcp-tests" "phase_forbidden_auto" (list (list "column" "id" "INT" '() '())) '() false tx) false))
           (lambda (failure) (strlike (concat failure) "%public and private%"))))
-        (define cache (createtable "memcp-tests" ".phase_constructor_cache"
-          (list (list "column" "id" "INT" '() '())) (list "engine" "cache") false tx))
-        (and rejected denied cache (nil? (table "memcp-tests" false "phase_forbidden_auto" false nil)))))))
+        (createtable "memcp-tests" ".phase_constructor_cache"
+          (list (list "column" "id" "INT" '() '())) (list "engine" "cache") false tx)
+        (list row_denied ids_denied denied
+          (nil? (table "memcp-tests" false "phase_forbidden_auto" false nil))
+          (not (nil? (table "memcp-tests" false ".phase_constructor_cache" false nil)))
+          (count ((show child "constraints" tx) "ForeignKeys"))
+          (count ((show child "constraints") "ForeignKeys")))))))
+      (define child (table "memcp-tests" false "phase_auto_child" false nil))
+      (define orphan (try (lambda () (begin (insert child '("id" "parent_id") (list (list 2 999))) false))
+        (lambda (failure) (strlike (concat failure) "%foreign key constraint%"))))
+      (define rows (scan nil child '() '() '() (lambda () true) '("id" "parent_id")
+        (lambda (acc id parent_id) (append acc (list id parent_id))) '()
+        (lambda (left right) (merge (list left right))) false))
       (droptable "memcp-tests" ".phase_constructor_cache" true)
-      result)
-  expect: {result: true}
+      (list result (count ((show child "constraints") "ForeignKeys")) orphan rows))
+  expect: {result: [[true,true,true,true,true,1,0],1,true,[[1,1]]]}

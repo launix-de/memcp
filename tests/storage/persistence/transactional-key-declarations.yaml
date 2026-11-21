@@ -98,7 +98,7 @@ test_cases:
       (define unchanged (equal? before (show target "constraints")))
       (tx_rollback s) (and denied unchanged))
   expect: {result: true}
-- name: An owned private catalog cannot amend a public table
+- name: A cursor-stable private owner leaves public unique declarations unchanged
   scm: |
     (begin
       (define s (newsession)) (s "username" "root") (tx_begin s)
@@ -108,7 +108,7 @@ test_cases:
       (define target (table "memcp-tests" false "native_key_public" false nil))
       (define before (show target "constraints"))
       (define denied (try (lambda () (begin (createkey target "ix_public" true '("id") tx) false))
-        (lambda (failure) (strlike (concat failure) "%owned unpublished table%"))))
+        (lambda (failure) (strlike (concat failure) "%public unique declaration requires a local committed native table%"))))
       (define unchanged (equal? before (show target "constraints")))
       (tx_rollback s) (and denied unchanged))
   expect: {result: true}

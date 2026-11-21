@@ -227,14 +227,10 @@ test_cases:
         (lambda () (dropdatabase "memcp-tests" false)))
         (lambda (valid operation) (and valid (try (lambda () (begin (operation) false))
           (lambda (failure) (strlike (concat failure) "%pending declaration%"))))) true))
-      (define mixed (try (lambda () (begin
-        (createtable "memcp-tests" "loaded_fk_forbidden_private" (list (list "column" "id" "INT" '() '())) '() false tx) false))
-        (lambda (failure) (strlike (concat failure) "%public and private%"))))
       (define clean (and (equal? ((show child "column" "category" false) "Collation") "utf8mb4_general_ci")
         (nil? (show child "column" "extra" false))
-        (nil? (table "memcp-tests" false "loaded_fk_forbidden_private" false tx))
         (equal? (count ((show child "constraints") "ForeignKeys")) 0)))
-      (tx_rollback s) (and denied mixed clean))
+      (tx_rollback s) (and denied clean))
   expect: {result: true}
 - name: Restart preserves historically validated declarations and existing rows
   action: restart
@@ -381,21 +377,21 @@ test_cases:
           (not (nil? (find published (lambda (current) (expression_equal? program current)) nil))))) true)))
   expect: {result: true}
 
-- name: A private declaration cannot be mixed into the shared public amendment history
+- name: An owned creation and public foreign declaration share their original rollback
   scm: |
     (begin
-      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define s (newsession)) (s "username" "root") (tx_begin_acid s)
       (define tx (s "__memcp_tx"))
       (define private (createtable "memcp-tests" "history_private_endpoint"
         (list (list "column" "id" "INT" '() '())) '() false tx))
       (define child (table "memcp-tests" false "history_fk_third" false tx))
       (define parent (table "memcp-tests" false "loaded_fk_parent" false tx))
-      (define rejected (try (lambda () (begin
-        (createforeignkey child "FK_history_mixed" '("code" "category") parent '("code" "category") "restrict" "restrict" tx) false))
-        (lambda (failure) (strlike (concat failure) "%public and private%"))))
-      (define unchanged (and (not (nil? (table "memcp-tests" false "history_private_endpoint" false tx)))
+      (createforeignkey child "FK_history_mixed" '("code" "category") parent '("code" "category") "restrict" "restrict" tx)
+      (define before (list (not (nil? (table "memcp-tests" false "history_private_endpoint" false tx)))
         (nil? (table "memcp-tests" false "history_private_endpoint" false nil))
-        (empty_list? ((show child "constraints" tx) "ForeignKeys"))))
+        (count ((show child "constraints" tx) "ForeignKeys"))
+        (count ((show child "constraints") "ForeignKeys"))))
       (tx_rollback s)
-      (and rejected unchanged (nil? (table "memcp-tests" false "history_private_endpoint" false nil))))
-  expect: {result: true}
+      (append (append before (nil? (table "memcp-tests" false "history_private_endpoint" false nil)))
+        (count ((show child "constraints") "ForeignKeys"))))
+  expect: {result: [true,true,1,0,true,0]}
