@@ -310,13 +310,13 @@ func catalogRaw(kind catalogKind, cell scm.Scmer) json.RawMessage {
 		items := cell.Slice()
 		raw := make([]json.RawMessage, len(items))
 		for i, item := range items {
-			encoded, err := json.Marshal(item)
+			encoded, err := item.MarshalJSON()
 			if err != nil {
 				panic(err)
 			}
 			raw[i] = encoded
 		}
-		value = raw
+		return marshalCatalogRecords(raw)
 	default:
 		return json.RawMessage(cell.String())
 	}
@@ -531,6 +531,13 @@ func catalogRowsFromDocument(document []byte) (rows catalogRows) {
 type catalogJSONEncoder struct {
 	strings map[string]json.RawMessage
 	json    map[string]json.RawMessage
+	values  map[catalogEncodedCell]json.RawMessage
+	row     []json.RawMessage
+}
+
+type catalogEncodedCell struct {
+	kind  catalogKind
+	value scm.Scmer
 }
 
 func (encoder *catalogJSONEncoder) string(value string) json.RawMessage {
@@ -543,10 +550,13 @@ func (encoder *catalogJSONEncoder) string(value string) json.RawMessage {
 }
 
 func (encoder *catalogJSONEncoder) cell(kind catalogKind, value scm.Scmer) json.RawMessage {
-	if kind == catalogText && !value.IsNil() {
+	if value.IsNil() {
+		return nil
+	}
+	if kind == catalogText {
 		return encoder.string(value.String())
 	}
-	if kind == catalogJSON && !value.IsNil() {
+	if kind == catalogJSON {
 		text := value.String()
 		if raw, present := encoder.json[text]; present {
 			return raw
@@ -558,7 +568,19 @@ func (encoder *catalogJSONEncoder) cell(kind catalogKind, value scm.Scmer) json.
 		encoder.json[text] = raw
 		return raw
 	}
-	return catalogRaw(kind, value)
+	if kind != catalogFloat && kind != catalogList {
+		return catalogRaw(kind, value)
+	}
+	key := catalogEncodedCell{kind, value}
+	if raw, present := encoder.values[key]; present {
+		return raw
+	}
+	if encoder.values == nil {
+		encoder.values = make(map[catalogEncodedCell]json.RawMessage)
+	}
+	raw := catalogRaw(kind, value)
+	encoder.values[key] = raw
+	return raw
 }
 
 func (encoder *catalogJSONEncoder) record(relation catalogRelationID, row []scm.Scmer) map[string]json.RawMessage {
@@ -636,11 +658,18 @@ func (encoder *catalogJSONEncoder) records(records []map[string]json.RawMessage)
 func (encoder *catalogJSONEncoder) appendRow(relation catalogRelationID, row []scm.Scmer) json.RawMessage {
 	r := &catalogRelations[relation]
 	offset := 1 + len(r.identity)
-	values := make([]json.RawMessage, len(r.fields))
+	values := encoder.row
+	if cap(values) < len(r.fields) {
+		values = make([]json.RawMessage, len(r.fields))
+	} else {
+		values = values[:len(r.fields)]
+	}
+	encoder.row = values
 	size := 2
 	for i, field := range r.fields {
-		if raw := encoder.cell(field.kind, row[offset+i]); raw != nil {
-			values[i] = raw
+		raw := encoder.cell(field.kind, row[offset+i])
+		values[i] = raw
+		if raw != nil {
 			size += len(encoder.string(field.key)) + 2 + len(raw)
 		}
 	}
