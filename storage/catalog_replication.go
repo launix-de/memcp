@@ -32,7 +32,7 @@ func (shard *storageShard) replicationResource() mosiResource {
 }
 
 func (shard *storageShard) replicationManager() *replicationManager {
-	if shard.catalogPrivate {
+	if shard.catalogPrivate.Load() {
 		return nil
 	}
 	owner := shard.authorityDatabase()
@@ -44,7 +44,7 @@ func (shard *storageShard) replicationManager() *replicationManager {
 }
 
 func declareCatalogShard(shard *storageShard) {
-	shard.catalogPrivate = false
+	shard.catalogPrivate.Store(false)
 	if cluster := activeNodeCluster(); cluster != nil && cluster.databases[shard.catalogOwner] {
 		cluster.manager.declareShard(shard, cluster.self.ID, true)
 	} else if r := replication.Load(); r != nil && validReplicaDatabase(shard.catalogOwner) {
@@ -115,9 +115,9 @@ func (r *replicationManager) replaceCatalogShard(resource mosiResource, previous
 	if !valid || db == nil {
 		return fmt.Errorf("missing catalog partition for shard publication")
 	}
-	replacement.catalogOwner = db.Name
-	replacement.catalogHome = catalogBackendDatabase()
-	replacement.catalogPrivate = false
+	// Placement and tenant identity are immutable constructor state. Only the
+	// private-to-published capability changes during native admission.
+	replacement.catalogPrivate.Store(false)
 	cell := r.resourceCell(resource)
 	if previous != nil && previous != replacement {
 		cell.retainShard(previous)

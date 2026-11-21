@@ -44,14 +44,14 @@ type storageShard struct {
 	filterFeedback filterFeedbackCache
 	t              *table
 	uuid           uuid.UUID // uuid.String()
-	// catalogHome is set only for system_schema shards. Their partition key is
-	// a database, and that database's backend stores the shard. Rebuild
-	// successors inherit it; ordinary shards persist through their table.
+	// catalogHome is immutable before publication for system_schema shards.
+	// Rebuild successors inherit physical placement; ordinary shards persist
+	// through their table.
 	catalogHome *database
-	// catalogOwner owns the logical schema partition, independently of storage.
+	// catalogOwner is the immutable logical tenant, independently of storage.
 	catalogOwner string
 	// A private rebuild/import generation has no published MOSI resource yet.
-	catalogPrivate bool
+	catalogPrivate atomic.Bool
 	// catalogDurable requests synced column files from the next rebuild of a
 	// system_schema shard, matching the durability of its schema.json commit.
 	catalogDurable bool
@@ -4370,7 +4370,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	result.t = t.t
 	result.catalogHome = t.catalogHome
 	result.catalogOwner = t.catalogOwner
-	result.catalogPrivate = t.catalogOwner != ""
+	result.catalogPrivate.Store(t.catalogOwner != "")
 	result.coherence.Store(t.coherence.Load())
 	result.localMutations.Store(t.localMutationState())
 	result.setState(WRITE) // mark as live so ensureLoaded() won't reset columns

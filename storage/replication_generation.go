@@ -893,7 +893,7 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 	var nativeRows [][]scm.Scmer
 	if isCatalogResource(resource) {
 		shard.catalogOwner, shard.catalogHome = db.Name, catalogBackendDatabase()
-		shard.catalogPrivate = true
+		shard.catalogPrivate.Store(true)
 		relation, _ := catalogResourceRelation(resource)
 		if transfer.untrusted || relation == catalogTables {
 			_, nativeRows = catalogShardRecords(shard, catalogRelationColumns(relation), nil)

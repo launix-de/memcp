@@ -588,7 +588,7 @@ func newCatalogShard(db *database, relation catalogRelationID, rows [][]scm.Scme
 	shard := NewShard(systemSchemaTables[relation])
 	shard.catalogHome = db
 	shard.catalogOwner = db.Name
-	shard.catalogPrivate = true
+	shard.catalogPrivate.Store(true)
 	for i, name := range catalogRelationColumns(relation) {
 		values := make([]scm.Scmer, len(rows))
 		for j, row := range rows {

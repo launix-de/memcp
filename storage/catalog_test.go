@@ -408,7 +408,7 @@ func TestCatalogReplicaImportValidatesBeforePublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	published := cell.resolved().current.Load()
-	if published == nil || published.uuid != incoming.uuid || published.home() != catalogBackendDatabase() || published.catalogPrivate {
+	if published == nil || published.uuid != incoming.uuid || published.home() != catalogBackendDatabase() || published.catalogPrivate.Load() {
 		t.Fatal("validated import did not publish native system-backend content")
 	}
 }
@@ -1075,7 +1075,7 @@ func TestCatalogMosiReadUsesPublishedNativeGeneration(t *testing.T) {
 	rows[catalogColumns][0][nameIndex] = scm.NewString("from-peer")
 	received := newCatalogShard(db, catalogColumns, rows[catalogColumns])
 	received.uuid = source.uuid
-	received.catalogPrivate = false
+	received.catalogPrivate.Store(false)
 	received.catalogHome = catalogBackendDatabase()
 	r := replicaRecoveryFixture()
 	cell := r.declareShard(source, r.id, true)
@@ -1093,7 +1093,7 @@ func TestCatalogMosiReadUsesPublishedNativeGeneration(t *testing.T) {
 	defer replication.Store(old)
 	_, visible := catalogShardRecords(source, catalogRelationColumns(catalogColumns), nil)
 	if len(visible) == 0 || visible[0][nameIndex].String() != "from-peer" {
-		t.Fatalf("native catalog scan ignored MOSI generation: private=%v owner=%q manager=%v current=%p wanted=%p visible=%v", source.catalogPrivate, source.catalogOwner, source.replicationManager() != nil, cell.current.Load(), received, visible)
+		t.Fatalf("native catalog scan ignored MOSI generation: private=%v owner=%q manager=%v current=%p wanted=%p visible=%v", source.catalogPrivate.Load(), source.catalogOwner, source.replicationManager() != nil, cell.current.Load(), received, visible)
 	}
 }
 
@@ -1195,6 +1195,34 @@ func TestCatalogNamespaceDurabilityPrecedesTenantRoot(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("retry omitted the accepted native column declaration")
+	}
+}
+
+func TestCatalogPublicationPreservesConcurrentCheckpointIdentity(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-publication-identity", 0)
+	db := tbl.schema
+	r := replicaRecoveryFixture()
+	rows := db.catalogRowsLocked()
+	shard := buildDiskShard(db, catalogColumns, rows[catalogColumns], true)
+	resource, home := shard.replicationResource(), shard.home()
+	started, done := make(chan struct{}), make(chan bool, 1)
+	go func() {
+		close(started)
+		consistent := true
+		for range 10000 {
+			consistent = consistent && shard.replicationResource() == resource && shard.home() == home
+			_ = shard.replicationManager()
+		}
+		done <- consistent
+	}()
+	<-started
+	for range 32 {
+		if err := r.replaceCatalogShard(resource, nil, shard); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !<-done || shard.catalogPrivate.Load() {
+		t.Fatal("native publication changed checkpoint identity or retained private authority")
 	}
 }
 
