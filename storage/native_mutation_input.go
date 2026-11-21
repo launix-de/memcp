@@ -11,9 +11,12 @@ import "unsafe"
 type nativeMutationInput struct {
 	target       *table
 	owner        *transactionState
+	event        nativeMutationEvent
 	columns      []*column
 	unique       []uniqueKey
 	foreign      []foreignKey
+	beforeInsert []TriggerDescription
+	afterInsert  []TriggerDescription
 	beforeUpdate []TriggerDescription
 	afterUpdate  []TriggerDescription
 	memory       *publicCatalogMemory
@@ -114,7 +117,7 @@ func checkedCatalogWriters(history []catalogDeclarationAmendment) map[*table]str
 	return result
 }
 
-func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews) *nativeMutationInput {
+func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, event nativeMutationEvent) *nativeMutationInput {
 	if source == nil || tx.privateMutationSource(t) != source || source.tables[t] == nil {
 		panic("native mutation input lost its private declaration source")
 	}
@@ -185,8 +188,10 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews) *na
 			}
 		}
 	}
-	input := &nativeMutationInput{target: t, owner: tx.transactionState,
+	input := &nativeMutationInput{target: t, owner: tx.transactionState, event: event,
 		columns: source.tables[t].metadata.columnNames.declarations, unique: uniqueKeysInView(t, source.keys), foreign: foreign}
+	input.beforeInsert = t.GetTriggers(BeforeInsert, retired)
+	input.afterInsert = t.GetTriggers(AfterInsert, retired)
 	input.beforeUpdate = t.GetTriggers(BeforeUpdate, retired)
 	input.afterUpdate = t.GetTriggers(AfterUpdate, retired)
 	if tx.privateMutationSource(t) != source {
@@ -195,7 +200,7 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews) *na
 	// Only the new header/vector containers belong to this producer. Column,
 	// key, FK-string and compiled-program payloads retain their existing owners.
 	input.bytes = uint64(unsafe.Sizeof(*input)) + uint64(cap(input.foreign))*uint64(unsafe.Sizeof(foreignKey{})) +
-		uint64(cap(input.beforeUpdate)+cap(input.afterUpdate))*uint64(unsafe.Sizeof(TriggerDescription{}))
+		uint64(cap(input.beforeInsert)+cap(input.afterInsert)+cap(input.beforeUpdate)+cap(input.afterUpdate))*uint64(unsafe.Sizeof(TriggerDescription{}))
 	input.memory = tx.publicCatalogChanges().memory
 	input.memory.mutationInputBytes.Add(input.bytes)
 	return input
@@ -214,6 +219,10 @@ func (t *table) mutationTriggers(timing TriggerTiming, input *nativeMutationInpu
 			panic("native mutation input belongs to another target")
 		}
 		switch timing {
+		case BeforeInsert:
+			return input.beforeInsert
+		case AfterInsert:
+			return input.afterInsert
 		case BeforeUpdate:
 			return input.beforeUpdate
 		case AfterUpdate:

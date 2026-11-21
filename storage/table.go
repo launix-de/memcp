@@ -4283,8 +4283,10 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			}
 		}()
 	}
-	if tx.mutationInputFor(t) != nil {
-		panic("private declaration input requires its checked UPDATE producer")
+	if input := tx.mutationInputFor(t); input != nil {
+		if input.event != nativeMutationInsert || !onCollision.IsNil() {
+			panic("private declaration input requires its checked INSERT producer without collision callbacks")
+		}
 	}
 	t.requireStatementTriggerMutation(tx, nativeMutationInsert)
 	t.admitCheckMutation(tx, "INSERT")
@@ -4317,6 +4319,11 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 	if len(currentTxArgs) > 0 {
 		currentTx = currentTxArgs[0]
 	}
+	input := currentTx.mutationInputFor(t)
+	if input != nil && (input.event != nativeMutationInsert || !onCollision.IsNil()) {
+		panic("private declaration input requires its checked INSERT producer without collision callbacks")
+	}
+	keys := mutationUniqueKeys(t, input)
 	// Insert has already resolved and borrowed its exact writer invocation.
 	// Remote callers supply their public invocation; private data views are
 	// nonserializable. Resolving again here adds a lease to every streaming row.
@@ -4353,7 +4360,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 	defer t.endContributionMutation()
 
 	columns, values = t.prepareInsertDefaults(columns, values, validatedSchema.declarations)
-	earlyTriggers, finalValidators := splitBeforeInsertTriggers(t.GetTriggers(BeforeInsert, nil))
+	earlyTriggers, finalValidators := splitBeforeInsertTriggers(t.mutationTriggers(BeforeInsert, input))
 	columns, values = t.ExecuteBeforeInsertTriggers(columns, values, earlyTriggers, isIgnore, currentTx)
 	validateInsertColumns(columns, validatedSchema.declarations)
 	// sanitize values (per-row recovery for INSERT IGNORE)
@@ -4451,7 +4458,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 				}
 
 				// check unique constraints in a thread safe manner
-				if len(t.Unique) > 0 {
+				if len(keys) > 0 {
 					t.ProcessUniqueCollision(columns, chunk, mergeNull, func(chunk [][]scm.Scmer, validate *uniqueWriteGuard) {
 						insertRows(chunk, validate)
 					}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
@@ -4478,7 +4485,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 						} else {
 							panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
 						}
-					}, 0, currentTx, nil, []*storageShard{shard}, nil)
+					}, 0, currentTx, nil, []*storageShard{shard}, input)
 				} else {
 					// physically insert (no unique constraints)
 					insertRows(chunk, nil)
@@ -4623,7 +4630,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 					start = end
 				}
 			}
-			if len(t.Unique) > 0 {
+			if len(keys) > 0 {
 				t.ProcessUniqueCollision(columns, values, mergeNull, insertRows, onCollisionCols, func(errmsg string, data []scm.Scmer) {
 					if onCollision.IsNil() {
 						panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
@@ -4643,7 +4650,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 					default:
 						result++
 					}
-				}, 0, currentTx, nil, targets, nil)
+				}, 0, currentTx, nil, targets, input)
 			} else {
 				insertRows(values, nil)
 			}
@@ -4657,7 +4664,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 			s = writeAccess.shard
 			defer rel()
 			// check unique constraints in a thread safe manner
-			if len(t.Unique) > 0 {
+			if len(keys) > 0 {
 				// this function will do the locking for us
 				t.ProcessUniqueCollision(columns, values, mergeNull, func(values [][]scm.Scmer, validate *uniqueWriteGuard) {
 					if !validate.validReads() {
@@ -4688,7 +4695,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 					} else {
 						panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
 					}
-				}, 0, currentTx, nil, []*storageShard{s}, nil)
+				}, 0, currentTx, nil, []*storageShard{s}, input)
 			} else {
 				// physically insert (parallel)
 				s.Insert(columns, values, false, validatedSchema, onFirstInsertId, isIgnore, currentTx, nil)

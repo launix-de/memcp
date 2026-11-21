@@ -72,8 +72,8 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 			if declarationTarget != nil && declarationTarget != target {
 				panic("private declaration input requires one checked native target")
 			}
-			if descriptor.event != nativeMutationUpdate {
-				panic("private declaration input requires a checked native UPDATE producer")
+			if descriptor.event != nativeMutationUpdate && descriptor.event != nativeMutationInsert {
+				panic("private declaration input requires a checked native INSERT or UPDATE producer")
 			}
 			declarationSource, declarationTarget = source, target
 			checked = true
@@ -148,7 +148,7 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 			operation.prepareStatement()
 		}
 		if declarationSource != nil {
-			binding.declarationInput = declarationTarget.bindMutationInput(binding, declarationSource)
+			binding.declarationInput = declarationTarget.bindMutationInput(binding, declarationSource, descriptor.event)
 		}
 		physicalTargets := make([]*table, 0, len(targets))
 		for _, target := range targets {

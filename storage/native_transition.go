@@ -45,13 +45,12 @@ const nativeTransitionBufferRows = 128
 // Caller holds the source's actual statement writer lease. Retain only its
 // immutable descriptive contract; defaults, generators and cache/computation
 // authority must never execute again while copying an already admitted value.
-func newNativeTransitionRelation(source *table) *nativeTransitionRelation {
+func newNativeTransitionRelation(source *table, declarations []*column) *nativeTransitionRelation {
 	relation := &nativeTransitionRelation{}
 	target := &table{schema: source.schema, Name: ".transition:" + uuid.NewString(), RuntimeIdentity: uuid.NewString(),
 		PersistencyMode: Memory, Ephemeral: true, mutationReadOnly: true, ShardMode: ShardModeFree, Collation: source.Collation, Charset: source.Charset}
 	relation.table = target
 	target.transitionRelation = relation
-	declarations := source.columnDeclarations()
 	relation.sourceSize = len(declarations)
 	for position, current := range declarations {
 		if current.IsTemp {
