@@ -13,10 +13,15 @@ import "github.com/launix-de/memcp/scm"
 
 func assertInitializedColumn(t *testing.T, tbl *table, column string, value scm.Scmer, rows int) {
 	t.Helper()
+	// Test cases name the visible declaration; native readers use storage keys.
+	storageColumn, exists := tbl.ResolveColumnName(column, false)
+	if !exists {
+		t.Fatalf("initialized column declaration does not exist: %s", column)
+	}
 	count := 0
 	for _, shard := range tbl.ActiveShards() {
 		release := shard.GetRead(nil, false)
-		read := shard.ColumnReaderTx(nil, column, false, ReadAuto).GetValue
+		read := shard.ColumnReaderTx(nil, storageColumn, false, ReadAuto).GetValue
 		shard.mu.RLock()
 		for i := uint32(0); i < shard.main_count+uint32(len(shard.deltaRows())); i++ {
 			if !shard.deletions.Get(uint(i)) {
