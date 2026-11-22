@@ -1683,11 +1683,17 @@ both names therefore bind to the same parameter. */
 				(if (empty_list? input_sources) nil (source_alias (car input_sources)))))
 			(define invariant_sources
 				(query_invariant_probe_sources annotated_nested_lookup input_sources))
+			/* A local relation owns its qualified coordinates even when it has no
+			local invariant binding. Mask the caller directory's sole count-output
+			coordinate before overlaying genuine local invariant bindings. */
+			(define scoped_caller_invariant_symbols (reduce input_sources (lambda (index source)
+				(set_assoc index (concat (source_alias source) "."
+					(aggregate_col_name aggregate_count_descriptor)) nil)) caller_invariant_symbols))
 			(define invariant_symbol_index
 				/* Caller-owned invariant outputs may occur only in this payload,
 				outside the recipe's nested dependency closure. Their actual binding
 				is emitted by the same query preparation owner before these recipes. */
-				(merge_assoc caller_invariant_symbols
+				(merge_assoc scoped_caller_invariant_symbols
 					(query_invariant_probe_symbol_index annotated_nested_lookup input_sources)))
 			(define rewrite_invariants (lambda (expr)
 				(rewrite_query_invariant_probe_symbols invariant_symbol_index

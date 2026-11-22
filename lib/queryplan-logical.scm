@@ -6169,7 +6169,12 @@ carrier selection remains a later, per-stage cost decision. */
 		(define kind (dep_subquery_kind marker))
 		(define probe (dep_subquery_probe marker))
 		(define subquery (dep_subquery_query marker))
-		(define outer_sources (dep_subquery_outer_sources marker))
+		/* Derived projection substitution can introduce a reference to an output
+		already produced in this caller block after the marker captured SQL names.
+		Use those actual source entries, never arbitrary stages from a catalog. */
+		(define outer_sources (merge_unique (list
+			(dep_subquery_outer_sources marker)
+			(filter (uctx_get ctx (quote local-sources) '()) source_is_stage_output?))))
 		(define parent (uctx_get ctx (quote btw2025-current-handle) nil))
 		(define parent_ancestors (uctx_get ctx (quote btw2025-ancestor-handles) '()))
 		(define current_ancestors (if (nil? parent) '() (cons parent parent_ancestors)))
@@ -6440,6 +6445,9 @@ outputs: this normalization covers joined and derived projection values. */
 (define btw2025_decorrelate_query_block (lambda (block ctx)
 	(begin
 		(define bundled (btw2025_bundle_scalar_markers_in_block block))
+		/* This completed local source cut owns the marker consumers below.
+		Nested query blocks install their own cut before resolving their markers. */
+		(define ctx (make_uctx ctx (list (list (quote local-sources) (qb_sources bundled)))))
 		(define source_result (btw2025_decorrelate_sources_with_stages_using (qb_sources bundled) ctx '()))
 		(define sources (nth source_result 0))
 		(define source_stages (nth source_result 1))
