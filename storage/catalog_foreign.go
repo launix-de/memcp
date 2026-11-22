@@ -102,6 +102,7 @@ func (snapshot *foreignMaintenanceSnapshot) validateLocked() {
 // The first profile admits declaration-only transactions: row mutations by
 // this owner are rejected by ordinary catalog admission before native effects.
 type publicCatalogViews struct {
+	names           *catalogNamespaceView
 	keys            map[*table][]uniqueKey
 	checkedWriters  map[*table]nativeMutationInputProfile
 	history         []catalogDeclarationAmendment
@@ -116,6 +117,7 @@ type publicCatalogViews struct {
 
 type publicCatalogChanges struct {
 	mu                           sync.Mutex
+	nameProjectionBytes          uint
 	db                           *database
 	owner                        *transactionState
 	leases                       map[*table]*tableWriteLease
@@ -162,6 +164,7 @@ func (changes *publicCatalogChanges) Close() error {
 			}
 		}
 	}
+	changes.closeNamespaceReservationsLocked()
 	changes.closeSourcesLocked()
 	changes.closeStatementTriggersLocked()
 	changes.constraintStates = nil
@@ -573,10 +576,12 @@ func (tx *TxContext) restorePublicDeclarations(keep int) {
 	defer changes.mu.Unlock()
 	defer changes.refreshMemoryLocked()
 	private := false
+	names := false
 	for _, entry := range tx.publicForeignAmendments() {
+		names = names || entry.tableRename != nil
 		private = private || entry.table != nil
 	}
-	if private || len(changes.sourceBaselines) != 0 || len(changes.statementTriggers) != 0 {
+	if private || names || len(changes.sourceBaselines) != 0 || len(changes.statementTriggers) != 0 {
 		access := changes.db.GetWrite(nil)
 		defer access.Release()
 		changes.db.schemalock.Lock()
@@ -588,6 +593,15 @@ func (tx *TxContext) restorePublicDeclarations(keep int) {
 		panic("invalid native public declaration boundary")
 	}
 	for i := len(history) - 1; i >= keep; i-- {
+		if rename := history[i].tableRename; rename != nil {
+			changes.amendmentBytes -= rename.bytes
+			if rename.previous == nil {
+				delete(views, rename.table)
+			} else {
+				views[rename.table] = rename.previous
+			}
+			continue
+		}
 		if before := history[i]; before.table != nil {
 			t := before.table
 			if (catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) {
@@ -705,6 +719,9 @@ func (tx *TxContext) restorePublicDeclarations(keep int) {
 		}
 	}
 	changes.publishViews(history[:keep], views)
+	if names {
+		changes.publishNamespaceReservationsLocked()
+	}
 	if keep == 0 {
 		tx.catalogAmendments.Store(nil)
 		changes.historyBytes = 0
@@ -795,6 +812,7 @@ type publicForeignEndpoint struct {
 	baselineWrapperBytes uint
 }
 type publicForeignPublication struct {
+	tableNames          map[*table]string
 	endpoints           []*publicForeignEndpoint
 	programs            []foreignKeyTrigger
 	changes             *publicCatalogChanges
@@ -833,7 +851,7 @@ func appendConstraintMetadata(t *table, base *tableShowColumnsSnapshot, addition
 			}
 		}
 	}
-	old := base.metadata.constraints.Slice()
+	old := base.nativeConstraints().Slice()
 	all := append(append([]scm.Scmer(nil), old[3].Slice()...), rows...)
 	constraints := append([]scm.Scmer(nil), old...)
 	constraints[3] = scm.NewSlice(all)
@@ -852,6 +870,7 @@ func appendConstraintMetadata(t *table, base *tableShowColumnsSnapshot, addition
 		}
 	}
 	metadata.constraints = scm.NewSlice(constraints)
+	metadata.storageConstraints = metadata.constraints
 	metadata.foreignByID = buildForeignMetadataDirectory(metadata.constraints)
 	declarations := append([]scm.Scmer(nil), base.metadata.declarations.Slice()...)
 	declarations[3] = metadata.constraints
@@ -879,11 +898,13 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 	var declarations, foreignDrops []catalogForeignDeclaration
 	var keyProjection map[*table][]uniqueKey
 	var propertyProjection map[*table][]*column
+	var tableNames map[*table]string
 	if len(nativeDeclarations) > 0 {
 		projection := db.projectNativeDeclarations(nativeDeclarations, (&TxContext{transactionState: changes.owner}).publicDeclarationViews(), catalogNativeCurrent, catalogForeignEndpointScope{owner: changes.owner})
 		declarations, foreignDrops, keyProjection, propertyProjection = projection.foreignAdds, projection.foreignDrops, projection.keys, projection.propertyColumns
+		tableNames = projection.tableNames
 	}
-	publication := &publicForeignPublication{changes: changes}
+	publication := &publicForeignPublication{changes: changes, tableNames: tableNames}
 	endpoints := make(map[*table]*publicForeignEndpoint)
 	additions := make(map[*table][]foreignKey)
 	for _, declaration := range foreignDrops {
@@ -1064,6 +1085,7 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 		}
 		bytes += uint(unsafe.Sizeof(*endpoint)) + uint(cap(endpoint.foreign))*uint(unsafe.Sizeof(foreignKey{})) + uint(cap(endpoint.keys))*uint(unsafe.Sizeof(uniqueKey{})) + uint(cap(endpoint.checks)+cap(endpoint.checkDrops))*uint(unsafe.Sizeof((*checkDeclaration)(nil))) + uint(cap(endpoint.foreignDrops))*uint(unsafe.Sizeof(catalogForeignDeclaration{})) + snapshotBytes
 	}
+	bytes += publication.projectNameMetadata()
 	publication.retainKeyBaselineContainers()
 	// Native decision preparation has drained construction. This retains the
 	// actual publication containers until resource Close, not a temporary map.
@@ -1073,6 +1095,10 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 }
 
 func (publication *publicForeignPublication) apply() {
+	for t, value := range publication.tableNames {
+		name := value
+		t.publishedName.Store(&name)
+	}
 	for _, endpoint := range publication.endpoints {
 		if endpoint.columns != nil {
 			endpoint.table.Columns = endpoint.columns

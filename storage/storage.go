@@ -1048,7 +1048,12 @@ func Init(en scm.Env) {
 				return scm.NewNil()
 			}
 			db.GetRead(tx)
-			t := db.GetTableForTx(scm.String(a[2]), a[3].Bool(), tx)
+			var t *table
+			if a[2].IsSlice() {
+				t = db.resolveNativeAddress(a[2], tx)
+			} else {
+				t = db.GetTableForTx(scm.String(a[2]), a[3].Bool(), tx)
+			}
 			if t == nil {
 				return scm.NewNil()
 			}
@@ -1058,7 +1063,7 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", Label: "database"},
 				{Kind: "bool", Label: "database_ignorecase"},
-				{Kind: "string", Label: "table"},
+				{Kind: "string|list", Label: "table"},
 				{Kind: "bool", Label: "table_ignorecase"},
 				{Kind: "any", Label: "transaction"},
 			},
@@ -1075,6 +1080,16 @@ func Init(en scm.Env) {
 		},
 	})
 
+	scm.Declare(&en, &scm.Declaration{
+		Name: "table_address",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if len(a) != 2 {
+				panic("table_address requires an actual table and transaction")
+			}
+			return TableFromScmer(a[0]).nativeAddress(scmerToTxContext(a[1]))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "bind an inert native generation address under actual visibility", Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}, {Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "list|nil"}},
+	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_estimate",
 
@@ -3887,21 +3902,30 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
-		Name: "renametable",
-
+		Name: "renamecolumn",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			RenameTable(scm.String(a[0]), scm.String(a[1]), scm.String(a[2]))
-			return scm.NewBool(true)
+			if len(a) != 7 {
+				panic("renamecolumn requires a table, old and new visible names, expected physical key, declaration and original transaction")
+			}
+			return scm.NewBool(scmerToTxContext(a[6]).renamePublicColumn(TableFromScmer(a[0]), scm.String(a[1]), scm.String(a[2]), scm.String(a[4]), decodeStoredColumnType(a[5]), scm.ToBool(a[3])))
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "renames a table", HasSideEffects: true,
-			Params: []*scm.TypeDescriptor{
-				{Kind: "string", Label: "schema", Description: "name of the database"},
-				{Kind: "string", Label: "oldname", Description: "current name of the table"},
-				{Kind: "string", Label: "newname", Description: "new name of the table"},
-			},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "rename an actual native column without changing its physical identity", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}, {Kind: "string", Label: "oldname"}, {Kind: "string", Label: "newname"}, {Kind: "bool", Label: "ignorecase"}, {Kind: "string", Label: "storage"}, {Kind: "list", Label: "expected"}, {Kind: "any", Label: "tx"}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "renametable",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if len(a) != 5 {
+				panic("renametable requires an actual table, new name, comparison policy, expected generation and original transaction")
+			}
+			return scm.NewBool(RenameTable(TableFromScmer(a[0]), scm.String(a[1]), scm.ToBool(a[2]), scm.String(a[3]), scmerToTxContext(a[4])))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "rename a native table namespace while retaining its physical generation", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}, {Kind: "string", Label: "newname"}, {Kind: "bool", Label: "ignorecase"}, {Kind: "string", Label: "identity"}, {Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+	})
+
 	scm.Declare(&en, &scm.Declaration{
 		Name: "table_id_state",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -3913,7 +3937,7 @@ func Init(en scm.Env) {
 			if !a[1].IsNil() && tx == nil {
 				panic("table_id_state requires a native transaction capability or nil")
 			}
-			if t.schema == nil || GetDatabase(t.schema.Name) != t.schema || t.schema.GetTableForTx(t.Name, false, tx) != t {
+			if t.schema == nil || GetDatabase(t.schema.Name) != t.schema || t.schema.tables.Get(t.Name) != t || !t.visibleIn(tx, t.schema.catalogView().version) {
 				panic("table allocator handle is outside its visible native generation")
 			}
 			return tableAllocatorObservation(t.currentTableAllocator())
@@ -4194,7 +4218,8 @@ func Init(en scm.Env) {
 					return t.statementTriggerDeclarations(tx)
 				}
 				if len(a) == 3 && a[1].IsString() && (a[1].String() == "constraints" || a[1].String() == "declarations") {
-					snapshot := t.declarationMetadataForTx(scmerToTxContext(a[2]))
+					tx := scmerToTxContext(a[2])
+					snapshot := t.declarationMetadataForTx(tx)
 					if a[1].String() == "constraints" {
 						return snapshot.metadata.constraints
 					}

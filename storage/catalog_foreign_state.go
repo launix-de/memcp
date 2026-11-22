@@ -70,7 +70,7 @@ func (tx *TxContext) stageConstraintState(child *table, names []string, all, ena
 		// constraints. A committed/unknown target rejects the WHOLE operation.
 		if all {
 			snapshot := child.declarationMetadataForTx(tx)
-			constraints := snapshot.metadata.constraints.Slice()
+			constraints := snapshot.nativeConstraints().Slice()
 			if (len(constraints) != 4 && len(constraints) != 6) || constraints[0].String() != "Unique" || constraints[2].String() != "ForeignKeys" || len(constraints) == 6 && constraints[4].String() != "Checks" {
 				panic("foreign state ALL requires a complete supported constraint directory")
 			}
@@ -197,7 +197,7 @@ func replaceConstraintStateMetadata(base *tableShowColumnsSnapshot, updates map[
 	result := &tableShowColumnsSnapshot{metadata: &tableShowColumnsSnapshotMetadata{}}
 	result.metadata.columnNames = base.metadata.columnNames
 	result.metadata.columnRows = base.metadata.columnRows
-	old := base.metadata.constraints.Slice()
+	old := base.nativeConstraints().Slice()
 	constraints := append([]scm.Scmer(nil), old...)
 	var ownedRows uint
 	var foreignRows []scm.Scmer
@@ -229,6 +229,7 @@ func replaceConstraintStateMetadata(base *tableShowColumnsSnapshot, updates map[
 		}
 	}
 	result.metadata.constraints = scm.NewSlice(constraints)
+	result.metadata.storageConstraints = result.metadata.constraints
 	result.metadata.foreignByID = buildForeignMetadataDirectory(result.metadata.constraints)
 	declarations := append([]scm.Scmer(nil), base.metadata.declarations.Slice()...)
 	declarations[3] = result.metadata.constraints

@@ -32,7 +32,7 @@ func (t *table) mayHaveUniqueDeclaration(name string, tx *TxContext) bool {
 	if snapshot == nil {
 		return true
 	}
-	for _, row := range snapshot.metadata.constraints.Slice()[1].Slice() {
+	for _, row := range snapshot.nativeConstraints().Slice()[1].Slice() {
 		id := foreignMetadataValue(row, "Id").String()
 		alias := foreignMetadataValue(row, "constraint_name").String()
 		if strings.EqualFold(id, name) || alias != "" && strings.EqualFold(alias, name) {
@@ -47,7 +47,7 @@ func (t *table) mayHaveForeignDeclaration(name string, tx *TxContext) bool {
 	if snapshot == nil {
 		return true
 	}
-	for _, row := range snapshot.metadata.constraints.Slice()[3].Slice() {
+	for _, row := range snapshot.nativeConstraints().Slice()[3].Slice() {
 		if foreignMetadataValue(row, "Role").String() == "referencing" &&
 			strings.EqualFold(foreignMetadataValue(row, "Id").String(), name) {
 			return true
@@ -85,6 +85,7 @@ type catalogDeclarationAmendment struct {
 	statementTrigger *catalogStatementTriggerAmendment
 	column           *catalogStoredColumnAmendment
 	tableDrop        *catalogTableDropAmendment
+	tableRename      *catalogTableRenameAmendment
 }
 
 func (tx *TxContext) catalogDeclarationPosition() int {
@@ -115,6 +116,9 @@ func (tx *TxContext) createCatalogKey(t *table, key uniqueKey) bool {
 		}
 		return scm.ToBool(value)
 	}
+	if tx.catalogDeclarationDataEntered(t) || tx.hasNameAmendments() || tx.hasTableDrops() {
+		return tx.stagePublicKey(t, "add", key)
+	}
 	return tx.amendCatalogDeclaration(t, func(current *table) bool { return declareUnpublishedKey(current, key) })
 }
 
@@ -132,7 +136,7 @@ func declareUnpublishedKey(current *table, key uniqueKey) bool {
 			panic("duplicate unique declaration column: " + name)
 		}
 		seen[name] = true
-		if _, exists := current.ResolveColumnName(name, false); !exists {
+		if column := catalogColumnInView(current, name, nil); column == nil {
 			panic("unknown unique declaration column: " + name)
 		}
 	}

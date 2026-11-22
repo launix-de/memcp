@@ -14,9 +14,13 @@ import (
 // One immutable publication determines visibility and case-folded lookup, so a
 // multi-table decision never becomes a sequence of individually visible names.
 type catalogSnapshot struct {
-	version uint64
-	folded  map[string]string
-	pending map[string]map[string]string
+	version      uint64
+	exact        map[string]*table
+	names        map[*table]string
+	pendingExact map[string]map[string]*table
+	pendingNames map[string]map[*table]string
+	folded       map[string]string
+	pending      map[string]map[string]string
 }
 type catalogVersion struct{ atomic.Uint64 }
 
@@ -92,7 +96,7 @@ func (t *table) NativeIdentity(tx *TxContext) scm.Scmer {
 		panic("native relation identity belongs to a replaced database")
 	}
 	view := db.catalogView()
-	current := db.tables.Get(t.clusterPublishedName())
+	current := db.tables.Get(t.Name)
 	if current == nil || !current.visibleIn(tx, view.version) || current.RuntimeIdentity != t.RuntimeIdentity {
 		panic("native relation identity is not visible in its current generation")
 	}
@@ -107,34 +111,65 @@ func (t *table) NativeIdentity(tx *TxContext) scm.Scmer {
 func (db *database) GetTableForTx(name string, ignoreCase bool, tx *TxContext) *table {
 	db.ensureLoaded()
 	view := db.catalogView()
-	if !ignoreCase {
-		if table := db.tables.Get(name); table != nil && table.visibleIn(tx, view.version) {
-			return table
-		}
-	} else {
-		key := scm.CaseFoldKey(name)
-		canonical, exists := view.folded[key]
-		if tx != nil && tx.State == TxActive {
-			if own, present := view.pending[tx.pendingCatalogKey()][key]; present {
-				if exists && canonical != own {
-					panic("ambiguous table name: " + name)
-				}
-				canonical, exists = own, true
-			}
-		}
-		if !exists {
-			return nil
-		}
-		if canonical == "" {
-			panic("ambiguous table name: " + name)
-		}
-		if table := db.tables.Get(canonical); table != nil && table.visibleIn(tx, view.version) {
-			return table
+	if len(name) > 0 && name[0] == '.' {
+		if t := db.tables.Get(name); t != nil && t.isHiddenFromShowTables() && t.visibleIn(tx, view.version) {
+			return t
 		}
 	}
-
+	own := tx.namespaceView(db)
+	selected := (*table)(nil)
+	accept := func(candidate *table) {
+		if candidate == nil || !candidate.visibleIn(tx, view.version) {
+			return
+		}
+		visible := candidate.visibleNameAt(tx, view)
+		if visible != name && !(ignoreCase && scm.CaseFoldKey(visible) == scm.CaseFoldKey(name)) {
+			return
+		}
+		if selected != nil && selected != candidate {
+			panic("ambiguous table name: " + name)
+		}
+		selected = candidate
+	}
+	if !ignoreCase {
+		if own != nil {
+			accept(own.exact[name])
+		}
+		if tx != nil && tx.State == TxActive {
+			accept(view.pendingExact[tx.pendingCatalogKey()][name])
+		}
+		accept(view.exact[name])
+	} else {
+		key := scm.CaseFoldKey(name)
+		if own != nil {
+			if candidate, found := own.folded[key]; found {
+				if candidate == nil {
+					panic("ambiguous table name: " + name)
+				}
+				accept(candidate)
+			}
+		}
+		if tx != nil && tx.State == TxActive {
+			if keyName, found := view.pending[tx.pendingCatalogKey()][key]; found {
+				if keyName == "" {
+					panic("ambiguous table name: " + name)
+				}
+				accept(db.tables.Get(keyName))
+			}
+		}
+		if keyName, found := view.folded[key]; found {
+			if keyName == "" {
+				panic("ambiguous table name: " + name)
+			}
+			accept(db.tables.Get(keyName))
+		}
+	}
+	if selected != nil {
+		return selected
+	}
 	return db.getLegacyTempTable(name, tx, view.version)
 }
+
 func (tx *TxContext) hasCatalogIntents() bool {
 	return tx != nil && (tx.catalogIntents.Load() != nil || tx.publicDeclarationPosition() != 0)
 }
@@ -151,7 +186,7 @@ func (db *database) showTableMetadata(tx *TxContext) scm.Scmer {
 		stats := t.statistics()
 		memory := showBuildMemory(t.residentMemory()).Slice()
 		rows = append(rows, scm.NewSlice(append(memory, []scm.Scmer{
-			scm.NewString("name"), scm.NewString(t.Name),
+			scm.NewString("name"), scm.NewString(t.visibleNameAt(tx, view)),
 			scm.NewString("engine"), scm.NewString(engine),
 			scm.NewString("row_count"), scm.NewInt(stats.rowCount),
 			scm.NewString("collation"), scm.NewString(t.Collation),

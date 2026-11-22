@@ -204,6 +204,7 @@ func (changes *publicCatalogChanges) refreshMemoryLocked() {
 	// their existing first-table payload owner.
 	dbBytes := uint(unsafe.Sizeof(*changes)) + uint(unsafe.Sizeof(*changes.memory))
 	dbBytes += uint(unsafe.Sizeof(transactionResource{})) + 128
+	dbBytes += changes.nameProjectionBytes
 	dbBytes += changes.historyBytes + changes.sourceHistoryBytes + changes.statementTriggerHistoryBytes + changes.tableDropBytes
 	// Pure table retirement has no snapshot-bearing anchor endpoint. Its
 	// native declaration-lease headers still belong to this database resource.
@@ -251,6 +252,9 @@ func (changes *publicCatalogChanges) refreshMemoryLocked() {
 	directories += allocatedMap(changes.blockedWritersHighWater, views != nil && views.blockedWriters != nil)
 	directories += allocatedMap(changes.tableDropsHighWater, views != nil && views.dropped != nil)
 	if views != nil {
+		if views.names != nil {
+			directories += uint(unsafe.Sizeof(*views.names)) + 3*publicCatalogMapFootprint(len(views.names.names))
+		}
 		directories += uint(unsafe.Sizeof(*views)) + uint(unsafe.Sizeof(views.columnWriters))
 	}
 	directories += allocatedMap(changes.constraintStatesHighWater, changes.constraintStates != nil)

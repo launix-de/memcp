@@ -25,10 +25,14 @@ type catalogColumnAppend struct {
 	Properties     columnDeclarationProperties  `json:"properties,omitempty"`
 	Comment        string                       `json:"comment,omitempty"`
 	Initialization *catalogColumnInitialization `json:"initialization,omitempty"`
+	NameBinding    *columnNameBinding           `json:"name_binding,omitempty"`
 }
 
 func (d catalogColumnAppend) column() *column {
 	c := &column{Name: d.Name, Typ: d.Type.Type, Typdimensions: append([]int(nil), d.Type.Dimensions...), AllowNull: d.Type.Nullable, Collation: d.Type.Collation, EnumValues: append([]string(nil), d.EnumValues...), DeclarationProperties: maps.Clone(d.Properties), Comment: d.Comment}
+	if d.NameBinding != nil {
+		c.visibleName = d.NameBinding.Visible
+	}
 	if d.Initialization != nil {
 		c.Default, c.DefaultName = d.Initialization.Default, d.Initialization.DefaultName
 		c.InitialValue, c.InitialValues = d.Initialization.Value, maps.Clone(d.Initialization.Extents)
@@ -58,6 +62,9 @@ func (d *catalogColumnAppend) containers() uint {
 	bytes := uint(unsafe.Sizeof(*d)) + uint(cap(d.Type.Dimensions))*uint(unsafe.Sizeof(int(0))) + uint(cap(d.EnumValues))*uint(unsafe.Sizeof(""))
 	if d.Properties != nil {
 		bytes += 64 + 64*uint(len(d.Properties))
+	}
+	if d.NameBinding != nil {
+		bytes += uint(unsafe.Sizeof(*d.NameBinding)) + uint(len(d.NameBinding.Visible)+len(d.NameBinding.Storage))
 	}
 	return bytes
 }
@@ -171,11 +178,7 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 	if _, err := uuid.Parse(t.RuntimeIdentity); err != nil {
 		panic("nullable append requires native generation identity")
 	}
-	for name := range t.DroppedColumns {
-		if strings.EqualFold(name, c.Name) {
-			panic("nullable append cannot reuse a retired column name")
-		}
-	}
+
 	observed := t.showColumnsSnapshot.Load()
 	base := changes.views.Load().tables[t]
 	if base == nil {
@@ -183,10 +186,11 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 	}
 	columns := base.metadata.columnNames.declarations
 	for _, previous := range columns {
-		if strings.EqualFold(previous.Name, c.Name) {
+		if strings.EqualFold(previous.displayName(), c.displayName()) {
 			return false
 		}
 	}
+	t.allocateColumnStorage(c, columns)
 	if c.DefaultName != "" {
 		if changes.db.hasDeclarationNameLocked(c.DefaultName, nil) || tx.pendingUniqueDeclarationName(c.DefaultName) {
 			panic("declaration name already exists: " + c.DefaultName)
@@ -200,6 +204,9 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 		}
 	}
 	d := &catalogColumnAppend{Table: t.Name, Identity: t.RuntimeIdentity, Ordinal: len(columns), Name: c.Name, Type: storedColumnTypeOf(c), EnumValues: append([]string(nil), c.EnumValues...), Properties: maps.Clone(c.DeclarationProperties), Comment: c.Comment, Initialization: initialization}
+	if c.displayName() != c.Name {
+		d.NameBinding = &columnNameBinding{1, c.Name, c.displayName()}
+	}
 	columns = append(append([]*column(nil), columns...), c)
 	view, bytes := replaceStoredColumnMetadata(t, base, columns)
 	amendment := &catalogStoredColumnAmendment{appendDeclaration: d, table: t, columns: columns, previous: changes.views.Load().tables[t], columnBytes: storedColumnBytes(c) + columnAppendStrings(c.Name, c.Typ, c.Collation, c.Comment, c.EnumValues, c.DeclarationProperties)}
@@ -365,6 +372,9 @@ func validateColumnAppendShape(appends []catalogColumnAppend) error {
 			if err := validateColumnInitialization(d); err != nil {
 				return err
 			}
+		}
+		if d.NameBinding != nil && (d.NameBinding.Version != 1 || d.NameBinding.Storage != d.Name || d.NameBinding.Visible == "" || !utf8.ValidString(d.NameBinding.Visible)) {
+			return fmt.Errorf("invalid appended column name binding")
 		}
 		seen[key], last[d.Table], identities[d.Table] = true, d.Ordinal, d.Identity
 	}

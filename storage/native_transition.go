@@ -59,7 +59,7 @@ func newNativeTransitionRelation(source *table, declarations []*column) *nativeT
 		if isRuntimeComputedColumn(current) {
 			panic("native statement transitions require materialized stored columns")
 		}
-		target.Columns = append(target.Columns, &column{Name: current.Name, Typ: current.Typ,
+		target.Columns = append(target.Columns, &column{Name: current.Name, visibleName: current.visibleName, Typ: current.Typ,
 			Typdimensions: append([]int(nil), current.Typdimensions...), EnumValues: append([]string(nil), current.EnumValues...),
 			AllowNull: current.AllowNull, Collation: current.Collation, DeclarationProperties: maps.Clone(current.DeclarationProperties)})
 		relation.columns = append(relation.columns, current.Name)

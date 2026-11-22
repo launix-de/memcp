@@ -121,11 +121,16 @@ func validateCheckColumns(t *table, definition *checkDeclaration) {
 func checkCompilerContext(t *table, definition *checkDeclaration) scm.Scmer {
 	validateCheckColumns(t, definition)
 	columns := make([]scm.Scmer, len(definition.Columns))
+	names := t.columnNamesSnapshot.Load()
 	for i, name := range definition.Columns {
-		row := t.ShowColumn(name, false, nil)
+		row := names.declarations[names.exact[name].ordinal].show("", 0, 0, nil)
 		var fields []scm.Scmer
 		for _, field := range []string{"Field", "Type", "RawType", "Dimensions", "Null", "Collation", "Computed", "EnumValues", "Properties"} {
-			fields = append(fields, scm.NewString(field), foreignMetadataValue(row, field))
+			value := foreignMetadataValue(row, field)
+			if field == "Field" {
+				value = scm.NewString(name)
+			}
+			fields = append(fields, scm.NewString(field), value)
 		}
 		columns[i] = scm.NewSlice(fields)
 	}

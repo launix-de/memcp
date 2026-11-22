@@ -47,9 +47,9 @@ func sameUniqueKey(a, b uniqueKey) bool {
 	return a.Id == b.Id && a.ConstraintName == b.ConstraintName && a.NullsNotDistinct == b.NullsNotDistinct && slices.Equal(a.Cols, b.Cols)
 }
 
-func validateCatalogKey(db *database, declaration catalogKeyDeclaration, views map[*table]*tableShowColumnsSnapshot) *table {
+func validateCatalogKey(db *database, declaration catalogKeyDeclaration, views map[*table]*tableShowColumnsSnapshot, scope catalogForeignEndpointScope) *table {
 	t := db.tables.Get(declaration.Table)
-	if t == nil || t.RuntimeIdentity != declaration.Identity || !t.committedAt(db.catalogView().version) {
+	if t == nil || t.RuntimeIdentity != declaration.Identity || (!t.committedAt(db.catalogView().version) && !scope.owns(t)) {
 		panic("unique declaration endpoint generation was replaced")
 	}
 	if _, err := uuid.Parse(declaration.Identity); err != nil {
@@ -87,7 +87,7 @@ func (tx *TxContext) stagePublicKey(t *table, operation string, key uniqueKey) b
 	}
 	finish := tx.beginCatalogConstruction(catalogValidationConstruction, t)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
-	if tx.replicationActive || tx.replicationWriting || tx.relationData != nil || tx.coordinator != nil || tx.clusterNumber.Load() != 0 || tx.remoteObject != nil || tx.remoteInvocation || tx.catalogIntents.Load() != nil || tx.hasTableDrops() || t.Ephemeral || t.ScopedSchema || t.PersistencyMode == Cache {
+	if tx.replicationActive || tx.replicationWriting || tx.relationData != nil || tx.coordinator != nil || tx.clusterNumber.Load() != 0 || tx.remoteObject != nil || tx.remoteInvocation || (tx.catalogIntents.Load() != nil || tx.hasTableDrops()) && !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) || t.Ephemeral || t.ScopedSchema || t.PersistencyMode == Cache {
 		panic("public unique declaration requires a local committed native table")
 	}
 	return tx.stagePublicCatalogDeclaration(t.schema, catalogPublicKeyKind, func(changes *publicCatalogChanges) bool { return changes.stageKey(tx, t, operation, key) })
@@ -139,7 +139,7 @@ func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation
 		defer db.schemalock.RUnlock()
 		changes.validateConstraintStateEndpointsLocked(tx)
 		requireTableMaintenance(db.Name, t.Name, maintenanceAlter)
-		if t.schema != db || db.tables.Get(t.Name) != t || !t.committedAt(db.catalogView().version) {
+		if t.schema != db || db.tables.Get(t.Name) != t || (!t.committedAt(db.catalogView().version) && !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t)) {
 			panic("unique declaration endpoint generation was replaced")
 		}
 		current := uniqueKeysInView(t, tx.publicUniqueKeys())
@@ -152,7 +152,7 @@ func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation
 			}
 			key.Cols = append([]string(nil), key.Cols...)
 			declaration = catalogKeyDeclaration{t.Name, t.RuntimeIdentity, key}
-			validateCatalogKey(db, declaration, tx.publicDeclarationViews())
+			validateCatalogKey(db, declaration, tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState})
 			if keyNameConflict(db, t, key, tx.publicUniqueKeys(), tx.publicForeignAmendments()) {
 				panic("declaration name already exists: " + key.Id)
 			}
@@ -170,7 +170,7 @@ func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation
 				return
 			}
 			declaration = catalogKeyDeclaration{t.Name, t.RuntimeIdentity, key}
-			validateCatalogKey(db, declaration, tx.publicDeclarationViews())
+			validateCatalogKey(db, declaration, tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState})
 			keys = append([]uniqueKey(nil), current...)
 			keys = slices.Delete(keys, found, found+1)
 			if dependency := foreignKeyRequiresUnique(t, keys, tx.publicForeignAmendments()); dependency != "" {
@@ -314,10 +314,11 @@ func replaceUniqueMetadata(base *tableShowColumnsSnapshot, keys []uniqueKey, pub
 		metadata.columnNames, metadata.columnRows = base.metadata.columnNames, base.metadata.columnRows
 	}
 	result.metadata = &metadata
-	constraints := append([]scm.Scmer(nil), base.metadata.constraints.Slice()...)
+	constraints := append([]scm.Scmer(nil), base.nativeConstraints().Slice()...)
 	rows := uniqueConstraintMetadata(keys)
 	constraints[1] = scm.NewSlice(rows)
 	metadata.constraints = scm.NewSlice(constraints)
+	metadata.storageConstraints = metadata.constraints
 	metadata.foreignByID = base.metadata.foreignByID
 	declarations := append([]scm.Scmer(nil), base.metadata.declarations.Slice()...)
 	keyTypes := make(map[string]string)

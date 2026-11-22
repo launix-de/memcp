@@ -57,13 +57,18 @@ func (tx *TxContext) tableDropLifecycle(db *database) *catalogTableDropLifecycle
 }
 
 type catalogTableDropLease struct {
-	table     *table
-	ddlOnce   sync.Once
-	lifecycle *catalogTableDropLifecycle
+	table       *table
+	ddlOnce     sync.Once
+	lifecycle   *catalogTableDropLifecycle
+	borrowedDDL bool
 }
 
 func (lease *catalogTableDropLease) releaseDDL() {
-	lease.ddlOnce.Do(func() { lease.table.ddlMu.Unlock() })
+	lease.ddlOnce.Do(func() {
+		if !lease.borrowedDDL {
+			lease.table.ddlMu.Unlock()
+		}
+	})
 }
 func (lease *catalogTableDropLease) Close() {
 	lease.releaseDDL()
@@ -127,7 +132,7 @@ func (tx *TxContext) dropCatalogTable(db *database, name string, ifexists bool) 
 		panic("nullable append cannot share a table retirement decision")
 	}
 	requireTableMaintenance(db.Name, name, maintenanceDrop)
-	if t.Ephemeral || t.ScopedSchema || tx.ownsPendingTable(t) || tx.catalogIntents.Load() != nil ||
+	if t.Ephemeral || t.ScopedSchema || tx.ownsPendingTable(t) ||
 		tx.coordinator != nil || sharedClusterDatabase(db.Name) || activeReplication(db) != nil {
 		panic("transactional table removal requires a local committed public table")
 	}
@@ -137,10 +142,11 @@ func (tx *TxContext) dropCatalogTable(db *database, name string, ifexists bool) 
 	// Match rebuild's existing lifecycle -> DDL order. Never wait for a builder
 	// while retaining catalog publication/schema locks or another DDL owner.
 	lifecycle := tx.tableDropLifecycle(db)
-	if !t.ddlMu.TryLock() {
+	borrowedDDL := tx.retainedColumnDDL(t)
+	if !borrowedDDL && !t.ddlMu.TryLock() {
 		panic("table removal conflicts with active native maintenance; retry transaction")
 	}
-	lease := &catalogTableDropLease{table: t, lifecycle: lifecycle}
+	lease := &catalogTableDropLease{table: t, lifecycle: lifecycle, borrowedDDL: borrowedDDL}
 	accepted := false
 	defer func() {
 		if !accepted {
@@ -193,11 +199,11 @@ func (changes *publicCatalogChanges) stageTableDrop(tx *TxContext, t *table, lea
 	}
 	// Endpoint-changing FK programs need a joint declaration operation. This
 	// profile never silently removes a surviving table's enforcement rights.
-	if len(t.Foreign) != 0 {
-		panic("transactional table removal requires no foreign key endpoints")
+	if tx.tableHasSurvivingForeign(t) {
+		panic("transactional table removal requires retired foreign key endpoints")
 	}
 	for _, entry := range tx.publicForeignAmendments() {
-		if entry.publicKey != nil || entry.foreignDrop != nil || entry.foreign != nil || entry.check != nil || entry.checkDrop != nil || entry.constraintState != nil || entry.statementTrigger != nil {
+		if (tx.catalogIntents.Load() == nil && !tx.hasNameAmendments()) && (entry.publicKey != nil || entry.foreignDrop != nil || entry.foreign != nil || entry.check != nil || entry.checkDrop != nil || entry.constraintState != nil || entry.statementTrigger != nil) {
 			panic("table removal cannot join enforcing declaration amendments")
 		}
 	}
@@ -247,7 +253,7 @@ func (changes *publicCatalogChanges) validateTableDropsLocked() error {
 		if drop := entry.tableDrop; drop != nil {
 			t := drop.table
 			if changes.db.tables.Get(drop.declaration.Name) != t || t.RuntimeIdentity != drop.declaration.Identity ||
-				!t.committedAt(changes.db.catalogView().version) || len(t.Foreign) != 0 || drop.lease == nil || changes.leases[t] == nil {
+				!t.committedAt(changes.db.catalogView().version) || (&TxContext{transactionState: changes.owner}).tableHasSurvivingForeign(t) || drop.lease == nil || changes.leases[t] == nil {
 				return fmt.Errorf("table removal endpoint declaration changed")
 			}
 		}

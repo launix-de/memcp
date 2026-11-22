@@ -97,7 +97,9 @@ func TestDropRefusesInternalObjectsBeforeMutation(t *testing.T) {
 	if db.tables.Get("user") == nil {
 		t.Fatal("protected table was removed")
 	}
-	requirePanic(t, func() { RenameTable("system", "user", "renamed_user") })
+	requirePanic(t, func() {
+		RenameTable(GetDatabase("system").GetTable("user"), "renamed_user", false, GetDatabase("system").GetTable("user").RuntimeIdentity, nil)
+	})
 	if db.tables.Get("user") == nil || db.tables.Get("renamed_user") != nil {
 		t.Fatal("protected table was renamed")
 	}
@@ -123,7 +125,7 @@ func TestPublishedFoldedTableNames(t *testing.T) {
 	if _, exists := before["mixedname"]; exists {
 		t.Fatal("namespace publication mutated a retained snapshot")
 	}
-	RenameTable(db.Name, "MixedName", "Renamed")
+	RenameTable(db.GetTable("MixedName"), "Renamed", false, db.GetTable("MixedName").RuntimeIdentity, nil)
 	if db.GetTable("MIXEDNAME", true) != nil {
 		t.Fatal("rename retained an obsolete name")
 	}
@@ -219,13 +221,13 @@ func TestIdentifierDirectoriesKeepDottedIDistinct(t *testing.T) {
 
 	unicodeTable := &table{Name: "Identifierİ", schema: unicodeDB}
 	unicodeDB.tables.Set(unicodeTable.Name, unicodeTable)
-	unicodeDB.publishTableNamesLocked()
+	unicodeDB.publishTableNamesLocked(unicodeDB.catalogView().pendingNames)
 	if unicodeDB.GetTable("identifieri", true) != nil {
 		t.Fatal("table lookup merged dotted I with ASCII i")
 	}
 	asciiTable := &table{Name: "Identifieri", schema: unicodeDB}
 	unicodeDB.tables.Set(asciiTable.Name, asciiTable)
-	unicodeDB.publishTableNamesLocked()
+	unicodeDB.publishTableNamesLocked(unicodeDB.catalogView().pendingNames)
 	if unicodeDB.GetTable("IDENTIFIERİ", true) != unicodeTable || unicodeDB.GetTable("IDENTIFIERI", true) != asciiTable {
 		t.Fatal("distinct table fold classes collided")
 	}

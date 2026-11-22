@@ -16,13 +16,14 @@ const (
 	nativeDeclarationRowInput nativeMutationInputProfile = iota + 1
 	nativeStatementTriggerRowInput
 	nativeOwnedCatalogRowInput
+	nativeColumnBindingRowInput
 )
 
 func (views *publicCatalogViews) mutationEventAllowed(t *table, event nativeMutationEvent) bool {
 	switch views.checkedWriters[t] {
 	case nativeDeclarationRowInput:
 		return event == nativeMutationInsert || event == nativeMutationUpdate
-	case nativeStatementTriggerRowInput, nativeOwnedCatalogRowInput:
+	case nativeStatementTriggerRowInput, nativeOwnedCatalogRowInput, nativeColumnBindingRowInput:
 		return event == nativeMutationInsert || event == nativeMutationUpdate || event == nativeMutationDelete
 	default:
 		return false
@@ -205,8 +206,21 @@ func checkedCatalogWriters(history []catalogDeclarationAmendment, statements map
 				}
 			}
 		}
-		if c := entry.column; c != nil {
-			result[c.table] = nativeDeclarationRowInput
+		if r := entry.tableRename; r != nil {
+			if result[r.table] != nativeDeclarationRowInput {
+				result[r.table] = nativeColumnBindingRowInput
+			}
+		}
+		if c := entry.column; c != nil && !c.nameMetadataOnly {
+			if c.rename != nil {
+				if _, exists := result[c.table]; !exists || result[c.table] != nativeDeclarationRowInput {
+					result[c.table] = nativeColumnBindingRowInput
+				}
+			} else if c.declaration != nil || c.appendDeclaration != nil || c.propertyChange != nil {
+				result[c.table] = nativeDeclarationRowInput
+			} else if _, exists := result[c.table]; !exists {
+				result[c.table] = nativeDeclarationRowInput
+			}
 		}
 		if c := entry.column; c != nil && c.appendDeclaration != nil {
 			if c.appendDeclaration.Initialization != nil {

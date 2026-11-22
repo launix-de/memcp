@@ -220,7 +220,7 @@ func (changes *publicCatalogChanges) stageForeignDrop(tx *TxContext, child *tabl
 }
 
 func foreignDropMetadataContains(t *table, snapshot *tableShowColumnsSnapshot, fk foreignKey) bool {
-	for _, row := range snapshot.metadata.constraints.Slice()[3].Slice() {
+	for _, row := range snapshot.nativeConstraints().Slice()[3].Slice() {
 		if foreignMetadataValue(row, "Id").String() == fk.Id && foreignMetadataValue(row, "OtherTable").String() == foreignDropOther(t, fk) {
 			return true
 		}
@@ -244,7 +244,7 @@ func removeForeignDropMetadata(t *table, base *tableShowColumnsSnapshot, fk fore
 		metadata.columnNames, metadata.columnRows = base.metadata.columnNames, base.metadata.columnRows
 	}
 	result.metadata = &metadata
-	constraints := append([]scm.Scmer(nil), base.metadata.constraints.Slice()...)
+	constraints := append([]scm.Scmer(nil), base.nativeConstraints().Slice()...)
 	rows := make([]scm.Scmer, 0, len(constraints[3].Slice()))
 	for _, row := range constraints[3].Slice() {
 		if foreignMetadataValue(row, "Id").String() != fk.Id || foreignMetadataValue(row, "OtherTable").String() != foreignDropOther(t, fk) {
@@ -253,6 +253,7 @@ func removeForeignDropMetadata(t *table, base *tableShowColumnsSnapshot, fk fore
 	}
 	constraints[3] = scm.NewSlice(rows)
 	metadata.constraints = scm.NewSlice(constraints)
+	metadata.storageConstraints = metadata.constraints
 	metadata.foreignByID = buildForeignMetadataDirectory(metadata.constraints)
 	declarations := append([]scm.Scmer(nil), base.metadata.declarations.Slice()...)
 	declarations[3] = metadata.constraints

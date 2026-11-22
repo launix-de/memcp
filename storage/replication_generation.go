@@ -1084,7 +1084,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 		}
 		db.catalogVersion = replacement.catalogVersion
 		db.incarnation.Store(replacement.incarnation.Load())
-		db.publishTableNamesLocked()
+		db.publishTableNamesLocked(db.catalogView().pendingNames)
 	}
 	r.schemaShards(db, source, false)
 	return nil

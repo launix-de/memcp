@@ -180,7 +180,7 @@ func requireStoredColumnDependencies(t *table, tx *TxContext, name string) {
 		}
 		return false
 	}
-	constraints := snapshot.metadata.constraints.Slice()
+	constraints := snapshot.nativeConstraints().Slice()
 	for i := 0; i < len(constraints); i += 2 {
 		kind, field := constraints[i].String(), ""
 		switch kind {

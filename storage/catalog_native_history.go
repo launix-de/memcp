@@ -14,10 +14,12 @@ import "github.com/launix-de/memcp/scm"
 // Keys and their FK consumers share one ordered inert declaration program.
 // A recipe is not a second catalog, row payload or independently accepted Tx.
 type catalogNativeDeclaration struct {
-	Operation string                       `json:"operation"`
-	Key       *catalogKeyDeclaration       `json:"key,omitempty"`
-	Foreign   *catalogForeignDeclaration   `json:"foreign,omitempty"`
-	Property  *catalogColumnPropertyChange `json:"column_property,omitempty"`
+	Operation   string                       `json:"operation"`
+	Key         *catalogKeyDeclaration       `json:"key,omitempty"`
+	Foreign     *catalogForeignDeclaration   `json:"foreign,omitempty"`
+	Property    *catalogColumnPropertyChange `json:"column_property,omitempty"`
+	Rename      *catalogColumnRename         `json:"column_rename,omitempty"`
+	TableRename *catalogTableRename          `json:"table_rename,omitempty"`
 }
 
 func (tx *TxContext) publicNativeDeclarations() []catalogNativeDeclaration {
@@ -41,6 +43,12 @@ func (tx *TxContext) publicNativeDeclarations() []catalogNativeDeclaration {
 		}
 	}
 	for _, entry := range history {
+		if a := entry.tableRename; a != nil && !tx.ownsTableDrop(a.table) {
+			result = append(result, catalogNativeDeclaration{Operation: "table_rename", TableRename: a.declaration})
+		}
+		if a := entry.column; a != nil && a.rename != nil && !tx.ownsTableDrop(a.table) {
+			result = append(result, catalogNativeDeclaration{Operation: "column_rename", Rename: a.rename})
+		}
 		if properties && entry.column != nil && entry.column.propertyChange != nil && !tx.ownsTableDrop(entry.column.table) {
 			operation := "column_property_claim"
 			if entry.column.propertyRemoval != nil {
@@ -110,10 +118,11 @@ type catalogNativeProjection struct {
 	foreignAdds     []catalogForeignDeclaration
 	foreignDrops    []catalogForeignDeclaration
 	propertyColumns map[*table][]*column
+	tableNames      map[*table]string
 }
 
 func newCatalogNativeProjection(db *database) *catalogNativeProjection {
-	p := &catalogNativeProjection{propertyColumns: make(map[*table][]*column), keys: make(map[*table][]uniqueKey), foreign: make(map[catalogForeignIdentity][]catalogForeignDeclaration), changedForeign: make(map[catalogForeignIdentity]bool)}
+	p := &catalogNativeProjection{tableNames: make(map[*table]string), propertyColumns: make(map[*table][]*column), keys: make(map[*table][]uniqueKey), foreign: make(map[catalogForeignIdentity][]catalogForeignDeclaration), changedForeign: make(map[catalogForeignIdentity]bool)}
 	p.foreign = nativeForeignDirectory(effectiveForeignDeclarations(db, nil))
 	return p
 }
@@ -138,7 +147,25 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 	p := newCatalogNativeProjection(db)
 	added := make(map[catalogForeignIdentity]int)
 	for index, action := range actions {
+		if action.TableRename != nil && action.Operation != "table_rename" {
+			panic("table rename payload on a different native action")
+		}
+		if action.Rename != nil && action.Operation != "column_rename" {
+			panic("column rename payload on a different native action")
+		}
 		switch action.Operation {
+		case "table_rename":
+			if domain != catalogNativeCurrent || action.TableRename == nil || action.Rename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
+				panic("invalid native table rename action")
+			}
+			db.projectTableRename(action.TableRename, p, scope)
+		case "column_rename":
+			if domain != catalogNativeCurrent || action.Rename == nil || action.TableRename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
+				panic("invalid native column rename action")
+			}
+			t := db.tables.Get(action.Rename.Table)
+			_, columns := db.projectColumnRename(action.Rename, p.propertyColumns[t])
+			p.propertyColumns[t] = columns
 		case "foreign_add", "foreign_drop":
 			if action.Foreign == nil || action.Key != nil || action.Property != nil {
 				panic("invalid native foreign action")
@@ -189,7 +216,7 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 				panic("invalid native unique action")
 			}
 			d := *action.Key
-			t := validateCatalogKey(db, d, views)
+			t := validateCatalogKey(db, d, views, scope)
 			keys := uniqueKeysInView(t, p.keys)
 			if action.Operation == "key_add" {
 				if nativeKeyNameConflict(db, t, d.Key, p.keys, p.foreign) {
@@ -284,6 +311,14 @@ func (db *database) recoverNativeDeclarations(actions []catalogNativeDeclaration
 	db.projectNativeDeclarations(actions, nil, domain, scope)
 	for _, action := range actions {
 		switch action.Operation {
+		case "table_rename":
+			t := db.tables.Get(action.TableRename.Storage)
+			name := action.TableRename.After
+			t.publishedName.Store(&name)
+		case "column_rename":
+			t, columns := db.projectColumnRename(action.Rename, nil)
+			t.Columns = columns
+			db.initializeRecoveryColumnMetadata(t)
 		case "foreign_add":
 			db.recoverPublicForeignDeclarations([]catalogForeignDeclaration{*action.Foreign}, scope)
 		case "foreign_drop":
@@ -293,10 +328,10 @@ func (db *database) recoverNativeDeclarations(actions []catalogNativeDeclaration
 			t.Columns = columns
 			db.initializeRecoveryColumnMetadata(t)
 		case "key_add":
-			t := validateCatalogKey(db, *action.Key, nil)
+			t := validateCatalogKey(db, *action.Key, nil, scope)
 			t.Unique = append(append([]uniqueKey(nil), t.Unique...), action.Key.Key)
 		case "key_drop":
-			t := validateCatalogKey(db, *action.Key, nil)
+			t := validateCatalogKey(db, *action.Key, nil, scope)
 			t.Unique = slices.DeleteFunc(t.Unique, func(key uniqueKey) bool { return sameUniqueKey(key, action.Key.Key) })
 		}
 	}
@@ -331,8 +366,41 @@ func validateNativeDeclarationShape(actions []catalogNativeDeclaration) error {
 		value       scm.Scmer
 	}
 	propertyCurrent := make(map[[3]string]propertyState)
+	renameCurrent := make(map[[2]string]*catalogColumnRename)
+	tableCurrent := make(map[string]*catalogTableRename)
 	for _, action := range actions {
+		if action.TableRename != nil && action.Operation != "table_rename" {
+			return fmt.Errorf("table rename payload on a different native action")
+		}
+		if action.Rename != nil && action.Operation != "column_rename" {
+			return fmt.Errorf("column rename payload on a different native action")
+		}
 		switch action.Operation {
+		case "table_rename":
+			if action.TableRename == nil || action.Rename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
+				return fmt.Errorf("invalid native table rename action")
+			}
+			d := action.TableRename
+			if err := validateTableRenameShape(d); err != nil {
+				return err
+			}
+			if before := tableCurrent[d.Identity]; before != nil && (before.Storage != d.Storage || before.After != d.Before) {
+				return fmt.Errorf("native table rename lost its ordered predecessor")
+			}
+			tableCurrent[d.Identity] = d
+		case "column_rename":
+			if action.Rename == nil || action.TableRename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
+				return fmt.Errorf("invalid native column rename action")
+			}
+			if err := validateColumnRenameShape(action.Rename); err != nil {
+				return err
+			}
+			d := action.Rename
+			key := [2]string{d.Identity, d.Storage}
+			if before := renameCurrent[key]; before != nil && (before.Table != d.Table || before.After != d.Before || !before.Expected.equal(d.Expected)) {
+				return fmt.Errorf("native column rename lost its ordered predecessor")
+			}
+			renameCurrent[key] = d
 		case "column_property_claim", "column_property_drop":
 			if action.Property == nil || action.Key != nil || action.Foreign != nil {
 				return fmt.Errorf("invalid native column property action")

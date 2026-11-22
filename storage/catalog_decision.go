@@ -132,10 +132,8 @@ func (scope *transactionResources) catalogReadOnlyLocked() bool {
 func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarationKind) {
 	public := kind == catalogDefaultKind || kind == catalogSourceKind || kind == catalogTableDropKind || kind == catalogForeignDropKind || kind == catalogForeignReplacementKind || kind == catalogPublicKeyKind || kind == catalogColumnKind || kind == catalogStatementTriggerKind || kind == catalogOwnedForeignKind
 	privateCreate := kind == catalogCreateKind
-	if kind == catalogTableDropKind && tx.catalogIntents.Load() != nil {
-		panic("table removal cannot share an owned creation decision")
-	}
-	if tx.hasTableDrops() && (!public || kind == catalogStatementTriggerKind) {
+
+	if tx.hasTableDrops() && (!public && !privateCreate || kind == catalogStatementTriggerKind) {
 		panic("table removal phase admits only default or source declarations")
 	}
 	// Construction admission owns effect policy. Merely preparing a private
@@ -512,6 +510,9 @@ func (tx *TxContext) prepareCatalogDecision() error {
 	if len(record.Tables) != 0 && record.hasPublicDeltas() {
 		record.Format = 22
 	}
+	if record.hasNameDeclarationActions() || record.hasOwnedKeyDeclarationActions() || len(record.Tables) > 0 && len(record.TableDrops) > 0 {
+		record.Format = 23
+	}
 	if len(record.ColumnAppends) != 0 || len(record.NativeDeclarations) != 0 || len(record.ColumnDeclarations) != 0 || len(record.ColumnPropertyRemovals) != 0 || len(record.Checks) != 0 || len(record.ColumnDefaults) != 0 || len(record.CheckDrops) != 0 {
 		commit.publicPublication = db.preparePublicConstraintPublication(record.Checks, record.ColumnDefaults, record.ColumnDeclarations, record.ColumnAppends, record.ColumnPropertyRemovals, record.CheckDrops, record.NativeDeclarations, record.Version, tx.publicConstraintPrograms(), tx.publicCatalogChanges())
 	}
@@ -584,7 +585,7 @@ func (tx *TxContext) publishCatalogDecision() error {
 	}
 	tx.publishTableDropCutsLocked(commit.record.Version)
 	db.catalogVersion = commit.record.Version
-	db.publishTableNamesLocked()
+	db.publishTableNamesLocked(db.catalogView().pendingNames)
 	tx.detachTableDropsLocked(commit.record.Version)
 	if len(commit.record.Sources) != 0 {
 		tx.publicCatalogChanges().finishSourcePublicationLocked()
@@ -742,7 +743,7 @@ func (tx *TxContext) discardCatalogIntents(keep int) {
 	} else {
 		tx.catalogIntents.Store(&remaining)
 	}
-	db.publishTableNamesLocked()
+	db.publishTableNamesLocked(db.catalogView().pendingNames)
 	db.schemalock.Unlock()
 	if failures := cleanupUnpublishedCatalogGenerations(retired); len(failures) != 0 {
 		panic(fmt.Errorf("native catalog rollback cleanup: %v", failures))

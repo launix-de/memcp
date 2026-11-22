@@ -1064,7 +1064,7 @@ func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
 // ensureLoaded loads schema.json into the database struct exactly once.
 func (db *database) ensureLoaded() {
 	db.loadOnce.Do(func() {
-		defer db.publishTableNamesLocked()
+		defer db.publishTableNamesLocked(db.catalogView().pendingNames)
 		db.initializeTransactionLog()
 		if db.srState != COLD {
 			return
@@ -1206,40 +1206,62 @@ func (db *database) initializeRecoveryColumnMetadata(t *table) {
 
 // publishTableNamesLocked owns schema membership (or an unpublished database).
 // Names are immutable scalar copies, not pointers to mutable table descriptors.
-func (db *database) publishTableNamesLocked() {
+func (db *database) publishTableNamesLocked(aliases map[string]map[*table]string) {
 	names := make(map[string]string)
+	exact := make(map[string]*table)
+	visible := make(map[*table]string)
 	pending := make(map[string]map[string]string)
-	for _, table := range db.tables.GetAll() {
-		if table.isHiddenFromShowTables() || table.droppedAt(db.catalogVersion) {
+	pendingExact := make(map[string]map[string]*table)
+	for _, t := range db.tables.GetAll() {
+		if t.isHiddenFromShowTables() || t.droppedAt(db.catalogVersion) {
 			continue
 		}
-		target := names
-		if !table.committedAt(db.catalogVersion) {
-			target = pending[table.CatalogDecisionID]
+		name := t.rawVisibleName()
+		target, exactTarget := names, exact
+		if !t.committedAt(db.catalogVersion) {
+			if renamed, found := aliases[t.CatalogDecisionID][t]; found {
+				name = renamed
+			}
+			target = pending[t.CatalogDecisionID]
+			exactTarget = pendingExact[t.CatalogDecisionID]
 			if target == nil {
 				target = make(map[string]string)
-				pending[table.CatalogDecisionID] = target
+				exactTarget = make(map[string]*table)
+				pending[t.CatalogDecisionID] = target
+				pendingExact[t.CatalogDecisionID] = exactTarget
 			}
+		} else {
+			visible[t] = name
 		}
-		key := scm.CaseFoldKey(table.Name)
+		exactTarget[name] = t
+		key := scm.CaseFoldKey(name)
 		if _, exists := target[key]; exists {
 			target[key] = ""
 		} else {
-			target[key] = table.Name
+			target[key] = t.Name
 		}
 	}
-	db.catalog.Store(&catalogSnapshot{version: db.catalogVersion, folded: names, pending: pending})
+	for owner, byTable := range aliases {
+		target, exactTarget := pending[owner], pendingExact[owner]
+		if target == nil {
+			target = make(map[string]string)
+			exactTarget = make(map[string]*table)
+			pending[owner] = target
+			pendingExact[owner] = exactTarget
+		}
+		for t, name := range byTable {
+			key := scm.CaseFoldKey(name)
+			if before, found := target[key]; found && before != t.Name {
+				target[key] = ""
+			} else {
+				target[key] = t.Name
+			}
+			exactTarget[name] = t
+		}
+	}
+	db.catalog.Store(&catalogSnapshot{version: db.catalogVersion, folded: names, pending: pending, exact: exact, names: visible, pendingExact: pendingExact, pendingNames: aliases})
 }
 
-// invalidatePersistedPlannerCodeAfterLoad drops executable code derived from a
-// physical query plan. Planner-owned CACHE tables contain no durable rows, and
-// the current createtable guard supplies their authoritative oninit callback on
-// first use. Retaining an older callback across a physical operator ABI change
-// would execute stale generated code before that guard can refresh it.
-// upgradePersistedTableCalls runs only while loading unpublished executable
-// definitions. It changes old native table/key-index call ABIs, never SQL syntax or
-// row values. Quoted data stays opaque; the live builtin accepts only the new
-// interface. New Proc identities discard any obsolete compiled/optimizer state.
 func upgradePersistedTableCalls(value scm.Scmer) scm.Scmer {
 	value = upgradePersistedBuiltinCalls(value, "table", func(items []scm.Scmer) (scm.Scmer, bool) {
 		switch len(items) {
@@ -1595,7 +1617,7 @@ func (db *database) ShowTables(transaction ...*TxContext) scm.Scmer {
 		if !t.visibleIn(tx, view.version) || t.isHiddenFromShowTables() {
 			continue
 		}
-		result = append(result, scm.NewString(t.Name))
+		result = append(result, scm.NewString(t.visibleNameAt(tx, view)))
 	}
 	return scm.NewSlice(result)
 }
@@ -2792,7 +2814,7 @@ func (db *database) createTableLocked(name string, pm PersistencyMode, ifnotexis
 		panic("Table " + name + " already exists")
 	}
 	if !t.isHiddenFromShowTables() {
-		db.publishTableNamesLocked()
+		db.publishTableNamesLocked(db.catalogView().pendingNames)
 	}
 	return t, true
 }
@@ -2916,7 +2938,7 @@ func dropTableIdentity(schema, name string, ifexists bool, expected *table) {
 		r.retireTablePayload(t)
 	}
 	if !t.isHiddenFromShowTables() {
-		db.publishTableNamesLocked()
+		db.publishTableNamesLocked(db.catalogView().pendingNames)
 	}
 	if name == ".blobs" {
 		db.blobRefState().table.Store(nil)
@@ -2956,7 +2978,14 @@ func dropTableIdentity(schema, name string, ifexists bool, expected *table) {
 	t.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 }
 
-func RenameTable(schema, oldname, newname string) {
+func RenameTable(t *table, newname string, ignoreCase bool, expectedIdentity string, tx *TxContext) bool {
+	if t == nil {
+		panic("table rename requires an actual native table")
+	}
+	if tx != nil {
+		return tx.renameCatalogTable(t, newname, ignoreCase, expectedIdentity)
+	}
+	schema, oldname := t.schema.Name, t.clusterPublishedName()
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("Database " + schema + " does not exist")
@@ -2975,8 +3004,7 @@ func RenameTable(schema, oldname, newname string) {
 		}
 	}
 	db.schemalock.Lock()
-	t := db.tables.Get(oldname)
-	if t == nil {
+	if db.tables.Get(t.Name) != t || t.RuntimeIdentity != expectedIdentity || !t.committedAt(db.catalogView().version) {
 		db.schemalock.Unlock()
 		panic("Table " + schema + "." + oldname + " does not exist")
 	}
@@ -2999,16 +3027,14 @@ func RenameTable(schema, oldname, newname string) {
 		releaseAdmission = t.admitNativeMaintenance()
 	}()
 	defer releaseAdmission()
-	if db.tables.Get(newname) != nil {
+	if db.namespaceOccupant(nil, newname, ignoreCase, t) != nil {
 		db.schemalock.Unlock()
 		panic("Table " + schema + "." + newname + " already exists")
 	}
-	db.tables.Remove(oldname)
-	t.Name = newname
 	t.publishedName.Store(&newname)
-	db.tables.Set(newname, t)
-	db.publishTableNamesLocked()
+	db.publishTableNamesLocked(db.catalogView().pendingNames)
 	db.saveLockedAndUnlock(t.schemaSaveMode())
+	return true
 }
 
 // keytableCleanup retires a planner-owned in-memory cache on the manager

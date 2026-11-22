@@ -72,10 +72,7 @@ func init() {
 }
 
 func (t *table) clusterPublishedName() string {
-	if name := t.publishedName.Load(); name != nil {
-		return *name
-	}
-	return t.Name
+	return t.visibleNameAt(nil, t.schema.catalogView())
 }
 
 func (t *table) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
@@ -84,6 +81,9 @@ func (t *table) Serialize(ctx *scm.SerializationContext) (scm.Scmer, error) {
 	// transport. The generic capture marker resolves it once on wire import;
 	// native schema GetRead still guards lookup, never each mapped row.
 	value := []scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.clusterPublishedName()), scm.NewBool(false), scm.NewNil()}
+	if t.RuntimeIdentity != "" && !t.ScopedSchema && t.schema.tables.Get(t.Name) == t {
+		value[3] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{scm.NewString(nativeTableAddressVersion), scm.NewString(t.schema.incarnationID()), scm.NewString(t.RuntimeIdentity), scm.NewString(t.Name)})})
+	}
 	if !t.committedAt(t.schema.catalogView().version) {
 		creator := t.creator.Load()
 		if ctx != nil {

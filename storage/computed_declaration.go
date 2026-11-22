@@ -26,7 +26,15 @@ func (c *column) UnmarshalJSON(data []byte) (err error) {
 		}
 	}()
 	type declaration column
-	if err := json.Unmarshal(data, (*declaration)(c)); err != nil {
+	var encoded struct {
+		*declaration
+		Name json.RawMessage
+	}
+	encoded.declaration = (*declaration)(c)
+	if err := json.Unmarshal(data, &encoded); err != nil {
+		return err
+	}
+	if err := c.restoreName(encoded.Name); err != nil {
 		return err
 	}
 	if c.DefaultDeferred && (!c.Default.IsNil() || c.DefaultExpression == "") {

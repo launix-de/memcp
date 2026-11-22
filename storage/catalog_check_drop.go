@@ -22,7 +22,7 @@ type catalogCheckDropAmendment struct {
 }
 
 func checkMetadataContains(snapshot *tableShowColumnsSnapshot, name string) bool {
-	constraints := snapshot.metadata.constraints.Slice()
+	constraints := snapshot.nativeConstraints().Slice()
 	if len(constraints) == 6 {
 		for _, row := range constraints[5].Slice() {
 			if strings.EqualFold(foreignMetadataValue(row, "Id").String(), name) {
@@ -128,7 +128,7 @@ func (changes *publicCatalogChanges) stageCheckDrop(tx *TxContext, t *table, nam
 	}
 	amendment.retainedBytes = uint(unsafe.Sizeof(*amendment)) + bytes
 	amendment.retiredBytes = definition.payloadFootprint
-	for _, row := range observed.metadata.constraints.Slice()[5].Slice() {
+	for _, row := range observed.nativeConstraints().Slice()[5].Slice() {
 		if foreignMetadataValue(row, "Id").String() == definition.Id {
 			amendment.retiredBytes += uint(cap(row.Slice())+cap(foreignMetadataValue(row, "Columns").Slice())) * uint(unsafe.Sizeof(scm.Scmer{}))
 		}
@@ -157,7 +157,7 @@ func removeCheckMetadata(base *tableShowColumnsSnapshot, name string, published 
 		metadata.columnNames, metadata.columnRows = base.metadata.columnNames, base.metadata.columnRows
 	}
 	result.metadata = &metadata
-	old := base.metadata.constraints.Slice()
+	old := base.nativeConstraints().Slice()
 	constraints := append([]scm.Scmer(nil), old...)
 	rows := make([]scm.Scmer, 0, len(old[5].Slice()))
 	for _, row := range old[5].Slice() {
@@ -167,6 +167,7 @@ func removeCheckMetadata(base *tableShowColumnsSnapshot, name string, published 
 	}
 	constraints[5] = scm.NewSlice(rows)
 	metadata.constraints = scm.NewSlice(constraints)
+	metadata.storageConstraints = metadata.constraints
 	metadata.foreignByID = buildForeignMetadataDirectory(metadata.constraints)
 	declarations := append([]scm.Scmer(nil), base.metadata.declarations.Slice()...)
 	declarations[3] = metadata.constraints

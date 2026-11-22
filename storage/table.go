@@ -60,13 +60,7 @@ func TableFromScmer(s scm.Scmer) *table {
 
 // String implements serialization for table pointers: (table "schema" false "name" false nil)
 func (t *table) String() string {
-	var name string
-	if published := t.publishedName.Load(); published != nil {
-		name = *published
-	} else {
-		name = t.Name // unpublished constructors own the fallback
-	}
-	return "(table " + strconv.Quote(t.schema.Name) + " false " + strconv.Quote(name) + " false nil)"
+	return "(table " + strconv.Quote(t.schema.Name) + " false " + t.nativeAddressCode() + " false nil)"
 }
 
 type dataset []scm.Scmer
@@ -108,7 +102,10 @@ func (estimate *atomicPlannerRowEstimate) UnmarshalJSON(data []byte) error {
 
 type column struct {
 	Name string
-	Typ  string
+	// Name is the immutable physical key used by rows, WAL, indexes and files.
+	// A logical rename changes only this immutable declaration projection.
+	visibleName string
+	Typ         string
 	// EnumValues is immutable declaration metadata; existing JSON schemas omit it.
 	EnumValues         []string                  `json:",omitempty"`
 	Typdimensions      []int                     // type dimensions for DECIMAL(10,3) and VARCHAR(5)
@@ -1205,6 +1202,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 	// can restore its previous topology without losing the original extents.
 	type persistedColumn struct {
 		*column
+		Name              any
 		PartitioningScore int
 		InitialValue      *scm.Scmer                     `json:"initial_value,omitempty"`
 		InitialValues     map[string]columnInitialExtent `json:"initial_values,omitempty"`
@@ -1212,6 +1210,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 	columns := make([]persistedColumn, len(t.Columns))
 	for i, c := range t.Columns {
 		columns[i].column = c
+		columns[i].Name = c.persistedName()
 		columns[i].PartitioningScore = c.PartitioningScore + int(c.partitioningTraffic.Load())
 		if len(c.InitialValues) == 0 {
 			continue
@@ -1232,7 +1231,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 	}
 	type persistedTable struct {
 		ShardForwards      map[string]string `json:"shard_forwards,omitempty"`
-		Name               string
+		Name               any
 		Columns            []persistedColumn
 		DroppedColumns     map[string]bool `json:"dropped_columns"`
 		Unique             []uniqueKey
@@ -1281,7 +1280,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(&persistedTable{
 		ShardForwards:      topology.forwards,
-		Name:               t.Name,
+		Name:               t.persistedName(),
 		Columns:            columns,
 		DroppedColumns:     t.DroppedColumns,
 		Unique:             t.Unique,
@@ -2033,7 +2032,7 @@ func (t *table) metadataMemory() uint {
 	size += uint(cap(t.Columns)) * uint(unsafe.Sizeof((*column)(nil)))
 	var declarationPayloads map[scm.Scmer]struct{}
 	for _, c := range t.Columns {
-		size += uint(unsafe.Sizeof(*c)) + uint(len(c.Name)+len(c.Typ)+len(c.Collation)+len(c.Comment)+len(c.DefaultExpression)+len(c.DefaultName))
+		size += uint(unsafe.Sizeof(*c)) + uint(len(c.Name)+len(c.visibleName)+len(c.Typ)+len(c.Collation)+len(c.Comment)+len(c.DefaultExpression)+len(c.DefaultName))
 		size += uint(cap(c.Typdimensions)) * uint(unsafe.Sizeof(int(0)))
 		size += uint(cap(c.EnumValues)) * uint(unsafe.Sizeof(""))
 		for _, label := range c.EnumValues {
@@ -2243,6 +2242,7 @@ type tableShowColumnsSnapshotMetadata struct {
 	columnNames               *tableColumnNamesSnapshot
 	statistics                *tableStatisticsSnapshot
 	foreignByID               *tableForeignMetadata
+	storageConstraints        scm.Scmer // native physical dependency vectors
 	constraints               scm.Scmer // immutable declarations, replaced only by schema-owned DDL
 	columnRows                scm.Scmer // same full SHOW payload, retained during rendered-value invalidation
 	declarations              scm.Scmer // one schema-owned column/constraint publication, independent of statistics
@@ -2321,6 +2321,7 @@ type tableColumnNamesSnapshot struct {
 	initialByShard          map[uuid.UUID]*nativeColumnInitialInput
 	initialBytes            uint
 	exact                   map[string]tableColumnName
+	visible                 map[string]tableColumnName
 	folded                  map[string]tableColumnName
 }
 
@@ -2349,7 +2350,7 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 	plannerStatistics := make([]*columnPlannerStatistics, len(columns))
 	filterSchema := storedColumnFilterSchema(t.Collation, columns)
 	for i, c := range columns {
-		names[i] = c.Name
+		names[i] = c.displayName()
 		keyType := ""
 		for _, uk := range t.Unique {
 			for _, col := range uk.Cols {
@@ -2407,6 +2408,7 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 		snapshot.metadata.catalogPrevious = current.metadata.catalogPrevious
 		snapshot.metadata.statistics = current.metadata.statistics
 		snapshot.metadata.constraints = current.metadata.constraints
+		snapshot.metadata.storageConstraints = current.metadata.storageConstraints
 		snapshot.metadata.foreignByID = current.metadata.foreignByID
 		snapshot.metadata.declarations = current.metadata.declarations
 	} else {
@@ -2487,6 +2489,7 @@ func (t *table) buildColumnNamesSnapshot(columns []*column) *tableColumnNamesSna
 		t.publishedName.CompareAndSwap(nil, &name)
 	}
 	exact := make(map[string]tableColumnName, len(columns))
+	renamed := false
 	folded := make(map[string]tableColumnName, len(columns))
 	hasDeclaredComputations := false
 	var initialByShard map[uuid.UUID]*nativeColumnInitialInput
@@ -2523,12 +2526,21 @@ func (t *table) buildColumnNamesSnapshot(columns []*column) *tableColumnNamesSna
 			entry.computation = scm.NewSlice([]scm.Scmer{showStringSlice(c.ComputorInputCols), c.Computor})
 		}
 		exact[c.Name] = entry
-		foldedName := scm.CaseFoldKey(c.Name)
+		renamed = renamed || c.displayName() != c.Name
+		foldedName := scm.CaseFoldKey(c.displayName())
 		if _, exists := folded[foldedName]; !exists {
 			folded[foldedName] = entry
 		}
 	}
-	return &tableColumnNamesSnapshot{declarations: append([]*column(nil), columns...), exact: exact, folded: folded, hasDeclaredComputations: hasDeclaredComputations, initialByShard: initialByShard, initialBytes: initialBytes}
+	visible := exact
+	if renamed {
+		visible = make(map[string]tableColumnName, len(columns))
+		for _, c := range columns {
+			visible[c.displayName()] = exact[c.Name]
+		}
+		initialBytes += 64 + uint(len(visible))*uint(unsafe.Sizeof(tableColumnName{}))
+	}
+	return &tableColumnNamesSnapshot{declarations: append([]*column(nil), columns...), exact: exact, visible: visible, folded: folded, hasDeclaredComputations: hasDeclaredComputations, initialByShard: initialByShard, initialBytes: initialBytes}
 }
 
 func (t *table) publishColumnNamesSnapshot() *tableColumnNamesSnapshot {
@@ -2673,6 +2685,7 @@ func (t *table) refreshShowColumnsStatistics() scm.Scmer {
 		snapshot := t.buildShowColumnsSnapshot(t.CountEstimate(), names)
 		if current != nil {
 			snapshot.metadata.constraints = current.metadata.constraints
+			snapshot.metadata.storageConstraints = current.metadata.storageConstraints
 			snapshot.metadata.foreignByID = current.metadata.foreignByID
 			snapshot.metadata.declarations = current.metadata.declarations
 		}
@@ -2728,7 +2741,7 @@ func (t *table) ShowColumn(name string, ignoreCase bool, tx *TxContext) scm.Scme
 		return scm.NewNil()
 	}
 	names := snapshot.metadata.columnNames
-	resolved, ok := names.exact[name]
+	resolved, ok := names.visible[name]
 	if !ok && ignoreCase {
 		resolved, ok = names.folded[scm.CaseFoldKey(name)]
 	}
@@ -2771,7 +2784,7 @@ func (t *table) ResolveColumnName(name string, ignoreCase bool) (string, bool) {
 	if snapshot == nil {
 		snapshot = t.publishColumnNamesSnapshot()
 	}
-	if resolved, ok := snapshot.exact[name]; ok {
+	if resolved, ok := snapshot.visible[name]; ok {
 		return resolved.name, true
 	}
 	if ignoreCase {
@@ -2914,8 +2927,8 @@ func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint,
 		maxEstimate = plannerStats.MaxEstimate
 		averageValueBytes = scm.NewFloat(plannerStats.AverageValueBytes)
 	}
-	return scm.NewSlice([]scm.Scmer{
-		scm.NewString("Field"), scm.NewString(c.Name),
+	fields := []scm.Scmer{
+		scm.NewString("Field"), scm.NewString(c.displayName()),
 		scm.NewString("Type"), scm.NewString(typ),
 		scm.NewString("Collation"), scm.NewString(c.Collation),
 		scm.NewString("RawType"), scm.NewString(c.Typ),
@@ -2947,7 +2960,11 @@ func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint,
 		scm.NewString("MaxEstimate"), maxEstimate,
 		scm.NewString("AverageValueBytes"), averageValueBytes,
 		scm.NewString("EnumValues"), showStringSlice(c.EnumValues),
-	})
+	}
+	if c.displayName() != c.Name {
+		fields = append(fields, scm.NewString("StorageField"), scm.NewString(c.Name))
+	}
+	return scm.NewSlice(fields)
 }
 
 // distinctEstimateFor returns the DistinctEstimate for this column.
@@ -3577,13 +3594,17 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		}
 	}
 	for _, c := range t.Columns {
-		if c.Name == name || (ignoreCase && strings.EqualFold(c.Name, name)) {
+		if c.displayName() == name || (ignoreCase && strings.EqualFold(c.displayName(), name)) {
 			return nil, false // column already exists
 		}
 	}
 
 	definition := decodeColumnDefinition(name, typ, typdimensions, extrainfo)
 	c, uniqueKeys, fillExisting := definition.column, definition.unique, definition.fillExisting
+	t.allocateColumnStorage(c, t.Columns)
+	for i := range uniqueKeys {
+		uniqueKeys[i].Cols = []string{c.Name}
+	}
 	nullsNotDistinct := definition.nullsNotDistinct
 	if len(uniqueKeys) != 0 {
 		validateUniqueConstraintNames(append(append([]uniqueKey(nil), t.Unique...), uniqueKeys...))
@@ -3633,7 +3654,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		}
 		// mutate shard column map under shard lock to avoid races with readers
 		s.mu.Lock()
-		s.columns[name] = new(StorageSparse)
+		s.columns[c.Name] = new(StorageSparse)
 		s.mu.Unlock()
 	}
 	for _, s := range t.PShards {
@@ -3642,7 +3663,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		}
 		// mutate shard column map under shard lock to avoid races with readers
 		s.mu.Lock()
-		s.columns[name] = new(StorageSparse)
+		s.columns[c.Name] = new(StorageSparse)
 		s.mu.Unlock()
 	}
 	return cp, true
@@ -3734,7 +3755,7 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 	// find and pin the current definition atomically with cache eviction.
 	if queryTx == nil {
 		for _, c := range t.columnDeclarations() {
-			if c.Name == name {
+			if c.displayName() == name {
 				return false
 			}
 		}
@@ -3789,7 +3810,7 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 		}
 	}()
 	for _, c := range t.Columns {
-		if c.Name == name {
+		if c.displayName() == name {
 			if c.IsTemp {
 				if !queryTx.retainQueryColumn(t, c) {
 					metadataLocked = false
@@ -3853,7 +3874,7 @@ func (t *table) CreateColumn(name string, typ string, typdimensions []int, extra
 // traffic remain advisory snapshots, never moved authority or synchronization.
 func cloneStoredColumnDeclaration(current *column) *column {
 	replacement := &column{
-		Name: current.Name, Typ: current.Typ, Typdimensions: append([]int(nil), current.Typdimensions...),
+		Name: current.Name, visibleName: current.visibleName, Typ: current.Typ, Typdimensions: append([]int(nil), current.Typdimensions...),
 		EnumValues:        append([]string(nil), current.EnumValues...),
 		PartitioningScore: current.PartitioningScore,
 		AutoIncrement:     current.AutoIncrement, Default: current.Default,
@@ -3864,6 +3885,7 @@ func cloneStoredColumnDeclaration(current *column) *column {
 		Collation: current.Collation, Comment: current.Comment,
 		DeclarationProperties: maps.Clone(current.DeclarationProperties),
 		sanitizer:             current.sanitizer,
+		recoverPersisted:      current.recoverPersisted,
 	}
 	replacement.partitioningTraffic.Store(current.partitioningTraffic.Load())
 	replacement.partitioningRangeTraffic.Store(current.partitioningRangeTraffic.Load())

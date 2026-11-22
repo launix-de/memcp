@@ -10,6 +10,7 @@ package storage
 type catalogForeignEndpointScope struct {
 	owner     *transactionState
 	recovered map[*table]struct{}
+	retired   map[*table]struct{}
 }
 
 func (scope catalogForeignEndpointScope) owns(t *table) bool {
@@ -23,21 +24,38 @@ func (scope catalogForeignEndpointScope) owns(t *table) bool {
 	return accepted
 }
 
+func (scope catalogForeignEndpointScope) retires(t *table) bool {
+	if scope.owner != nil && (&TxContext{transactionState: scope.owner}).ownsTableDrop(t) {
+		return true
+	}
+	_, accepted := scope.retired[t]
+	return accepted
+}
+
 // Caller has decoded and accepted the complete decision, registered these exact
 // generations, and retained the predecessor catalog version until publication.
 func recoveredForeignEndpointScope(db *database, record *catalogDecisionRecord) catalogForeignEndpointScope {
-	if record.Format != 22 {
+	if record.Format != 22 && record.Format != 23 {
 		return catalogForeignEndpointScope{}
 	}
 	if record.Database != db.Name || record.Incarnation != db.incarnationID() || record.Version != db.catalogVersion+1 {
 		panic("owned foreign recovery lost its accepted catalog predecessor")
 	}
-	scope := catalogForeignEndpointScope{recovered: make(map[*table]struct{}, len(record.Tables))}
+	scope := catalogForeignEndpointScope{retired: make(map[*table]struct{}), recovered: make(map[*table]struct{}, len(record.Tables))}
 	for _, t := range record.Tables {
 		if db.tables.Get(t.Name) != t || t.CreatorTxID != record.Transaction || t.CatalogDecisionID != record.Decision || t.CreatorIncarnation != record.Incarnation || t.CreatorNamespace != record.Namespace || t.CatalogVersion.Load() != record.Version {
 			panic("owned foreign recovery lost its accepted generation")
 		}
 		scope.recovered[t] = struct{}{}
+	}
+	if record.Format == 23 {
+		for _, d := range record.TableDrops {
+			t := db.tables.Get(d.Name)
+			if t == nil || t.RuntimeIdentity != d.Identity || !t.committedAt(db.catalogView().version) {
+				panic("retired namespace recovery lost its accepted predecessor")
+			}
+			scope.retired[t] = struct{}{}
+		}
 	}
 	return scope
 }

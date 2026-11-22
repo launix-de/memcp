@@ -484,7 +484,7 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 		tx.appendCatalogIntent(newTable)
 	}
 	if !newTable.isHiddenFromShowTables() {
-		db.publishTableNamesLocked()
+		db.publishTableNamesLocked(db.catalogView().pendingNames)
 	}
 	if staged || scopedChange != nil {
 		createTableTriggerMu.Unlock()
