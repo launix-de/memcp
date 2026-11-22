@@ -225,22 +225,35 @@ func (db *database) namespaceOccupant(tx *TxContext, name string, ignoreCase boo
 	matches := func(candidate string) bool {
 		return candidate == name || ignoreCase && scm.CaseFoldKey(candidate) == scm.CaseFoldKey(name)
 	}
+	var selected *table
+	selectFolded := func(t *table) {
+		if selected != nil && selected != t {
+			panic("ambiguous table name: " + name)
+		}
+		selected = t
+	}
 	for _, t := range db.tables.GetAll() {
 		if t == excluded || t.droppedAt(db.catalogView().version) || tx.ownsTableDrop(t) {
 			continue
 		}
 		if matches(t.visibleNameAt(tx, db.catalogView())) {
-			return t
+			if !ignoreCase {
+				return t
+			}
+			selectFolded(t)
 		}
 	}
 	for _, byTable := range db.catalogView().pendingNames {
 		for t, alias := range byTable {
 			if t != excluded && !tx.ownsTableDrop(t) && matches(alias) {
-				return t
+				if !ignoreCase {
+					return t
+				}
+				selectFolded(t)
 			}
 		}
 	}
-	return nil
+	return selected
 }
 
 func (tx *TxContext) hasNameAmendments() bool {
