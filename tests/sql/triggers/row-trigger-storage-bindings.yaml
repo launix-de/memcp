@@ -104,7 +104,74 @@ test_cases:
         before_value: 25
         after_value: 29
       rows: 3
+- name: Prepare a persisted row-language program without executing its callback
+  steps:
+  - sql: DROP TABLE IF EXISTS trigger_binding_isolation
+  - sql: DROP TABLE IF EXISTS trigger_binding_isolation_audit
+  - sql: CREATE TABLE trigger_binding_isolation(id INT PRIMARY KEY,a INT,b INT) ENGINE=sloppy
+  - sql: CREATE TABLE trigger_binding_isolation_audit(id INT,observed_a INT) ENGINE=sloppy
+  - sql: CREATE TRIGGER trigger_binding_isolation_ai AFTER INSERT ON trigger_binding_isolation FOR EACH ROW BEGIN
+      INSERT INTO trigger_binding_isolation_audit(id,observed_a) VALUES(NEW.id,NEW.a); END
+- name: Reload the existing language-owned trigger before private namespace changes
+  action: restart
+- name: A private name reuse and its data fully rewind before the next public writer
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.trigger_binding_isolation.a',N'old_a',N'COLUMN'
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.trigger_binding_isolation.b',N'a',N'COLUMN'
+    - connection: owner
+      sql: INSERT trigger_binding_isolation(id,old_a,a) VALUES(1,10,20)
+    - connection: owner
+      sql: SELECT id,old_a,a FROM trigger_binding_isolation ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_a: 10
+          a: 20
+    - connection: owner
+      sql: SELECT id,observed_a FROM trigger_binding_isolation_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          observed_a: 20
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,a,b FROM trigger_binding_isolation ORDER BY id
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: SELECT id,observed_a FROM trigger_binding_isolation_audit ORDER BY id
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: INSERT trigger_binding_isolation(id,a,b) VALUES(2,30,40)
+    - connection: observer
+      sql: SELECT id,a,b FROM trigger_binding_isolation ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          a: 30
+          b: 40
+    - connection: observer
+      sql: SELECT id,observed_a FROM trigger_binding_isolation_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          observed_a: 30
 cleanup:
 - sql: DROP TABLE IF EXISTS row_binding_after
 - sql: DROP TABLE IF EXISTS row_binding_before
 - sql: DROP TABLE IF EXISTS row_binding_audit
+- sql: DROP TABLE IF EXISTS trigger_binding_isolation
+- sql: DROP TABLE IF EXISTS trigger_binding_isolation_audit
