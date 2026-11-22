@@ -26,7 +26,13 @@ setup:
     (begin
       (eval (parse_sql "memcp-tests" "CREATE USER check_tds_member IDENTIFIED BY 'pw'" nil))
       (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO check_tds_member" nil)))
+- sql: DROP TABLE IF EXISTS check_rename_legacy
+- sql: CREATE TABLE check_rename_legacy(id INT PRIMARY KEY,v INT)
+- sql: DROP TABLE IF EXISTS check_rename_bound
+- sql: CREATE TABLE check_rename_bound(id INT PRIMARY KEY,v INT)
 cleanup:
+- sql: DROP TABLE IF EXISTS check_rename_bound
+- sql: DROP TABLE IF EXISTS check_rename_legacy
 - sql: DROP TABLE IF EXISTS check_tds_like
 - sql: DROP PROCEDURE IF EXISTS check_tds_date_revalidate_module
 - sql: DROP PROCEDURE IF EXISTS check_tds_date_insert_module
@@ -612,3 +618,53 @@ test_cases:
     - connection: observer
       sql: SELECT id,v FROM check_tds_like ORDER BY id
       expect: {rows: 3, data: [{id: 1, v: 'updated:value'}, {id: 2, v: 'long:accepted'}, {id: 3, v: null}]}
+
+- name: A legacy plain SQL CHECK keeps its physical input after visible rename
+  tds:
+    statements:
+    - sql: ALTER TABLE check_rename_legacy ADD CONSTRAINT CK_rename_legacy CHECK(v >= 0)
+    - sql: EXEC sp_rename N'check_rename_legacy.v',N'renamed_v',N'COLUMN'
+    - sql: INSERT check_rename_legacy(id,renamed_v) VALUES(1,5)
+    - sql: INSERT check_rename_legacy(id,renamed_v) VALUES(2,-1)
+      expect: {error: true, contains: [CK_rename_legacy failed]}
+    - sql: SELECT id,renamed_v FROM check_rename_legacy ORDER BY id
+      expect: {rows: 1, data: [{id: 1, renamed_v: 5}]}
+- name: A new CHECK binds the renamed SQL spelling to the existing native input
+  tds:
+    statements:
+    - sql: EXEC sp_rename N'check_rename_bound.v',N'new_v',N'COLUMN'
+    - sql: ALTER TABLE check_rename_bound ADD CONSTRAINT CK_rename_bound CHECK(new_v >= 0)
+    - sql: INSERT check_rename_bound(id,new_v) VALUES(1,7)
+    - sql: UPDATE check_rename_bound SET new_v=-1 WHERE id=1
+      expect: {error: true, contains: [CK_rename_bound failed]}
+    - sql: SELECT id,new_v FROM check_rename_bound ORDER BY id
+      expect: {rows: 1, data: [{id: 1, new_v: 7}]}
+    - sql: SELECT check_clause FROM information_schema.check_constraints WHERE constraint_name=N'CK_rename_bound'
+      expect: {rows: 1, data: [{check_clause: 'new_v >= 0'}]}
+- name: Renaming a newly constrained visible column retains the stored source binding
+  tds:
+    statements:
+    - sql: EXEC sp_rename N'check_rename_bound.new_v',N'final_v',N'COLUMN'
+    - sql: UPDATE check_rename_bound SET final_v=9 WHERE id=1
+    - sql: SELECT id,final_v FROM check_rename_bound ORDER BY id
+      expect: {rows: 1, data: [{id: 1, final_v: 9}]}
+- name: Restart both legacy and bound CHECK source recipes after column rename
+  sql: SHUTDOWN
+  syntax: mysql
+  expect: {rows: 0}
+- name: Reloaded legacy CHECK enforces its unchanged physical source dependency
+  tds:
+    statements:
+    - sql: INSERT check_rename_legacy(id,renamed_v) VALUES(2,-2)
+      expect: {error: true, contains: [CK_rename_legacy failed]}
+    - sql: SELECT id,renamed_v FROM check_rename_legacy ORDER BY id
+      expect: {rows: 1, data: [{id: 1, renamed_v: 5}]}
+- name: Reloaded bound CHECK retains original SQL and current visible access
+  tds:
+    statements:
+    - sql: INSERT check_rename_bound(id,final_v) VALUES(2,-3)
+      expect: {error: true, contains: [CK_rename_bound failed]}
+    - sql: SELECT id,final_v FROM check_rename_bound ORDER BY id
+      expect: {rows: 1, data: [{id: 1, final_v: 9}]}
+    - sql: SELECT check_clause FROM information_schema.check_constraints WHERE constraint_name=N'CK_rename_bound'
+      expect: {rows: 1, data: [{check_clause: 'new_v >= 0'}]}

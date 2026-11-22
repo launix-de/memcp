@@ -357,9 +357,35 @@ carries a generic default Collation field. */
 )))
 	info_schema_fk_unique_name)))
 
+/* Stored SQL source may bind a visible spelling to an immutable native input.
+Only strings and finite name pairs enter this language-owned recipe; legacy
+plain SQL remains unchanged. Metadata consumes the original source text too. */
+(define sql_source_binding_prefix "memcp:sql-source-bindings:")
+(define sql_source_binding_parts (close_procedure (lambda (source)
+	(if (and (>= (strlen source) (strlen sql_source_binding_prefix))
+		(equal? (substr source 0 (strlen sql_source_binding_prefix)) sql_source_binding_prefix))
+		(match (json_decode (substr source (strlen sql_source_binding_prefix)))
+			'(version text bindings) (begin
+				(if (and (equal? version 1) (string? text) (list? bindings)) true
+					(error "unsupported SQL source binding recipe"))
+				(map bindings (lambda (binding) (match binding
+					'(visible storage) (if (and (string? visible) (string? storage)) true
+						(error "invalid SQL source column binding"))
+					_ (error "invalid SQL source column binding"))))
+				(if (and (equal? (count bindings) (count (merge_unique (list (map bindings car)))))
+					(equal? (count bindings) (count (merge_unique (list (map bindings cadr)))))) true
+					(error "duplicate SQL source column binding"))
+				(list text bindings))
+			_ (error "invalid SQL source binding recipe"))
+		(list source nil)))))
+(define sql_source_binding_recipe (close_procedure (lambda (source bindings)
+	(if (find bindings (lambda (binding) (not (equal? (car binding) (cadr binding)))) nil)
+		(concat sql_source_binding_prefix (json_encode (list 1 source bindings))) source))))
+(define sql_source_binding_text (close_procedure (lambda (source) (car (sql_source_binding_parts source)))))
+
 /* Constraint catalogs describe actual native declaration publications. No
 query rows, synthetic constraints, or automatic access indexes enter them. */
-(define info_schema_constraint_rows (close_procedure ((lambda (sql_key_constraint_name)
+(define info_schema_constraint_rows (close_procedure ((lambda (sql_key_constraint_name sql_source_binding_text)
 	(lambda (database name tx checks_only) (begin
 		(define handle (table database false name false tx))
 		(if (nil? handle) '() (begin
@@ -367,7 +393,7 @@ query rows, synthetic constraints, or automatic access indexes enter them. */
 			(define checks (coalesceNil (constraints "Checks") '()))
 			(if checks_only (map checks (lambda (check)
 				(list "constraint_catalog" "def" "constraint_schema" database
-					"constraint_name" (check "Id") "check_clause" (check "Source"))))
+					"constraint_name" (check "Id") "check_clause" (sql_source_binding_text (check "Source")))))
 				(begin
 					(define row (lambda (id type enabled)
 						(list "constraint_catalog" "def" "constraint_schema" database "constraint_name" id
@@ -379,7 +405,7 @@ query rows, synthetic constraints, or automatic access indexes enter them. */
 						(map (filter (constraints "ForeignKeys") (lambda (key) (equal? (key "Role") "referencing")))
 							(lambda (key) (row (key "Id") "FOREIGN KEY" (if (has_assoc? key "Enabled") (key "Enabled") true))))
 						(map checks (lambda (check) (row (check "Id") "CHECK" (if (has_assoc? check "Enabled") (check "Enabled") true)))))))))))))
-	sql_key_constraint_name)))
+	sql_key_constraint_name sql_source_binding_text)))
 
 /* build one INFORMATION_SCHEMA.TABLES row from the catalog snapshot returned
 by (show schema true).  Keeping table discovery and metadata collection in one

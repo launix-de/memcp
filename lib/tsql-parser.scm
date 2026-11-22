@@ -685,7 +685,7 @@ widths never determine a declared SQL width. */
 consumed below so CREATEFOREIGNKEY can revalidate them under its DDL owner;
 no row data or executable comparison policy enters the declaration. */
 (define tsql_foreign_column_facts (lambda (column)
-	(list (column "Field") (column "RawType") (column "Dimensions")
+	(list (sql_column_storage_name column) (column "RawType") (column "Dimensions")
 		(column "Collation") (column "Null") (column "Computed"))))
 (define tsql_foreign_column_declarations (lambda (declarations names) (begin
 	(define columns (map names (lambda (name) (begin
@@ -760,7 +760,7 @@ transaction-bound relation. Resolve all recipes before native publication. */
 				(error "foreign declaration requires an existing native unique target"))
 			(list "foreign" (coalesceNil key (concat name "_" ((car child) "Field") "_fk"))
 				(map child (lambda (column) (column "Field")))
-				(show parent_handle "name") parent_columns update_mode delete_mode))
+				(show parent_handle "name") (map parent sql_column_storage_name) update_mode delete_mode))
 		_ definition))))))
 /* Changing comparison rules preserves existing text values when its declared
 code page is unchanged (national text retains its UTF16 value domain). Native
@@ -1478,11 +1478,12 @@ column writer still rechecks its current declaration atomically against races.
 https://learn.microsoft.com/sql/relational-databases/errors-events/database-engine-events-and-errors-1000-to-1999 */
 (define tsql_add_column_default (lambda (target column definition tx) (begin
 	(define declaration (show target "column" column false tx))
+	(if declaration true (error "DEFAULT column does not exist: " column))
 	(if (and declaration (or (not (nil? (declaration "Default")))
 		(not (equal? (declaration "DefaultExpression") ""))
 		(not (equal? (declaration "DefaultName") ""))))
 		(error '("tsql-error" 1781 "The column already has a default bound to it." 1 16)) true)
-	(altercolumn target column "add_default" definition tx))))
+	(altercolumn target (sql_column_storage_name declaration) "add_default" definition tx))))
 
 (define tsql_default_assignment_expr (lambda (declaration database policy planning tx)
 	(if (if planning (planning "__tsql_compile_only") false)
@@ -1512,7 +1513,8 @@ https://learn.microsoft.com/sql/relational-databases/errors-events/database-engi
 /* Only declaration consumers register these O(1) guards. The common cache
 recompiles a variant after DDL, without a schema epoch or runtime SQL type tag. */
 (define tsql_declaration_contract (lambda (column)
-	(list (column "RawType") (coalesceNil (column "Dimensions") '())
+	(list (column "Field") (sql_column_storage_name column)
+		(column "RawType") (coalesceNil (column "Dimensions") '())
 		(column "Null") (coalesceNil (column "Collation") "")
 		(column "Default") (coalesceNil (column "DefaultExpression") "") (column "DefaultDeferred") (column "Extra") (column "Computed"))))
 (define tsql_declaration_matches? (lambda (column contract)
@@ -2757,7 +2759,8 @@ The current directory/name and column descriptors remain native metadata. */
 		(define handle (cadr mode))
 		(define current (table (car mode) false (show handle "name") false tx))
 		(if (identical? current handle)
-			(begin (define declaration (show handle "column" (nth mode 2) false tx))
+			(begin (define declaration (find (show handle "columns" tx)
+				(lambda (column) (equal? (sql_column_storage_name column) (nth mode 2))) nil))
 				(if (nil? declaration) false (equal? (declaration "Extra") "auto_increment"))) false)))))
 (define tsql_set_identity_insert (lambda (session database name enabled tx) (begin
 	((tsql_temporary_policy (coalesceNil (session "username") "root") (tsql_temporary_bindings session)) database name true)
@@ -2771,7 +2774,7 @@ The current directory/name and column descriptors remain native metadata. */
 		(begin
 			(if (if same false (tsql_identity_mode_live? previous tx))
 				(tsql_raise_error 8107 "IDENTITY_INSERT is already ON for another table" 1) true)
-			(session "__tsql_identity_insert" (list database handle (identity "Field"))))
+			(session "__tsql_identity_insert" (list database handle (sql_column_storage_name identity))))
 		same (session "__tsql_identity_insert" nil) true)
 	0)))
 (define tsql_check_identity_insert (lambda (session handle explicit_columns supplied) (begin
@@ -2822,14 +2825,15 @@ scan/count/materialize SELECT input to reserve IDs, or rewind consumed blocks.
 The frontend checks the complete reserved block before any row publication.
 Explicit NULL must fail here: native auto_increment would otherwise allocate
 an unchecked replacement. Completion uses only this invocation's reserved range. */
-(define tsql_native_insert_expr (lambda (relation identity columns values row_count capture_identity deferred) (begin
+(define tsql_native_insert_expr (lambda (relation identity columns values row_count capture_identity deferred storage_declarations) (begin
 	(define columns (merge (list columns (map deferred car))))
 	(define values (if (empty_list? deferred) values
 		(list (quote map) values (list (quote lambda) (list (quote __default_row))
 			(list (quote merge) (list (quote list) (quote __default_row)
 				(cons (quote list) (map deferred cadr))))))))
 	(define native_insert (lambda (names rows callback)
-		(list (quote insert) relation (list (quote quote) names) rows
+		(list (quote insert) relation
+			(list (quote quote) (sql_storage_column_names storage_declarations names true)) rows
 			'(list) nil false callback (quote tx))))
 	(define without_generated_identity (lambda (formula)
 		(if capture_identity
@@ -6609,7 +6613,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 							(sql_type_formula '() (tsql_assignment_expr
 								(list (quote sql_type_expr) '('nth 'item (+ (* i 2) 1))
 									(sql_info_datatype info) (sql_info_collation info))
-								(nth declarations i))))))))) 1 false deferred))
+								(nth declarations i))))))))) 1 false deferred
+					(tsql_write_declarations database tbl planning_session tx)))
 				(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
 					(error "INSERT column count does not match SELECT column count"))
 				(if describe (begin
@@ -6741,7 +6746,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 									(list (nth columns i) (nth row i)))))))) true nil nil nil nil nil nil nil nil))
 							(tsql_identity_insert_statement database tbl identity explicit_columns columns
 								(tsql_native_insert_expr (quote __tsql_insert_target) identity columns (sql_insert_values_expr
-									(map typed_rows (lambda (row) (map row (lambda (value) (sql_type_formula '() value)))))) (count rows) true (tsql_insert_deferred_columns database tbl columns policy planning_session tx))))))
+									(map typed_rows (lambda (row) (map row (lambda (value) (sql_type_formula '() value)))))) (count rows) true (tsql_insert_deferred_columns database tbl columns policy planning_session tx)
+									(tsql_write_declarations database tbl planning_session tx))))))
 	))))))
 
 	/* Deferred cells are expanded before the native all-default row. Other
@@ -6769,7 +6775,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(tsql_identity_insert_statement database tbl identity false '()
 						(tsql_native_insert_expr (quote __tsql_insert_target) identity '()
 							(if (equal?? limit 0) '('list) '('list '(list)))
-							(if (equal?? limit 0) 0 1) true (tsql_insert_deferred_columns database tbl '() policy planning_session tx))))))))))
+							(if (equal?? limit 0) 0 1) true (tsql_insert_deferred_columns database tbl '() policy planning_session tx)
+							(tsql_write_declarations database tbl planning_session tx))))))))))
 
 	(define tsql_insert_select (parser '(
 		tsql_keyword_insert (define limit tsql_write_limit) (? tsql_keyword_into)
@@ -6825,7 +6832,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(define declarations (get_schema database tbl tx))
 				(define columns (map columns (lambda (name) (begin
 					(define declaration (find declarations (lambda (column) (equal?? (column "Field") name)) nil))
-					(if declaration (declaration "Field") (error "unknown index column: " name))))))
+					(if declaration (sql_column_storage_name declaration) (error "unknown index column: " name))))))
 				(map included (lambda (name) (if (find declarations (lambda (column) (equal?? (column "Field") name)))
 					true (error "unknown included column: " name))))
 				(reduce columns (lambda (seen name)
@@ -7054,7 +7061,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(if (tsql_compatible_column_declaration? previous type dimensions nullable collation) true
 						(error "ALTER COLUMN requires native validation or conversion"))
 					(list (quote !begin) (list (quote altercolumn) (list (quote table) database false name false (quote tx))
-						(previous "Field") "declaration"
+						(sql_column_storage_name previous) "declaration"
 						(list (quote quote) (list (list type dimensions nullable collation)
 							(tsql_column_declaration_tuple previous))) (quote tx)) true)))))
 
@@ -7067,13 +7074,13 @@ that context explicitly; stored views refuse this scalar before publication. */
 						(not ((find (show (table database false name false tx)) (lambda (meta) (equal? (meta "Field") column))) "Null")))) true)
 						true (error "ADD PRIMARY KEY currently requires NOT NULL columns"))
 					(list (quote createkey) (list (quote table) database false name false (quote tx)) "PRIMARY" true
-						(cons (quote list) columns) (quote tx)
+						(cons (quote list) (sql_storage_column_names (tsql_write_declarations database name planning_session tx) columns true)) (quote tx)
 						(cons (quote list) (if key (list "constraint_name" key) '())))))))
 			(parser '(tsql_keyword_add tsql_keyword_constraint (define key tsql_identifier)
 				tsql_keyword_unique tsql_key_placement "(" (define columns tsql_key_columns) ")" tsql_key_layout)
 				(lambda (database name)
 					(if compile_only (tsql_command_binding 'alter-table (list database name) '()) (list (quote createkey) (list (quote table) database false name false (quote tx)) key true
-						(cons (quote list) columns) (quote tx)
+						(cons (quote list) (sql_storage_column_names (tsql_write_declarations database name planning_session tx) columns true)) (quote tx)
 						(list (quote list) "nulls_not_distinct" true "constraint_name" key)))))
 			(parser '((define validation (? (parser '(tsql_keyword_with (define mode (or tsql_keyword_check tsql_keyword_nocheck))) mode)))
 				tsql_keyword_add (define definition foreign_key_definition))
@@ -7097,9 +7104,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 						(define key (coalesceNil key (concat name "_" ((car child) "Field") "_fk")))
 						(list (quote if) (list (quote createforeignkey)
 							(list (quote table) database false name false (quote tx)) key
-							(list (quote quote) (map child (lambda (column) (column "Field"))))
+							(list (quote quote) (map child sql_column_storage_name))
 							(list (quote table) parent_database false target false (quote tx))
-							(list (quote quote) (map parent (lambda (column) (column "Field"))))
+							(list (quote quote) (map parent sql_column_storage_name))
 							update_mode delete_mode (quote tx)
 							(list (quote quote) (list "expected_child" (map child tsql_foreign_column_facts)
 								"expected_parent" (map parent tsql_foreign_column_facts)
@@ -7144,9 +7151,12 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(define columns (+ tsql_identifier ",")))
 				(lambda (database name)
 					(if compile_only (tsql_command_binding 'alter-table (list database name) '()) (cons (quote !begin) (map columns (lambda (col)
-						(list (quote altertable) (list (quote table) database false name false (quote tx))
-							(if ifexists "drop_if_exists" "drop")
-							(coalesceNil (resolve_column_name database name col true) col))))))))
+						(begin
+							(define declaration (tsql_column_description database name col true planning_session tx))
+							(if declaration
+								(list 'altertable (list 'table database false name false 'tx)
+									(if ifexists "drop_if_exists" "drop") (sql_column_storage_name declaration))
+								ifexists true (error "DROP column does not exist: " col)))))))))
 			(parser '(tsql_keyword_drop tsql_keyword_constraint
 				(define ifexists (? tsql_keyword_if tsql_keyword_exists))
 				(define keys (+ tsql_identifier ",")))

@@ -87,7 +87,13 @@ partner. */
 		col
 		(if (not (source_is_base_table? src))
 			col
-			(coalesceNil (source_column_name src col true) col)))))
+			(begin
+				(define declaration (source_column_declaration src col col_ignorecase))
+				(if declaration (sql_column_storage_name declaration)
+					/* Native pseudo-columns and privately constructed helper sources
+					already carry storage coordinates, without SQL declarations. */
+					(or (nil? (source_declarations src)) (internal_column_name? col)) col
+					(sql_binding_error "missing-column" (concat "Column does not exist: " col))))))))
 
 /* A membership marker carries one distinguished probe, but its decorrelated
 domain can contain additional lookup keys. Both direct and joined scan filters
@@ -1842,12 +1848,12 @@ those unique result keys onto every matching driver row. */
 			nil
 			(begin
 				(define col (direct_column_name_for_alias src (nth keys idx)))
-				(define primary_key (source_primary_key_columns src))
+				(define primary_key (source_storage_primary_key_columns src))
 				(define unique_keys (merge (list
-					(source_unique_key_sets src)
+					(source_storage_unique_key_sets src)
 					(if (empty_list? primary_key) '() (list primary_key)))))
 				(if (reduce unique_keys (lambda (found key_cols)
-					(or found (and (equal? (count key_cols) 1) (equal?? (car key_cols) col))))
+					(or found (and (equal? (count key_cols) 1) (equal? (car key_cols) col))))
 					false)
 					idx
 					nil))))))
@@ -4755,7 +4761,7 @@ repeated prefix values would restart the suffix and violate global ordering. */
 /* A truth-filtered ordinary equality rejects NULL on both sides. This is
 not the null-safe domain equality used for session and grouped bindings. */
 (define order_prefix_column_nonnull? (lambda (src col condition)
-	(or (source_column_guaranteed_nonnull? src col)
+	(or (source_storage_column_guaranteed_nonnull? src col)
 		(reduce (split_and_terms condition) (lambda (found term)
 			(or found (or
 				/* An explicit row truth filter proves the distinguishing key
@@ -4820,7 +4826,7 @@ not the null-safe domain equality used for session and grouped bindings. */
 		"bin"
 		(begin
 			(define meta (find (source_columns src)
-				(lambda (candidate) (equal?? (candidate "Field") col)) nil))
+				(lambda (candidate) (equal? (sql_column_storage_name candidate) col)) nil))
 			(if (nil? meta)
 				"bin"
 				(begin
@@ -4834,13 +4840,14 @@ callbacks remain authoritative. Numeric aggregate results ignore string collatio
 	(match expr
 		((symbol aggregate) value _reduce _neutral) (physical_expr_collation_source input value)
 		((symbol aggregate) value _reduce _neutral _finalize) (physical_expr_collation_source input value)
-		((symbol get_column) tblvar ignorecase col _col_ignorecase)
+		((symbol get_column) tblvar ignorecase col col_ignorecase)
 		(begin
 			(define sources (canonical_helper_sources input))
 			(define alias (resolve_column_alias tblvar (if (empty_list? sources) nil (source_alias (car sources)))))
 			(define src (find sources (lambda (candidate)
 				(source_alias_matches? candidate (source_alias candidate) alias ignorecase)) nil))
-			(if (or (nil? src) (not (source_is_base_table? src))) nil (list src col)))
+			(if (or (nil? src) (not (source_is_base_table? src))) nil
+				(list src (resolve_physical_column_name src col col_ignorecase))))
 		_ nil)))
 
 (define physical_expr_collation (lambda (input expr)
@@ -6019,7 +6026,7 @@ still rechecks current data and autoindex statistics. */
 		(define cols (extract_columns_for_alias src condition))
 		(define estimate_expr (compile_scan_plan (quote scan_selectivity_estimate)
 			(physical_query_tx_symbol)
-			(list (quote table) (source_schema src) false (source_relation src) false (quote tx))
+			(source_native_table_expr src (quote tx))
 			(cons (quote list) cols)
 			(list (quote lambda)
 				(map cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
@@ -6088,7 +6095,7 @@ candidate RecSet. */
 							(list (quote equal?)
 								(list
 									(list (quote table_planner_statistics)
-										(list (quote table) (source_schema src) false (source_relation src) false (quote tx)))
+										(source_native_table_expr src (quote tx)))
 									"row_count")
 								rows) planning_session)
 						nil))) nil)
@@ -6201,7 +6208,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 						(list (quote equal?)
 							(list
 								(list (quote table_planner_statistics)
-									(list (quote table) (source_schema src) false (source_relation src) false (quote tx)))
+									(source_native_table_expr src (quote tx)))
 								"row_count")
 							source_rows) planning_session)
 					nil)
@@ -6997,8 +7004,8 @@ self-joins of the same base table still describe two distinct row roles. */
 							(begin
 								(define src (nth role 1))
 								(list (quote base-column) (nth role 0)
-									(source_schema src) (source_relation src)
-									(canonical_col col col_ignorecase)))))
+									(source_schema src) (source_storage_relation src)
+									(resolve_physical_column_name src col col_ignorecase)))))
 					((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
 					(rewrite (list (symbol "get_column") tblvar tbl_ignorecase col col_ignorecase))
 					(cons head tail) (cons (rewrite head) (map tail rewrite))
@@ -7011,7 +7018,7 @@ self-joins of the same base table still describe two distinct row roles. */
 									(begin
 										(define src (nth role 1))
 										(list (quote base-column) (nth role 0)
-											(source_schema src) (source_relation src) col))))
+											(source_schema src) (source_storage_relation src) col))))
 							_ node)
 						node)))))
 		(rewrite expr))))
@@ -7041,7 +7048,9 @@ an unrelated aggregate cannot rename an embedded calculation. */
 			(if (empty_list? sources) nil (source_alias (car sources))) alias insensitive))
 		(define columns (if (and (not (nil? src)) (source_is_stage_output? src))
 			(get_assoc signatures (concat (nth (source_relation src) 1) ":columns")) nil))
-		(coalesceNil (get_assoc columns col) (if col_insensitive (toLower col) col)))))
+		(coalesceNil (get_assoc columns col)
+			(if (and src (source_is_base_table? src))
+				(resolve_physical_column_name src col col_insensitive) (if col_insensitive (toLower col) col))))))
 
 /* Keep recursive traversal in one named procedure. Repeatedly adapting a
 large local recursive callback makes serial map setup walk its body per node. */
@@ -7111,7 +7120,7 @@ large local recursive callback makes serial map setup walk its body per node. */
 		(define aliases (merge (list
 			(mapIndex sources (lambda (i src) (list (source_alias src)
 				(list (quote cache-source) i (source_schema src)
-					(source_relation src)))))
+					(source_storage_relation src)))))
 			(stage_semantic_alias_entries outer "__cache_input_"))))
 		(define context (list sources signatures bindings source_recipes aliases))
 		(lambda (node) (group_cache_rewrite_identity context node)))))
@@ -7122,7 +7131,7 @@ large local recursive callback makes serial map setup walk its body per node. */
 		(define sources (canonical_helper_sources input))
 		(define source_identity (lambda (src)
 			(list (source_schema src)
-				(rewrite (source_relation src))
+				(rewrite (source_storage_relation src))
 				(source_outer? src)
 				(rewrite (source_join_expr src)))))
 		(if (query_block? input)
@@ -7171,7 +7180,7 @@ input relation of another carrier, never in that carrier's own row domain. */
 	physical window recipe; SELECT aliases and read-time LIMIT/OFFSET are absent. */
 	(concat "__orc_" kind "_" (stable_structural_hash (list
 		"canonical-orc-v2"
-		(list (source_schema src) (source_relation src))
+		(list (source_schema src) (source_storage_relation src))
 		payload) true))))
 
 /* CONTRACT: make_group_cache publishes the complete immutable physical
@@ -7980,7 +7989,7 @@ every group row and its canonical identity stays independent of bound values. */
 
 (define build_group_ordered_scalar_column (lambda (stage schema tbl alias grouptbl keys key_names condition ag value_expr order_exprs dirs offset_value agg_reduce agg_neutral)
 	(begin
-		(define src (list alias schema tbl false nil nil))
+		(define src (gs_input stage))
 		(define agg_col (group_stage_aggregate_column stage ag))
 		(define group_key_cols_for_scan (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
 		(define condition_cols (extract_columns_for_alias src condition))
@@ -7999,7 +8008,7 @@ every group row and its canonical identity stays independent of bound values. */
 				(map key_names (lambda (col) (symbol col)))
 				(compile_scan_plan (quote scan_order)
 					nil
-					(list (quote table) schema false tbl false (quote tx))
+					(source_native_table_expr src (quote tx))
 					(cons (quote list) filtercols)
 					(list (quote lambda)
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
@@ -8051,7 +8060,7 @@ every group row and its canonical identity stays independent of bound values. */
 				(group_insert_finish_expr schema grouptbl keys key_names agg_cols true (physical_query_tx_symbol)))
 			(compile_scan_plan (quote scan_order)
 				(physical_query_tx_symbol)
-				(list (quote table) schema false tbl false (quote tx))
+				(source_native_table_expr src (quote tx))
 				(cons (quote list) filtercols)
 				(list (quote lambda)
 					(map filtercols (lambda (col) (symbol (concat alias "." col))))
@@ -8083,7 +8092,7 @@ every group row and its canonical identity stays independent of bound values. */
 		'(((quote scalar_order_value) value_expr order_expr dir) agg_reduce agg_neutral)
 		(build_group_ordered_scalar_column stage schema tbl alias grouptbl keys key_names condition ag value_expr (list order_expr) (list dir) 0 agg_reduce agg_neutral)
 		(cons agg_expr (cons agg_reduce (cons agg_neutral _rest))) (begin
-			(define src (list alias schema tbl false nil nil))
+			(define src (gs_input stage))
 			(define agg_col (group_stage_aggregate_column stage ag))
 			(define membership_parts (base_group_membership_parts src condition (gs_facts stage)))
 			(define membership_expr (car membership_parts))
@@ -8127,7 +8136,7 @@ every group row and its canonical identity stays independent of bound values. */
 					/* Persistent computed columns read committed storage independently
 					from the request which first creates or later repairs them. */
 					nil
-					(list (quote table) schema false tbl false (quote tx))
+					(source_native_table_expr src (quote tx))
 					(cons (quote list) filtercols)
 					(list (quote lambda)
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
@@ -8272,7 +8281,7 @@ otherwise unnecessary one-entry associative group. */
 		(define emit_expr (list (quote resultrow)
 			(direct_group_result_assoc_expr alias keys key_names ags fields)))
 		(define state_plan (build_base_ungrouped_aggregate_state_plan
-			schema tbl alias source_expr effective_condition ags))
+			src source_expr effective_condition ags))
 		(define plan (list
 			(list (quote lambda) (list aggregate_state)
 				(list (quote begin)
@@ -8304,9 +8313,9 @@ otherwise unnecessary one-entry associative group. */
 		(lower_query_local_base_scalar_stage stage fields offset_value limit_value result_consumer)
 		(lower_direct_base_group_stage stage fields order_items offset_value limit_value result_consumer))))
 
-(define build_base_group_scan_assoc_plan (lambda (schema tbl alias table_expr keys condition ags)
+(define build_base_group_scan_assoc_plan (lambda (src table_expr keys condition ags)
 	(begin
-		(define src (list alias schema tbl false nil nil))
+		(define alias (source_alias src))
 		(define group_key_cols_for_scan (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
 		(define condition_cols (extract_columns_for_alias src condition))
 		(define agg_value_cols (merge_unique (map ags (lambda (ag)
@@ -8349,11 +8358,11 @@ otherwise unnecessary one-entry associative group. */
 			merge_groups
 			false))))
 
-(define build_base_ungrouped_aggregate_state_plan (lambda (schema tbl alias table_expr condition ags)
+(define build_base_ungrouped_aggregate_state_plan (lambda (src table_expr condition ags)
 	(match ags
 		(list ag) (match ag
 			(cons agg_expr (cons agg_reduce (cons agg_neutral _rest))) (begin
-				(define src (list alias schema tbl false nil nil))
+				(define alias (source_alias src))
 				(define filtercols (extract_columns_for_alias src condition))
 				(define mapcols (if (equal? ag aggregate_count_descriptor)
 					'()
@@ -8378,7 +8387,7 @@ otherwise unnecessary one-entry associative group. */
 					false))
 			_ (neumann_fail "build_queryplan" "ungrouped base aggregate expects aggregate descriptor"))
 		_ (begin
-			(define src (list alias schema tbl false nil nil))
+			(define alias (source_alias src))
 			(define filtercols (extract_columns_for_alias src condition))
 			(define mapcols (merge_unique (map ags (lambda (ag)
 				(extract_columns_for_alias src (car ag))))))
@@ -8500,7 +8509,7 @@ query transaction; DML-trigger replacement plans pass it through explicitly. */
 		(define scalar_parts (ungrouped_aggregate_parts keys key_names ags))
 		(define plan (if (nil? scalar_parts)
 			(begin
-				(define grouped_scan (build_base_group_scan_assoc_plan schema tbl alias source_expr keys effective_condition ags))
+				(define grouped_scan (build_base_group_scan_assoc_plan src source_expr keys effective_condition ags))
 				(define grouped_expr (seed_empty_grouped_assoc_expr keys ags 'grouped
 					(or (equal? keys '(1))
 						/* A correlated domain needs an input row to supply its keys.
@@ -8523,7 +8532,7 @@ query transaction; DML-trigger replacement plans pass it through explicitly. */
 				(define aggregate_col (group_stage_aggregate_column stage ag))
 				(build_ungrouped_aggregate_insert_plan schema grouptbl key_name aggregate_col ag
 					(build_base_ungrouped_aggregate_state_plan
-						schema tbl alias source_expr effective_condition (list ag))
+						src source_expr effective_condition (list ag))
 					true nil))))
 		(if (nil? membership_expr)
 			plan
@@ -8574,7 +8583,7 @@ query transaction; DML-trigger replacement plans pass it through explicitly. */
 			(source_table_expr src)
 			membership_var))
 		(define grouped_scan (seed_empty_grouped_assoc_expr keys ags
-			(build_base_group_scan_assoc_plan schema tbl alias table_expr keys effective_condition ags)
+			(build_base_group_scan_assoc_plan src table_expr keys effective_condition ags)
 			(qassoc_get (gs_facts stage) 'preserve_empty_domain false)))
 		(define rowassoc_expr (direct_group_assoc_from_key_payload_expr alias key_names ags))
 		(define having_expr (replace_direct_group_expr alias keys key_names ags (coalesceNil (gs_having stage) true)))
@@ -9035,8 +9044,8 @@ SUM/AVG empty and NULL semantics. */
 
 (define scalar_group_projection_name (lambda (spec col)
 	(concat ".scalar:" (stable_structural_hash
-		(list (source_schema (car spec)) (source_relation (car spec))
-			(source_schema (cadr spec)) (source_relation (cadr spec)) (nth spec 2) col) true))))
+		(list (source_schema (car spec)) (source_storage_relation (car spec))
+			(source_schema (cadr spec)) (source_storage_relation (cadr spec)) (nth spec 2) col) true))))
 
 (define scalar_group_projection_column (lambda (spec col)
 	(begin
@@ -9082,9 +9091,9 @@ canonical projection, using the existing cache-admission accounting. */
 				0 0 0 0 (* rows width 16) 0 matching_rows 0.5)
 			(* rows width planner_membership_direct_probe_row_ns)))))
 
-(define scalar_group_projection_ready? (lambda (schema relation columns)
+(define scalar_group_projection_ready? (lambda (handle columns)
 	(reduce columns (lambda (ready col)
-		(and ready (not (nil? (resolve_column_name schema relation col false))))) true)))
+		(and ready (not (nil? (show handle "column" col false nil))))) true)))
 
 (define scalar_group_projection_wins? (lambda (driver matching_rows width aggregate_width)
 	(begin
@@ -9102,7 +9111,7 @@ canonical projection, using the existing cache-admission accounting. */
 				(define matching_rows (planner_row_count_after_selectivity driver (qb_sources input)
 					(source_alias driver) (qb_where input) nil planning_session))
 				(if (or (not (number? matching_rows))
-					(not (scalar_group_projection_wins? (table (source_schema driver) false (source_relation driver) false nil)
+					(not (scalar_group_projection_wins? (table (source_schema driver) false (source_storage_relation driver) false nil)
 						matching_rows (count columns) (count ags)))) direct_plan
 					(begin
 						(define projected_input (make_query_block (qb_schema input) (list driver) '()
@@ -9124,16 +9133,17 @@ canonical projection, using the existing cache-admission accounting. */
 								(group_upsert_collision_cols aggregate_cols false)
 								(group_upsert_collision_lambda aggregate_cols false) true nil (physical_query_tx_symbol)))))))
 						(define driver_table (source_table_expr driver))
-						(define costs (scalar_group_projection_costs (table (source_schema driver) false (source_relation driver) false nil)
+						(define costs (scalar_group_projection_costs (table (source_schema driver) false (source_storage_relation driver) false nil)
 							matching_rows (count columns) (count ags)))
-						(define ready_expr (list (quote scalar_group_projection_ready?) (source_schema driver)
-							(source_relation driver) (quoted_runtime_list columns)))
+						(define ready_expr (list (quote scalar_group_projection_ready?)
+							(source_table_expr driver) (quoted_runtime_list columns)))
 						(define cold_plan (list (quote !begin)
 							(list (quote define) (quote __scalar_projection_started) (list (quote nanotime)))
 							direct_plan
 							(list (quote group_cache_candidate_accumulate) name
 								(list (quote -) (list (quote nanotime)) (quote __scalar_projection_started)) nil)))
-						(define ready (scalar_group_projection_ready? (source_schema driver) (source_relation driver) columns))
+						(define ready (scalar_group_projection_ready?
+							(table (source_schema driver) false (source_storage_relation driver) false nil) columns))
 						(planner_record_physical_decision (list (list "decision_id" name)
 							(list "decision" "scalar_group_projection") (list "chosen" (if (and ready (planner_cost_better? (cadr costs) (car costs))) "projected_columns" "direct_join"))
 							(list "selection" "runtime_cost") (list "inputs" (list (list "matching_rows" matching_rows)
@@ -9511,17 +9521,17 @@ ordinary count/overflow check in the scalar consumer. */
 	(build_native_group_insert_plan input stage grouptbl keys key_names
 		(list value_ag count_ag) (list value_col count_col))))
 
-(define build_group_keytable_cleanup (lambda (schema tbl alias grouptbl keys key_names)
+(define build_group_keytable_cleanup (lambda (src schema alias grouptbl keys key_names)
 	(begin
 		(define pairs (map (produceN (count keys)) (lambda (i)
 			(match (nth keys i)
-				((symbol get_column) _ _ col _) (list col (nth key_names i))
-				((quote get_column) _ _ col _) (list col (nth key_names i))
+				((symbol get_column) _ _ col col_ic) (list (resolve_physical_column_name src col col_ic) (nth key_names i))
+				((quote get_column) _ _ col col_ic) (list (resolve_physical_column_name src col col_ic) (nth key_names i))
 				_ nil))))
 		(if (reduce pairs (lambda (bad p) (or bad (nil? p))) false)
 			nil
 			(list (quote register_keytable_cleanup)
-				(list (quote table) schema false tbl false (quote tx))
+				(source_native_table_expr src (quote tx))
 				(list (quote table) schema false grouptbl false (quote tx))
 				alias
 				(cons (quote list) (map pairs (lambda (p) (cons (quote list) p)))))))))

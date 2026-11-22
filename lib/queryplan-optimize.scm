@@ -365,7 +365,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 						inequality has been derived; it is not permission to omit that input.
 						Budget zero is essential: guards never sample or run a filter. */
 						(define read_expr (list (quote scan_selectivity_estimate) nil
-							(list (quote table) (source_schema src) false (source_relation src) false (quote tx))
+							(source_native_table_expr src (quote tx))
 							(list (quote quote) (car access)) (cons (quote list) (cadr access))
 							(list (quote quote) '()) (list (quote lambda) '() true) 0))
 						/* Provenance matters too: a prior from other LIKE words may be
@@ -400,7 +400,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 								(planner_bind_session_values callback planning_session) true)))
 							(define values (nth access 1))
 							(planner_record_filter_feedback_guard src cols callback planning_session)
-							(scan_selectivity_estimate nil (table (source_schema src) false (source_relation src) false nil)
+							(scan_selectivity_estimate nil (table (source_schema src) false (source_storage_relation src) false nil)
 								(nth access 0) values
 								cols (eval callback) 0)))
 						(lambda (_e) nil))))))))
@@ -521,7 +521,7 @@ observed output cardinality. The physical producer stays outside logical IR. */
 		storage metadata call for a nonexistent handle (or materialize its rows
 		inside a guard). Semantic source validation still belongs to lowering. */
 		(if (or (not (source_is_base_table? src))
-			(nil? (planner_table_statistics (source_schema src) (source_relation src)))) fallback
+			(nil? (planner_table_statistics (source_schema src) (source_storage_relation src)))) fallback
 			(begin
 				(define cols (extract_columns_for_alias src predicate))
 				(define callback (list (quote lambda)
@@ -532,7 +532,7 @@ observed output cardinality. The physical producer stays outside logical IR. */
 					(planner_guard_runtime_binding
 						(list (quote qassoc_get)
 							(list (quote scan_selectivity_estimate) nil
-								(list (quote table) (source_schema src) false (source_relation src) false (quote tx))
+								(source_native_table_expr src (quote tx))
 								(planner_quoted_value (car access)) (cons (quote list) (cadr access))
 								(planner_quoted_value '()) (list (quote lambda) '() true) 0)
 							(planner_quoted_value (quote value)) fallback) planning_session nil))))))))
@@ -1899,9 +1899,9 @@ particular star shape. */
 	(if (planner_parameterized_costing? planning_session) nil
 	(reduce (filter sources source_is_native_table?) (lambda (_ src)
 		(begin
-			(define table_value (table (source_schema src) false (source_relation src) false tx))
+				(define table_value (table (source_schema src) false (source_storage_relation src) false tx))
 			(define table_expr
-				(list (quote table) (source_schema src) false (source_relation src) false (quote tx)))
+					(source_native_table_expr src (quote tx)))
 			(planner_record_statistics_dependency
 					table_expr (table_planner_statistics table_value) planning_session))) nil))))
 
@@ -2505,10 +2505,10 @@ to the cost model, not to an adapter that overwrites unknown values. */
 			(match term
 				'(op left right) (if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
 					(or
-						(and (equal?? (direct_column_name_for_alias src left) col)
+						(and (equal? (direct_column_name_for_alias src left) col)
 							(empty_list? (join_hypergraph_expr_aliases
 								default_alias (source_aliases sources) right)))
-						(and (equal?? (direct_column_name_for_alias src right) col)
+						(and (equal? (direct_column_name_for_alias src right) col)
 							(empty_list? (join_hypergraph_expr_aliases
 								default_alias (source_aliases sources) left))))
 					false)
@@ -2517,7 +2517,7 @@ to the cost model, not to an adapter that overwrites unknown values. */
 (define join_optimizer_source_constant_unique_point? (lambda (sources default_alias src condition)
 	(if (not (source_is_base_table? src))
 		false
-		(reduce (source_unique_key_sets src) (lambda (found key_cols)
+		(reduce (source_storage_unique_key_sets src) (lambda (found key_cols)
 			(or found (reduce key_cols (lambda (complete col)
 				(and complete (join_optimizer_source_column_constant_bound?
 					sources default_alias src col condition))) true))) false))))
@@ -3220,7 +3220,7 @@ floor avoids pretending that an unseen word is impossible. */
 							(lower_column_expr_for_alias src condition)) planning_session)
 					(define estimate (scan_selectivity_estimate
 						tx
-						(table (source_schema src) false (source_relation src) false tx)
+						(table (source_schema src) false (source_storage_relation src) false tx)
 						(nth access 0)
 						values
 						filtercols
@@ -3239,7 +3239,7 @@ floor avoids pretending that an unseen word is impossible. */
 
 (define planner_source_row_count (lambda (src)
 	(if (source_is_native_table? src)
-		(planner_table_row_count (source_schema src) (source_relation src))
+		(planner_table_row_count (source_schema src) (source_storage_relation src))
 		(if (row_domain_relation? (source_relation src))
 			(count (row_domain_data (source_relation src)))
 			nil))))
@@ -3298,7 +3298,7 @@ source itself has no known row count (not a base table). */
 		(try
 			(lambda ()
 				(begin
-					(define stats (planner_table_statistics (source_schema src) (source_relation src)))
+					(define stats (planner_table_statistics (source_schema src) (source_storage_relation src)))
 					(define columns (if (nil? stats) nil (stats "columns")))
 					(define column_stats (if (nil? columns) nil (columns column)))
 					/* The immutable column catalog deliberately does not get rebuilt
@@ -3359,8 +3359,8 @@ driver: grouping the referencing columns cannot produce more non-NULL keys
 than the referenced unique relation has rows. Keep one extra bucket for NULL.
 The ordinary NDV estimate remains preferable when it is tighter. */
 (define planner_columns_unique? (lambda (src columns)
-	(or (equal? (source_primary_key_columns src) columns)
-		(contains? (source_unique_key_sets src) columns))))
+	(or (equal? (source_storage_primary_key_columns src) columns)
+		(contains? (source_storage_unique_key_sets src) columns))))
 
 (define planner_foreign_key_group_bounds (lambda (src columns)
 	(if (not (source_is_base_table? src))
@@ -3374,12 +3374,12 @@ The ordinary NDV estimate remains preferable when it is tighter. */
 						(if (and (equal? (foreign_key "Role") "referencing")
 							(not (expression_equal? (foreign_key "Trusted") false))
 							(not (expression_equal? (foreign_key "Enabled") false))
-							(equal? (foreign_key "LocalColumns") columns))
+							(equal? (coalesceNil (foreign_key "LocalStorageColumns") (foreign_key "LocalColumns")) columns))
 							(begin
 								(define target (list "__aggregate_pushdown_fk_target"
 									(source_schema src) (foreign_key "OtherTable") false nil
 									(source_referenced_declarations src (foreign_key "OtherTable"))))
-								(define target_columns (foreign_key "OtherColumns"))
+								(define target_columns (coalesceNil (foreign_key "OtherStorageColumns") (foreign_key "OtherColumns")))
 								(define target_rows (planner_source_row_count target))
 								(if (and (number? target_rows)
 									(planner_columns_unique? target target_columns))
@@ -5586,7 +5586,7 @@ an ordered join pipeline against a selective join followed by sorting. */
 										(planner_record_table_statistics_guards (list binder) planning_session tx)
 										/* A declared singleton key has the table's row count as NDV.
 										Do not manufacture this inference for a nonunique binding. */
-										(if (contains? (source_unique_key_sets binder)
+										(if (contains? (source_storage_unique_key_sets binder)
 											(list (direct_column_name_for_alias binder other)))
 											(planner_source_row_count binder) nil)))) nil)
 						_ nil))) nil) 1))))
@@ -7629,7 +7629,7 @@ sampling guard for a choice that no cardinality change can reverse. */
 				(or found (and (not (empty_list? key))
 					(reduce key (lambda (complete col)
 						(and complete (and (contains? columns col)
-							(source_column_guaranteed_nonnull? driver col)))) true)))) false)))))
+							(source_storage_column_guaranteed_nonnull? driver col)))) true)))) false)))))
 
 (define aggregate_pushdown_logical (lambda (ir planning_session tx)
 	(begin

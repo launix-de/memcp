@@ -1588,8 +1588,10 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 			(if policy (policy schema tbl true) true)
 			/* Route ALL UPDATE (single + multi-table) through the query planner.
 			The planner handles column resolution, inner_selects, joins. */
+			(define assignments (sql_canonical_assignments
+				(sql_write_column_declarations (source_schema first_def) tbl planning_session tx) (merge cols) true))
 			(build_dml_plan tbl tblalias
-				(make_query_block schema all_defs (merge cols) (coalesceNil condition true)
+				(make_query_block schema all_defs assignments (coalesceNil condition true)
 					nil nil order limit offset nil nil nil) planning_session tx)
 	)))
 
@@ -1758,11 +1760,14 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 	) (begin
 			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
+			(define target_columns (sql_write_column_declarations (coalesce schema2 schema) tbl planning_session tx))
 			(set updaterows2 (if (nil? updaterows) nil
 				(map_assoc (merge updaterows) (lambda (col value)
 					(sql_type_formula (list (list tbl (coalesce schema2 schema) tbl false nil nil)) value)))))
+			(set updaterows2 (sql_storage_assignments target_columns updaterows2 true))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)))
+			(define coldesc (sql_storage_column_names target_columns
+				(coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)) true))
 			/* Validate the complete statement before evaluating or inserting rows.
 			Both literal templates and general expression rows obey SQL arity. */
 			(if (reduce datasets (lambda (valid row)
@@ -1794,7 +1799,9 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 		(define datasets (* (parser '("(" (define dataset (* sql_expression ",")) ")") dataset) ","))
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)))
+			(define target_columns (sql_write_column_declarations (coalesce schema2 schema) tbl planning_session tx))
+			(define coldesc (sql_storage_column_names target_columns
+				(coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)) true))
 			(define updaterows2 (merge (map coldesc (lambda (col)
 				(list col (list (quote get_column) "VALUES" true col true))))))
 			(define updatecols (cons "$update" (map coldesc (lambda (col) (concat "NEW." col)))))
@@ -1828,11 +1835,14 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 		) updaterows)))
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
+			(define target_columns (sql_write_column_declarations (coalesce schema2 schema) tbl planning_session tx))
 			(set updaterows2 (if (nil? updaterows) nil
 				(map_assoc (merge updaterows) (lambda (col value)
 					(sql_type_formula (list (list tbl (coalesce schema2 schema) tbl false nil nil)) value)))))
+			(set updaterows2 (sql_storage_assignments target_columns updaterows2 true))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)))
+			(define coldesc (sql_storage_column_names target_columns
+				(coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)) true))
 			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
 
@@ -1864,11 +1874,14 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 	) (begin
 			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
+			(define target_columns (sql_write_column_declarations (coalesce schema2 schema) tbl planning_session tx))
 			(set updaterows2 (if (nil? updaterows) nil
 				(map_assoc (merge updaterows) (lambda (col value)
 					(sql_type_formula (list (list tbl (coalesce schema2 schema) tbl false nil nil)) value)))))
+			(set updaterows2 (sql_storage_assignments target_columns updaterows2 true))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)))
+			(define coldesc (sql_storage_column_names target_columns
+				(coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)) true))
 			(sql_insert_select_plan (coalesce schema2 schema) tbl coldesc inner ignoreexists updaterows updaterows2 updatecols)
 	)))
 
@@ -1883,7 +1896,9 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 		(define assignments (+ (parser '((define col sql_identifier) (atom "=" false) (define value sql_expression)) '(col value)) ","))
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
-			(define coldesc (map assignments (lambda (a) (match a '(col _) col))))
+			(define target_columns (sql_write_column_declarations (coalesce schema2 schema) tbl planning_session tx))
+			(define coldesc (sql_storage_column_names target_columns
+				(map assignments (lambda (a) (match a '(col _) col))) true))
 			(define dataset (map assignments (lambda (a) (match a '(_ value) value))))
 			(physical_insert_producer '('insert '('table (coalesce schema2 schema) false tbl false (quote tx)) (cons list coldesc) '(list (cons list dataset)) '(list)
 				(if ignoreexists '('lambda '() true) nil)
@@ -1985,7 +2000,7 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 			(parser '((atom "ADD" true) (atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2))) */
 			(parser '((atom "ADD" true) (or (atom "KEY" true) (atom "INDEX" true)) sql_identifier "(" (+ (parser '((define col sql_identifier) (? "(" sql_int ")")) col) ",") ")" (? (atom "USING" true) (atom "BTREE" true))) (lambda (id) true)) /* ignore index definitions */
 			(parser '((atom "ADD" true) (atom "FULLTEXT" true) (? (atom "INDEX" true)) (? sql_identifier) "(" (+ sql_identifier ",") ")") (lambda (id) true)) /* ignore fulltext index */
-			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define cname (? sql_identifier))) (atom "FOREIGN" true) (atom "KEY" true) (? (define fkname sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode))) (lambda (id) '('createforeignkey '('table schema false id false (quote tx)) (coalesce cname fkname (concat id "_" (car cols1) "_fk")) (cons (quote list) cols1) '('table schema false tbl2 false (quote tx)) (cons (quote list) cols2) updatemode deletemode (quote tx))))
+			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define cname (? sql_identifier))) (atom "FOREIGN" true) (atom "KEY" true) (? (define fkname sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode))) (lambda (id) '('createforeignkey '('table schema false id false (quote tx)) (coalesce cname fkname (concat id "_" (car cols1) "_fk")) (cons (quote list) (sql_storage_column_names (sql_write_column_declarations schema id planning_session tx) cols1 true)) '('table schema false tbl2 false (quote tx)) (cons (quote list) (sql_storage_column_names (sql_write_column_declarations schema tbl2 planning_session tx) cols2 true)) updatemode deletemode (quote tx))))
 			(parser '((atom "DROP" true) (atom "FOREIGN" true) (atom "KEY" true) (define fk sql_identifier)) (lambda (id) '('dropforeignkey '('table schema false id false (quote tx)) fk (quote tx))))
 			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define fk sql_identifier)) (lambda (id) '('or '('dropforeignkey '('table schema false id false (quote tx)) fk (quote tx)) '('dropkey '('table schema false id false (quote tx)) fk (quote tx)))))
 			(parser '((atom "DROP" true) (atom "PRIMARY" true) (atom "KEY" true)) (lambda (id) true))
@@ -2011,7 +2026,7 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 					(parser empty '((quote list)))
 				))
 				(define typeparams sql_column_attributes)
-			) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "type" type) '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "dimensions" dimensions) 1)))
+			) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema false id false (quote tx)) (sql_bind_storage_column schema id col true planning_session tx) "type" type) '((quote altercolumn) '((quote table) schema false id false (quote tx)) (sql_bind_storage_column schema id col true planning_session tx) "dimensions" dimensions) 1)))
 			(parser '((atom "CHANGE" true)
 				(define oldcol sql_identifier)
 				(define col sql_identifier)
@@ -2022,15 +2037,15 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 					(parser empty '((quote list)))
 				))
 				(define typeparams sql_column_attributes)
-			) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "type" type) '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "dimensions" dimensions) 1)))
+			) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema false id false (quote tx)) (sql_bind_storage_column schema id col true planning_session tx) "type" type) '((quote altercolumn) '((quote table) schema false id false (quote tx)) (sql_bind_storage_column schema id col true planning_session tx) "dimensions" dimensions) 1)))
 			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "TYPE" true) (define type sql_column_type) (define dimensions (or
 				(parser '("(" (define a sql_int) "," (define b sql_int) ")") '((quote list) a b))
 				(parser '("(" (define a sql_int) ")") '((quote list) a))
 				(parser empty '((quote list)))
-			))) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "type" type) '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "dimensions" dimensions) 1)))
+			))) (lambda (id) '('!begin '((quote altercolumn) '((quote table) schema false id false (quote tx)) (sql_bind_storage_column schema id col true planning_session tx) "type" type) '((quote altercolumn) '((quote table) schema false id false (quote tx)) (sql_bind_storage_column schema id col true planning_session tx) "dimensions" dimensions) 1)))
 			(parser '((atom "CONVERT" true) (atom "TO" true) (atom "CHARACTER" true) (atom "SET" true) (define charset sql_identifier) (? (atom "COLLATE" true) (define coll sql_identifier))) (lambda (id) true))
-			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (atom "IF" true) (atom "EXISTS" true) (define col sql_identifier)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "drop_if_exists" col)))
-			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col sql_identifier)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "drop" col)))
+			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (atom "IF" true) (atom "EXISTS" true) (define col sql_identifier)) (lambda (id) (sql_drop_column_expr schema id col true true planning_session tx)))
+			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col sql_identifier)) (lambda (id) (sql_drop_column_expr schema id col true false planning_session tx)))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "engine" "memory")))
 			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "engine" "sloppy")))
 			(parser '((atom "ENGINE" true) "=" (atom "CACHE" true)) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "engine" "cache")))
@@ -2044,10 +2059,10 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 			(parser '((atom "COLLATE" true) "=" (define collation (regex "[a-zA-Z0-9_]+"))) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "collation" collation)))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) '((quote table) schema false id false (quote tx)) "auto_increment" ai)))
 			/* ALTER COLUMN operations for defaults */
-			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "SET" true) (atom "DEFAULT" true) (define def sql_uuid_default)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "default_expression" def (quote tx))))
-			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "SET" true) (atom "DEFAULT" true) (define def sql_expression)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "default" def (quote tx))))
-			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "DROP" true) (atom "DEFAULT" true)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "default" nil (quote tx))))
-			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "COLLATE" true) (define coll sql_identifier)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false (quote tx)) col "collation" coll)))
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "SET" true) (atom "DEFAULT" true) (define def sql_uuid_default)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false (quote tx)) (sql_bind_storage_column schema id col true planning_session tx) "default_expression" def (quote tx))))
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "SET" true) (atom "DEFAULT" true) (define def sql_expression)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false (quote tx)) (sql_bind_storage_column schema id col true planning_session tx) "default" def (quote tx))))
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "DROP" true) (atom "DEFAULT" true)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false (quote tx)) (sql_bind_storage_column schema id col true planning_session tx) "default" nil (quote tx))))
+			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col sql_identifier) (atom "COLLATE" true) (define coll sql_identifier)) (lambda (id) '((quote altercolumn) '((quote table) schema false id false (quote tx)) (sql_bind_storage_column schema id col true planning_session tx) "collation" coll)))
 		) ","))
 	) (cons '!begin (map alters (lambda (alter) (alter id))))))
 
@@ -2343,7 +2358,11 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 				(define view_schema (coalesce schema2 schema))
 				(if policy (policy view_schema id true) true)
 				(list (quote drop_sql_view) (list (quote session) "__memcp_tx") view_schema id (if if_exists true false)))))
-		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier)) '((quote renametable) schema oldname newname))
+		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier))
+			(list 'begin
+				(list 'define 'rename_target (list 'table schema false oldname true 'tx))
+				(list 'renametable 'rename_target newname true
+					(list 'show 'rename_target "identity" 'tx) 'tx)))
 		/* mysqldump --single-transaction establishes this before START TRANSACTION. */
 		(parser '((atom "SET" true) (atom "SESSION" true) (atom "TRANSACTION" true)
 			(atom "ISOLATION" true) (atom "LEVEL" true) (atom "REPEATABLE" true) (atom "READ" true)) (quote true))
@@ -2373,7 +2392,7 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 			))
 			"(" (define cols (+ sql_index_column ",")) ")"
 			(? (atom "USING" true) (atom "BTREE" true))
-		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) false t false (quote tx)) idx true (cons (quote list) cols) '(session "__memcp_tx") '('list "nulls_not_distinct" false))))
+		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) false t false (quote tx)) idx true (cons (quote list) (sql_storage_column_names (sql_write_column_declarations (coalesce schema2 schema) t planning_session tx) cols true)) '(session "__memcp_tx") '('list "nulls_not_distinct" false))))
 		(parser '((atom "CREATE" true)
 			(atom "INDEX" true)
 			(define idx sql_identifier)
@@ -2395,7 +2414,7 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 			))
 			(atom "USING" true) (atom "BTREE" true)
 			"(" (define cols (+ sql_index_column ",")) ")"
-		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) false t false (quote tx)) idx true (cons (quote list) cols) '(session "__memcp_tx") '('list "nulls_not_distinct" false))))
+		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) false t false (quote tx)) idx true (cons (quote list) (sql_storage_column_names (sql_write_column_declarations (coalesce schema2 schema) t planning_session tx) cols true)) '(session "__memcp_tx") '('list "nulls_not_distinct" false))))
 		(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier)
 			(atom "ON" true)
 			(define target (or

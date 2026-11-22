@@ -58,9 +58,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(match term
 				'(op left right) (if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
 					(or
-						(and (equal?? (direct_column_name_for_alias src left) col)
+						(and (equal? (direct_column_name_for_alias src left) col)
 							(not (expr_contains_column_ref? right)))
-						(and (equal?? (direct_column_name_for_alias src right) col)
+						(and (equal? (direct_column_name_for_alias src right) col)
 							(not (expr_contains_column_ref? left))))
 					false)
 				_ false)))
@@ -78,10 +78,10 @@ the source row; otherwise this is a join equality, not a query-local value. */
 				(match term
 					'(op left right)
 					(if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
-						(if (and (equal?? (direct_column_name_for_alias src left) col)
+						(if (and (equal? (direct_column_name_for_alias src left) col)
 							(not (expr_contains_column_ref? right)))
 							(list true right)
-							(if (and (equal?? (direct_column_name_for_alias src right) col)
+							(if (and (equal? (direct_column_name_for_alias src right) col)
 								(not (expr_contains_column_ref? left)))
 								(list true left)
 								found))
@@ -92,7 +92,7 @@ the source row; otherwise this is a join equality, not a query-local value. */
 (define source_unique_point_condition? (lambda (src condition)
 	(if (not (source_is_base_table? src))
 		false
-		(reduce (source_unique_key_sets src) (lambda (found key_cols)
+		(reduce (source_storage_unique_key_sets src) (lambda (found key_cols)
 			(or found
 				(reduce key_cols (lambda (complete col)
 					(and complete (source_column_bound_by_equality? src col condition)))
@@ -1750,24 +1750,26 @@ per-key budgets would multiply into an oversized Cartesian topology.
 Small source tables naturally collapse to a single partition and partitiontable skips them; only direct column references to the
 scanned base table qualify, so session/constant-key groups (never plain
 get_column refs to the source) are excluded automatically too. */
-(define group_cache_partition_hint (lambda (schema tbl alias key col_name)
+(define group_cache_partition_hint (lambda (src alias key col_name)
 	(match key
 		((symbol get_column) tblvar _tbl_ignorecase col _col_ignorecase) (if (equal? tblvar alias)
-			(list col_name (list (quote shardcolumn) (list (quote table) schema false tbl false (quote tx)) col))
+			(list col_name (list (quote shardcolumn) (source_native_table_expr src (quote tx))
+				(resolve_physical_column_name src col _col_ignorecase)))
 			'())
 		((quote get_column) tblvar _tbl_ignorecase col _col_ignorecase) (if (equal? tblvar alias)
-			(list col_name (list (quote shardcolumn) (list (quote table) schema false tbl false (quote tx)) col))
+			(list col_name (list (quote shardcolumn) (source_native_table_expr src (quote tx))
+				(resolve_physical_column_name src col _col_ignorecase)))
 			'())
 		_ '())))
 
 (define group_cache_partition_plan (lambda (schema tbl alias src grouptbl keys key_names)
 	(begin
 		(define hints (merge (map (produceN (count keys)) (lambda (i)
-			(group_cache_partition_hint schema tbl alias (nth keys i) (nth key_names i))))))
+			(group_cache_partition_hint src alias (nth keys i) (nth key_names i))))))
 		(if (or (not (source_is_base_table? src)) (empty_list? hints))
 			nil
 			(list (quote partitiontable) (list (quote table) schema false grouptbl false (quote tx)) (cons (quote list) hints)
-				(list (quote table) schema false tbl false (quote tx)))))))
+				(source_native_table_expr src (quote tx)))))))
 
 (define boolean_recset_domain_source (lambda (input keys)
 	(if (not (query_block? input))
@@ -2093,7 +2095,7 @@ outer joins. */
 							'()))))
 			(define cleanup_plan (if (query_block? src)
 				nil
-				(build_group_keytable_cleanup schema tbl alias grouptbl keys key_names)))
+					(build_group_keytable_cleanup src schema alias grouptbl keys key_names)))
 			(define agg_plans (if query_input
 				(if (empty_list? ags)
 					'()
@@ -3449,7 +3451,7 @@ strictly cheaper. */
 		(and (not (empty_list? key_cols))
 			(and (not (reduce key_cols (lambda (missing col)
 				(or missing (nil? col))) false))
-				(contains? (source_unique_key_sets input) key_cols))))))
+				(contains? (source_storage_unique_key_sets input) key_cols))))))
 
 (define scalar_order_lookup_cache_eligible? (lambda (stage target input_cols parts)
 	(and (stage_result_reusable? stage)
@@ -3695,7 +3697,7 @@ ordinary probe path until RecMap carries explicit equality relations. */
 
 (define recmap_direct_key_column? (lambda (src col)
 	(and (source_is_base_table? src)
-		(recmap_direct_key_declaration? (source_column_declaration src col true)))))
+		(recmap_direct_key_declaration? (source_storage_column_declaration src col)))))
 
 /* An already selected source window reads prepared query-local payload by
 record identity. Keep its storage acquisition out of the callback; the existing
@@ -3928,16 +3930,16 @@ outer CASE/short-circuit expression must keep its existing row-bound probe. */
 		(define middle (nth candidate 3))
 		(define target (nth candidate 6))
 		(define driver_rows (coalesceNil (planner_source_row_count driver)
-			(scan_estimate (table (source_schema driver) false (source_relation driver) false nil))))
+			(scan_estimate (table (source_schema driver) false (source_storage_relation driver) false nil))))
 		(define window (nested_scalar_recmap_window candidate))
 		(define selected_rows (if (nil? window) driver_rows
 			(min driver_rows (nth window 4))))
 		(define middle_rows (min selected_rows
 			(coalesceNil (planner_source_row_count middle)
-				(scan_estimate (table (source_schema middle) false (source_relation middle) false nil)))))
+				(scan_estimate (table (source_schema middle) false (source_storage_relation middle) false nil)))))
 		(define target_rows (min middle_rows
 			(coalesceNil (planner_source_row_count target)
-				(scan_estimate (table (source_schema target) false (source_relation target) false nil)))))
+				(scan_estimate (table (source_schema target) false (source_storage_relation target) false nil)))))
 		(list selected_rows middle_rows target_rows))))
 
 (define nested_scalar_recmap_costs_for_rows (lambda (driver_rows middle_rows target_rows windowed)
@@ -5957,7 +5959,7 @@ fix). */
 					(list (quote literal_union_dedupe_rows) rows) rows))
 			(if (information_schema_source? (source_schema src) (source_relation src))
 				(list (quote information_schema_rows) (source_schema src) (source_relation src) (quote tx) nil)
-					(list (quote table) (source_schema src) false (source_relation src) false (quote tx))))))))
+					(source_native_table_expr src (quote tx))))))))
 
 /* A virtual catalog can avoid constructing unrelated metadata rows when a
 positive conjunct already restricts its native names. These access requirements
@@ -7665,7 +7667,7 @@ scalar comparison work rather than an uncalibrated multiplier. */
 				(define ordercols (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
 				(define batch_tiebreaker_cols (if (empty_list? order_items)
 					'()
-					(filter (source_primary_key_columns src)
+					(filter (source_storage_primary_key_columns src)
 						(lambda (col) (not (contains? ordercols col))))))
 				(define batch_ordercols (merge (list ordercols batch_tiebreaker_cols)))
 				(define batch_orderdirs (merge (list
@@ -8292,7 +8294,7 @@ invalidation certificate; only the existing cost/observation budget decides. */
 				(map (merge (list output_exprs (list condition condition) (map sources source_join_expr) (map order_items car)))
 					(lambda (expr) (parameter_access_scalar_work expr sources))))))
 			(define statistics (if (nil? scalar) '() (map sources (lambda (source)
-				(table_planner_statistics (table (source_schema source) false (source_relation source) false tx))))))
+				(table_planner_statistics (table (source_schema source) false (source_storage_relation source) false tx))))))
 			(define rows (map statistics (lambda (stats) (stats "row_count"))))
 			(if (or (nil? scalar) (not (equal? (count rows) 2))
 				(not (reduce statistics (lambda (known stats)
@@ -9115,7 +9117,7 @@ until the caller has selected this physical alternative. */
 		(define ordercols (scan_order_sort_columns_for_join_driver
 			ordered_sources default_alias src driver_order_items stages carrier_condition))
 		(define tiebreaker_cols (if use_batch_accept
-			(filter (source_primary_key_columns src)
+			(filter (source_storage_primary_key_columns src)
 				(lambda (col) (not (contains? ordercols col)))) '()))
 		(define physical_ordercols (merge (list ordercols tiebreaker_cols)))
 		(define physical_orderdirs (merge (list
@@ -11480,7 +11482,7 @@ Row and shard merges retain the caller's existing reducer algebra. */
 							(begin
 								(define ordercols (scan_order_sort_columns_for_join_driver
 									ordered_sources default_alias src current_order_items stages final_condition))
-								(define tiebreaker_cols (filter (source_primary_key_columns src)
+										(define tiebreaker_cols (filter (source_storage_primary_key_columns src)
 									(lambda (col) (not (contains? ordercols col)))))
 								(list (quote scan_order_batch_accept)
 									(physical_query_tx_symbol)
@@ -11671,7 +11673,7 @@ only. Its predicates and aliases cannot prove a prefilter of preserved rows. */
 /* Canonical physical prejoin relations                                      */
 
 (define prejoin_primary_key_columns (lambda (src)
-	(source_primary_key_columns src)))
+	(source_storage_primary_key_columns src)))
 
 (define prejoin_source_position (lambda (sources alias)
 	(reduce (produceN (count sources)) (lambda (found i)
@@ -11688,7 +11690,7 @@ only. Its predicates and aliases cannot prove a prefilter of preserved rows. */
 			(concat "s" pos "_" (stable_structural_hash col false))))))
 
 (define prejoin_source_table_key (lambda (src)
-	(list (source_schema src) (source_relation src))))
+	(list (source_schema src) (source_storage_relation src))))
 
 (define prejoin_sources_distinct? (lambda (sources)
 	(equal? (count sources)
@@ -11820,7 +11822,8 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 (define prejoin_primary_key_exprs (lambda (sources)
 	(merge (map sources (lambda (src)
 		(map (prejoin_primary_key_columns src) (lambda (col)
-			(list (quote get_column) (source_alias src) false col false))))))))
+			(list (quote get_column) (source_alias src) false
+				(source_storage_column_visible_name src col) false))))))))
 
 (define prejoin_primary_key_names (lambda (sources)
 	(merge (map sources (lambda (src)
@@ -11878,7 +11881,8 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 					(define physical_col (resolve_physical_column_name src col col_ignorecase))
 					(if (equal?? (source_alias src) trigger_alias)
 						(list (quote get_assoc) dict_symbol physical_col)
-						(list (quote get_column) (source_alias src) false physical_col false)))))
+						(list (quote get_column) (source_alias src) false
+							(source_column_name src col col_ignorecase) false)))))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
 		(prejoin_replace_trigger_expr sources default_alias trigger_alias dict_symbol
 			(list (symbol "get_column") tblvar tbl_ignorecase col col_ignorecase))
@@ -11938,7 +11942,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 
 (define prejoin_create_trigger_plan (lambda (src name timing body)
 	(list (quote createtrigger)
-		(list (quote table) (source_schema src) false (source_relation src) false (quote tx))
+		(source_native_table_expr src (quote tx))
 		name timing "" "" (prejoin_deferred_trigger body) false)))
 
 (define prejoin_trigger_registration_plans (lambda (block table_name)
@@ -12844,8 +12848,12 @@ contain large subtrees. Volatile calls still execute once per occurrence. */
 (define dml_assignment_exprs (lambda (cols)
 	(extract_assoc (coalesceNil cols '()) (lambda (_title expr) expr))))
 
+(define dml_storage_assignments (lambda (src cols)
+	(merge (extract_assoc (coalesceNil cols '()) (lambda (title expression)
+		(list (sql_column_storage_name (sql_bound_column (source_columns src) title false)) expression))))))
+
 (define lower_dml_update_values (lambda (src cols)
-	(map_assoc (coalesceNil cols '()) (lambda (_title expr)
+	(map_assoc (dml_storage_assignments src cols) (lambda (_title expr)
 		(lower_column_expr_for_alias src expr)))))
 
 (define dml_target_source (lambda (sources target_schema target_tbl target_alias)
@@ -12884,7 +12892,7 @@ contain large subtrees. Volatile calls still execute once per occurrence. */
 (define multi_delete_target_scan_plan (lambda (target_src target_rows)
 	(begin
 		(define alias (source_alias target_src))
-		(define keycols (source_primary_key_columns target_src))
+		(define keycols (source_storage_primary_key_columns target_src))
 		(if (empty_list? keycols)
 			(neumann_fail "build_queryplan" "multi-target DELETE requires a primary key on every target")
 			true)
@@ -13096,7 +13104,7 @@ identity/payload carrier. No unique key or byte-wise equality is inferred. */
 						(expr_refs_alias? default_alias alias term) (expr_refs_any_alias? default_alias other_aliases term)))))
 				(define bound_columns (merge_unique (map bindings (lambda (term)
 					(extract_columns_for_join_alias sources default_alias alias term)))))
-				(if (not (reduce (extract_assoc columns (lambda (name _expression) name))
+				(if (not (reduce (extract_assoc (dml_storage_assignments target columns) (lambda (name _expression) name))
 					(lambda (stable name) (and stable (not (contains? bound_columns name)))) true)) nil
 					(begin
 						(define expressions (dml_assignment_exprs columns))
@@ -13106,7 +13114,7 @@ identity/payload carrier. No unique key or byte-wise equality is inferred. */
 						(define filter_columns (extract_columns_for_alias source source_condition))
 						(define source_columns (merge_unique (map expressions
 							(lambda (expression) (extract_columns_for_alias source expression)))))
-						(define value (cons 'list (map_assoc columns (lambda (_name expression)
+						(define value (cons 'list (map_assoc (dml_storage_assignments target columns) (lambda (_name expression)
 							(lower_column_expr_for_join sources default_alias expression)))))
 						(define selected '__joined_update_first)
 						(define acc '__joined_update_acc)
@@ -13202,7 +13210,7 @@ identity/payload carrier. No unique key or byte-wise equality is inferred. */
 							(expr_refs_any_alias? first_alias other_aliases term)))))
 				(define bound_target_columns (merge_unique (map target_join_terms (lambda (term)
 					(extract_columns_for_join_alias sources first_alias target_alias term)))))
-				(if (reduce (extract_assoc (coalesceNil cols '()) (lambda (title _expr) title))
+				(if (reduce (extract_assoc (dml_storage_assignments target_src cols) (lambda (title _expr) title))
 					(lambda (safe title) (and safe (not (contains? bound_target_columns title)))) true) true
 					(neumann_fail "build_queryplan" "joined UPDATE cannot change its target join columns yet"))
 
@@ -13214,7 +13222,7 @@ identity/payload carrier. No unique key or byte-wise equality is inferred. */
 				/* Prepared stages have their own immutable input. Direct aliases of the
 				mutation table do not: changing a column read through another alias would
 				make a later nested probe consume this statement's new values. */
-				(define target_writes (extract_assoc (coalesceNil cols '()) (lambda (title _expr) title)))
+				(define target_writes (extract_assoc (dml_storage_assignments target_src cols) (lambda (title _expr) title)))
 				(if (reduce sources (lambda (safe src) (and safe
 					(or (not (and (source_is_base_table? src)
 						(equal? (source_schema src) target_schema) (equal? (source_relation src) target_tbl)
@@ -13232,7 +13240,7 @@ identity/payload carrier. No unique key or byte-wise equality is inferred. */
 				(define update_fn (lower_column_expr_for_join sources first_alias update_ref))
 				(define update_values (if delete_mode
 					nil
-					(cons (quote list) (map_assoc (coalesceNil cols '()) (lambda (_title expr)
+					(cons (quote list) (map_assoc (dml_storage_assignments target_src cols) (lambda (_title expr)
 						(lower_column_expr_for_join sources first_alias expr))))))
 				(define row_expr (if delete_mode
 					(list (quote if) (list update_fn) 1 0)
@@ -13327,12 +13335,16 @@ in storage. The nested lambda receives an independently bound invocation. */
 
 /* Operation identity is already explicit in logical DML field ownership.
 Validate every UNION branch before emitting a single outer native producer. */
-(define physical_dml_descriptor (lambda (block)
+(define physical_dml_descriptor (lambda (block target_schema target_tbl)
 	(if (query_block? block)
 		(list (if (empty_list? (coalesceNil (qb_fields block) '())) "delete" "update")
-			(extract_assoc (coalesceNil (qb_fields block) '()) (lambda (name _expr) name)))
+			(extract_assoc (dml_storage_assignments
+				(dml_target_source (qb_sources block) target_schema target_tbl
+					(qassoc_get (qb_facts block) 'dml_target_alias nil)) (qb_fields block))
+				(lambda (name _expr) name)))
 		(union_block? block) (begin
-			(define events (map (union_branches block) physical_dml_descriptor))
+			(define events (map (union_branches block) (lambda (branch)
+				(physical_dml_descriptor branch target_schema target_tbl))))
 			(if (or (empty_list? events) (find events (lambda (event) (not (expression_equal? event (car events)))) nil))
 				(neumann_fail "build_queryplan" "DML UNION branches require one operation")
 				(car events)))
@@ -14641,7 +14653,7 @@ prepare bindings; no key enumeration or storage artifact enters logical IR. */
 					the outer producer must borrow the same handle as its scan. */
 					(list (if (local_relation_reference? target_tbl) (local_relation_symbol target_tbl)
 						(list 'table target_schema false target_tbl false 'tx)))
-					(physical_dml_descriptor (ir_root ir))
+					(physical_dml_descriptor (ir_root ir) target_schema target_tbl)
 					(match (logical_op (ir_root ir))
 						(symbol query-block) (lower_dml_query_block_with_stages (ir_root ir) target_schema target_tbl)
 						(symbol union-block) (lower_dml_union_block_with_stages (ir_root ir) target_schema target_tbl)
@@ -14650,7 +14662,7 @@ prepare bindings; no key enumeration or storage artifact enters logical IR. */
 					(symbol query-block) (physical_mutation_producer
 						(map target_specs (lambda (spec) (begin
 							(define source (dml_target_source_for_spec (qb_sources (ir_root ir)) spec))
-							(list 'table (source_schema source) false (source_relation source) false 'tx))))
+							(source_native_table_expr source 'tx))))
 						(list "delete" '())
 						(lower_multi_target_delete_with_stages (ir_root ir) target_specs))
 					_ (neumann_fail "build_queryplan" "multi-target DELETE lowering expects a query-block root"))
@@ -15070,7 +15082,7 @@ current scalar once. No input expression or caller procedure is evaluated. */
 		(expression_equal? (car profile) (quote native-ordered-access)) (parameter_access_reuse_work profile session tx)
 		(begin
 			(define statistics (map (car profile) (lambda (src)
-				(table_planner_statistics (table (source_schema src) false (source_relation src) false tx)))))
+				(table_planner_statistics (table (source_schema src) false (source_storage_relation src) false tx)))))
 			(define rows (map statistics (lambda (stats) (stats "row_count"))))
 			(define input_bytes (parameter_plan_input_byte_work (nth profile 4) session))
 			(if (or (not (reduce statistics (lambda (known stats)
@@ -16025,8 +16037,8 @@ It is as stable as its symbolic form; other procedures remain unproven. */
 						(extract_assoc fields (lambda (_name expr) expr))))
 						(lambda (used expr) (or used (expr_refs_sources? default_alias (list lookup) expr))) false)))))
 			(define keys (map edges (lambda (term) (union_semijoin_equal_parts driver lookup term))))
-			(define lookup_unique (and (not (empty_list? (source_primary_key_columns lookup)))
-				(reduce (source_primary_key_columns lookup) (lambda (ok col)
+			(define lookup_unique (and (not (empty_list? (source_storage_primary_key_columns lookup)))
+				(reduce (source_storage_primary_key_columns lookup) (lambda (ok col)
 					(and ok (contains? (map keys car) col))) true)))
 			(if (and (source_is_base_table? driver) (source_is_base_table? lookup)
 				(not (source_outer? driver))
@@ -16150,7 +16162,7 @@ existing scan and expression primitives. No predicate is discarded. */
 			(cons head tail) (cons (unqualify head) (map tail unqualify))
 			_ (qassoc_get names expr expr))))
 		(define body (unqualify qualified_body))
-		(define name (concat ".predicate:" (stable_structural_hash (list (source_schema driver) (source_relation driver) (source_schema lookup) (source_relation lookup) columns body) true)))
+		(define name (concat ".predicate:" (stable_structural_hash (list (source_schema driver) (source_storage_relation driver) (source_schema lookup) (source_storage_relation lookup) columns body) true)))
 		(list name
 			(list (quote createcolumn) (source_table_expr driver) name "any" (quoted_runtime_list '()) (quoted_runtime_list '("temp" true))
 				(quoted_runtime_list columns)
@@ -16194,7 +16206,7 @@ wrap a plan with it. The SQL frontend then omits its independent count plan. */
 						_ expr)))
 				(define matches (semijoin_filter_recset src (source_table_expr src)
 					(prejoin_rewrite_expr sources default_alias name (nth spec 4))))
-				(define keys (source_primary_key_columns driver))
+				(define keys (source_storage_primary_key_columns driver))
 				(list name (narrow prepare)
 					(candidate_recset_filter_source driver
 						(list (quote recset_project_join) (physical_query_tx_symbol) matches
@@ -16243,8 +16255,8 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 				(define decision_id (concat "semijoin_carrier:" (stable_structural_hash
 					(list (source_schema driver) (source_relation driver) (source_schema lookup) (source_relation lookup)
 						(nth spec 2) (nth spec 3) (nth spec 4) count_mode) true)))
-				(define driver_table (table (source_schema driver) false (source_relation driver) false nil))
-				(define lookup_table (table (source_schema lookup) false (source_relation lookup) false nil))
+				(define driver_table (table (source_schema driver) false (source_storage_relation driver) false nil))
+				(define lookup_table (table (source_schema lookup) false (source_storage_relation lookup) false nil))
 				(define cache_table (if count_mode driver_table (table (qb_schema block) false name false nil)))
 				(define is_ready (if count_mode
 					(not (nil? (resolve_column_name (source_schema driver) (source_relation driver) name false)))
@@ -16306,7 +16318,7 @@ without freezing a statistics-dependent decision in the SQL plan cache. */
 
 (define semijoin_split_filter_wins? (lambda (src indexed residual_width execution_session)
 	(begin
-		(define input_rows (scan_estimate (table (source_schema src) false (source_relation src) false nil)))
+		(define input_rows (scan_estimate (table (source_schema src) false (source_storage_relation src) false nil)))
 		(define selectivity (reduce indexed (lambda (value term)
 			(* value (join_optimizer_expr_selectivity (list src) (source_alias src) term execution_session))) 1))
 		(define matching_rows (* input_rows selectivity))
@@ -16318,8 +16330,8 @@ carrier. Guard this crossover as well as the runtime cache/direct decision. */
 (define semijoin_root_preferred? (lambda (spec cache_name)
 	(if (not (nth spec 5)) true
 		(begin
-			(define driver (table (source_schema (car spec)) false (source_relation (car spec)) false nil))
-			(define lookup (table (source_schema (cadr spec)) false (source_relation (cadr spec)) false nil))
+			(define driver (table (source_schema (car spec)) false (source_storage_relation (car spec)) false nil))
+			(define lookup (table (source_schema (cadr spec)) false (source_storage_relation (cadr spec)) false nil))
 			(if (or (nil? driver) (nil? lookup)) false
 				(or (and (not (nil? cache_name))
 					(not (nil? (resolve_column_name (source_schema (car spec)) (source_relation (car spec)) cache_name false)))

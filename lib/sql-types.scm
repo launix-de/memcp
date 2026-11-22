@@ -798,7 +798,7 @@ O(k) for the k declared keys and never reads shard data or automatic indexes. */
 			(lambda (key) (list (equal? (key "Id") "PRIMARY") (key "Cols")
 				(if (key "nulls_not_distinct") true false)))))))
 (define sql_mutation_column_contract (lambda (column)
-	(if (nil? column) nil (list (column "RawType")
+	(if (nil? column) nil (list (column "Field") (sql_column_storage_name column) (column "RawType")
 		(coalesceNil (column "Dimensions") '()) (column "Null")
 		(coalesceNil (column "Collation") "")))))
 (define sql_mutation_contract_declarations (lambda (sources expressions)

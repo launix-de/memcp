@@ -36,7 +36,7 @@ https://learn.microsoft.com/sql/t-sql/statements/alter-table-transact-sql */
 	(define missing (lambda ()
 		(tsql_raise_error 4926 (concat "ALTER COLUMN DROP ROWGUIDCOL failed because column '" column "' has no ROWGUIDCOL property.") 1)))
 	(if (tsql_row_guid_column? declaration) true (missing))
-	(if (altercolumn handle (declaration "Field") "drop_property" "tsql.rowguidcol" tx) true (missing)))))
+	(if (altercolumn handle (sql_column_storage_name declaration) "drop_property" "tsql.rowguidcol" tx) true (missing)))))
 
 /* Claim publication is atomic in the native declaration owner. The frontend
 owns only direct-type eligibility and the meaning of this namespaced marker;
@@ -48,7 +48,7 @@ there is no preliminary table-wide scan whose result could race publication. */
 		(tsql_raise_error 4924 (concat "ALTER COLUMN failed because column '" column "' does not exist in table '" name "'.") 1) true)
 	(if (equal? (toUpper (declaration "RawType")) "UNIQUEIDENTIFIER") true
 		(error "ROWGUIDCOL requires the native UNIQUEIDENTIFIER declaration"))
-	(altercolumn handle (declaration "Field") "claim_property"
+	(altercolumn handle (sql_column_storage_name declaration) "claim_property"
 		(list "tsql.rowguidcol" true
 			(list (declaration "RawType") (coalesceNil (declaration "Dimensions") '())
 				(declaration "Null") (coalesceNil (declaration "Collation") ""))) tx))))

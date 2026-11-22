@@ -910,8 +910,8 @@ prepare stage creates. */
 (define source_join_expr (lambda (src)
 	(match src '(_ _ _ _ join _) join _ nil)))
 
-/* A source carries only semantic declaration facts. Native identities,
-transactions, row estimates and physical helpers never enter this slot. */
+/* A source carries pure declaration facts and its immutable native generation
+address. Transactions, handles, row estimates and physical helpers stay outside. */
 (define source_declarations (lambda (src)
 	(match src '(_ _ _ _ _ declarations) declarations _ nil)))
 /* These builtin relations read the current metadata publication, not rows
@@ -957,7 +957,7 @@ before a native declaration enters logical binding or a query-plan key. */
 		(or (nil? value) (number? value) (string? value)
 			(identical? value true) (identical? value false)) value
 		(error "opaque native value cannot be bound as a SQL declaration"))))
-(define sql_semantic_column_fields '("Field" "Type" "RawType" "Dimensions" "Null" "Key" "Collation"
+(define sql_semantic_column_fields '("Field" "StorageField" "Type" "RawType" "Dimensions" "Null" "Key" "Collation"
 	"Extra" "Computed" "Default" "DefaultExpression" "DefaultDeferred" "DefaultName" "EnumValues" "Properties" "Comment"))
 (define sql_column_declaration (lambda (column)
 	(merge (map sql_semantic_column_fields
@@ -965,7 +965,8 @@ before a native declaration enters logical binding or a query-plan key. */
 (define sql_relation_local_declarations (lambda (database name tx) (begin
 	(define handle (if (equal?? database "information_schema") nil
 		(table database false name false tx)))
-	(if handle (sql_declaration_data (show handle "declarations" tx))
+	(if handle (merge (list (sql_declaration_data (show handle "declarations" tx))
+		(list "storage_address" (sql_declaration_data (table_address handle tx)))))
 		(list "columns" (map (if (equal?? database "information_schema")
 			(information_schema_column_catalog database name) '()) sql_column_declaration)
 			"constraints" '("Unique" () "ForeignKeys" ()))))))
@@ -989,12 +990,14 @@ return through ordinary recompilation and validation. */
 (define sql_relation_local_declarations_match? (lambda (database name tx expected fields) (begin
 	(define handle (if (equal?? database "information_schema") nil
 		(table database false name false tx)))
-	(define actual (if handle (show handle "declarations" tx)
+	(define actual (if handle (merge (list (show handle "declarations" tx)
+		(list "storage_address" (table_address handle tx))))
 		(list "columns" (map (if (equal?? database "information_schema")
 			(information_schema_column_catalog database name) '()) sql_column_declaration)
 			"constraints" '("Unique" () "ForeignKeys" ()))))
-	(reduce fields (lambda (same field)
-		(and same (expression_equal? (expected field) (actual field)))) true))))
+	(and (expression_equal? (expected "storage_address") (actual "storage_address"))
+		(reduce fields (lambda (same field)
+			(and same (expression_equal? (expected field) (actual field)))) true)))))
 (define sql_relation_declarations_match? (lambda (database name tx expected)
 	(and (sql_relation_local_declarations_match? database name tx expected '("columns" "constraints" "visibility"))
 		(reduce (coalesceNil (expected "references") '()) (lambda (same reference)
@@ -1011,10 +1014,68 @@ return through ordinary recompilation and validation. */
 (define source_referenced_declarations (lambda (src target)
 	(if (nil? (source_declarations src)) nil
 		(qassoc_get ((source_declarations src) "references") target nil))))
+/* The visible relation remains the SQL/ACL binding. Physical constructors use
+its already selected generation; the inert address is quoted into emitted code. */
+(define source_storage_relation (lambda (src)
+	(coalesceNil (get_assoc (coalesceNil (source_declarations src) '()) "storage_address" nil)
+		(source_relation src))))
+(define source_native_table_expr (lambda (src tx)
+	(list 'table (source_schema src) false
+		(if (list? (source_storage_relation src))
+			(list 'quote (source_storage_relation src)) (source_storage_relation src)) false tx)))
+
 (define source_column_declaration (lambda (src column ignorecase)
 	(find (source_columns src) (lambda (declaration)
 		(if ignorecase (equal?? (declaration "Field") column)
 			(equal? (declaration "Field") column))) nil)))
+
+/* SQL binds only visible names. The immutable storage coordinate is consumed
+after that binding, never as an alternative SQL spelling. Legacy declarations
+and logical producer exports use the same name for both coordinates. */
+(define sql_column_storage_name (lambda (declaration)
+	(coalesceNil (declaration "StorageField") (declaration "Field"))))
+(define sql_bound_column (lambda (declarations name ignorecase) (begin
+	(define declaration (find declarations (lambda (column)
+		((if ignorecase equal?? equal?) (column "Field") name)) nil))
+	(if declaration declaration (sql_binding_error "missing-column" (concat "Column does not exist: " name))))))
+(define sql_storage_column_names (lambda (declarations names ignorecase)
+	(map names (lambda (name)
+		(sql_column_storage_name (sql_bound_column declarations name ignorecase))))))
+(define sql_write_column_declarations (lambda (database name planning_session tx)
+	(if (local_relation_reference? name) (local_relation_columns name) (begin
+		(define declarations (sql_relation_local_declarations database name tx))
+		(planner_record_guard_condition
+			(list 'sql_relation_local_declarations_match? database name 'tx
+				(list 'quote declarations) (list 'quote '("columns" "constraints"))) planning_session)
+		(declarations "columns")))))
+(define sql_bind_storage_column (lambda (database name column ignorecase planning_session tx)
+	(sql_column_storage_name (sql_bound_column
+		(sql_write_column_declarations database name planning_session tx) column ignorecase))))
+(define sql_drop_column_expr (lambda (database name column ignorecase ifexists planning_session tx) (begin
+	(define declaration (find (sql_write_column_declarations database name planning_session tx)
+		(lambda (declaration) ((if ignorecase equal?? equal?) (declaration "Field") column)) nil))
+	(if declaration (list 'altertable (list 'table database false name false 'tx)
+		(if ifexists "drop_if_exists" "drop") (sql_column_storage_name declaration))
+		ifexists true (error "DROP column does not exist: " column)))))
+/* INSERT collision callbacks use native old/NEW column arguments. Translate
+their already typed references once while constructing the callback, retaining
+the alias and every scalar operation. Quoted data remains opaque. */
+(define sql_storage_column_references (lambda (declarations expression) (match expression
+	((symbol quote) _literal) expression
+	((symbol get_column) alias alias_ic name column_ic)
+	(list 'get_column alias alias_ic
+		(sql_column_storage_name (sql_bound_column declarations name column_ic)) false)
+	(cons head arguments) (cons head (map arguments (lambda (argument)
+		(sql_storage_column_references declarations argument))))
+	_ expression)))
+(define sql_storage_assignments (lambda (declarations assignments ignorecase)
+	(merge (extract_assoc (coalesceNil assignments '()) (lambda (name expression)
+		(list (sql_column_storage_name (sql_bound_column declarations name ignorecase))
+			(sql_storage_column_references declarations expression)))))))
+(define sql_canonical_assignments (lambda (declarations assignments ignorecase)
+	(merge (extract_assoc assignments (lambda (name expression)
+		(list ((sql_bound_column declarations name ignorecase) "Field") expression))))))
+
 (define source_with_declarations (lambda (src declarations)
 	(list (source_alias src) (source_schema src) (source_relation src)
 		(source_outer? src) (source_join_expr src) declarations)))
@@ -1547,6 +1608,24 @@ work before decorrelation has even started. */
 		(map (filter (source_columns src) (lambda (col)
 			(equal?? (col "Key") "PRI"))) (lambda (col) (col "Field"))))))
 
+/* Physical consumers use native coordinates after the visible SQL key has
+been bound. Logical key proofs continue to consume the visible key helpers. */
+(define source_storage_primary_key_columns (lambda (src)
+	(map (source_primary_key_columns src) (lambda (name)
+		(sql_column_storage_name (sql_bound_column (source_columns src) name false))))))
+(define source_storage_unique_key_sets (lambda (src)
+	(map (source_unique_key_sets src) (lambda (names)
+		(sql_storage_column_names (source_columns src) names false)))))
+(define source_storage_column_declaration (lambda (src name)
+	(find (source_columns src) (lambda (column)
+		(equal? (sql_column_storage_name column) name)) nil)))
+(define source_storage_column_guaranteed_nonnull? (lambda (src name) (begin
+	(define column (source_storage_column_declaration src name))
+	(and (not (nil? column)) (not (column "Null"))))))
+(define source_storage_column_visible_name (lambda (src name) (begin
+	(define column (source_storage_column_declaration src name))
+	(if column (column "Field") name))))
+
 (define source_unique_key_sets (lambda (src)
 	(if (not (source_is_base_table? src))
 		'()
@@ -1590,17 +1669,26 @@ membership path until their nullability is represented in logical metadata. */
 			sources default_alias)
 		_ false)))
 
+(define logical_direct_column_name_for_alias (lambda (src expr)
+	(match expr
+		((symbol get_column) alias alias_ic column column_ic)
+		(if (source_alias_matches? src (source_alias src) alias alias_ic)
+			(source_column_name src column column_ic) nil)
+		((quote get_column) alias alias_ic column column_ic)
+		(logical_direct_column_name_for_alias src (list (symbol "get_column") alias alias_ic column column_ic))
+		_ nil)))
+
 (define unique_lookup_column_name (lambda (src expr)
 	(match expr
 		((symbol if) ((symbol nil?) probe) fallback value)
 		(if (and (nil? fallback) (equal? probe value))
-			(direct_column_name_for_alias src probe)
+			(logical_direct_column_name_for_alias src probe)
 			nil)
 		((quote if) ((quote nil?) probe) fallback value)
 		(if (and (nil? fallback) (equal? probe value))
-			(direct_column_name_for_alias src probe)
+			(logical_direct_column_name_for_alias src probe)
 			nil)
-		_ (direct_column_name_for_alias src expr))))
+		_ (logical_direct_column_name_for_alias src expr))))
 
 /* make_exists_stage_join_condition wraps a session-variable domain equality as
 (or (equal?? A B) (and (nil? A) (nil? B))) so it stays true when the session

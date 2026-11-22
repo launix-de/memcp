@@ -841,8 +841,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define tbl (car tables))
 			(if policy (policy schema tbl true) true)
 			(define all_defs (map tables (lambda (t) (list t schema t false nil nil))))
+			(define assignments (sql_canonical_assignments
+				(sql_write_column_declarations schema tbl planning_session tx) (merge cols) false))
 			(build_dml_plan tbl nil
-				(make_query_block schema all_defs (merge cols) (coalesceNil condition true)
+				(make_query_block schema all_defs assignments (coalesceNil condition true)
 					nil nil nil nil nil nil nil nil) planning_session tx)
 	)))
 
@@ -943,12 +945,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	) (begin
 			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
+			(define target_columns (sql_write_column_declarations (coalesce schema2 schema) tbl planning_session tx))
 			(set do_nothing (match onconflict '(do_nothing) true _ false))
 			(set conflictupdates (match onconflict '(do_update u) u _ nil))
 			(set updaterows3 (coalesce conflictupdates updaterows))
 			(set updaterows2 (if (nil? updaterows3) nil (merge updaterows3)))
+			(set updaterows2 (sql_storage_assignments target_columns updaterows2 false))
 			(set updatecols (if (nil? updaterows3) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)))
+			(define coldesc (sql_storage_column_names target_columns
+				(coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)) false))
 			(physical_insert_producer '('insert '('table (coalesce schema2 schema) false tbl false (quote tx)) (cons list coldesc) (cons list (map datasets (lambda (dataset) (cons list dataset)))) (cons list updatecols)
 				(if (or do_nothing (and ignoreexists (nil? updaterows3)))
 					'((quote lambda) '() 0)
@@ -984,9 +989,12 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	) (begin
 			/* policy: write access check */
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
+			(define target_columns (sql_write_column_declarations (coalesce schema2 schema) tbl planning_session tx))
 			(set updaterows2 (if (nil? updaterows) nil (merge updaterows)))
+			(set updaterows2 (sql_storage_assignments target_columns updaterows2 false))
 			(set updatecols (if (nil? updaterows) '() (cons "$update" (merge_unique (extract_assoc updaterows2 (lambda (k v) (extract_stupid v)))))))
-			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)))
+			(define coldesc (sql_storage_column_names target_columns
+				(coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl tx)) false))
 			(physical_mutation_producer (list (list 'table (coalesce schema2 schema) false tbl false 'tx)) (list "insert" '()) '('begin
 				'('set 'resultrow '('lambda '('item) '('insert '('table (coalesce schema2 schema) false tbl false (quote tx)) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))) false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx))))
 				(build_queryplan_term (sql_expand_views inner policy planning_session tx) planning_session tx)
@@ -1085,13 +1093,13 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(define id (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier))
 		(define alters (+ (or
 			/* TODO */
-			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ psql_identifier ",")) ")") (lambda (tbl) '('createkey '('table schema false tbl false (quote tx)) "PRIMARY" true (cons (quote list) cols) '(session "__memcp_tx"))))
+			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ psql_identifier ",")) ")") (lambda (tbl) '('createkey '('table schema false tbl false (quote tx)) "PRIMARY" true (cons (quote list) (sql_storage_column_names (sql_write_column_declarations schema tbl planning_session tx) cols false)) '(session "__memcp_tx"))))
 			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define key psql_identifier)) (atom "UNIQUE" true)
 				(define equalnulls psql_unique_null_policy) "(" (define cols (+ psql_identifier ",")) ")")
 				(lambda (tbl) (list (quote createkey) (list (quote table) schema false tbl false (quote tx))
 					(coalesce key (reduce cols (lambda (a b) (concat a "_" b)) tbl)) true
-					(cons (quote list) cols) '(session "__memcp_tx") (list (quote list) "nulls_not_distinct" equalnulls))))
-			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ psql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) "(" (define cols2 (+ psql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode psql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode psql_foreign_key_mode))) (lambda (tbl) '('createforeignkey '('table schema false tbl false (quote tx)) id (cons (quote list) cols1) '('table schema false tbl2 false (quote tx)) (cons (quote list) cols2) updatemode deletemode)))
+					(cons (quote list) (sql_storage_column_names (sql_write_column_declarations schema tbl planning_session tx) cols false)) '(session "__memcp_tx") (list (quote list) "nulls_not_distinct" equalnulls))))
+			(parser '((atom "ADD" true) (atom "CONSTRAINT" true) (define id psql_identifier) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ psql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) "(" (define cols2 (+ psql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode psql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode psql_foreign_key_mode))) (lambda (tbl) '('createforeignkey '('table schema false tbl false (quote tx)) id (cons (quote list) (sql_storage_column_names (sql_write_column_declarations schema tbl planning_session tx) cols1 false)) '('table schema false tbl2 false (quote tx)) (cons (quote list) (sql_storage_column_names (sql_write_column_declarations schema tbl2 planning_session tx) cols2 false)) updatemode deletemode)))
 			/*
 			(parser '((atom "ADD" true) (atom "UNIQUE" true) (atom "KEY" true) (define id psql_identifier) "(" (define cols (+ psql_identifier ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
 			(parser '((atom "ADD" true) (atom "KEY" true) psql_identifier "(" (+ psql_identifier ",") ")" (? (atom "USING" true) (atom "BTREE" true))) nil) /* ignore index definitions */
@@ -1107,7 +1115,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			) (lambda (id) '((quote createcolumn) '('table schema false id false (quote tx)) col type dimensions (cons 'list (sql_add_column_attributes typeparams)) nil nil (quote tx))))
 			(parser '((atom "OWNER" true) (atom "TO" true) (define owner psql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define cname psql_identifier)) (lambda (id) true))
-			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col psql_identifier)) (lambda (id) '((quote altertable) '('table schema false id false (quote tx)) "drop" col)))
+			(parser '((atom "DROP" true) (? (atom "COLUMN" true)) (define col psql_identifier)) (lambda (id) (sql_drop_column_expr schema id col false false planning_session tx)))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) (lambda (id) '((quote altertable) '('table schema false id false (quote tx)) "engine" "memory")))
 			(parser '((atom "ENGINE" true) "=" (atom "CACHE" true)) (lambda (id) '((quote altertable) '('table schema false id false (quote tx)) "engine" "cache")))
 			(parser '((atom "ENGINE" true) "=" (atom "SLOPPY" true)) (lambda (id) '((quote altertable) '('table schema false id false (quote tx)) "engine" "sloppy")))
@@ -1119,11 +1127,11 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define ai (regex "[0-9]+"))) (lambda (id) '((quote altertable) '('table schema false id false (quote tx)) "auto_increment" ai)))
 			(parser '((atom "ALTER" true) (atom "COLUMN" true) (define col psql_identifier) (define body (or /* ALTER COLUMN */
 				/* Type and default changes */
-				(parser '((atom "TYPE" true) (define type psql_identifier) (define dimensions (or (parser '("(" (define a psql_int) "," (define b psql_int) ")") '((quote list) a b)) (parser '("(" (define a psql_int) ")") '((quote list) a)) (parser empty '((quote list))))) ) (lambda (col) (lambda (id) '('!begin '((quote altercolumn) '('table schema false id false (quote tx)) col "type" type) '((quote altercolumn) '('table schema false id false (quote tx)) col "dimensions" dimensions)))))
-				(parser '((atom "SET" true) (atom "DEFAULT" true) (define def sql_uuid_default)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false (quote tx)) col "default_expression" def (quote tx)))))
-				(parser '((atom "SET" true) (atom "DEFAULT" true) (define def psql_expression)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false (quote tx)) col "default" def (quote tx)))))
-				(parser '((atom "DROP" true) (atom "DEFAULT" true)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false (quote tx)) col "default" nil (quote tx)))))
-				(parser '((atom "COLLATE" true) (define coll psql_identifier)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false (quote tx)) col "collation" coll))))
+				(parser '((atom "TYPE" true) (define type psql_identifier) (define dimensions (or (parser '("(" (define a psql_int) "," (define b psql_int) ")") '((quote list) a b)) (parser '("(" (define a psql_int) ")") '((quote list) a)) (parser empty '((quote list))))) ) (lambda (col) (lambda (id) '('!begin '((quote altercolumn) '('table schema false id false (quote tx)) (sql_bind_storage_column schema id col false planning_session tx) "type" type) '((quote altercolumn) '('table schema false id false (quote tx)) (sql_bind_storage_column schema id col false planning_session tx) "dimensions" dimensions)))))
+				(parser '((atom "SET" true) (atom "DEFAULT" true) (define def sql_uuid_default)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false (quote tx)) (sql_bind_storage_column schema id col false planning_session tx) "default_expression" def (quote tx)))))
+				(parser '((atom "SET" true) (atom "DEFAULT" true) (define def psql_expression)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false (quote tx)) (sql_bind_storage_column schema id col false planning_session tx) "default" def (quote tx)))))
+				(parser '((atom "DROP" true) (atom "DEFAULT" true)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false (quote tx)) (sql_bind_storage_column schema id col false planning_session tx) "default" nil (quote tx)))))
+				(parser '((atom "COLLATE" true) (define coll psql_identifier)) (lambda (col) (lambda (id) '((quote altercolumn) '('table schema false id false (quote tx)) (sql_bind_storage_column schema id col false planning_session tx) "collation" coll))))
 			))) (body col))
 		) ","))
 	) (cons '!begin (map alters (lambda (alter) (alter id))))))
@@ -1338,7 +1346,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					false
 		)))
 
-		(parser '((atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) (atom "INDEX" true) (define id psql_identifier) (atom "ON" true) (define tbl (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) (? (atom "USING" true) psql_identifier) "(" (define cols (+ psql_identifier ",")) ")" (define equalnulls psql_unique_null_policy)) (if unique '('createkey '('table schema false tbl false (quote tx)) id unique (cons (quote list) cols) '(session "__memcp_tx") (list (quote list) "nulls_not_distinct" equalnulls)) (if equalnulls (error "NULLS NOT DISTINCT requires a unique index") true)))
+		(parser '((atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) (atom "INDEX" true) (define id psql_identifier) (atom "ON" true) (define tbl (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) (? (atom "USING" true) psql_identifier) "(" (define cols (+ psql_identifier ",")) ")" (define equalnulls psql_unique_null_policy)) (if unique '('createkey '('table schema false tbl false (quote tx)) id unique (cons (quote list) (sql_storage_column_names (sql_write_column_declarations schema tbl planning_session tx) cols false)) '(session "__memcp_tx") (list (quote list) "nulls_not_distinct" equalnulls)) (if equalnulls (error "NULLS NOT DISTINCT requires a unique index") true)))
 		/* Preserve acceptance of unsupported physical index hints, but never discard a NULL policy. */
 		(parser (define ignored_index (regex "^[\\r\\n\\t ]*CREATE INDEX (?s:.*)\\z"))
 			(if (empty_list? (regexp_matches ignored_index "(?i)\\bNULLS\\b")) true
@@ -1424,7 +1432,11 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(define view_schema (coalesce schema2 schema))
 				(if policy (policy view_schema id true) true)
 				(list (quote drop_sql_view) (list (quote session) "__memcp_tx") view_schema id (if if_exists true false)))))
-		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname psql_identifier) (atom "TO" true) (define newname psql_identifier)) '((quote renametable) schema oldname newname))
+		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname psql_identifier) (atom "TO" true) (define newname psql_identifier))
+			(list 'begin
+				(list 'define 'rename_target (list 'table schema false oldname false 'tx))
+				(list 'renametable 'rename_target newname false
+					(list 'show 'rename_target "identity" 'tx) 'tx)))
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key psql_identifier) (or "=" (atom ":=" true)) (define value (or
 			(parser (atom "content" true) "content") /* quirks for SET xmloption = content */
 			(parser (atom "warning" true) "warning") /* quirks for SET client_min_messages = warning */
@@ -1509,7 +1521,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 (define psql_copy_column_types (lambda (schema tbl columns) (begin
 	(define table_info (show schema tbl))
 	(map columns (lambda (col) (begin
-		(define col_info (find table_info (lambda (info) (equal?? (info "Field") col)) nil))
+		(define col_info (sql_bound_column table_info col false))
 		(toLower (coalesce (if col_info (col_info "RawType") nil) (if col_info (col_info "Type") nil) ""))
 	)))
 )))
@@ -1574,7 +1586,7 @@ actual sink against later declaration publication. Ordinary COPY is unchanged. *
 	(psql_copy_require_target schema tbl)
 	(define state (newsession))
 	(state "copy_tbl" tbl)
-	(state "copy_cols" columns)
+	(state "copy_cols" (sql_storage_column_names (get_schema schema tbl nil) columns false))
 	(state "copy_types" (psql_copy_column_types schema tbl columns))
 	(state "copy_rows" '())
 	(state "copy_rows_count" 0)
@@ -1582,7 +1594,7 @@ actual sink against later declaration publication. Ordinary COPY is unchanged. *
 		(if (equal? (psql_copy_line_payload line) "")
 			false
 			(psql_copy_stdin_line schema state line))) "\n")
-	(psql_copy_flush_rows schema tbl columns state)
+	(psql_copy_flush_rows schema tbl (state "copy_cols") state)
 )))
 
 (define psql_skip_function_line (lambda (state psql_line line)
@@ -1686,7 +1698,7 @@ substring replace (which is the historical behaviour). */
 				(match (psql_copy_def def) '(tbl columns) (begin
 					(psql_copy_require_target schema tbl)
 					(state "copy_tbl" tbl)
-					(state "copy_cols" columns)
+					(state "copy_cols" (sql_storage_column_names (get_schema schema tbl nil) columns false))
 					(state "copy_types" (psql_copy_column_types schema tbl columns))
 					(state "copy_rows" '())
 					(state "copy_rows_count" 0)))

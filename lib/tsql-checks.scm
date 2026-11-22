@@ -82,10 +82,21 @@ scalars remain rejected. No creator session is retained in the program. */
 and lazy restart: an ordinary four-runtime-argument procedure, never a tuple or
 creator environment. Column locals are formal inputs of an inner scalar call. */
 (define tsql_compile_check (lambda (source context) (begin
-	(define expression (tsql_check_expression (context "schema") source (context "columns")))
+	(define recipe (sql_source_binding_parts source))
+	(define bindings (cadr recipe))
+	(define columns (if (nil? bindings) (context "columns") (begin
+		(if (equal? (count bindings) (count (context "columns"))) true
+			(error "CHECK source column binding contract changed"))
+		(map (context "columns") (lambda (column) (begin
+			(define physical (sql_column_storage_name column))
+			(define binding (find bindings (lambda (binding) (equal? (cadr binding) physical)) nil))
+			(if binding
+				(set_assoc (set_assoc column "Field" (car binding)) "StorageField" physical)
+				(error "CHECK source column binding contract changed"))))))))
+	(define expression (tsql_check_expression (context "schema") (car recipe) columns))
 	(define relation (car expression))
 	(define inputs (nth expression 2))
-	(define declared (map (context "columns") (lambda (column) (column "Field"))))
+	(define declared (map (context "columns") sql_column_storage_name))
 	(if (expression_equal? inputs declared) true
 		(error "CHECK source dependency contract changed"))
 	(define body (cons
@@ -108,7 +119,11 @@ creator environment. Column locals are formal inputs of an inner scalar call. */
 	leased input contract, so a concurrent schema publication cannot install a
 	predicate typed against an unrelated earlier declaration. */
 	(define expression (tsql_check_expression database source ((show handle "declarations" tx) "columns")))
-	(createcheck handle id "tsql-check" source (nth expression 2) tx session))))
+	(define columns (source_columns (car expression)))
+	(define bindings (map (nth expression 2) (lambda (physical) (begin
+		(define column (find columns (lambda (column) (equal? (sql_column_storage_name column) physical)) nil))
+		(if column (list (column "Field") physical) (error "CHECK input does not exist: " physical))))))
+	(createcheck handle id "tsql-check" (sql_source_binding_recipe source bindings) (nth expression 2) tx session))))
 
 /* All SQL names are resolved before the ONE native state operation. Its owner
 then validates complete pending ownership and historical rows for both kinds. */
