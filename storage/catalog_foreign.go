@@ -774,7 +774,7 @@ func (tx *TxContext) validatePublicDeclarations(db *database) error {
 	}
 	// Validate the same ordered program used by publication and restart.
 	// Reservation checks remain attached to actual final active additions.
-	if actions := tx.publicNativeDeclarations(); len(actions) > 0 {
+	if actions := tx.publicNativeDeclarations(tx.publicForeignAmendments()); len(actions) > 0 {
 		db.projectNativeDeclarations(actions, tx.publicDeclarationViews(), catalogNativeCurrent, catalogForeignEndpointScope{owner: tx.transactionState})
 	}
 	current := currentForeignAdditions(tx.publicForeignAmendments())

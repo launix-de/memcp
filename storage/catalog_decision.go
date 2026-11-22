@@ -436,7 +436,8 @@ func (tx *TxContext) prepareCatalogDecision() error {
 	}
 	record := &catalogDecisionRecord{Format: 1, Kind: "prepare", Database: db.Name, Incarnation: identity.Incarnation, Transaction: tx.durableID(), Decision: identity.Decision,
 		Installation: identity.Installation, Boot: walBootID, Namespace: identity.Namespace, Version: db.catalogVersion + 1, Distributed: true, Tables: tables}
-	record.NativeDeclarations = tx.publicNativeDeclarations()
+	properties := tx.publicCatalogChanges().projectColumnPropertyDecision(tx, tx.publicForeignAmendments())
+	record.NativeDeclarations = properties.native
 	record.Sources = tx.publicSourceDeclarations()
 	record.Checks = tx.publicCheckDeclarations()
 	record.CheckDrops = tx.publicCheckDrops()
@@ -444,7 +445,7 @@ func (tx *TxContext) prepareCatalogDecision() error {
 	record.StatementTriggers = tx.publicStatementTriggerDeclarations()
 	record.ColumnDefaults = tx.publicColumnDefaultDeclarations()
 	record.ColumnDeclarations = tx.publicColumnDeclarations()
-	record.ColumnPropertyRemovals = tx.publicColumnPropertyRemovals()
+	record.ColumnPropertyRemovals = properties.removals
 	record.ColumnAppends = tx.publicColumnAppends()
 	if len(record.Sources) != 0 {
 		record.Format = 3

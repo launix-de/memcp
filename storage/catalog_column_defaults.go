@@ -147,9 +147,8 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 	accepted := false
 	if operation == "claim_property" {
 		tx.requireColumnPropertyRetirementProfile()
-		tx.requireColumnPropertyLayout(t, true)
 	} else if operation == "declaration" {
-		tx.requireColumnPropertyLayout(t, false)
+		tx.requireColumnPropertyLayout(t)
 	}
 	finishLease := changes.acquireStoredColumnLease(tx, t, operation == "declaration")
 	defer func() { finishLease(accepted) }()
@@ -253,6 +252,7 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 		amendment.columnBytes = storedColumnBytes(replacement)
 		amendment.retainedBytes = uint(unsafe.Sizeof(*amendment)) + uint(cap(updated))*uint(unsafe.Sizeof((*column)(nil))) + amendment.columnBytes + bytes + declaration.memory() + propertyRemoval.memory() + propertyChange.memory()
 		history := appendCatalogDeclarationHistory(tx.publicForeignAmendments(), catalogDeclarationAmendment{column: amendment})
+		changes.requireColumnPropertyDecision(tx, history)
 		access := db.GetWrite(tx)
 		defer access.Release()
 		db.schemalock.Lock()

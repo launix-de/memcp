@@ -115,7 +115,7 @@ func (tx *TxContext) appendPublicColumn(t *table, name, typ string, dimensions [
 func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, c *column, initialized, fillExisting bool) bool {
 	changes.mu.Lock()
 	defer changes.mu.Unlock()
-	tx.requireColumnPropertyLayout(t, false)
+	tx.requireColumnPropertyLayout(t)
 	if tx.hasTableDrops() {
 		panic("column append cannot share a table retirement decision")
 	}
@@ -153,7 +153,7 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 	if changes.leases[t] != lease {
 		panic("append constructor lost its native declaration lease while waiting")
 	}
-	tx.requireColumnPropertyLayout(t, false)
+	tx.requireColumnPropertyLayout(t)
 	if tx.hasTableDrops() {
 		panic("column append cannot share a table retirement decision")
 	}
@@ -212,6 +212,7 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 	amendment := &catalogStoredColumnAmendment{appendDeclaration: d, table: t, columns: columns, previous: changes.views.Load().tables[t], columnBytes: storedColumnBytes(c) + columnAppendStrings(c.Name, c.Typ, c.Collation, c.Comment, c.EnumValues, c.DeclarationProperties)}
 	amendment.retainedBytes = uint(unsafe.Sizeof(*amendment)) + uint(cap(columns))*uint(unsafe.Sizeof((*column)(nil))) + amendment.columnBytes + bytes + d.containers() + d.Initialization.containers() + 128
 	history := appendCatalogDeclarationHistory(tx.publicForeignAmendments(), catalogDeclarationAmendment{column: amendment})
+	changes.requireColumnPropertyDecision(tx, history)
 	views := maps.Clone(changes.views.Load().tables)
 	views[t] = view
 	if _, exists := changes.baselines[t]; !exists {

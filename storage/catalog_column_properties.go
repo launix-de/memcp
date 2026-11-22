@@ -27,12 +27,12 @@ func (declaration *catalogColumnPropertyRemoval) memory() uint {
 	return uint(unsafe.Sizeof(*declaration)) + uint(len(declaration.Table)+len(declaration.Identity)+len(declaration.Column)+len(declaration.Key)) + scm.ComputeSize(declaration.Before) - uint(unsafe.Sizeof(scm.Scmer{}))
 }
 
-func (tx *TxContext) publicColumnPropertyRemovals() []catalogColumnPropertyRemoval {
-	if tx.hasColumnPropertyClaims() {
+func (tx *TxContext) publicColumnPropertyRemovals(history []catalogDeclarationAmendment) []catalogColumnPropertyRemoval {
+	if tx.hasColumnPropertyClaims(history) {
 		return nil // V20 has one ordered property authority inside NativeDeclarations.
 	}
 	var result []catalogColumnPropertyRemoval
-	for _, entry := range tx.publicForeignAmendments() {
+	for _, entry := range history {
 		if amendment := entry.column; amendment != nil && amendment.propertyRemoval != nil && !tx.ownsTableDrop(amendment.table) {
 			result = append(result, *amendment.propertyRemoval)
 		}
@@ -103,7 +103,8 @@ func (db *database) recoverColumnPropertyRemovals(declarations []catalogColumnPr
 }
 
 func (changes *publicCatalogChanges) validateColumnPropertyRemovalsLocked() error {
-	for _, declaration := range (&TxContext{transactionState: changes.owner}).publicColumnPropertyRemovals() {
+	tx := &TxContext{transactionState: changes.owner}
+	for _, declaration := range tx.publicColumnPropertyRemovals(tx.publicForeignAmendments()) {
 		validateCatalogColumnPropertyRemoval(changes.db, declaration, false)
 	}
 	return nil

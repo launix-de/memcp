@@ -22,10 +22,9 @@ type catalogNativeDeclaration struct {
 	TableRename *catalogTableRename          `json:"table_rename,omitempty"`
 }
 
-func (tx *TxContext) publicNativeDeclarations() []catalogNativeDeclaration {
+func (tx *TxContext) publicNativeDeclarations(history []catalogDeclarationAmendment) []catalogNativeDeclaration {
 	var result []catalogNativeDeclaration
-	history := tx.publicForeignAmendments()
-	properties := tx.hasColumnPropertyClaims()
+	properties := tx.hasColumnPropertyClaims(history)
 	// Pending state transitions belong to this same amendment history. Freeze
 	// each addition's accepted validation fact once, including its matching DROP;
 	// recovery never publishes a transient pending state or a second projection.
