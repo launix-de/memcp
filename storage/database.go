@@ -3057,6 +3057,7 @@ func RenameTable(t *table, newname string, ignoreCase bool, expectedIdentity str
 		endpoint.showColumnsSnapshot.Store(views[endpoint])
 		endpoint.publishPlannerStatsToken()
 	}
+	t.invalidateSourceTriggerBindings()
 	t.publishedName.Store(&newname)
 	db.catalogVersion = version
 	db.publishTableNamesLocked(db.catalogView().pendingNames)

@@ -1097,10 +1097,14 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 func (publication *publicForeignPublication) apply() {
 	for t, value := range publication.tableNames {
 		name := value
+		t.invalidateSourceTriggerBindings()
 		t.publishedName.Store(&name)
 	}
 	for _, endpoint := range publication.endpoints {
 		if endpoint.columns != nil {
+			if !sameTriggerColumns(endpoint.table.columnDeclarations(), endpoint.columns) {
+				endpoint.table.invalidateSourceTriggerBindings()
+			}
 			endpoint.table.Columns = endpoint.columns
 			endpoint.table.columnNamesSnapshot.Store(endpoint.snapshot.metadata.columnNames)
 		}

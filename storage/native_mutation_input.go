@@ -355,13 +355,13 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 	input := &nativeMutationInput{target: t, source: source, owner: tx.transactionState, event: event,
 		columns: source.tables[t].metadata.columnNames.declarations, unique: uniqueKeysInView(t, source.keys), foreign: foreign}
 	profile := nativeTriggerProfileFor(tx)
-	input.beforeInsert = t.GetTriggers(BeforeInsert, retired, profile, input.columns)
-	input.afterInsert = t.GetTriggers(AfterInsert, retired, profile, input.columns)
-	input.beforeUpdate = t.GetTriggers(BeforeUpdate, retired, profile, input.columns)
-	input.afterUpdate = t.GetTriggers(AfterUpdate, retired, profile, input.columns)
+	input.beforeInsert = t.GetTriggers(BeforeInsert, retired, profile, input)
+	input.afterInsert = t.GetTriggers(AfterInsert, retired, profile, input)
+	input.beforeUpdate = t.GetTriggers(BeforeUpdate, retired, profile, input)
+	input.afterUpdate = t.GetTriggers(AfterUpdate, retired, profile, input)
 	if event == nativeMutationDelete {
-		input.beforeDelete = t.GetTriggers(BeforeDelete, retired, profile, input.columns)
-		input.afterDelete = t.GetTriggers(AfterDelete, retired, profile, input.columns)
+		input.beforeDelete = t.GetTriggers(BeforeDelete, retired, profile, input)
+		input.afterDelete = t.GetTriggers(AfterDelete, retired, profile, input)
 	}
 	for _, program := range addedPrograms {
 		switch program.Timing {
@@ -391,9 +391,9 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 	if tx.privateMutationSource(t) != source {
 		panic("private declaration input changed while preparing its programs")
 	}
-	// Only the new header/vector containers belong to this producer. Column,
-	// key, FK-string and compiled-program payloads retain their existing owners.
-	input.bytes = uint64(unsafe.Sizeof(*input)) + uint64(cap(input.foreign))*uint64(unsafe.Sizeof(foreignKey{})) +
+	// Private source programs and new header/vector containers belong to this
+	// producer. Column, key and FK-string payloads retain their existing owners.
+	input.bytes += uint64(unsafe.Sizeof(*input)) + uint64(cap(input.foreign))*uint64(unsafe.Sizeof(foreignKey{})) +
 		uint64(cap(input.beforeInsert)+cap(input.afterInsert)+cap(input.beforeUpdate)+cap(input.afterUpdate)+cap(input.beforeDelete)+cap(input.afterDelete))*uint64(unsafe.Sizeof(TriggerDescription{}))
 	input.memory = tx.publicCatalogChanges().memory
 	input.memory.mutationInputBytes.Add(input.bytes)

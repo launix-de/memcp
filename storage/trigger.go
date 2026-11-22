@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/launix-de/memcp/scm"
 )
@@ -568,8 +569,53 @@ func compileTriggerForUse(schemaName, tableName string, trigger *TriggerDescript
 	finalizeTriggerCompilation(trigger)
 }
 
+// Source row programs are bound to the selected declaration's visible names.
+// Native FK/CHECK programs retain their authoritative physical definitions.
+func (tr TriggerDescription) hasSourceRowBinding() bool {
+	return !tr.Timing.isStatement() && tr.Language != "" && tr.Source != "" && tr.checkDefinition == nil
+}
+
+func sameTriggerColumns(left, right []*column) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i, col := range left {
+		if col != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// The existing DDL publication owner has drained row producers before replacing
+// a public name binding. Source remains authoritative for the next cold use.
+func (t *table) invalidateSourceTriggerBindings() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := range t.Triggers {
+		trigger := &t.Triggers[i]
+		if trigger.hasSourceRowBinding() {
+			trigger.Func, trigger.FuncPlan, trigger.VectorFunc = scm.NewNil(), scm.NewNil(), scm.NewNil()
+		}
+	}
+	t.refreshTriggerMemoryLocked()
+}
+
 // GetTriggers returns all triggers for a specific timing
-func (t *table) GetTriggers(timing TriggerTiming, retired map[nativeTriggerSlot]struct{}, profile nativeTriggerProfile, columns []*column) []TriggerDescription {
+func (t *table) GetTriggers(timing TriggerTiming, retired map[nativeTriggerSlot]struct{}, profile nativeTriggerProfile, input *nativeMutationInput) []TriggerDescription {
+	var columns []*column
+	compileName := t.clusterPublishedName()
+	if input != nil {
+		if input.target != t || input.source == nil {
+			panic("trigger input belongs to another native target")
+		}
+		columns = input.columns
+		if names := input.source.names; names != nil {
+			if name, present := names.names[t]; present {
+				compileName = name
+			}
+		}
+	}
 	t.mu.Lock()
 	result := make([]TriggerDescription, 0, len(t.Triggers))
 	type lazyTrigger struct {
@@ -588,6 +634,12 @@ func (t *table) GetTriggers(timing TriggerTiming, retired map[nativeTriggerSlot]
 		}
 		if _, removed := retired[nativeTriggerSlot{tr.Name, tr.Timing}]; removed {
 			continue
+		}
+		// A private declaration may rebind the same source spelling to another
+		// immutable storage column. Its program belongs to this input, including
+		// when the public header already has a compiled function.
+		if input != nil && tr.hasSourceRowBinding() {
+			tr.Func, tr.FuncPlan, tr.VectorFunc = scm.NewNil(), scm.NewNil(), scm.NewNil()
 		}
 		result = append(result, tr)
 		if col, ordered := t.dependencyCleanupColumn(tr); col != nil {
@@ -632,16 +684,26 @@ func (t *table) GetTriggers(timing TriggerTiming, retired map[nativeTriggerSlot]
 			}
 			tr.FuncPlan, tr.VectorFunc = scm.NewNil(), scm.NewNil()
 		} else {
-			compileTriggerForUse(t.schema.Name, t.clusterPublishedName(), &tr, columns)
+			compileTriggerForUse(t.schema.Name, compileName, &tr, columns)
 		}
 		tr.initialFKFootprint = nil
 		tr.preservesUpdateValues = false
 		result[item.resultIndex] = tr
+		if input != nil && tr.hasSourceRowBinding() {
+			// New code is retained until this actual producer drains. Borrowed
+			// source/declaration strings keep their existing metadata owners.
+			for _, value := range []scm.Scmer{tr.Func, tr.FuncPlan, tr.VectorFunc} {
+				if !triggerScmerMissing(value) {
+					input.bytes += uint64(scm.ComputeSize(value) - uint(unsafe.Sizeof(scm.Scmer{})))
+				}
+			}
+			continue
+		}
 
 		t.mu.Lock()
 		if item.triggerIndex < len(t.Triggers) {
 			current := &t.Triggers[item.triggerIndex]
-			if current.Name == tr.Name && current.Timing == tr.Timing && triggerScmerMissing(current.Func) {
+			if current.Name == tr.Name && current.Timing == tr.Timing && current.Source == tr.Source && current.Language == tr.Language && triggerScmerMissing(current.Func) && sameTriggerColumns(columns, t.columnDeclarations()) && compileName == t.clusterPublishedName() {
 				current.Func = tr.Func
 				current.FuncPlan = tr.FuncPlan
 				current.VectorFunc = tr.VectorFunc
