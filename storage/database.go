@@ -2580,13 +2580,23 @@ func RenameTable(schema, oldname, newname string) {
 		db.schemalock.Unlock()
 		panic("Table " + schema + "." + newname + " already exists")
 	}
-	db.dropCatalogTableLocked(oldname)
+	// Keep the RAM directory intact if native admission fails. Removing the
+	// old catalog name and adding the new one must share one transaction.
+	func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				db.schemalock.Unlock()
+				panic(failure)
+			}
+		}()
+		db.renameCatalogTableLocked(oldname, newname)
+	}()
 	db.tables.Remove(oldname)
 	t.Name = newname
 	t.publishedName.Store(&newname)
 	db.tables.Set(newname, t)
 	db.publishTableNamesLocked()
-	db.saveLockedAndUnlock(t.schemaSaveMode(), t)
+	db.saveLockedAndUnlock(t.schemaSaveMode())
 }
 
 // keytableCleanup retires a planner-owned in-memory cache on the manager

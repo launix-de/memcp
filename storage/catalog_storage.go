@@ -93,8 +93,11 @@ type retiredCatalogShard struct {
 var systemSchemaOnce sync.Once
 var systemSchemaDB *database
 
-// Serializes orphan collection with publication of cross-database catalog files.
-var catalogPersistenceMu sync.RWMutex
+// Collection validates an epoch after enumerating candidates and collecting
+// roots. Publications create fresh UUIDs, so a later publication cannot adopt
+// an unowned candidate. Backend I/O never holds a global publication lock.
+var catalogPublicationEpoch atomic.Uint64
+var catalogPublications atomic.Int64
 
 // Retiring generations remain GC roots until native topology readers drain.
 var retiringCatalogGenerations sync.Map // UUID -> *storageShard
@@ -838,6 +841,29 @@ func (db *database) dropCatalogTableLocked(name string) {
 	db.editCatalogLocked(&rows, catalogAllRelations, nil)
 }
 
+// Rename all owned definitions in one native decision. A reader's snapshot
+// sees either complete name, including its columns, keys and triggers.
+func (db *database) renameCatalogTableLocked(oldname, newname string) {
+	rows := db.catalogRowsLocked()
+	for i := catalogTables; i < catalogProcedures; i++ {
+		owner := 1
+		if i == catalogTables {
+			for j, field := range catalogRelations[i].columns() {
+				if field.key == "Name" {
+					owner = j
+					break
+				}
+			}
+		}
+		for _, row := range rows[i] {
+			if row[owner].String() == oldname {
+				row[owner] = scm.NewString(newname)
+			}
+		}
+	}
+	db.editCatalogLocked(&rows, catalogAllRelations, nil)
+}
+
 func (db *database) editCatalogProcedureLocked(name string, proposal *ProcedureDescription) *ProcedureDescription {
 	rows := db.catalogRowsLocked()
 	definitions := make([]map[string]json.RawMessage, 0, len(rows[catalogProcedures])+1)
@@ -1071,12 +1097,11 @@ func (db *database) commitSchemaLocked(durable bool, release func()) {
 	version := db.catalog.liveVersion.Load()
 	live := db.catalog.live
 	jsonbytes := catalogDocumentFromRows(db.Name, &rows)
-	catalogPersistenceMu.RLock()
-	persistenceOwned := true
+	catalogPublications.Add(1)
+	catalogPublicationEpoch.Add(1)
 	defer func() {
-		if persistenceOwned {
-			catalogPersistenceMu.RUnlock()
-		}
+		catalogPublicationEpoch.Add(1)
+		catalogPublications.Add(-1)
 	}()
 	db.catalogMu.Lock()
 	released = true
@@ -1096,10 +1121,6 @@ func (db *database) commitSchemaLocked(durable bool, release func()) {
 		jsonbytes = attachCatalogRoot(jsonbytes, root)
 	}()
 	db.commitSchemaSnapshot(jsonbytes, durable, db.catalogMu.Unlock)
-	// The root now owns its committed files. Release the GC publication gate
-	// before reacquiring schema ownership: cleanup uses schema -> persistence.
-	catalogPersistenceMu.RUnlock()
-	persistenceOwned = false
 	db.schemalock.Lock()
 	func() {
 		defer db.schemalock.Unlock()

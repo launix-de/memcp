@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1058,17 +1059,169 @@ func TestCatalogCleanupAndCheckpointMakeProgress(t *testing.T) {
 	db.schemalock.Lock()
 	done := make(chan struct{})
 	go func() { cleanShards(db); close(done) }()
-	// Let cleanup reach the held schema boundary. With the reversed order it
-	// takes the persistence gate first; with the correct order it waits here.
+	// Let cleanup reach the held schema boundary. Checkpoint publication must
+	// make progress without waiting for a collector holding a global gate.
 	for range 256 {
 		runtime.Gosched()
-		if !catalogPersistenceMu.TryRLock() {
-			break
-		}
-		catalogPersistenceMu.RUnlock()
 	}
 	db.commitSchemaLocked(true, db.schemalock.Unlock)
 	<-done
+}
+
+type delayedCatalogCleanupPersistence struct {
+	PersistenceEngine
+	phase   string
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *delayedCatalogCleanupPersistence) wait(phase string) {
+	if p.phase == phase {
+		p.once.Do(func() { close(p.entered); <-p.release })
+	}
+}
+func (p *delayedCatalogCleanupPersistence) ReadSchema() []byte {
+	p.wait("anchor")
+	return p.PersistenceEngine.ReadSchema()
+}
+func (p *delayedCatalogCleanupPersistence) WalkShardFiles(fn func(string)) {
+	p.wait("walk")
+	p.PersistenceEngine.WalkShardFiles(fn)
+}
+func (p *delayedCatalogCleanupPersistence) DeleteShardFile(name string) {
+	p.wait("delete")
+	p.PersistenceEngine.DeleteShardFile(name)
+}
+
+func TestCatalogSlowCleanupDoesNotBlockUnrelatedDDL(t *testing.T) {
+	for _, phase := range []string{"walk", "anchor", "delete"} {
+		t.Run(phase, func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "catalog-slow-cleanup-"+phase, 0)
+			home := catalogBackendDatabase()
+			target := home
+			if phase == "anchor" {
+				target = tbl.schema
+			}
+			physical := target.persistence
+			delay := &delayedCatalogCleanupPersistence{PersistenceEngine: physical, phase: phase, entered: make(chan struct{}), release: make(chan struct{})}
+			if phase == "delete" {
+				writer := home.persistence.WriteColumn(uuid.NewString(), "orphan")
+				writer.Write([]byte("unowned"))
+				writer.Close()
+			}
+			target.persistence = delay
+			cleanupDone := make(chan struct{})
+			go func() { defer close(cleanupDone); cleanShards(home) }()
+			release := sync.OnceFunc(func() { close(delay.release) })
+			defer func() {
+				release()
+				<-cleanupDone
+				target.persistence = physical
+			}()
+			select {
+			case <-delay.entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("cleanup did not reach delayed backend operation")
+			}
+			done := make(chan struct{})
+			go func() { defer close(done); tbl.CreateColumn("added", "INT", nil, nil) }()
+			defer func() { release(); <-done }()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("unrelated DDL waited for cleanup backend I/O")
+			}
+			root := readCatalogRoot(physical.ReadSchema())
+			if target != tbl.schema {
+				root = readCatalogRoot(tbl.schema.persistence.ReadSchema())
+			}
+			if root == nil {
+				t.Fatal("DDL failed to publish its durable catalog root")
+			}
+			release()
+			<-cleanupDone
+			// The new root was published while cleanup was blocked. Collection
+			// must retain its entire payload, including the added column.
+			cold := newDatabase()
+			cold.Name, cold.persistence, cold.srState = tbl.schema.Name, tbl.schema.persistence, COLD
+			defer cold.closeTransactionLog()
+			cold.ensureLoaded()
+			restored := cold.GetTable(tbl.Name)
+			if restored == nil || len(restored.Columns) != 3 || restored.Columns[2].Name != "added" {
+				t.Fatal("cleanup removed files from the concurrently published catalog")
+			}
+		})
+	}
+}
+
+func TestCatalogRenameUsesOneNativeDecision(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-rename-decision", 0)
+	db := tbl.schema
+	oldname := tbl.Name
+	before := db.catalog.liveVersion.Load()
+	RenameTable(db.Name, oldname, "renamed")
+	if got := db.catalog.liveVersion.Load(); got != before+1 {
+		t.Fatalf("rename published %d native decisions, want one", got-before)
+	}
+	if db.GetTable(oldname) != nil || db.GetTable("renamed") != tbl {
+		t.Fatal("RAM directory does not match rename")
+	}
+	rows := db.catalogRowsLocked()
+	for i := catalogTables; i < catalogProcedures; i++ {
+		for _, row := range rows[i] {
+			if i == catalogTables {
+				if catalogTableName(row) != "renamed" {
+					t.Fatal("catalog table retained old name")
+				}
+			} else if row[1].String() != "renamed" {
+				t.Fatal("catalog child retained old owner")
+			}
+		}
+	}
+}
+
+func TestCatalogSizeEstimateDoesNotAcquireDataLocks(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-size-estimate", 8192)
+	fn := scm.Globalenv.Vars[scm.Symbol("table_size_estimate")]
+	for _, statistics := range []*tableStatisticsSnapshot{nil, {rowCount: 8192, sizeBytes: 123456}} {
+		snapshot := tbl.buildShowColumnsSnapshot(8192, nil)
+		snapshot.metadata.statistics = statistics
+		tbl.showColumnsSnapshot.Store(snapshot)
+		// A metadata scalar must complete while every data and definition
+		// mutex is unavailable. Diagnostic memory accounting cannot do that.
+		tbl.schema.schemalock.Lock()
+		tbl.mu.Lock()
+		shards := tbl.ActiveShards()
+		for _, shard := range shards {
+			shard.mu.Lock()
+		}
+		result := make(chan scm.Scmer, 1)
+		go func() { result <- scm.Apply(fn, NewTableScmer(tbl)) }()
+		var value scm.Scmer
+		completed := false
+		select {
+		case value = <-result:
+			completed = true
+		case <-time.After(time.Second):
+		}
+		for _, shard := range shards {
+			shard.mu.Unlock()
+		}
+		tbl.mu.Unlock()
+		tbl.schema.schemalock.Unlock()
+		if !completed {
+			<-result
+			t.Fatal("size estimate acquired a data or definition lock")
+		}
+		if statistics == nil {
+			if !value.IsNil() {
+				t.Fatalf("unknown size must remain unknown, got %v", value)
+			}
+		} else if scm.ToInt(value) != 123456 {
+			t.Fatalf("size estimate = %v, want published estimate 123456", value)
+		}
+	}
 }
 
 func TestCatalogDoesNotFallbackToLegacyAfterMissingShardColumn(t *testing.T) {

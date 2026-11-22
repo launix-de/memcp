@@ -13,7 +13,33 @@ setup:
   - sql: DROP TABLE IF EXISTS sc_parent
   - sql: DROP TABLE IF EXISTS sc_memory
   - sql: DROP TABLE IF EXISTS sc_gone
+  - sql: DROP TABLE IF EXISTS sc_rename_old
+  - sql: DROP TABLE IF EXISTS sc_rename_new
 test_cases:
+  - name: Create a relation for rename publication
+    sql: CREATE TABLE sc_rename_old (id INT PRIMARY KEY, label TEXT DEFAULT 'kept')
+  - name: Populate the relation before rename
+    sql: INSERT INTO sc_rename_old (id) VALUES (7)
+  - name: Rename publishes the complete new declaration
+    sql: RENAME TABLE sc_rename_old TO sc_rename_new
+  - name: Catalog joins see the renamed table with all its columns
+    sql: >-
+      SELECT t.name AS table_name, c.ordinal, c.name AS column_name
+      FROM system_schema.tables t JOIN system_schema.columns c
+      ON c.schema_name = t.schema_name AND c.table_name = t.name
+      WHERE t.schema_name = 'memcp-tests' AND t.name IN ('sc_rename_old', 'sc_rename_new')
+      ORDER BY c.ordinal
+    expect:
+      rows: 2
+      data:
+        - {table_name: sc_rename_new, ordinal: 0, column_name: id}
+        - {table_name: sc_rename_new, ordinal: 1, column_name: label}
+  - name: The old name no longer resolves
+    sql: SELECT * FROM sc_rename_old
+    expect: {error: true}
+  - name: A failed rename preserves the accepted declaration
+    sql: RENAME TABLE sc_rename_new TO sc_rename_new
+    expect: {error: true}
   - name: Create a parent with named keys, defaults and comments
     sql: >-
       CREATE TABLE sc_parent (id INT PRIMARY KEY AUTO_INCREMENT, code VARCHAR(12) NOT NULL COMMENT 'business code',
@@ -123,6 +149,22 @@ test_cases:
     action: restart
   - name: Defaults survive the restart
     sql: INSERT INTO sc_parent (code) VALUES ('p3')
+  - name: Renamed data and defaults survive restart
+    sql: SELECT id, label FROM sc_rename_new ORDER BY id
+    expect:
+      rows: 1
+      data:
+        - {id: 7, label: kept}
+  - name: Renamed declarations survive restart without the old owner
+    sql: >-
+      SELECT table_name, ordinal, name FROM system_schema.columns
+      WHERE schema_name = 'memcp-tests' AND table_name IN ('sc_rename_old', 'sc_rename_new')
+      ORDER BY ordinal
+    expect:
+      rows: 2
+      data:
+        - {table_name: sc_rename_new, ordinal: 0, name: id}
+        - {table_name: sc_rename_new, ordinal: 1, name: label}
   - name: Recovered defaults and AUTO_INCREMENT continue
     sql: SELECT id, kind, amount FROM sc_parent WHERE code = 'p3'
     expect:
@@ -191,6 +233,8 @@ test_cases:
       data:
         - {n: 0}
 cleanup:
+  - sql: DROP TABLE IF EXISTS sc_rename_old
+  - sql: DROP TABLE IF EXISTS sc_rename_new
   - sql: DROP TABLE IF EXISTS sc_log
   - sql: DROP TABLE IF EXISTS sc_child
   - sql: DROP TABLE IF EXISTS sc_parent

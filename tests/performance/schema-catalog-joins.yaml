@@ -9,6 +9,15 @@ metadata:
 setup:
 - scm: |-
     (begin
+      (droptable "memcp-tests" "catalog_delta_size" true)
+      (createtable "memcp-tests" "catalog_delta_size"
+        (list (list "column" "id" "int" '() '()) (list "column" "payload" "text" '() '()))
+        '("engine" "memory") false)
+      (define payload (string_repeat "x" 1024))
+      (insert (table "memcp-tests" false "catalog_delta_size" false) '("id" "payload")
+        (map (produceN 32768) (lambda (i) (list i payload)))) true)
+- scm: |-
+    (begin
      (map (produceN 128) (lambda (i) (begin
       (define name (concat "catalog_perf_" i))
       (droptable "memcp-tests" name true)
@@ -17,6 +26,16 @@ setup:
        '("engine" "memory") false))))
      true)
 test_cases:
+- name: Table size metadata does not inspect a large writable delta
+  sql: SELECT table_name, (data_length IS NULL OR data_length >= 0) AS valid_estimate FROM information_schema.tables WHERE table_schema = 'memcp-tests' AND table_name = 'catalog_delta_size'
+  warmup: 0
+  timing_samples: 129
+  timing_aggregation: total
+  threshold_ms: 30000
+  expect:
+    rows: 1
+    data:
+    - {table_name: catalog_delta_size, valid_estimate: true}
 - name: Catalog table-column join includes cold planning and repeated indexed execution
   sql: SELECT t.table_name, COUNT(c.column_name) AS n FROM information_schema.tables t JOIN information_schema.columns
     c ON c.table_schema=t.table_schema AND c.table_name=t.table_name WHERE t.table_schema='memcp-tests' AND t.table_name
@@ -285,5 +304,6 @@ test_cases:
     - table_name: catalog_perf_99
       n: 4
 cleanup:
+- sql: DROP TABLE IF EXISTS catalog_delta_size
 - scm: |-
     (begin (map (produceN 128) (lambda (i) (droptable "memcp-tests" (concat "catalog_perf_" i) true))) true)
