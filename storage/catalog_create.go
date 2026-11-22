@@ -492,6 +492,13 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 	if staged {
 		tx.appendCatalogIntent(newTable)
 	}
+	// The constructor's early raw packet was private and could precede a
+	// parent's name publication. Bind it only at this actual schema cut, using
+	// the original transaction's selected endpoint and namespace descriptions.
+	if len(newTable.Foreign) != 0 {
+		snapshot, _ := newTable.projectConstraintNames(newTable.showColumnsSnapshot.Load(), tx.publicDeclarationViews(), tx.namespaceView(db))
+		newTable.showColumnsSnapshot.Store(snapshot)
+	}
 	if !newTable.isHiddenFromShowTables() {
 		db.publishTableNamesLocked(db.catalogView().pendingNames)
 	}

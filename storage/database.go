@@ -1138,6 +1138,7 @@ func (db *database) ensureLoaded() {
 		// files written by older binaries cannot retain an obsolete builtin ABI.
 		rebuildFKTriggersAfterLoad(db)
 		rebuildCheckTriggersAfterLoad(db)
+		db.publishLoadedNameMetadata()
 		db.srState = SHARED
 		// Dot-prefixed cache tables are planner-owned and persisted only so a
 		// warm query cache can survive restart. Re-register their table-level

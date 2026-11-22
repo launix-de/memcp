@@ -2648,7 +2648,16 @@ func (t *table) publishShowColumnsSnapshot(constraintsChanged bool) scm.Scmer {
 		snapshot := t.buildShowColumnsSnapshot(t.CountEstimate(), nil)
 		if constraintsChanged {
 			snapshot.metadata.constraints = t.buildConstraintMetadata(t.Foreign)
+			snapshot.metadata.storageConstraints = snapshot.metadata.constraints
 			snapshot.metadata.foreignByID = buildForeignMetadataDirectory(snapshot.metadata.constraints)
+			// Registered declaration publishers own schema/endpoint admission.
+			// A referenced endpoint's name change must acquire this table too;
+			// its immutable name/column packets therefore remain stable here.
+			// Unregistered constructors get their selected projection at their
+			// actual namespace publication; load also performs one final pass.
+			if t.schema != nil && t.schema.tables.Get(t.Name) == t {
+				snapshot, _ = t.projectConstraintNames(snapshot, nil, nil)
+			}
 		}
 		snapshot.metadata.declarations = buildTableDeclarations(snapshot.metadata.columnRows, snapshot.metadata.constraints)
 		if constraintsChanged {

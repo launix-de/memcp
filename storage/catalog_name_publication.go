@@ -116,3 +116,19 @@ func (publication *publicForeignPublication) projectNameMetadata() uint {
 	}
 	return result
 }
+
+// The unpublished loader has restored every endpoint before this final pass.
+// Retain that complete input set while projecting all public descriptions;
+// getters never repair names or read a second endpoint on demand.
+func (db *database) publishLoadedNameMetadata() {
+	tables := db.tables.GetAll()
+	views := make(map[*table]*tableShowColumnsSnapshot, len(tables))
+	for _, t := range tables {
+		views[t] = t.showColumnsSnapshot.Load()
+	}
+	for _, t := range tables {
+		snapshot, _ := t.projectConstraintNames(views[t], views, nil)
+		t.showColumnsSnapshot.Store(snapshot)
+		t.publishPlannerStatsToken()
+	}
+}
