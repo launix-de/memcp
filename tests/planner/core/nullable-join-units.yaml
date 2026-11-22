@@ -6,6 +6,12 @@ metadata:
   requires_tds: true
   description: Complete joined operands match before nullable extension and outer selection
 setup:
+- sql: DROP TABLE IF EXISTS unit_enabled
+- sql: DROP TABLE IF EXISTS unit_label
+- sql: DROP TABLE IF EXISTS unit_rule
+- sql: DROP TABLE IF EXISTS unit_child
+- sql: DROP TABLE IF EXISTS unit_head
+- sql: DROP TABLE IF EXISTS unit_parent
 - sql: CREATE TABLE unit_parent(id INT PRIMARY KEY,code INT)
 - sql: CREATE TABLE unit_head(id INT,code INT)
 - sql: CREATE TABLE unit_child(id INT PRIMARY KEY,code INT,enabled INT,label NVARCHAR(12))
@@ -194,13 +200,13 @@ test_cases:
       (define failed (try (lambda () (begin
         (with_autocommit owner nil 0 "failed native result retirement" (lambda (tx) (begin
           (define code (parse_tsql "memcp-tests"
-            "SELECT CONVERT(INT,c.label) AS value FROM unit_parent a LEFT JOIN unit_head b INNER JOIN unit_child c ON b.code=c.code AND c.enabled=1 ON a.code=b.code ORDER BY c.id"
+            "SELECT a.id,c.id AS cid FROM unit_parent a LEFT JOIN unit_head b INNER JOIN unit_child c ON b.code=c.code AND c.enabled=1 ON a.code=b.code ORDER BY c.id,a.id"
             nil owner tx))
           (define execute (eval (list 'lambda (list 'session 'tx 'resultrow 'resultfields 'createtable) code)))
-          (execute owner tx (lambda (row) true) (lambda fields true)
+          (execute owner tx (lambda (row) (error "native result consumer failed after sort creation")) (lambda fields true)
             (lambda args (begin
               (if (regexp_test (nth args 1) "#join-order$") (observed "name" (nth args 1)) true)
-              (apply native_create args))))))) false)) (lambda (failure) true)))
+              (apply native_create args))))))) false)) (lambda (failure) (equal? (failure_value failure) "native result consumer failed after sort creation"))))
       (and failed (not (nil? (observed "name")))
         (nil? (table "memcp-tests" false (observed "name") false nil))))
   expect: {result: true}
@@ -435,4 +441,331 @@ test_cases:
     SELECT CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END AS consistent
     FROM (SELECT NEWID() AS payload) d CROSS JOIN (SELECT 1 AS unit) u
   expect: {rows: 1,data: [{consistent: 1}]}
+  max_time: 5
+
+- name: Fresh scalar exports retain selection and complete values through mysql
+  syntax: mysql
+  sql: |
+    SELECT d.marker,CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END AS consistent
+    FROM (SELECT 7 AS marker,RAND() AS payload) d CROSS JOIN (SELECT 1 AS unit) u
+    WHERE d.marker=7
+  expect: {rows: 1,data: [{marker: 7,consistent: 1}]}
+  max_time: 5
+- name: Fresh native-row projections preserve repeated reads and join multiplicity through mysql
+  syntax: mysql
+  sql: |
+    SELECT d.id,h.id AS peer,CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END AS consistent
+    FROM (SELECT id,code,RAND() AS payload FROM unit_parent WHERE id IN(1,2)) d
+    INNER JOIN unit_head h ON d.code=h.code ORDER BY d.id,h.id
+  expect:
+    rows: 3
+    data: [{id: 1,peer: 10,consistent: 1},{id: 1,peer: 11,consistent: 1},{id: 2,peer: 12,consistent: 1}]
+  max_time: 5
+
+- name: Fresh scalar exports retain selection and complete values through psql
+  syntax: psql
+  sql: |
+    SELECT d.marker,CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END AS consistent
+    FROM (SELECT 7 AS marker,RANDOM() AS payload) d CROSS JOIN (SELECT 1 AS unit) u
+    WHERE d.marker=7
+  expect: {rows: 1,data: [{marker: 7,consistent: 1}]}
+  max_time: 5
+- name: Fresh native-row projections preserve repeated reads and join multiplicity through psql
+  syntax: psql
+  sql: |
+    SELECT d.id,h.id AS peer,CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END AS consistent
+    FROM (SELECT id,code,RANDOM() AS payload FROM unit_parent WHERE id IN(1,2)) d
+    INNER JOIN unit_head h ON d.code=h.code ORDER BY d.id,h.id
+  expect:
+    rows: 3
+    data: [{id: 1,peer: 10,consistent: 1},{id: 1,peer: 11,consistent: 1},{id: 2,peer: 12,consistent: 1}]
+  max_time: 5
+
+- name: Fresh scalar exports retain selection and complete values through tsql
+  syntax: tsql
+  sql: |
+    SELECT d.marker,CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END AS consistent
+    FROM (SELECT 7 AS marker,NEWID() AS payload) d CROSS JOIN (SELECT 1 AS unit) u
+    WHERE d.marker=7
+  expect: {rows: 1,data: [{marker: 7,consistent: 1}]}
+  max_time: 5
+- name: Fresh native-row projections preserve repeated reads and join multiplicity through tsql
+  syntax: tsql
+  sql: |
+    SELECT d.id,h.id AS peer,CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END AS consistent
+    FROM (SELECT id,code,NEWID() AS payload FROM unit_parent WHERE id IN(1,2)) d
+    INNER JOIN unit_head h ON d.code=h.code ORDER BY d.id,h.id
+  expect:
+    rows: 3
+    data: [{id: 1,peer: 10,consistent: 1},{id: 1,peer: 11,consistent: 1},{id: 2,peer: 12,consistent: 1}]
+  max_time: 5
+
+- name: Scalar fresh operands preserve an empty result for every caller through mysql
+  syntax: mysql
+  sql: |
+    SELECT a.id,(SELECT CASE WHEN d.payload=d.payload THEN 7 ELSE 8 END
+      FROM (SELECT RAND() AS payload) d INNER JOIN unit_head h ON h.code=a.code
+      WHERE h.id<0) AS scalar_value
+    FROM unit_parent a WHERE a.id IN(1,2) ORDER BY a.id
+  expect: {rows: 2,data: [{id: 1,scalar_value: null},{id: 2,scalar_value: null}]}
+  max_time: 5
+- name: Scalar fresh operands retain duplicate and missing caller domains through mysql
+  syntax: mysql
+  sql: |
+    SELECT a.id,(SELECT CASE WHEN d.payload=d.payload THEN r.rule_id ELSE -1 END
+      FROM (SELECT RAND() AS payload) d INNER JOIN unit_rule r ON r.code=a.code) AS scalar_value
+    FROM unit_head a WHERE a.id IN(10,11,12) ORDER BY a.id
+  expect:
+    rows: 3
+    data: [{id: 10,scalar_value: 100},{id: 11,scalar_value: 100},{id: 12,scalar_value: null}]
+  max_time: 5
+- name: Scalar fresh operands retain the multiple accepted row error through mysql
+  syntax: mysql
+  sql: |
+    SELECT (SELECT CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END
+      FROM (SELECT RAND() AS payload) d INNER JOIN unit_head h ON h.code=7) AS scalar_value
+  expect: {error: true,contains: ['scalar subselect returned more than one row']}
+  max_time: 5
+
+- name: Scalar fresh operands preserve an empty result for every caller through psql
+  syntax: psql
+  sql: |
+    SELECT a.id,(SELECT CASE WHEN d.payload=d.payload THEN 7 ELSE 8 END
+      FROM (SELECT RANDOM() AS payload) d INNER JOIN unit_head h ON h.code=a.code
+      WHERE h.id<0) AS scalar_value
+    FROM unit_parent a WHERE a.id IN(1,2) ORDER BY a.id
+  expect: {rows: 2,data: [{id: 1,scalar_value: null},{id: 2,scalar_value: null}]}
+  max_time: 5
+- name: Scalar fresh operands retain duplicate and missing caller domains through psql
+  syntax: psql
+  sql: |
+    SELECT a.id,(SELECT CASE WHEN d.payload=d.payload THEN r.rule_id ELSE -1 END
+      FROM (SELECT RANDOM() AS payload) d INNER JOIN unit_rule r ON r.code=a.code) AS scalar_value
+    FROM unit_head a WHERE a.id IN(10,11,12) ORDER BY a.id
+  expect:
+    rows: 3
+    data: [{id: 10,scalar_value: 100},{id: 11,scalar_value: 100},{id: 12,scalar_value: null}]
+  max_time: 5
+- name: Scalar fresh operands retain the multiple accepted row error through psql
+  syntax: psql
+  sql: |
+    SELECT (SELECT CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END
+      FROM (SELECT RANDOM() AS payload) d INNER JOIN unit_head h ON h.code=7) AS scalar_value
+  expect: {error: true,contains: ['scalar subselect returned more than one row']}
+  max_time: 5
+
+- name: Scalar fresh operands preserve an empty result for every caller through tsql
+  syntax: tsql
+  sql: |
+    SELECT a.id,(SELECT CASE WHEN d.payload=d.payload THEN 7 ELSE 8 END
+      FROM (SELECT NEWID() AS payload) d INNER JOIN unit_head h ON h.code=a.code
+      WHERE h.id<0) AS scalar_value
+    FROM unit_parent a WHERE a.id IN(1,2) ORDER BY a.id
+  expect: {rows: 2,data: [{id: 1,scalar_value: null},{id: 2,scalar_value: null}]}
+  max_time: 5
+- name: Scalar fresh operands retain duplicate and missing caller domains through tsql
+  syntax: tsql
+  sql: |
+    SELECT a.id,(SELECT CASE WHEN d.payload=d.payload THEN r.rule_id ELSE -1 END
+      FROM (SELECT NEWID() AS payload) d INNER JOIN unit_rule r ON r.code=a.code) AS scalar_value
+    FROM unit_head a WHERE a.id IN(10,11,12) ORDER BY a.id
+  expect:
+    rows: 3
+    data: [{id: 10,scalar_value: 100},{id: 11,scalar_value: 100},{id: 12,scalar_value: null}]
+  max_time: 5
+- name: Scalar fresh operands retain the multiple accepted row error through tsql
+  syntax: tsql
+  sql: |
+    SELECT (SELECT CASE WHEN d.payload=d.payload THEN 1 ELSE 0 END
+      FROM (SELECT NEWID() AS payload) d INNER JOIN unit_head h ON h.code=7) AS scalar_value
+  expect: {error: true,contains: ['scalar subselect returned more than one row']}
+  max_time: 5
+
+- name: A projected scalar reads its value after an empty global group through mysql
+  syntax: mysql
+  sql: |
+    SELECT (SELECT r.rule_id FROM unit_rule r WHERE r.code=7) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+  expect: {rows: 1,data: [{chosen: 100,n: 0}]}
+  max_time: 5
+- name: A missing projected scalar remains NULL after an empty global group through mysql
+  syntax: mysql
+  sql: |
+    SELECT (SELECT r.rule_id FROM unit_rule r WHERE r.code=999) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+  expect: {rows: 1,data: [{chosen: null,n: 0}]}
+  max_time: 5
+- name: HAVING consumes scalar values from the completed empty global group through mysql
+  syntax: mysql
+  sql: |
+    SELECT (SELECT r.rule_id FROM unit_rule r WHERE r.code=7) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+    HAVING COUNT(*)=0 AND (SELECT r.rule_id FROM unit_rule r WHERE r.code=7)=100
+  expect: {rows: 1,data: [{chosen: 100,n: 0}]}
+  max_time: 5
+- name: Explicit empty groups remain absent with a scalar projection through mysql
+  syntax: mysql
+  sql: |
+    SELECT p.code,(SELECT r.rule_id FROM unit_rule r WHERE r.code=7) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0 GROUP BY p.code
+  expect: {rows: 0}
+  max_time: 5
+- name: The neutral global row retains projected scalar cardinality errors through mysql
+  syntax: mysql
+  sql: |
+    SELECT (SELECT h.id FROM unit_head h WHERE h.code=7) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+  expect: {error: true,contains: ['scalar subselect returned more than one row']}
+  max_time: 5
+
+- name: A projected scalar reads its value after an empty global group through psql
+  syntax: psql
+  sql: |
+    SELECT (SELECT r.rule_id FROM unit_rule r WHERE r.code=7) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+  expect: {rows: 1,data: [{chosen: 100,n: 0}]}
+  max_time: 5
+- name: A missing projected scalar remains NULL after an empty global group through psql
+  syntax: psql
+  sql: |
+    SELECT (SELECT r.rule_id FROM unit_rule r WHERE r.code=999) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+  expect: {rows: 1,data: [{chosen: null,n: 0}]}
+  max_time: 5
+- name: HAVING consumes scalar values from the completed empty global group through psql
+  syntax: psql
+  sql: |
+    SELECT (SELECT r.rule_id FROM unit_rule r WHERE r.code=7) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+    HAVING COUNT(*)=0 AND (SELECT r.rule_id FROM unit_rule r WHERE r.code=7)=100
+  expect: {rows: 1,data: [{chosen: 100,n: 0}]}
+  max_time: 5
+- name: Explicit empty groups remain absent with a scalar projection through psql
+  syntax: psql
+  sql: |
+    SELECT p.code,(SELECT r.rule_id FROM unit_rule r WHERE r.code=7) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0 GROUP BY p.code
+  expect: {rows: 0}
+  max_time: 5
+- name: The neutral global row retains projected scalar cardinality errors through psql
+  syntax: psql
+  sql: |
+    SELECT (SELECT h.id FROM unit_head h WHERE h.code=7) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+  expect: {error: true,contains: ['scalar subselect returned more than one row']}
+  max_time: 5
+
+- name: A projected scalar reads its value after an empty global group through tsql
+  syntax: tsql
+  sql: |
+    SELECT (SELECT r.rule_id FROM unit_rule r WHERE r.code=7) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+  expect: {rows: 1,data: [{chosen: 100,n: 0}]}
+  max_time: 5
+- name: A missing projected scalar remains NULL after an empty global group through tsql
+  syntax: tsql
+  sql: |
+    SELECT (SELECT r.rule_id FROM unit_rule r WHERE r.code=999) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+  expect: {rows: 1,data: [{chosen: null,n: 0}]}
+  max_time: 5
+- name: HAVING consumes scalar values from the completed empty global group through tsql
+  syntax: tsql
+  sql: |
+    SELECT (SELECT r.rule_id FROM unit_rule r WHERE r.code=7) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+    HAVING COUNT(*)=0 AND (SELECT r.rule_id FROM unit_rule r WHERE r.code=7)=100
+  expect: {rows: 1,data: [{chosen: 100,n: 0}]}
+  max_time: 5
+- name: Explicit empty groups remain absent with a scalar projection through tsql
+  syntax: tsql
+  sql: |
+    SELECT p.code,(SELECT r.rule_id FROM unit_rule r WHERE r.code=7) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0 GROUP BY p.code
+  expect: {rows: 0}
+  max_time: 5
+- name: The neutral global row retains projected scalar cardinality errors through tsql
+  syntax: tsql
+  sql: |
+    SELECT (SELECT h.id FROM unit_head h WHERE h.code=7) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+  expect: {error: true,contains: ['scalar subselect returned more than one row']}
+  max_time: 5
+
+- name: Mixed native and scalar group expressions retain their actual grouped values through mysql
+  syntax: mysql
+  sql: |
+    SELECT p.code,(SELECT r.rule_id FROM unit_rule r WHERE r.code=7)+p.code AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id IN(1,2,4) GROUP BY p.code ORDER BY p.code
+  expect:
+    rows: 3
+    data: [{code: 7,chosen: 107,n: 1},{code: 8,chosen: 108,n: 1},{code: 9,chosen: 109,n: 1}]
+  max_time: 5
+- name: Multiple scalar projections consume the completed neutral group through mysql
+  syntax: mysql
+  sql: |
+    SELECT (SELECT r.rule_id FROM unit_rule r WHERE r.code=7)+
+      (SELECT r.rule_id FROM unit_rule r WHERE r.code=9) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+  expect: {rows: 1,data: [{chosen: 300,n: 0}]}
+  max_time: 5
+
+- name: Mixed native and scalar group expressions retain their actual grouped values through psql
+  syntax: psql
+  sql: |
+    SELECT p.code,(SELECT r.rule_id FROM unit_rule r WHERE r.code=7)+p.code AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id IN(1,2,4) GROUP BY p.code ORDER BY p.code
+  expect:
+    rows: 3
+    data: [{code: 7,chosen: 107,n: 1},{code: 8,chosen: 108,n: 1},{code: 9,chosen: 109,n: 1}]
+  max_time: 5
+- name: Multiple scalar projections consume the completed neutral group through psql
+  syntax: psql
+  sql: |
+    SELECT (SELECT r.rule_id FROM unit_rule r WHERE r.code=7)+
+      (SELECT r.rule_id FROM unit_rule r WHERE r.code=9) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+  expect: {rows: 1,data: [{chosen: 300,n: 0}]}
+  max_time: 5
+
+- name: Mixed native and scalar group expressions retain their actual grouped values through tsql
+  syntax: tsql
+  sql: |
+    SELECT p.code,(SELECT r.rule_id FROM unit_rule r WHERE r.code=7)+p.code AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id IN(1,2,4) GROUP BY p.code ORDER BY p.code
+  expect:
+    rows: 3
+    data: [{code: 7,chosen: 107,n: 1},{code: 8,chosen: 108,n: 1},{code: 9,chosen: 109,n: 1}]
+  max_time: 5
+- name: Multiple scalar projections consume the completed neutral group through tsql
+  syntax: tsql
+  sql: |
+    SELECT (SELECT r.rule_id FROM unit_rule r WHERE r.code=7)+
+      (SELECT r.rule_id FROM unit_rule r WHERE r.code=9) AS chosen,COUNT(*) AS n
+    FROM unit_parent p WHERE p.id<0
+  expect: {rows: 1,data: [{chosen: 300,n: 0}]}
+  max_time: 5
+
+- name: Correlated scalar lookups retain their actual grouped caller coordinate through mysql
+  syntax: mysql
+  sql: |
+    SELECT a.code,(SELECT r.rule_id FROM unit_rule r WHERE r.code=a.code) AS chosen,COUNT(*) AS n
+    FROM unit_head a WHERE a.id IN(10,11,12) GROUP BY a.code ORDER BY a.code
+  expect: {rows: 2,data: [{code: 7,chosen: 100,n: 2},{code: 8,chosen: null,n: 1}]}
+  max_time: 5
+
+- name: Correlated scalar lookups retain their actual grouped caller coordinate through psql
+  syntax: psql
+  sql: |
+    SELECT a.code,(SELECT r.rule_id FROM unit_rule r WHERE r.code=a.code) AS chosen,COUNT(*) AS n
+    FROM unit_head a WHERE a.id IN(10,11,12) GROUP BY a.code ORDER BY a.code
+  expect: {rows: 2,data: [{code: 7,chosen: 100,n: 2},{code: 8,chosen: null,n: 1}]}
+  max_time: 5
+
+- name: Correlated scalar lookups retain their actual grouped caller coordinate through tsql
+  syntax: tsql
+  sql: |
+    SELECT a.code,(SELECT r.rule_id FROM unit_rule r WHERE r.code=a.code) AS chosen,COUNT(*) AS n
+    FROM unit_head a WHERE a.id IN(10,11,12) GROUP BY a.code ORDER BY a.code
+  expect: {rows: 2,data: [{code: 7,chosen: 100,n: 2},{code: 8,chosen: null,n: 1}]}
   max_time: 5

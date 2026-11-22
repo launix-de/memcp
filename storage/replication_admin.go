@@ -430,14 +430,22 @@ func initReplicationAdmin(en *scm.Env) {
 		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{{Kind: "func", Label: "session"}, {Kind: "string", Label: "database"}, {Kind: "string", Label: "sql"}, {Kind: "bool", Label: "postgresql"}, {Kind: "func", Label: "resultrow"}, {Kind: "func", Label: "resultfields"}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
 	scm.Declare(en, &scm.Declaration{Name: "replication_write", Fn: func(a ...scm.Scmer) scm.Scmer {
+		var database *string
+		if len(a) > 1 {
+			if !a[1].IsString() {
+				panic("replication_write requires an actual database name")
+			}
+			name := a[1].String()
+			database = &name
+		}
 		if !a[0].IsNil() {
 			if tx := scmerToTxContext(a[0]); tx != nil {
-				replicationWrite(tx)
+				replicationWrite(tx, database)
 			}
 		}
 		return scm.NewBool(true)
 	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true,
-		Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
+		Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}, {Kind: "string", Label: "database", Optional: true, Description: "actual write target; omitted calls retain the legacy replication intent contract"}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
 	scm.Declare(en, &scm.Declaration{Name: "replication_slaves", Fn: func(a ...scm.Scmer) scm.Scmer {
 		r := replication.Load()
 		var statuses []replicaStatus = []replicaStatus{}

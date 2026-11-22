@@ -4252,7 +4252,7 @@ still represents the original SQL equality and must keep its NULL rejection. */
 		(if (not (equal? (count (qb_fields inner)) 2))
 			(neumann_fail "untangle_query" "IN subquery must expose exactly one column")
 			true)
-		(define stage (make_group_stage_for_query_block inner))
+		(define stage (make_group_stage_for_query_block inner '()))
 		(define input_alias (group_stage_input_alias stage))
 		(define keys (gs_keys stage))
 		(define ags (gs_aggregates stage))
@@ -4711,7 +4711,7 @@ row producer publishes every real group; only the outer scalar stage owns
 
 (define make_grouped_derived_stage_source (lambda (src alias inner)
 	(begin
-		(define stage (make_group_stage_for_query_block inner))
+		(define stage (make_group_stage_for_query_block inner '()))
 		(define projection (grouped_derived_projection stage alias))
 		(define input_alias (group_stage_input_alias stage))
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
@@ -7582,7 +7582,10 @@ every nested query/group scope before substitution. */
 					_ '()))) alias)
 		_ false)
 		expr
-		(and (query_block? expr) (derived_projection_reads_alias? alias expr)
+		/* Flattening installs the projection's free aliases in the enclosing
+		scope. Protect nested local binders even when this child has no direct
+		read of the eliminated alias: later correlation analysis sees both scopes. */
+		(and (query_block? expr)
 			(not (identical? (avoid_derived_projection_capture alias projection expr) expr)))
 		(rewrite_derived_ref alias projection (avoid_derived_projection_capture alias projection expr))
 		(match expr
@@ -7993,6 +7996,13 @@ bindings are stable here, unlike mutable SQL session variables. */
 													(prepend_derived_rewrite alias (nth staged 1) tail_rewrites)
 													(rewrite_derived_where_terms alias (nth staged 1) tail_wheres)
 													(cons (nth staged 2) (merge (list (qb_stages inner) tail_stages)))))))))
+							(query_requires_fresh_invocation? inner nil false)
+							/* The producer still owns its exported values when a fresh
+							FROM-less query acquired a literal unit during untangling.
+							Inlining its projection would repeat volatile expressions
+							at each consumer instead of reading the produced column. */
+							(list (cons (source_with_relation src inner) tail_sources)
+								tail_rewrites tail_wheres tail_stages)
 							(begin
 								(define inner_sources (coalesceNil (qb_sources inner) '()))
 								(if (empty_list? inner_sources)
@@ -8359,7 +8369,7 @@ can be represented by the same reducer. */
 					(map (union_branches relation) (lambda (branch)
 						(wrap_embedded_union_branch_query input_wrapper src branch canonical_fields)))
 					'() nil nil (qassoc_set (union_facts relation) (quote alias) alias)) ctx))
-				(define template (make_group_stage_for_query_block block))
+				(define template (make_group_stage_for_query_block block '()))
 				(define stage (make_group_stage (gs_id template) input
 					(gs_domain template) (gs_keys template) (gs_aggregates template)
 					(gs_having template) (gs_output template) (gs_order template)

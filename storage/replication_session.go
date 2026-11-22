@@ -50,8 +50,11 @@ func replicationEnterMode(tx *TxContext, session scm.Scmer, write bool) {
 }
 
 // Called before a parsed write plan executes, including on plan-cache hits.
-func replicationWrite(tx *TxContext) {
-	if replication.Load() != nil && tx != nil {
+// An explicit target belongs to its actual adapter: shared-cluster writes do
+// not enter the separate legacy replication session. An omitted target keeps
+// the historical native-call contract for stored procedures and SCM callers.
+func replicationWrite(tx *TxContext, database *string) {
+	if replication.Load() != nil && tx != nil && (database == nil || !sharedClusterDatabase(*database)) {
 		tx.replicationWriting = true
 	}
 }

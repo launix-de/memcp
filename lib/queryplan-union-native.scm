@@ -216,7 +216,7 @@ this is a physical capability boundary, not a semantic freshness claim. */
 		(query_block_has_aggregates? block))
 		(not (nil? (find (qb_sources block) (lambda (source)
 			(union_block? (source_relation source))) nil))))
-		(make_group_stage_for_query_block block) nil))
+		(make_group_stage_for_query_block block '()) nil))
 	/* Normalization may already have made the complete UNION grouping an
 	explicit stage. This terminal consumer can keep native NULL-safe group
 	identity through emission without publishing an intermediate cache. */

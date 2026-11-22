@@ -62,6 +62,10 @@ and authorize each readable table once, then keep using show's immutable table
 snapshot through the stable handle for the rest of this compile only. */
 (define sql_compile_table_policy (lambda (policy tx access readonly)
 	(begin
+		/* This one compile owner publishes independent target facts. Policy
+		callbacks may run in parallel; per-database session stores cannot lose
+		a target through a read/append/write race. The plan retains strings only. */
+		(access "write_databases" (newsession))
 		(define catalog (newsession))
 		(lambda (schema tbl write)
 			(if (and write (sql_database_create_request? tbl)) (begin
@@ -74,10 +78,11 @@ snapshot through the stable handle for the rest of this compile only. */
 				write (begin
 					(if policy (policy schema tbl true) true)
 					(access "write" true)
+					((access "write_databases") schema true)
 					(if (and (equal? schema "system") (equal? tbl true)) (access "admin" true) true)
 					/* Native schema/shard access acquires ownership. Keep write
 					intent on cached plans; admin commands route to the master. */
-					(if (or readonly (equal? schema "system")) true (replication_write tx)))
+					(if (or readonly (equal? schema "system")) true (replication_write tx schema)))
 				(begin
 					(define handle (table schema false tbl false tx))
 					(if (and handle (catalog handle))
@@ -403,7 +408,12 @@ serialization still see the complete plan. */
 					(if (list? parse_fn) (equal? (car parse_fn) parse_psql) false)
 					(quote resultrow) (quote resultfields))
 				formula)
-			(list (quote !begin) (list (quote replication_write) (quote tx)) formula))
+			(if (nil? (access "write_databases"))
+				(error "write plan is missing its actual database targets")
+				(cons (quote !begin) (merge
+					(map ((access "write_databases")) (lambda (database)
+						(list (quote replication_write) (quote tx) database)))
+					(list formula)))))
 		formula)))
 
 /* Search programs depend on statement inputs, never on the scanned row. Bind

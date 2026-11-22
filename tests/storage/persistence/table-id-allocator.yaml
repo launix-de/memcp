@@ -219,8 +219,13 @@ test_cases:
       (define admin (newsession)) (admin "username" "root")
       (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests-allocator-authority`.* TO allocator_metadata_reader" nil))
       (define fresh (list "allocator_metadata_reader" (tsql_account_id "allocator_metadata_reader")))
-      (define old_result (tsql_ident_current_rows "memcp-tests-allocator-authority" old "allocator_secured" nil '()))
-      (define new_result (tsql_ident_current_rows "memcp-tests-allocator-authority" fresh "allocator_secured" nil '()))
+      (define observe (lambda (actor) (begin
+        (define database (find (tsql_ident_current_databases actor nil) (lambda (row)
+          (equal? (car row) "memcp-tests-allocator-authority")) nil))
+        (list (list (if (nil? database) nil
+          (tsql_ident_current_value (car database) "allocator_secured" nil)))))))
+      (define old_result (observe old))
+      (define new_result (observe fresh))
       (eval (parse_sql "memcp-tests" "DROP USER allocator_metadata_reader" nil))
       (tsql_execute_request "memcp-tests-allocator-authority" "DROP TABLE allocator_secured"
         admin nil 0 (lambda (row) true) (lambda fields true))
@@ -331,3 +336,115 @@ test_cases:
   expect: {result: [true,91,0]}
   cleanup:
   - sql: DROP TABLE IF EXISTS allocator_handle
+
+- name: Correlated identity names remain ordinary relational inputs with exact native values
+  setup:
+  - sql: DROP TABLE IF EXISTS allocator_address_target
+  - sql: DROP TABLE IF EXISTS allocator_address_driver
+  - sql: CREATE TABLE allocator_address_target(id INT IDENTITY(401,1) PRIMARY KEY,value INT)
+  - sql: CREATE TABLE allocator_address_driver(id INT)
+  - sql: INSERT allocator_address_target(value) VALUES(1),(2)
+  - sql: INSERT allocator_address_driver VALUES(1),(2),(2)
+  sql: |
+    SELECT id,IDENT_CURRENT(CASE WHEN id%2=0 THEN N'dbo.allocator_address_target'
+      ELSE N'ALLOCATOR_ADDRESS_TARGET' END) AS current_value
+    FROM allocator_address_driver ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 1,current_value: 402},{id: 2,current_value: 402},{id: 2,current_value: 402}]
+  cleanup:
+  - sql: DROP TABLE IF EXISTS allocator_address_driver
+  - sql: DROP TABLE IF EXISTS allocator_address_target
+
+- name: Correlated address selection preserves missing nonidentity and null results
+  setup:
+  - sql: DROP TABLE IF EXISTS allocator_address_target
+  - sql: DROP TABLE IF EXISTS allocator_address_driver
+  - sql: CREATE TABLE allocator_address_target(id INT IDENTITY(402,1) PRIMARY KEY,value INT)
+  - sql: CREATE TABLE allocator_address_driver(id INT,name NVARCHAR(128))
+  - sql: INSERT allocator_address_driver VALUES(1,N'allocator_address_target'),(2,N'allocator_plain'),(3,N'allocator_absent'),(4,NULL),(5,N'other.allocator_address_target'),(6,N'allocator_joined_view')
+  sql: SELECT id,IDENT_CURRENT(name) AS current_value FROM allocator_address_driver ORDER BY id
+  expect:
+    rows: 6
+    data: [{id: 1,current_value: 402},{id: 2,current_value: null},{id: 3,current_value: null},{id: 4,current_value: null},{id: 5,current_value: null},{id: 6,current_value: null}]
+  cleanup:
+  - sql: DROP TABLE IF EXISTS allocator_address_driver
+  - sql: DROP TABLE IF EXISTS allocator_address_target
+
+- name: Identity lookup consumes the single value exported by a volatile relational operand
+  setup:
+  - sql: DROP TABLE IF EXISTS allocator_address_target
+  - sql: DROP TABLE IF EXISTS allocator_address_driver
+  - sql: CREATE TABLE allocator_address_target(id INT IDENTITY(402,1) PRIMARY KEY,value INT)
+  - sql: CREATE TABLE allocator_address_driver(id INT)
+  - sql: INSERT allocator_address_driver VALUES(1),(2)
+  sql: |
+    SELECT a.id,IDENT_CURRENT(CASE WHEN d.payload=d.payload
+      THEN N'allocator_address_target' ELSE N'allocator_plain' END) AS current_value
+    FROM allocator_address_driver a INNER JOIN (SELECT RAND() AS payload) d ON 1=1
+    ORDER BY a.id
+  expect: {rows: 2,data: [{id: 1,current_value: 402},{id: 2,current_value: 402}]}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS allocator_address_driver
+  - sql: DROP TABLE IF EXISTS allocator_address_target
+
+- name: An authorized database input does not retain a replaced table identity
+  setup:
+  - sql: DROP TABLE IF EXISTS allocator_address_replaced
+  - sql: CREATE TABLE allocator_address_replaced(id INT IDENTITY(402,1) PRIMARY KEY,value INT)
+  scm: |
+    (begin
+      (define actor (list "root" (tsql_account_id "root")))
+      (define database (find (tsql_ident_current_databases actor nil) (lambda (row)
+        (equal? (car row) "memcp-tests")) nil))
+      (define admin (newsession)) (admin "username" "root")
+      (tsql_execute_request "memcp-tests" "DROP TABLE allocator_address_replaced" admin nil 0
+        (lambda (row) true) (lambda fields true))
+      (tsql_execute_request "memcp-tests" "CREATE TABLE allocator_address_replaced(value INT)" admin nil 0
+        (lambda (row) true) (lambda fields true))
+      (define current_value (tsql_ident_current_value (car database) "allocator_address_replaced" nil))
+      (define rows (newsession)) (rows "data" '())
+      (tsql_execute_request "memcp-tests" "SELECT value FROM allocator_address_replaced" admin nil 0
+        (lambda (row) (rows "data" (append (rows "data") row))) (lambda fields true))
+      (list current_value (rows "data")))
+  expect: {result: [null,[]]}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS allocator_address_replaced
+
+- name: Serializable native identity reads do not acquire an unrelated pending view read
+  setup:
+  - sql: DROP VIEW IF EXISTS allocator_unrelated_pending
+  - sql: DROP TABLE IF EXISTS allocator_address_target
+  - sql: CREATE TABLE allocator_address_target(id INT IDENTITY(402,1) PRIMARY KEY,value INT)
+  - sql: INSERT allocator_address_target(value) VALUES(77)
+  scm: |
+    (begin
+      (define writer (newsession)) (writer "username" "root")
+      (define reader (newsession)) (reader "username" "root")
+      (define run (lambda (session text) (begin
+        (define output (newsession)) (output "rows" '())
+        (tsql_execute_request "memcp-tests" text session nil 0
+          (lambda (row) (output "rows" (append (output "rows") row))) (lambda fields true))
+        (output "rows"))))
+      (define outcome (try (lambda () (begin
+        (run writer "BEGIN TRANSACTION")
+        (run writer "CREATE VIEW allocator_unrelated_pending AS SELECT value FROM allocator_address_target")
+        (run reader "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        (run reader "BEGIN TRANSACTION")
+        (define observed (run reader "SELECT id,value,IDENT_CURRENT(N'dbo.allocator_address_target') AS current_value FROM allocator_address_target"))
+        (define state (car (run reader "SELECT XACT_STATE() AS transaction_state,@@TRANCOUNT AS transaction_depth")))
+        (run reader "COMMIT")
+        (define writer_state (car (run writer "SELECT XACT_STATE() AS transaction_state,@@TRANCOUNT AS transaction_depth")))
+        (list true (list (map observed (lambda (row)
+          (list (row "id") (row "value") (row "current_value"))))
+          (state "transaction_state") (state "transaction_depth")
+          (writer_state "transaction_state") (writer_state "transaction_depth")))))
+        (lambda (cause) (list false cause))))
+      (try (lambda () (run reader "ROLLBACK")) (lambda (_already_completed) nil))
+      (try (lambda () (run writer "ROLLBACK")) (lambda (_already_completed) nil))
+      (if (car outcome) (cadr outcome) (error (cadr outcome))))
+  expect:
+    result: [[[402,77,402]],1,1,1,1]
+  cleanup:
+  - sql: DROP VIEW IF EXISTS allocator_unrelated_pending
+  - sql: DROP TABLE IF EXISTS allocator_address_target

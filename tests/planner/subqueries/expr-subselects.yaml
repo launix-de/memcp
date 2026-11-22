@@ -54,6 +54,9 @@ setup:
 
 test_cases:
   - name: "Cold group initialization keeps transaction-local rows out of other sessions"
+    session_id: "es_cache_isolation_writer"
+    cleanup:
+      - sql: "ROLLBACK"
     steps:
       - session_id: "es_cache_isolation_writer"
         sql: "START ACID TRANSACTION"
@@ -82,9 +85,12 @@ test_cases:
         expect: {rows: 1, data: [{total: null}], contains: ["None"], not_contains: ["777"]}
 
   - name: "Warm group cache preserves other-session visibility through rollback"
+    session_id: "es_cache_isolation_writer"
+    cleanup:
+      - sql: "ROLLBACK"
     steps:
       - session_id: "es_cache_isolation_reader"
-        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx GROUP BY bucket"
+        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx GROUP BY bucket ORDER BY bucket"
         expect: {rows: 2, data: [{bucket: 0, total: 40}, {bucket: 1, total: 20}], contains: ["40", "20"], not_contains: ["807"]}
       - session_id: "es_cache_isolation_writer"
         sql: "START ACID TRANSACTION"
@@ -92,15 +98,15 @@ test_cases:
         sql: "UPDATE es_cache_tx SET amount=777 WHERE id=1"
         expect: {affected_rows: 1}
       - session_id: "es_cache_isolation_writer"
-        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx GROUP BY bucket"
+        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx GROUP BY bucket ORDER BY bucket"
         expect: {rows: 2, data: [{bucket: 0, total: 807}, {bucket: 1, total: 20}], contains: ["807", "20"]}
       - session_id: "es_cache_isolation_reader"
-        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx GROUP BY bucket"
+        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx GROUP BY bucket ORDER BY bucket"
         expect: {rows: 2, data: [{bucket: 0, total: 40}, {bucket: 1, total: 20}], contains: ["40", "20"], not_contains: ["807"]}
       - session_id: "es_cache_isolation_writer"
         sql: "ROLLBACK"
       - session_id: "es_cache_isolation_reader"
-        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx GROUP BY bucket"
+        sql: "SELECT bucket,SUM(amount) AS total FROM es_cache_tx GROUP BY bucket ORDER BY bucket"
         expect: {rows: 2, data: [{bucket: 0, total: 40}, {bucket: 1, total: 20}], contains: ["40", "20"], not_contains: ["807"]}
 
   - name: "Canonical scalar cache rows survive consumer rollback after initialization"

@@ -1259,58 +1259,76 @@ scalar-query cardinality error. Restrict this owner to these constructions. */
 			(list 'get_column alias false key false) (tsql_implicit_cast_expr value "INT" '()))
 		nil nil nil (if principal nil 1) nil '() '() '())))))
 
-/* IDENT_CURRENT reads a native allocator observation at its authorized
-invocation producer. It never borrows a session identity or a SHOW estimate.
-Unknown historical provenance is a supported-profile error, distinct from
-SQL NULL for a missing/inaccessible/nonidentity object. */
-(define tsql_ident_current_rows (close_procedure ((lambda (parse_name qualifier visible relation view_name find_view parse_integer query_block? qb_sources state_reader decode_ir restore_code restore_layout)
-	(lambda (context actor name tx options) (begin
-		(define value (if (nil? name) nil (begin
-			(define address (try (lambda () (parse_name name)) (lambda (_invalid_address) nil)))
-			(if (nil? address) nil (begin
-				(define database (database_name (qualifier (car address) context options) true))
-				(if (or (nil? database) (not (equal?? (cadr address) "dbo"))
-					(not (visible actor database true))) nil (begin
-						(define native (relation database (nth address 2) tx))
-						(if (nil? native) (begin
-							(define view (view_name database (nth address 2) tx))
-							(if (nil? view) nil (begin
-								(define recipe (find_view tx database view))
-								(define serialized (nth recipe 2))
-								(define query (if (nil? serialized) nil (restore_layout (restore_code (decode_ir serialized)))))
-								/* The documented joined-view rule has an actual logical
-								join proof; other view lineage needs its own contract. */
-								(if (and (query_block? query) (> (count (qb_sources query)) 1)) nil
-									(error "IDENT_CURRENT view identity lineage is not supported")))))
-							(begin
-								(define identity (find (show native "columns" tx)
-									(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
-								(if (nil? identity) nil (begin
-									(define observation (state_reader native tx))
-									(define issued (observation "issued"))
-									(define current (if (nil? issued) nil
-										(not issued) (observation "start")
-										(observation "high_allocated") (observation "high") nil))
-									(if (nil? current)
-										(error "IDENT_CURRENT allocator provenance is unavailable for this table")
-										(parse_integer current)))))))))))))
-		(list (list value)))))
-	tsql_object_name_parts tsql_qualifier_database tsql_metadata_visible? tsql_native_relation_handle
-	tsql_view_name sql_find_view tsql_parse_integer query_block? qb_sources table_id_state
+/* The invocation producer transports authorized database names only. Its
+arguments are closed; caller-row expressions belong to the ordinary relational
+domain. Native-table observations must not read unrelated system.views rows or
+observe unrelated legacy allocator failures during namespace enumeration. */
+(define tsql_ident_current_databases (close_procedure ((lambda (visible)
+	(lambda (actor _tx)
+		(map (filter (show) (lambda (database) (visible actor database true)))
+			(lambda (database) (list database))))) tsql_metadata_visible?)))
+
+/* The selected database comes from the actual actor/transaction-owned producer,
+not a worker-local account check. Resolve one actual native handle at the read
+and use it for both declaration and allocator. Only native-missing names enter
+the existing view lookup; unrelated pending view writers cannot affect a native
+observation through a gratuitous system.views scan. */
+(define tsql_ident_current_value (close_procedure ((lambda (relation view_name find_view parse_integer query_block? qb_sources state_reader decode_ir restore_code restore_layout)
+	(lambda (database name tx) (begin
+		(define native (relation database name tx))
+		(if (nil? native) (begin
+			(define view (view_name database name tx))
+			(if (nil? view) nil (begin
+				(define serialized (nth (find_view tx database view) 2))
+				(define query (if (nil? serialized) nil (restore_layout (restore_code (decode_ir serialized)))))
+				(if (and (query_block? query) (> (count (qb_sources query)) 1)) nil
+					(error "IDENT_CURRENT view identity lineage is not supported")))))
+			(begin
+				(define declared (find (show native "columns" tx)
+					(lambda (column) (equal? (column "Extra") "auto_increment")) nil))
+				(if (nil? declared) nil (begin
+					(define identity (show native "identity" tx))
+					(define observation (state_reader native tx))
+					(if (or (nil? identity) (not (equal? identity (observation "table_uuid"))))
+						(error "IDENT_CURRENT allocator generation is unavailable") true)
+					(define issued (observation "issued"))
+					(define current (if (nil? issued) nil
+						(not issued) (observation "start")
+						(observation "high_allocated") (observation "high") nil))
+					(if (nil? current)
+						(error "IDENT_CURRENT allocator provenance is unavailable for this table")
+						(parse_integer current)))))))))
+	tsql_native_relation_handle tsql_view_name sql_find_view tsql_parse_integer query_block? qb_sources table_id_state
 	json_decode_scmer restore_storage_code sql_restore_source_layout)))
 (define tsql_ident_current_query (lambda (database name planning tx) (begin
-	(define alias (binding_fresh_alias (binding_collect_string_catalog name '()) "__tsql_identity_current"))
-	(define names '("current_value"))
-	(define columns (list (list "Field" "current_value" "RawType" "NUMERIC" "Dimensions" '(38 0) "Null" true)))
+	(define names (binding_collect_string_catalog name '()))
+	(define input_alias (binding_fresh_alias names "__tsql_identity_input"))
+	(define alias (binding_fresh_alias (set_assoc names input_alias true) "__tsql_identity_current"))
+	/* The existing FROM-less relational operand owns exactly one evaluation
+	of the name expression. Both selection and the lazy projection consume its
+	exported column, including for volatile or error-producing expressions. */
+	(define input (make_query_block database '()
+		(list "name" (tsql_implicit_cast_expr name "NVARCHAR" '(776))) true
+		nil nil nil nil nil '() '() (list (list 'lateral true))))
+	(define columns (list
+		(list "Field" "database" "RawType" "NVARCHAR" "Dimensions" '(128) "Null" false)))
 	(define source (list alias database
-		(list 'table-function tsql_ident_current_rows
-			(list database (tsql_actor_formula) (tsql_implicit_cast_expr name "NVARCHAR" '(776)) 'tx
-				(list 'list "tsql_import_target" (list 'session "tsql_import_target")
-					"tsql_import_source" (list 'session "tsql_import_source"))) names)
+		(list 'table-function tsql_ident_current_databases (list (tsql_actor_formula) 'tx) '("database"))
 		false nil (list "columns" columns "constraints" '("Unique" () "ForeignKeys" ()) "lifetime" "invocation")))
-	(list 'inner_select (make_query_block database (list source)
-		(list "current_value" (list 'sql_type_expr (list 'get_column alias false "current_value" false)
-			(list "NUMERIC" '(38 0)) nil)) true nil nil nil nil nil '() '()
+	(define column (lambda (field) (list 'get_column alias false field false)))
+	(define argument (list 'get_column input_alias false "name" false))
+	(define options (list 'list "tsql_import_target" (list 'session "tsql_import_target")
+		"tsql_import_source" (list 'session "tsql_import_source")))
+	(define address (lambda (field) (list tsql_catalog_address_field database argument options field)))
+	(define matches (list 'and (list 'equal?? (address "owner") "dbo")
+		(list 'equal? (address "database") (column "database"))))
+	(list 'inner_select (make_query_block database
+		(list (list input_alias database input false nil nil) source)
+		/* Physical projection preparation may precede WHERE. Keep the same
+		lazy selector around the read itself, not just in the row predicate. */
+		(list "current_value" (list 'sql_type_expr (list 'if matches
+			(list tsql_ident_current_value (column "database") (address "name") 'tx) nil)
+			(list "NUMERIC" '(38 0)) nil)) matches nil nil nil nil nil '() '()
 		(list (list 'fresh_invocation true)))))))
 (define tsql_ident_current_call (lambda (database value)
 	(list 'sql_type_expr

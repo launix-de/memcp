@@ -78,3 +78,27 @@ test_cases:
     ORDER BY p.token
   expect:
     data: [{token: 10,value: 100},{token: 20,value: 200},{token: 30,value: null},{token: 40,value: 100},{token: 50,value: null}]
+
+- name: An uncorrelated membership binder remains local across UNION flattening through mysql
+  syntax: mysql
+  sql: |
+    SELECT d.token FROM(SELECT c.id,c.token FROM capture_inputs c WHERE c.token<=20 UNION ALL
+      SELECT c.id,c.token FROM capture_inputs c WHERE c.token>20)d
+    WHERE d.id IN(SELECT c.id FROM capture_lookup c WHERE c.value IS NOT NULL) ORDER BY d.token
+  expect: {data: [{token: 10},{token: 20},{token: 40}]}
+
+- name: An uncorrelated membership binder remains local across UNION flattening through psql
+  syntax: psql
+  sql: |
+    SELECT d.token FROM(SELECT c.id,c.token FROM capture_inputs c WHERE c.token<=20 UNION ALL
+      SELECT c.id,c.token FROM capture_inputs c WHERE c.token>20)d
+    WHERE d.id IN(SELECT c.id FROM capture_lookup c WHERE c.value IS NOT NULL) ORDER BY d.token
+  expect: {data: [{token: 10},{token: 20},{token: 40}]}
+
+- name: An uncorrelated membership binder remains local across UNION flattening through tsql
+  syntax: tsql
+  sql: |
+    SELECT d.token FROM(SELECT c.id,c.token FROM capture_inputs c WHERE c.token<=20 UNION ALL
+      SELECT c.id,c.token FROM capture_inputs c WHERE c.token>20)d
+    WHERE d.id IN(SELECT c.id FROM capture_lookup c WHERE c.value IS NOT NULL) ORDER BY d.token
+  expect: {data: [{token: 10},{token: 20},{token: 40}]}

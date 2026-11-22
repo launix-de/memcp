@@ -6737,6 +6737,7 @@ retain their existing owners. Only the native distinct-value owner removes it. *
 
 (define external_column_refs_for_alias (lambda (default_alias expr)
 	(match expr
+		((symbol quote) _datum) '()
 		((symbol count_distinct) _agg_expr) '()
 		((quote count_distinct) _agg_expr) '()
 		((symbol group_concat_distinct) _agg_expr _separator) '()
@@ -6753,7 +6754,20 @@ retain their existing owners. Only the native distinct-value owner removes it. *
 		(if (or (nil? tblvar) (equal? (resolve_column_alias tblvar default_alias) default_alias))
 			'()
 			(list (list (quote get_column) tblvar ignorecase col col_ignorecase)))
-		(cons _head tail) (merge_unique (map tail (lambda (item) (external_column_refs_for_alias default_alias item))))
+		(cons head tail)
+		/* A physical scalar marker owns its child query's lexical scope. Its
+		inner columns are not parent grouping inputs; only actual lookup keys
+		cross the group boundary, as in replace_group_expr_indexed below. */
+		(if (and (symbol? head) (has? (list 'scalar_first_probe 'scalar_aggregate_probe 'scalar_cardinality_probe) head)
+			(not (empty_list? tail)) (group_stage? (car tail)))
+			(begin
+				(define dependencies (if (and (equal? head 'scalar_first_probe) (equal? (count tail) 3))
+					(coalesceNil (nth tail 2) '()) '()))
+				(define caller_stages (cons (car tail) (filter dependencies group_stage?)))
+				(merge_unique (map caller_stages (lambda (stage)
+					(merge_unique (map (qassoc_get (gs_facts stage) 'lookup-keys '())
+						(lambda (key) (external_column_refs_for_alias default_alias key))))))))
+			(merge_unique (map tail (lambda (item) (external_column_refs_for_alias default_alias item)))))
 		_ '())))
 
 (define field_passthrough_keys_for_alias (lambda (default_alias fields)
@@ -7529,12 +7543,25 @@ NULL is UNKNOWN. Keep SQL collation for non-NULL values. */
 				(list (quote physical_planning_session) (planner_context_session (qb_facts block)))
 				(list (quote physical_planning_tx) (planner_context_tx (qb_facts block))))))))
 
-(define make_group_stage_for_query_block (lambda (block)
+(define make_group_stage_for_query_block (lambda (block post_group_sources)
 	(begin
 		(define alias (source_alias (car (qb_sources block))))
 		(define group_keys (map (coalesceNil (qb_group block) '()) (lambda (expr) (canonical_column_expr_for_alias alias expr))))
-		(define field_passthrough_keys (field_passthrough_keys_for_alias alias (qb_fields block)))
-		(define passthrough_keys (external_column_refs_for_alias alias (coalesceNil (qb_having block) true)))
+		(define post_group_aliases (source_aliases post_group_sources))
+		(define field_keys (field_passthrough_keys_for_alias alias (qb_fields block)))
+		(define having_keys (external_column_refs_for_alias alias (coalesceNil (qb_having block) true)))
+		/* These exact scalar sources are rejoined by the owning final block.
+		Their values are projections of the completed group, not extra grouping
+		dimensions. Mixed native/other-stage references keep their existing keys. */
+		(define field_passthrough_keys (if (empty_list? post_group_aliases) field_keys
+			(filter field_keys (lambda (expression) (begin
+				(define references (sql_column_refs expression))
+				(or (empty_list? references)
+					(reduce references (lambda (needed reference)
+						(or needed (not (contains? post_group_aliases (expr_source_alias reference))))) false)))))))
+		(define passthrough_keys (if (empty_list? post_group_aliases) having_keys
+			(filter having_keys (lambda (reference)
+				(not (contains? post_group_aliases (expr_source_alias reference)))))))
 		(define session_keys (query_expr_session_reads block))
 		(define keys (merge_unique (list group_keys field_passthrough_keys passthrough_keys session_keys)))
 		(define group_order (group_order_items_for_alias alias keys (qb_order block)))

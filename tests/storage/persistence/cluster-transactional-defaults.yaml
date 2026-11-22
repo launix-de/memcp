@@ -10,7 +10,20 @@ metadata:
     columns: 8
     nodes: 4
     gomaxprocs: 2
+setup:
+- sql: DROP TABLE IF EXISTS cluster_intent_shared
+- sql: DROP TABLE IF EXISTS cluster_intent_cached
+- sql: DROP TABLE IF EXISTS cluster_intent_probe_cold
+- sql: DROP TABLE IF EXISTS cluster_intent_probe_warm
+- scm: (droptable "memcp-tests" "cluster_intent_legacy" true)
+- scm: (droptable "memcp-tests" "cluster_intent_local" true)
 cleanup:
+- sql: DROP TABLE IF EXISTS cluster_intent_shared
+- sql: DROP TABLE IF EXISTS cluster_intent_cached
+- sql: DROP TABLE IF EXISTS cluster_intent_probe_cold
+- sql: DROP TABLE IF EXISTS cluster_intent_probe_warm
+- scm: (droptable "memcp-tests" "cluster_intent_legacy" true)
+- scm: (droptable "memcp-tests" "cluster_intent_local" true)
 - sql: DROP TABLE IF EXISTS cluster_default_install
 - sql: DROP TABLE IF EXISTS cluster_default_aborted
 - sql: DROP TABLE IF EXISTS cluster_context_default
@@ -100,3 +113,100 @@ test_cases:
     rows: 3
     data: [{id: 0,actor: 'origin-client#dbo'},{id: 1,actor: 'origin-client#dbo'},{id: 2,actor: 'origin-client#dbo'}]
     cluster: {min_remote_shards: 1}
+- name: An explicit shared target retains pristine CS namespace reads before SQL creation
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "{database}")
+      (tx_begin s) (define tx (s "__memcp_tx"))
+      (try (lambda () (begin
+        (define admitted (replication_write tx "{database}"))
+        (tsql_execute_statement tx "{database}"
+          "CREATE TABLE cluster_intent_shared(id INT,value INT)" s
+          (lambda (row) true) (lambda fields true))
+        (define target (table "{database}" false "cluster_intent_shared" false tx))
+        (insert target '("id" "value") (list (list 1 31)) '() nil false nil tx)
+        (define private (nil? (table "{database}" false "cluster_intent_shared" false nil)))
+        (tx_commit s)
+        (list admitted private (scan nil (table "{database}" false "cluster_intent_shared" false nil)
+          '() '() '() (lambda () true) '("id" "value")
+          (lambda (rows id value) (merge rows (list (list id value)))) '() merge))))
+        (lambda (failure) (begin (tx_rollback s) (error failure)))))
+  expect: {result: [true,true,[[1,31]]]}
+- name: Omitted native write intent preserves ordinary legacy row ownership
+  scm: |
+    (begin
+      (createtable "memcp-tests" "cluster_intent_legacy"
+        (list (list "column" "id" "INT" '() '())
+          (list "column" "value" "INT" '() '())) '("engine" "safe") false)
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (tx_begin s) (define tx (s "__memcp_tx"))
+      (try (lambda () (begin
+        (define admitted (replication_write tx))
+        (insert (table "memcp-tests" false "cluster_intent_legacy" false tx)
+          '("id" "value") (list (list 1 41)) '() nil false nil tx)
+        (tx_commit s)
+        (list admitted (scan nil (table "memcp-tests" false "cluster_intent_legacy" false nil)
+          '() '() '() (lambda () true) '("id" "value")
+          (lambda (rows id value) (merge rows (list (list id value)))) '() merge))))
+        (lambda (failure) (begin (tx_rollback s) (error failure)))))
+  expect: {result: [true,[[1,41]]]}
+- name: An explicit local target retains its independent legacy write path
+  scm: |
+    (begin
+      (createtable "memcp-tests" "cluster_intent_local"
+        (list (list "column" "id" "INT" '() '())
+          (list "column" "value" "INT" '() '())) '("engine" "safe") false)
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (tx_begin s) (define tx (s "__memcp_tx"))
+      (try (lambda () (begin
+        (define admitted (replication_write tx "memcp-tests"))
+        (insert (table "memcp-tests" false "cluster_intent_local" false tx)
+          '("id" "value") (list (list 2 52)) '() nil false nil tx)
+        (tx_commit s)
+        (list admitted (scan nil (table "memcp-tests" false "cluster_intent_local" false nil)
+          '() '() '() (lambda () true) '("id" "value")
+          (lambda (rows id value) (merge rows (list (list id value)))) '() merge))))
+        (lambda (failure) (begin (tx_rollback s) (error failure)))))
+  expect: {result: [true,[[2,52]]]}
+- name: Cold and repeated cross-database CREATE guards retain actual targets rather than the request database
+  scm: |
+    (begin
+      (createtable "{database}" "cluster_intent_cached"
+        (list (list "column" "id" "INT" '() '())) '("engine" "safe") false)
+      (define s (newsession)) (s "username" "root") (s "schema" "{database}")
+      (define text "CREATE TABLE IF NOT EXISTS [{database}].[dbo].[cluster_intent_cached](id INT)")
+      (reduce (list (list "cluster_intent_probe_cold" 61) (list "cluster_intent_probe_warm" 62))
+        (lambda (rows item) (begin
+          (tx_begin s) (define tx (s "__memcp_tx"))
+          (try (lambda () (begin
+            (tsql_execute_statement tx "system" text s
+              (lambda (row) true) (lambda fields true))
+            (createtable "{database}" (car item)
+              (list (list "column" "id" "INT" '() '())
+                (list "column" "value" "INT" '() '())) '("engine" "safe") false tx)
+            (insert (table "{database}" false (car item) false tx)
+              '("id" "value") (list (list 1 (cadr item))) '() nil false nil tx)
+            (define private (nil? (table "{database}" false (car item) false nil)))
+            (tx_commit s)
+            (merge rows (list (list private
+              (scan nil (table "{database}" false (car item) false nil)
+                '() '() '() (lambda () true) '("id" "value")
+                (lambda (items id value) (merge items (list (list id value)))) '() merge))))))
+            (lambda (failure) (begin (tx_rollback s) (error failure)))))) '()))
+  expect: {result: [[true,[[1,61]]],[true,[[1,62]]]]}
+- name: Parallel policy targets are replayed completely on each compiled write invocation
+  scm: |
+    (begin
+      (define access (newsession))
+      (define check (sql_compile_table_policy (lambda (schema name write) true) nil access true))
+      (parallel_map '("{database}" "memcp-tests" "collector_other" "{database}")
+        (lambda (schema) (check schema "cluster_intent_target" true)))
+      (define calls (newsession))
+      (define replication_write (lambda (tx database) (begin
+        (calls database (+ (coalesceNil (calls database) 0) 1)) true)))
+      (define guarded (sql_queryplan_write_guard (list (quote quote) 73)
+        access false "unrelated_request_database" "fixture" parse_sql))
+      (define run (eval (list (quote lambda) (list (quote tx)) guarded)))
+      (define first (run nil)) (define second (run nil))
+      (list first second (calls "{database}") (calls "memcp-tests") (calls "collector_other")))
+  expect: {result: [73,73,2,2,2]}

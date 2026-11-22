@@ -2984,7 +2984,7 @@ kinds inherit the global aggregate consumer without expression-specific code. */
 					(prepare_simple_query_block_physical_core probe_rewritten) nil))
 				(define direct_core (if (nil? direct_prepared) nil (nth direct_prepared 1)))
 				(define direct_stage (if (nil? direct_core) nil
-					(make_group_stage_for_query_block direct_core)))
+					(make_group_stage_for_query_block direct_core '())))
 				/* Physical membership preparation is shared with ordinary SELECT
 				lowering. Once it exposes an exact driver carrier, a global row count
 				has no reusable grouping dimension: the fused join reducer dominates a
@@ -3034,7 +3034,7 @@ kinds inherit the global aggregate consumer without expression-specific code. */
 							(if (runtime_rows_source? driver_src)
 								(begin
 									(define invocation_group (make_group_stage_for_query_block
-										(expand_grouped_query_block probe_rewritten)))
+										(expand_grouped_query_block probe_rewritten) '()))
 									(lower_runtime_rows_group_stage (qb_schema probe_rewritten) invocation_group
 										(gs_output invocation_group) (qb_order probe_rewritten)
 										(qb_offset probe_rewritten) (qb_limit probe_rewritten) result_consumer))
@@ -3051,13 +3051,22 @@ kinds inherit the global aggregate consumer without expression-specific code. */
 									carrier, whose grouped insert is evaluated inside the query session. */
 									(empty_list? (query_expr_session_reads probe_rewritten))
 									(expr_contains_driver_membership? (qb_where probe_rewritten))))
-								(define final_stage_sources (physicalize_stage_output_sources stage_lookup
+								(define post_group_sources
 									(filter (cdr sources) (lambda (src)
 										(source_needed_after_group? (source_alias driver_src) (qb_group probe_rewritten)
 											(merge (list (projection_exprs (qb_fields probe_rewritten))
 												(projection_exprs (qb_hidden probe_rewritten))
 												(list (coalesceNil (qb_having probe_rewritten) true))
-												(order_item_exprs (qb_order probe_rewritten)))) src)))))
+												(order_item_exprs (qb_order probe_rewritten)))) src))))
+								/* Only actual scalar stages with invocation-bound lookup inputs
+								can supply a value after an empty global aggregate. Keep their
+								original input/WHERE work; only the projection is consumed later. */
+								(define post_group_scalars (filter post_group_sources (lambda (source) (begin
+									(define scalar (source_stage_output_stage stage_lookup source))
+									(and (scalar_value_stage? scalar)
+										(reduce (qassoc_get (gs_facts scalar) 'lookup-keys '()) (lambda (closed key)
+											(and closed (empty_list? (sql_column_refs key)))) true))))))
+								(define final_stage_sources (physicalize_stage_output_sources stage_lookup post_group_sources))
 								(define grouped_input_block (make_query_block
 									(qb_schema probe_rewritten)
 									(cons driver_src stage_sources)
@@ -3071,7 +3080,7 @@ kinds inherit the global aggregate consumer without expression-specific code. */
 									(qb_hidden probe_rewritten)
 									'()
 									(qb_facts probe_rewritten)))
-								(define main_stage (make_group_stage_for_query_block grouped_input_block))
+								(define main_stage (make_group_stage_for_query_block grouped_input_block post_group_scalars))
 								(define main_stage_lookup (lowering_catalog_with_planning_session
 									(lowering_catalog_with_local_stages stage_lookup (list main_stage))
 									(planner_context_session (qb_facts block))))
@@ -9236,9 +9245,24 @@ until the caller has selected this physical alternative. */
 
 (define join_ordered_streaming_limit_plan (lambda (schema all_sources plan default_alias output_exprs needed_exprs final_condition order_items offset_value limit_value stages facts value_builder reduce_expr neutral_expr)
 	(begin
+		(define driver (join_optimizer_source_by_alias all_sources (join_optimizer_tree_first_alias plan)))
+		(define complete_driver (or (query_block? (source_relation driver)) (union_block? (source_relation driver))))
 		(define spec (scan_join_order_spec all_sources plan default_alias output_exprs
 			final_condition order_items offset_value limit_value stages facts false))
-		(if (nil? spec)
+		(if (and (empty_list? order_items) complete_driver)
+			/* A complete producer is not a native ordered-scan handle. With no
+			ORDER requirement, its existing join pipeline emits accepted tuples;
+			the enclosing window alone owns OFFSET/LIMIT and scalar cardinality. */
+			(begin
+				(define work_rows (probe_limit_work_rows limit_value (planner_context_session facts)))
+				(define emit '__ordered_join_emit_value)
+				(list 'stream_window_reduce (coalesceNil offset_value 0) (coalesceNil limit_value -1)
+					reduce_expr neutral_expr
+					(list 'lambda (list emit)
+						(build_join_scan_pipeline_using_recipe schema all_sources plan default_alias
+							needed_exprs final_condition (list 'stream_emit emit (value_builder work_rows nil))
+							'() 0 -1 true work_rows nil stages nil facts))))
+			(nil? spec)
 			(join_ordered_streaming_limit_legacy_plan schema all_sources plan default_alias
 				output_exprs needed_exprs final_condition order_items offset_value limit_value
 				stages facts value_builder reduce_expr neutral_expr)
@@ -12689,7 +12713,7 @@ physical decision and preserve its runtime recompile gate. */
 		(define grouped_block (expand_grouped_query_block block))
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
 			(begin
-				(define group_stage (make_group_stage_for_query_block grouped_block))
+				(define group_stage (make_group_stage_for_query_block grouped_block '()))
 				(define direct_supported (and
 					(empty_list? (coalesceNil (qb_order grouped_block) '()))
 					(direct_join_group_supported? group_stage)))
