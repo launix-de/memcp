@@ -1,0 +1,500 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Native column rename retains physical values and original transaction visibility across SQL frontends
+    and restart
+test_cases:
+- name: Column rename retains values and accepts named system procedure arguments
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_named
+  - sql: CREATE TABLE rename_named(old_id INT NOT NULL,payload INT NULL)
+  - sql: INSERT rename_named VALUES(1,17),(2,NULL)
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sys.sp_rename @objname=N'dbo.rename_named.old_id',@newname=N'new_id',@objtype=N'COLUMN'
+    - connection: owner
+      sql: SELECT new_id,payload FROM rename_named ORDER BY new_id
+      expect:
+        rows: 2
+        data:
+        - new_id: 1
+          payload: 17
+        - new_id: 2
+          payload: null
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'dbo.rename_named',N'old_id') AS old_length,COL_LENGTH(N'dbo.rename_named',N'new_id')
+        AS new_length
+      expect:
+        rows: 1
+        data:
+        - old_length: null
+          new_length: 4
+    - connection: owner
+      sql: SELECT old_id FROM rename_named
+      expect:
+        error: true
+    - connection: owner
+      sql: SELECT CASE WHEN OBJECT_ID(N'sys.sp_rename',N'P') IS NULL THEN 0 ELSE 1 END AS present
+      expect:
+        rows: 1
+        data:
+        - present: 1
+- name: Earlier data changes and rename share the original commit
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_commit
+  - sql: CREATE TABLE rename_commit(old_id INT NOT NULL,payload INT NULL)
+  - sql: INSERT rename_commit VALUES(1,17),(2,NULL)
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE rename_commit SET payload=19 WHERE old_id=1
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_commit.old_id',N'new_id',N'COLUMN'
+    - connection: owner
+      sql: INSERT rename_commit(new_id,payload) VALUES(3,23)
+    - connection: owner
+      sql: UPDATE rename_commit SET new_id=4 WHERE new_id=2
+    - connection: owner
+      sql: SELECT new_id,payload FROM rename_commit ORDER BY new_id
+      expect:
+        rows: 3
+        data:
+        - new_id: 1
+          payload: 19
+        - new_id: 3
+          payload: 23
+        - new_id: 4
+          payload: null
+    - connection: observer
+      sql: SELECT old_id,payload FROM rename_commit ORDER BY old_id
+      expect:
+        rows: 2
+        data:
+        - old_id: 1
+          payload: 17
+        - old_id: 2
+          payload: null
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'dbo.rename_commit',N'new_id') AS new_length
+      expect:
+        rows: 1
+        data:
+        - new_length: null
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT new_id,payload FROM rename_commit ORDER BY new_id
+      expect:
+        rows: 3
+        data:
+        - new_id: 1
+          payload: 19
+        - new_id: 3
+          payload: 23
+        - new_id: 4
+          payload: null
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS nesting,XACT_STATE() AS state
+      expect:
+        rows: 1
+        data:
+        - nesting: 0
+          state: 0
+- name: Rollback restores both column name and earlier rows
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_rollback
+  - sql: CREATE TABLE rename_rollback(old_id INT NOT NULL,payload INT NULL)
+  - sql: INSERT rename_rollback VALUES(1,17),(2,NULL)
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE rename_rollback SET payload=19 WHERE old_id=1
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_rollback.old_id',N'new_id',N'COLUMN'
+    - connection: owner
+      sql: INSERT rename_rollback(new_id,payload) VALUES(3,23)
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT old_id,payload FROM rename_rollback ORDER BY old_id
+      expect:
+        rows: 2
+        data:
+        - old_id: 1
+          payload: 17
+        - old_id: 2
+          payload: null
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'dbo.rename_rollback',N'new_id') AS new_length
+      expect:
+        rows: 1
+        data:
+        - new_length: null
+- name: Savepoint discards rename while retaining the original data prefix
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_savepoint
+  - sql: CREATE TABLE rename_savepoint(old_id INT NOT NULL,payload INT NULL)
+  - sql: INSERT rename_savepoint VALUES(1,17)
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE rename_savepoint SET payload=19 WHERE old_id=1
+    - connection: owner
+      sql: SAVE TRANSACTION before_rename
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_savepoint.old_id',N'new_id',N'COLUMN'
+    - connection: owner
+      sql: UPDATE rename_savepoint SET payload=23 WHERE new_id=1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_rename
+    - connection: owner
+      sql: SELECT old_id,payload FROM rename_savepoint ORDER BY old_id
+      expect:
+        rows: 1
+        data:
+        - old_id: 1
+          payload: 19
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'dbo.rename_savepoint',N'new_id') AS new_length
+      expect:
+        rows: 1
+        data:
+        - new_length: null
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT old_id,payload FROM rename_savepoint ORDER BY old_id
+      expect:
+        rows: 1
+        data:
+        - old_id: 1
+          payload: 19
+- name: Quoted parts retain delimiter escapes and qualified current database binding
+  setup:
+  - sql: DROP TABLE IF EXISTS [rename.address]
+  - sql: CREATE TABLE [rename.address]([old]]value] INT)
+  - sql: INSERT [rename.address] VALUES(31)
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'[memcp-tests].[dbo].[rename.address].[old]]value]',N'[new.value]',N'COLUMN'
+    - connection: owner
+      sql: SELECT [new.value] FROM [rename.address]
+      expect:
+        rows: 1
+        data:
+        - new.value: 31
+    - connection: owner
+      sql: EXEC sp_rename N'[dbo].[rename.address].[new.value]',N'newer',N'COLUMN'
+    - connection: owner
+      sql: SELECT newer FROM [rename.address]
+      expect:
+        rows: 1
+        data:
+        - newer: 31
+- name: Invalid rename arguments leave the existing declaration and rows intact
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_invalid
+  - sql: CREATE TABLE rename_invalid(old_id INT,existing INT)
+  - sql: INSERT rename_invalid VALUES(1,2)
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_invalid.old_id',N'existing',N'COLUMN'
+      expect:
+        error: true
+    - connection: owner
+      sql: EXEC sp_rename N'other_database.dbo.rename_invalid.old_id',N'new_id',N'COLUMN'
+      expect:
+        error: true
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_invalid.old_id',N'.private',N'COLUMN'
+      expect:
+        error: true
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_invalid.old_id',N'dbo.new_id',N'COLUMN'
+      expect:
+        error: true
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_invalid.absent',N'new_id',N'COLUMN'
+      expect:
+        error: true
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_invalid.old_id',NULL,N'COLUMN'
+      expect:
+        error: true
+    - connection: owner
+      sql: SELECT old_id,existing FROM rename_invalid
+      expect:
+        rows: 1
+        data:
+        - old_id: 1
+          existing: 2
+- name: Existing key and foreign key dependencies retain the same column binding
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_child
+  - sql: DROP TABLE IF EXISTS rename_parent
+  - sql: CREATE TABLE rename_parent(old_id INT NOT NULL PRIMARY KEY)
+  - sql: CREATE TABLE rename_child(id INT NOT NULL PRIMARY KEY,parent_id INT NOT NULL,CONSTRAINT rename_reference
+      FOREIGN KEY(parent_id) REFERENCES rename_parent(old_id) ON UPDATE CASCADE)
+  - sql: INSERT rename_parent VALUES(1)
+  - sql: INSERT rename_child VALUES(1,1)
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_parent.old_id',N'new_id',N'COLUMN'
+    - connection: owner
+      sql: UPDATE rename_parent SET new_id=2 WHERE new_id=1
+    - connection: owner
+      sql: SELECT new_id FROM rename_parent ORDER BY new_id
+      expect:
+        rows: 1
+        data:
+        - new_id: 2
+    - connection: owner
+      sql: SELECT id,parent_id FROM rename_child ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          parent_id: 2
+    - connection: owner
+      sql: INSERT rename_parent(new_id) VALUES(2)
+      expect:
+        error: true
+    - connection: owner
+      sql: INSERT rename_child VALUES(2,99)
+      expect:
+        error: true
+    - connection: owner
+      sql: INSERT rename_parent(new_id) VALUES(3)
+    - connection: owner
+      sql: INSERT rename_child VALUES(2,3)
+    - connection: owner
+      sql: SELECT p.new_id,c.id FROM rename_parent p JOIN rename_child c ON c.parent_id=p.new_id ORDER BY c.id
+      expect:
+        rows: 2
+        data:
+        - new_id: 2
+          id: 1
+        - new_id: 3
+          id: 2
+- name: Computed inputs and deferred defaults retain the original physical binding
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_computed
+  - sql: CREATE TABLE rename_computed(id INT NOT NULL PRIMARY KEY,old_value INT CONSTRAINT rename_computed_default
+      DEFAULT 3,total AS(old_value+2))
+  - sql: INSERT rename_computed(id) VALUES(1)
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_computed.old_value',N'new_value',N'COLUMN'
+    - connection: owner
+      sql: UPDATE rename_computed SET new_value=7 WHERE id=1
+    - connection: owner
+      sql: INSERT rename_computed(id) VALUES(2)
+    - connection: owner
+      sql: SELECT id,new_value,total FROM rename_computed ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          new_value: 7
+          total: 9
+        - id: 2
+          new_value: 3
+          total: 5
+- name: Reusing the retired SQL name allocates a distinct physical column
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_reuse
+  - sql: CREATE TABLE rename_reuse(id INT NOT NULL PRIMARY KEY,old_value INT)
+  - sql: INSERT rename_reuse VALUES(1,17)
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_reuse.old_value',N'new_value',N'COLUMN'
+    - connection: owner
+      sql: ALTER TABLE rename_reuse ADD old_value INT NULL CONSTRAINT rename_reuse_default DEFAULT 31
+    - connection: owner
+      sql: INSERT rename_reuse(id,new_value,old_value) VALUES(2,19,37)
+    - connection: owner
+      sql: UPDATE rename_reuse SET old_value=41 WHERE id=1
+    - connection: owner
+      sql: SELECT id,new_value,old_value FROM rename_reuse ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          new_value: 17
+          old_value: 41
+        - id: 2
+          new_value: 19
+          old_value: 37
+- name: Case-only rename updates display metadata while retaining values
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_spelling
+  - sql: CREATE TABLE rename_spelling(OldValue INT)
+  - sql: INSERT rename_spelling VALUES(43)
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_spelling.OldValue',N'OLDVALUE',N'COLUMN'
+    - connection: owner
+      sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'rename_spelling')
+      expect:
+        rows: 1
+        data:
+        - name: OLDVALUE
+    - connection: owner
+      sql: SELECT oldvalue AS value FROM rename_spelling
+      expect:
+        rows: 1
+        data:
+        - value: 43
+- name: A renamed ordinary column remains writable from every SQL dialect
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_dialects
+  - sql: CREATE TABLE rename_dialects(old_id INT NOT NULL,payload INT)
+  - sql: INSERT rename_dialects VALUES(1,17)
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_dialects.old_id',N'new_id',N'COLUMN'
+- name: mysql inserts through the renamed column
+  sql: INSERT INTO rename_dialects(new_id,payload) VALUES(2,20)
+  syntax: mysql
+- name: mysql updates through the renamed column
+  sql: UPDATE rename_dialects SET payload=payload+1 WHERE new_id=2
+  syntax: mysql
+- name: mysql reads the shared physical values
+  sql: SELECT new_id,payload FROM rename_dialects WHERE new_id=2
+  syntax: mysql
+  expect:
+    rows: 1
+    data:
+    - new_id: 2
+      payload: 21
+- name: mysql rejects the retired visible name
+  sql: SELECT old_id FROM rename_dialects
+  syntax: mysql
+  expect:
+    error: true
+- name: psql inserts through the renamed column
+  sql: INSERT INTO rename_dialects(new_id,payload) VALUES(3,30)
+  syntax: psql
+- name: psql updates through the renamed column
+  sql: UPDATE rename_dialects SET payload=payload+1 WHERE new_id=3
+  syntax: psql
+- name: psql reads the shared physical values
+  sql: SELECT new_id,payload FROM rename_dialects WHERE new_id=3
+  syntax: psql
+  expect:
+    rows: 1
+    data:
+    - new_id: 3
+      payload: 31
+- name: psql rejects the retired visible name
+  sql: SELECT old_id FROM rename_dialects
+  syntax: psql
+  expect:
+    error: true
+- name: MySQL deletes using the renamed binding
+  syntax: mysql
+  steps:
+  - sql: INSERT INTO rename_dialects(new_id,payload) VALUES(4,41)
+  - sql: DELETE FROM rename_dialects WHERE new_id=4
+    expect:
+      affected_rows: 1
+  - sql: SELECT new_id,payload FROM rename_dialects ORDER BY new_id
+    expect:
+      rows: 3
+      data:
+      - new_id: 1
+        payload: 17
+      - new_id: 2
+        payload: 21
+      - new_id: 3
+        payload: 31
+- name: PostgreSQL deletes using the renamed binding
+  syntax: psql
+  steps:
+  - sql: INSERT INTO rename_dialects(new_id,payload) VALUES(4,41)
+  - sql: DELETE FROM rename_dialects WHERE new_id=4
+    expect:
+      affected_rows: 1
+  - sql: SELECT new_id,payload FROM rename_dialects ORDER BY new_id
+    expect:
+      rows: 3
+      data:
+      - new_id: 1
+        payload: 17
+      - new_id: 2
+        payload: 21
+      - new_id: 3
+        payload: 31
+- name: Renamed column checkpoint reload
+  action: restart
+- name: Renamed values survive restart
+  sql: SELECT new_id,payload FROM rename_dialects ORDER BY new_id
+  expect:
+    rows: 3
+    data:
+    - new_id: 1
+      payload: 17
+    - new_id: 2
+      payload: 21
+    - new_id: 3
+      payload: 31
+- name: The retired name stays absent after restart
+  sql: SELECT COL_LENGTH(N'dbo.rename_dialects',N'old_id') AS old_length,COL_LENGTH(N'dbo.rename_dialects',N'new_id')
+    AS new_length
+  expect:
+    rows: 1
+    data:
+    - old_length: null
+      new_length: 4
+- name: Computed dependency binding survives restart
+  sql: SELECT id,new_value,total FROM rename_computed ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      new_value: 7
+      total: 9
+    - id: 2
+      new_value: 3
+      total: 5
+- name: Distinct reused column values survive restart
+  sql: SELECT id,new_value,old_value FROM rename_reuse ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      new_value: 17
+      old_value: 41
+    - id: 2
+      new_value: 19
+      old_value: 37
+cleanup:
+- sql: DROP TABLE IF EXISTS rename_child
+- sql: DROP TABLE IF EXISTS rename_parent
+- sql: DROP TABLE IF EXISTS rename_dialects
+- sql: DROP TABLE IF EXISTS rename_invalid
+- sql: DROP TABLE IF EXISTS [rename.address]
+- sql: DROP TABLE IF EXISTS rename_savepoint
+- sql: DROP TABLE IF EXISTS rename_rollback
+- sql: DROP TABLE IF EXISTS rename_commit
+- sql: DROP TABLE IF EXISTS rename_named
+- sql: DROP TABLE IF EXISTS rename_computed
+- sql: DROP TABLE IF EXISTS rename_reuse
+- sql: DROP TABLE IF EXISTS rename_spelling

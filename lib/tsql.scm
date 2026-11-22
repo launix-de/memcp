@@ -1784,7 +1784,8 @@ formula reaches the existing native INSERT. No relational list is retained. */
 			(list (quote sql_type_expr) (list (quote nth) (quote row) (+ 1 (* 2 index)))
 				type (field "sql_collation")) (nth declarations index))))))))
 	(define formula (tsql_native_insert_expr (quote target) identity columns
-		(list (quote list) values) 1 false (tsql_insert_deferred_columns database target_name columns policy planning tx)))
+		(list (quote list) values) 1 false (tsql_insert_deferred_columns database target_name columns policy planning tx)
+		(tsql_write_declarations database target_name planning tx)))
 	(define compiled (eval (list (quote lambda)
 		(list (quote row) (quote session) (quote tx) (quote target))
 		(sql_type_lower_annotations '() formula))))
@@ -1882,7 +1883,8 @@ the storage engine owns rollback, partitioning, constraints and durability. */
 			assigned)))))))
 	(define identity (tsql_insert_identity (pending "database") (pending "name") nil tx))
 	(define formula (tsql_native_insert_expr (quote target) identity columns (list (quote list) values) 1 false
-		(tsql_insert_deferred_columns (pending "database") (pending "name") columns policy planning tx)))
+		(tsql_insert_deferred_columns (pending "database") (pending "name") columns policy planning tx)
+		(tsql_write_declarations (pending "database") (pending "name") planning tx)))
 	(define compiled (eval (list (quote lambda) (list (quote row) (quote session) (quote tx) (quote target))
 		(sql_type_lower_annotations '() formula))))
 	(lambda (row) (compiled row session tx target)))))
@@ -2601,6 +2603,77 @@ https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sp
 		(refresh_sql_view tx database (nth parts 2)
 			(tsql_policy (tsql_session_actor caller)) caller))))))
 
+/* SQL Server changes an object's address, not stored SQL source text. Native
+column bindings retain data, keys and computed dependencies; the original
+statement owner supplies the transaction, including earlier data changes.
+https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sp-rename-transact-sql */
+(define tsql_rename_address (lambda (schema text kind caller) (begin
+	(define parts (if (nil? text) nil (tsql_name_parts text)))
+	(define column (equal? kind "COLUMN"))
+	(define minimum (if column 2 1))
+	(define maximum (if column 4 3))
+	(if (or (nil? parts) (< (count parts) minimum) (> (count parts) maximum)
+		(find parts (lambda (part) (or (nil? part) (equal? part "")
+			(not (tsql_sysname? part)) (sql_private_relation? part))) nil))
+		(tsql_raise_error 15248 "The object name is invalid or ambiguous for the requested object type." 1) true)
+	(define reversed (reverse parts))
+	(define namespace (if (>= (count parts) (+ minimum 1)) (nth reversed minimum) "dbo"))
+	(define qualifier (if (equal? (count parts) maximum) (car parts) nil))
+	(define database (database_name (caller "schema") true))
+	(define invoked_database (database_name schema true))
+	(define addressed_database (database_name (tsql_qualifier_database qualifier database caller) true))
+	(if (and (equal? invoked_database database) (equal? addressed_database database)) true
+		(tsql_raise_error 15250 "The database name must be the current database." 1))
+	(if (equal?? namespace "dbo") true
+		(tsql_raise_error 15248 "The object is not in the requested schema." 1))
+	(list database (nth reversed (- minimum 1)) (if column (car reversed) nil)))))
+(define tsql_execute_rename (lambda (schema arguments statement caller) (begin
+	(define declarations (list
+		(list "objname" (tsql_parameter_declaration (caller "schema") "NVARCHAR" '(776)) nil false)
+		(list "newname" (tsql_parameter_declaration (caller "schema") "NVARCHAR" '(128)) nil false)
+		(list "objtype" (tsql_parameter_declaration (caller "schema") "VARCHAR" '(13)) "NULL" false)))
+	(define binding (tsql_bind_call arguments declarations statement caller))
+	(define values (car binding))
+	(define name (cadr (nth values 0)))
+	(define replacement (cadr (nth values 1)))
+	(define kind (toUpper (sql_rtrim (coalesceNil (cadr (nth values 2)) "OBJECT"))))
+	(if (has? '("COLUMN" "OBJECT") kind) true
+		(error "sp_rename object type is not supported: " kind))
+	(define address (tsql_rename_address schema name kind caller))
+	(define replacement_parts (if (nil? replacement) nil (tsql_name_parts replacement)))
+	(if (and (equal? (count replacement_parts) 1) (not (nil? (car replacement_parts)))
+		(not (equal? (car replacement_parts) ""))
+		(not (sql_private_relation? (car replacement_parts)))) true
+		(tsql_raise_error 15248 "The new name must be a single public identifier." 1))
+	(define replacement (car replacement_parts))
+	(define database (car address))
+	(tsql_require_permission (tsql_session_actor caller) database "ALTER")
+	(tsql_statement_call statement caller "rename object" false (lambda (tx) (begin
+		(define relation (tsql_resolve_relation database (cadr address) caller tx))
+		(define handle (tsql_native_relation_handle (car relation) (cadr relation) tx))
+		(if (nil? handle) (tsql_raise_error 15248 "The rename target does not exist or is ambiguous." 1) true)
+		(if (equal? kind "COLUMN") (begin
+			(define declaration (show handle "column" (nth address 2) true tx))
+			(if (nil? declaration) (tsql_raise_error 15248 "The column to rename does not exist." 1) true)
+			(if (find (show handle "columns" tx) (lambda (column)
+				(and (equal?? (column "Field") replacement)
+					(not (equal? (column "Field") (declaration "Field"))))) nil)
+				(tsql_raise_error 15335 "The new column name is already in use." 1) true)
+			(renamecolumn handle (declaration "Field") replacement true
+				(coalesceNil (declaration "StorageField") (declaration "Field"))
+				(list (declaration "RawType") (coalesceNil (declaration "Dimensions") '())
+					(declaration "Null") (coalesceNil (declaration "Collation") "")) tx))
+			(begin
+				(if (or (tsql_temporary_name? (cadr address)) (tsql_temporary_name? replacement))
+					(error "temporary table rename requires temporary namespace rebinding") true)
+				(define occupied (tsql_native_relation_handle database replacement tx))
+				(if (and occupied (not (identical? occupied handle)))
+					(tsql_raise_error 15335 "The new object name is already in use." 1) true)
+				(if (tsql_view_name database replacement tx)
+					(tsql_raise_error 15335 "The new object name is already in use." 1) true)
+				(renametable handle replacement true (show handle "identity" tx) tx)))
+		0))))))
+
 (define tsql_invoke_procedure (lambda (schema name arguments statement caller resultrow resultfields) (begin
 	(define system_call (tsql_system_procedure_declaration name))
 	(define name (if system_call (car system_call) name))
@@ -2618,6 +2691,8 @@ https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sp
 			arguments statement caller resultrow resultfields)
 		(equal? name "sp_refreshview")
 		(tsql_execute_refreshview schema arguments statement caller)
+		(equal? name "sp_rename")
+		(tsql_execute_rename schema arguments statement caller)
 		(equal? (toLower name) "sp_changedbowner")
 		(tsql_change_database_owner arguments statement caller)
 		(equal? (toLower name) "xp_logevent")
