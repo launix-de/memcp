@@ -25,7 +25,7 @@ type catalogStatementTriggerDeclaration struct {
 type catalogStatementTriggerSlot struct {
 	table       *table
 	identity    string
-	tableName   string
+	tableName   string // immutable physical containing-table key
 	baseline    *statementTriggerDefinition
 	head        *statementTriggerDefinition
 	reservation *statementTriggerDefinition
@@ -96,11 +96,13 @@ func (changes *publicCatalogChanges) stageStatementTrigger(tx *TxContext, t *tab
 	defer access.Release()
 	db.schemalock.Lock()
 	defer db.schemalock.Unlock()
-	if db.tables.Get(t.clusterPublishedName()) != t || t.RuntimeIdentity == "" || !t.committedAt(db.catalogView().version) || t.Ephemeral || sharedClusterDatabase(db.Name) || activeReplication(db) != nil {
+	if db.tables.Get(t.Name) != t || t.RuntimeIdentity == "" || !t.committedAt(db.catalogView().version) || t.Ephemeral || sharedClusterDatabase(db.Name) || activeReplication(db) != nil {
 		panic("statement trigger declaration requires its current local committed table")
 	}
-	requireTableMaintenance(db.Name, t.clusterPublishedName(), maintenanceAlter)
-	if definition != nil && (definition.compiledTableName != t.clusterPublishedName() || definition.compiledIdentity != t.RuntimeIdentity) {
+	tx.requireDeclarationEndpoint(t, maintenanceAlter)
+	// Source compilation uses the owner-visible name; retained slots and journal
+	// endpoints use the separately attested immutable physical key.
+	if definition != nil && (definition.compiledTableName != t.visibleNameAt(tx, db.catalogView()) || definition.compiledIdentity != t.RuntimeIdentity) {
 		panic("statement trigger target changed during source compilation")
 	}
 	// Trigger names share the existing database-wide user-trigger namespace.
@@ -185,7 +187,7 @@ func (changes *publicCatalogChanges) stageStatementTrigger(tx *TxContext, t *tab
 		reservation := newStatementTriggerDefinition(TriggerDescription{Name: name, Timing: AfterStatement})
 		reservation.pendingDecision, reservation.reservation = tx.pendingCatalogKey(), true
 		reservation.previousCommitted.Store(baseline)
-		slot = &catalogStatementTriggerSlot{table: t, identity: t.RuntimeIdentity, tableName: t.clusterPublishedName(), baseline: baseline, reservation: reservation}
+		slot = &catalogStatementTriggerSlot{table: t, identity: t.RuntimeIdentity, tableName: t.Name, baseline: baseline, reservation: reservation}
 		reservation.memory.retain(db)
 		if baseline != nil {
 			baseline.memory.retain(db)
@@ -444,13 +446,13 @@ func createStatementTrigger(t *table, name string, timing TriggerTiming, languag
 		panic("statement trigger creation requires a native table and transaction")
 	}
 	t.NativeIdentity(tx)
-	requireTableMaintenance(t.schema.Name, t.clusterPublishedName(), maintenanceAlter)
+	tx.requireDeclarationEndpoint(t, maintenanceAlter)
 	header := TriggerDescription{Name: name, Timing: timing, Language: language, Source: source, StatementEvents: events}
 	if err := validateStatementTrigger(header); err != nil {
 		panic(err)
 	}
 	definition := newStatementTriggerDefinition(header)
-	definition.compiledTableName, definition.compiledIdentity = strings.Clone(t.clusterPublishedName()), strings.Clone(t.RuntimeIdentity)
+	definition.compiledTableName, definition.compiledIdentity = strings.Clone(t.visibleNameAt(tx, t.schema.catalogView())), strings.Clone(t.RuntimeIdentity)
 	definition.memory.bytes += uint(len(definition.compiledTableName) + len(definition.compiledIdentity))
 	// Validate the complete source recipe before acquiring publication locks.
 	// All programs are immutable and carry explicit runtime invocation inputs.
@@ -494,7 +496,7 @@ func setStatementTriggersEnabled(t *table, names []string, enabled bool, tx *TxC
 		panic("statement trigger state requires a native table and transaction")
 	}
 	t.NativeIdentity(tx)
-	requireTableMaintenance(t.schema.Name, t.clusterPublishedName(), maintenanceAlter)
+	tx.requireDeclarationEndpoint(t, maintenanceAlter)
 	t.mu.Lock()
 	headers := t.visibleTriggerDescriptionsLocked(tx)
 	t.mu.Unlock()
@@ -531,7 +533,7 @@ func setStatementTriggersEnabled(t *table, names []string, enabled bool, tx *TxC
 		previous := header.statementDefinition
 		header.Disabled = !enabled
 		definition := newStatementTriggerDefinition(header)
-		definition.compiledTableName, definition.compiledIdentity = strings.Clone(t.clusterPublishedName()), strings.Clone(t.RuntimeIdentity)
+		definition.compiledTableName, definition.compiledIdentity = strings.Clone(t.visibleNameAt(tx, t.schema.catalogView())), strings.Clone(t.RuntimeIdentity)
 		definition.memory.bytes += uint(len(definition.compiledTableName) + len(definition.compiledIdentity))
 		tx.stageStatementTrigger(t, definition, header.Name, true, true, false, previous)
 	}
