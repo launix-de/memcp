@@ -278,7 +278,10 @@ func (s *storageShard) getDeltaInput(idx int, name string, input *nativeColumnIn
 
 func (s *storageShard) initializedColumnInput(tx *TxContext) *nativeColumnInitialInput {
 	if names := s.t.columnNamesForTx(tx); names != nil {
-		return names.initialByShard[s.uuid]
+		if input := names.initialByShard[s.uuid]; input != nil {
+			return input
+		}
+		return names.appendedInitialInput
 	}
 	return nil
 }

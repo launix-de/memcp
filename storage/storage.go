@@ -817,6 +817,7 @@ func invalidateComputedRows(proxy *StorageComputeProxy, recids map[uint32]struct
 }
 
 func Init(en scm.Env) {
+	initCatalogColumnInitialization(&en)
 	initIOInstrumentation(&en)
 	initRelationScopes(&en)
 	scm.HTTPAuthenticationHook = replicationHTTPAuthentication
@@ -2713,6 +2714,13 @@ func Init(en scm.Env) {
 			if len(a) > 7 {
 				queryTx = scmerToTxContext(a[7])
 			}
+			if len(a) > 8 && !a[8].IsNil() {
+				if temporary || len(orcSortCols) != 0 || len(a) > 6 && !a[6].IsNil() {
+					panic("row initializer cannot define a computed column")
+				}
+				definitions := scm.NewSlice([]scm.Scmer{scm.NewSlice([]scm.Scmer{a[1], a[2], a[3], a[4], a[8]})})
+				return scm.NewBool(queryTx.appendInitializedColumns(t, decodeNativeColumnInitialization(definitions)))
+			}
 			if !temporary && queryTx != nil && queryTx.transactionState != nil && !queryTx.autoCommit && !queryTx.ownsPendingTable(t) && !t.Ephemeral && !t.ScopedSchema {
 				if len(orcSortCols) != 0 || len(a) > 6 && !a[6].IsNil() {
 					panic("transactional append does not admit a computation")
@@ -2798,6 +2806,7 @@ func Init(en scm.Env) {
 					return value
 				}(),
 				{Kind: "any", Label: "queryTx", Optional: true, Description: "actual native execution context; explicit public ADD stages a fresh nullable declaration, temporary preparation retains its existing query lifetime"},
+				{Kind: "func|nil", Label: "initializer", Optional: true, NoEscape: true, Description: "zero-argument historical row initializer, evaluated once per visible row under original local ACID statement Undo; its realized values are journaled without ordinary DML triggers", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},

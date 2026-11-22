@@ -182,7 +182,8 @@ type scanAccessSegment struct {
 }
 
 type scanAccessRuntime struct {
-	mutation bool // invocation-owned: acquire M before selecting cluster mutation rows
+	initializer *nativeColumnInitializer // invocation-only original-T construction; no serialized schema authority
+	mutation    bool                     // invocation-owned: acquire M before selecting cluster mutation rows
 	// prefixMerge is immutable invocation-owned state, borrowed under the scan
 	// shard rights and lock. It retains no index or mutable shard container.
 	prefixMerge *orderedPrefixAccess

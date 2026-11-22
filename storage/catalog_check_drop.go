@@ -43,12 +43,12 @@ func (tx *TxContext) dropCatalogCheck(t *table, name string) bool {
 	if !checkMetadataContains(t.declarationMetadataForTx(tx), name) {
 		return false
 	}
-	finish := tx.beginCatalogConstruction(catalogEnforcementConstruction, t)
+	finish := tx.beginCatalogConstruction(catalogEnforcementConstruction, nil, t)
 	defer finish()
 	if tx.coordinator != nil || tx.catalogIntents.Load() != nil || t.Ephemeral {
 		panic("check removal requires a local public declaration transaction")
 	}
-	return tx.stagePublicCatalogDeclaration(t.schema, catalogEnforcementKind, func(changes *publicCatalogChanges) bool {
+	return tx.stagePublicCatalogDeclaration(t.schema, catalogEnforcementKind, nil, func(changes *publicCatalogChanges) bool {
 		return changes.stageCheckDrop(tx, t, name)
 	})
 }

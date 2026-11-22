@@ -1249,7 +1249,7 @@ func TestClusterUniqueCallbackReleasesMOnPanic(t *testing.T) {
 	if failure != "callback failure" || cell.ownstate.Writing() {
 		t.Fatalf("callback failure=%v retained writer=%v", failure, cell.ownstate.Writing())
 	}
-	access, ready := shard.getWrite(nil, false)
+	access, ready := shard.getWrite(nil, false, nil)
 	if !ready {
 		t.Fatal("failed callback stranded later writer")
 	}

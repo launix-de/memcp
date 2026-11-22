@@ -111,7 +111,7 @@ func getShardWrites(shards []*storageShard, tx *TxContext) []WriteAccess {
 	for {
 		retry := false
 		for i, shard := range shards {
-			access, ready := shard.getWrite(tx, false)
+			access, ready := shard.getWrite(tx, false, nil)
 			if !ready {
 				release()
 				// Independent peers may otherwise recall the same M set in

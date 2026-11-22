@@ -582,7 +582,7 @@ func (t *table) reserveUniqueDomain(columns []string, rows [][]scm.Scmer, mergeN
 			current := shard
 			admitted := true
 			if borrowed.ownedShard == nil || cluster.manager.shardCell(borrowed.ownedShard) != cell.resolved() {
-				set.singleWrite, admitted = shard.getWrite(tx, false)
+				set.singleWrite, admitted = shard.getWrite(tx, false, nil)
 				if admitted {
 					set.hasSingleWrite = true
 					current = set.singleWrite.shard
@@ -718,7 +718,7 @@ func (set *uniqueReservationSet) reserveLocalUniqueGroup(shards []*storageShard,
 		if native == nil {
 			current := shard
 			if set.guard.ownedShard == nil || cluster.manager.shardCell(set.guard.ownedShard) != cell {
-				access, admitted := shard.getWrite(tx, false)
+				access, admitted := shard.getWrite(tx, false, nil)
 				if !admitted {
 					panic(uniqueReservationBusy{shard: remoteScanShard{Resource: cluster.manager.shardResource(shard)}, owner: cluster.self.ID})
 				}
@@ -917,7 +917,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 		}
 	}
 	if input.uniqueGuard == nil {
-		firstWrite, admitted := s.getWrite(tx, false)
+		firstWrite, admitted := s.getWrite(tx, false, nil)
 		if !admitted {
 			return false, uniqueReservationBusy{shard: remoteScanShard{Resource: mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: ids[0]}}}
 		}
@@ -952,7 +952,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 			scope.bindNativeShard(id, existing)
 			continue
 		}
-		access, admitted := part.getWrite(tx, false)
+		access, admitted := part.getWrite(tx, false, nil)
 		if !admitted {
 			return false, uniqueReservationBusy{shard: remoteScanShard{Resource: resource}}
 		}

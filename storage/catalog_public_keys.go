@@ -85,12 +85,12 @@ func (tx *TxContext) stagePublicKey(t *table, operation string, key uniqueKey) b
 	if operation == "add" && (t.mayHaveUniqueDeclaration(key.Id, tx) || key.ConstraintName != "" && t.mayHaveUniqueDeclaration(key.ConstraintName, tx)) {
 		return false
 	}
-	finish := tx.beginCatalogConstruction(catalogValidationConstruction, t)
+	finish := tx.beginCatalogConstruction(catalogValidationConstruction, nil, t)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
 	if tx.replicationActive || tx.replicationWriting || tx.relationData != nil || tx.coordinator != nil || tx.clusterNumber.Load() != 0 || tx.remoteObject != nil || tx.remoteInvocation || (tx.catalogIntents.Load() != nil || tx.hasTableDrops()) && !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) || t.Ephemeral || t.ScopedSchema || t.PersistencyMode == Cache {
 		panic("public unique declaration requires a local committed native table")
 	}
-	return tx.stagePublicCatalogDeclaration(t.schema, catalogPublicKeyKind, func(changes *publicCatalogChanges) bool { return changes.stageKey(tx, t, operation, key) })
+	return tx.stagePublicCatalogDeclaration(t.schema, catalogPublicKeyKind, nil, func(changes *publicCatalogChanges) bool { return changes.stageKey(tx, t, operation, key) })
 }
 
 func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation string, key uniqueKey) bool {

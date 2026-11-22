@@ -2319,6 +2319,7 @@ type tableColumnNamesSnapshot struct {
 	declarations            []*column // immutable directory; column fields retain existing ownership
 	hasDeclaredComputations bool
 	initialByShard          map[uuid.UUID]*nativeColumnInitialInput
+	appendedInitialInput    *nativeColumnInitialInput
 	initialBytes            uint
 	exact                   map[string]tableColumnName
 	visible                 map[string]tableColumnName
@@ -2336,7 +2337,7 @@ type tableColumnName struct {
 
 func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableColumnNamesSnapshot) *tableShowColumnsSnapshot {
 	if columnNames == nil {
-		columnNames = t.buildColumnNamesSnapshot(t.Columns) // unpublished constructor or schema mutation owner
+		columnNames = t.buildColumnNamesSnapshot(t.Columns, nil) // unpublished constructor or schema mutation owner
 	}
 	columns := columnNames.declarations
 	// Costing may price native rows without inspecting or invoking opaque
@@ -2481,7 +2482,10 @@ func columnDescriptionStatistic(name string) bool {
 	}
 }
 
-func (t *table) buildColumnNamesSnapshot(columns []*column) *tableColumnNamesSnapshot {
+// Private declaration producers supply their actual committed predecessor.
+// Public constructor/load/publication owners pass nil; no private sparse input
+// is registered in public storage or reconstructed by a row reader.
+func (t *table) buildColumnNamesSnapshot(columns []*column, public *tableColumnNamesSnapshot) *tableColumnNamesSnapshot {
 	if t.publishedName.Load() == nil {
 		// The first column-directory publication belongs to the unpublished
 		// constructor/load. Later publications retain RENAME's immutable name.
@@ -2493,9 +2497,24 @@ func (t *table) buildColumnNamesSnapshot(columns []*column) *tableColumnNamesSna
 	folded := make(map[string]tableColumnName, len(columns))
 	hasDeclaredComputations := false
 	var initialByShard map[uuid.UUID]*nativeColumnInitialInput
+	var appendedInput *nativeColumnInitialInput
 	var initialBytes uint
 	for i, c := range columns {
 		if !isRuntimeComputedColumn(c) && c.ComputorDefinition == nil {
+			// Private appends have no public main storage. Their rows may already
+			// be realized original-T replacements, so this input provides only the
+			// sparse main side, never a default for those delta payloads. The
+			// actual constant extents below remain authoritative where present.
+			if public != nil {
+				if _, exists := public.exact[c.Name]; !exists {
+					if appendedInput == nil {
+						appendedInput = &nativeColumnInitialInput{fields: make(map[string]nativeColumnInitialValue)}
+						initialBytes += uint(unsafe.Sizeof(*appendedInput)) + 64
+					}
+					appendedInput.fields[c.Name] = nativeColumnInitialValue{main: new(StorageSparse)}
+					initialBytes += 128 + uint(unsafe.Sizeof(StorageSparse{}))
+				}
+			}
 			value := c.InitialValue
 			if c.recoverPersisted != nil && !value.IsNil() {
 				value = c.recoverPersisted(value)
@@ -2532,6 +2551,16 @@ func (t *table) buildColumnNamesSnapshot(columns []*column) *tableColumnNamesSna
 			folded[foldedName] = entry
 		}
 	}
+	if appendedInput != nil {
+		for _, input := range initialByShard {
+			for name, value := range appendedInput.fields {
+				if _, exists := input.fields[name]; !exists {
+					input.fields[name] = value
+					initialBytes += 128
+				}
+			}
+		}
+	}
 	visible := exact
 	if renamed {
 		visible = make(map[string]tableColumnName, len(columns))
@@ -2540,12 +2569,12 @@ func (t *table) buildColumnNamesSnapshot(columns []*column) *tableColumnNamesSna
 		}
 		initialBytes += 64 + uint(len(visible))*uint(unsafe.Sizeof(tableColumnName{}))
 	}
-	return &tableColumnNamesSnapshot{declarations: append([]*column(nil), columns...), exact: exact, visible: visible, folded: folded, hasDeclaredComputations: hasDeclaredComputations, initialByShard: initialByShard, initialBytes: initialBytes}
+	return &tableColumnNamesSnapshot{declarations: append([]*column(nil), columns...), exact: exact, visible: visible, folded: folded, hasDeclaredComputations: hasDeclaredComputations, initialByShard: initialByShard, appendedInitialInput: appendedInput, initialBytes: initialBytes}
 }
 
 func (t *table) publishColumnNamesSnapshot() *tableColumnNamesSnapshot {
 
-	snapshot := t.buildColumnNamesSnapshot(t.Columns)
+	snapshot := t.buildColumnNamesSnapshot(t.Columns, nil)
 	t.columnNamesSnapshot.Store(snapshot)
 	return snapshot
 }
@@ -4439,7 +4468,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 	// rechecks only if DDL replaces it while this INSERT is in flight.
 	validatedSchema := t.columnNamesForTx(currentTx)
 	if validatedSchema == nil {
-		validatedSchema = t.buildColumnNamesSnapshot(t.Columns)
+		validatedSchema = t.buildColumnNamesSnapshot(t.Columns, nil)
 	}
 
 	t.beginContributionMutation()

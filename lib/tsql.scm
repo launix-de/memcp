@@ -616,29 +616,55 @@ SQL spelling after a rename. Ordinary SQL sources retain their visible names. */
 	failure belong to that owner; no textual status is interpreted as success. */
 	(rebuild handle true false tx true)
 	0)))
+/* These scalar generators belong to the SQL default declaration. Native ADD
+receives the actual callable plus inert future DEFAULT data, never SQL syntax
+or a pre-sampled UUID. The native batch owns statement Undo before its FIRST
+column, including ordinary siblings of a generated column. */
+(define tsql_add_column_initializer (lambda (attributes)
+	(match (toUpper (coalesceNil (attributes "default_expression") ""))
+		"NEWID" (lambda () (uuid_v4))
+		"UUID_V4" (lambda () (uuid_v4))
+		"UUIDV4" (lambda () (uuid_v4))
+		"GEN_RANDOM_UUID" (lambda () (uuid_v4))
+		"UUID_GENERATE_V4" (lambda () (uuid_v4))
+		"UUID_V7" (lambda () (uuid_v7))
+		"UUIDV7" (lambda () (uuid_v7))
+		_ nil)))
 (define tsql_add_columns (lambda (database name columns tx session) (begin
-	/* A frontend precheck cannot reserve a table-wide role across concurrent
-	DDL owners. CREATE validates an unpublished complete declaration; marked
-	ADD requires a native atomic declaration-validation boundary first. */
-	(if (tsql_validate_row_guid_definitions columns)
-		(error "ROWGUIDCOL in ALTER ADD is not supported") true)
-	/* The native ADD owner has no invocation-bound historical initializer.
-	Reject before adding ANY column rather than backfill NOT NULL with nil. */
+	(tsql_validate_row_guid_definitions columns)
+	/* Resolve all declaration/default profiles before any column publication. */
 	(if (find columns (lambda (column) (begin
 		(define options (nth column 4))
-		(and (options "default_deferred") (has_assoc? options "null") (not (options "null"))))))
+		(and (options "default_deferred") (has_assoc? options "null") (not (options "null"))
+			(nil? (tsql_add_column_initializer options))))))
 		(error "ALTER ADD NOT NULL with a deferred DEFAULT requires historical initialization") true)
+	(if (find columns (lambda (column)
+		(and (tsql_row_guid_definition? column) (nil? (tsql_add_column_initializer (nth column 4))))))
+		(error "ROWGUIDCOL in ALTER ADD requires its atomic initialized declaration") true)
 	(define publish (lambda () (begin
-		/* Validate every alias identity before changing any column. */
 		(define published_columns (map columns (lambda (column) (match column
 			'("column" column_name type dimensions attributes)
 			(list column_name type dimensions (tsql_publish_alias_attributes type attributes))))))
-		(reduce published_columns (lambda (_ column) (match column '(column_name type dimensions attributes)
-			(if (sql_create_column (table database false name false tx) column_name type dimensions
-				(merge (sql_add_column_attributes attributes) '("name_ignorecase" true)) tx) true
-				(error "column already exists: " column_name)))) true))))
+		(define initialized (find published_columns (lambda (column)
+			(not (nil? (tsql_add_column_initializer (nth column 3))))) nil))
+		(if initialized (begin
+			(define handle (table database false name false tx))
+			(define collation (get_assoc (show handle true) "Collation"))
+			(createcolumns handle (map published_columns (lambda (column) (match column
+				'(column_name type dimensions attributes) (begin
+					(define attributes (sql_add_column_attributes attributes))
+					(define attributes (if (if (attributes "properties") ((attributes "properties") "tsql.rowguidcol") false)
+						(append attributes "exclusive_properties" '("tsql.rowguidcol")) attributes))
+					(list column_name type dimensions
+						(sql_column_collation_defaults type (append attributes "name_ignorecase" true) collation)
+						(tsql_add_column_initializer attributes)))))) tx))
+			(reduce published_columns (lambda (_ column) (match column '(column_name type dimensions attributes)
+				(if (sql_create_column (table database false name false tx) column_name type dimensions
+					(merge (sql_add_column_attributes attributes) '("name_ignorecase" true)) tx) true
+					(error "column already exists: " column_name)))) true)))))
 	(if (find columns (lambda (column) (has_assoc? (nth column 4) "__tsql_alias_id")))
 		(tsql_type_ddl database tx session publish) (publish)))))
+
 
 /* Transport tuples describe bytes and unscaled coefficients only. Their SQL
 meaning is chosen here from the request's declaration, not in the Go bridge. */
@@ -1609,6 +1635,8 @@ finished its decision. THROW retains the raw cause, including completion facts. 
 		'("constraint-violation" "check" _name message) (list "tsql-error" 547 message 1 16)
 		'("constraint-violation" "unique-declaration" _name message) (list "tsql-error" 1505 message 1 16)
 		'("constraint-violation" "not-null-declaration" _name message) (list "tsql-error" 515 message 1 16)
+		'("column-declaration-conflict" "name" table column)
+		(list "tsql-error" 2705 (concat "Column names in each table must be unique. Column name '" column "' in table '" table "' is specified more than once.") 1 16)
 		'("column-property-conflict" table _column "tsql.rowguidcol" true _owner)
 		(list "tsql-error" 4925 (concat "ALTER TABLE ALTER COLUMN ADD ROWGUIDCOL failed because a column already exists in table '" table "' with ROWGUIDCOL property.") 1 16)
 		value (if (transaction_serialization_failure? cause)

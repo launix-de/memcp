@@ -33,12 +33,12 @@ func (tx *TxContext) stageCatalogCheck(t *table, definition *checkDeclaration) b
 		panic("check declaration requires an active native transaction")
 	}
 	requireCheckInvocation(tx)
-	finish := tx.beginCatalogConstruction(catalogEnforcementConstruction, t)
+	finish := tx.beginCatalogConstruction(catalogEnforcementConstruction, nil, t)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
 	if tx.State != TxActive || tx.decisionStarted || tx.coordinator != nil || tx.catalogIntents.Load() != nil {
 		panic("check declaration requires a local public metadata transaction")
 	}
-	return tx.stagePublicCatalogDeclaration(t.schema, catalogEnforcementKind, func(changes *publicCatalogChanges) bool {
+	return tx.stagePublicCatalogDeclaration(t.schema, catalogEnforcementKind, nil, func(changes *publicCatalogChanges) bool {
 		return changes.stageCheck(tx, t, definition)
 	})
 }

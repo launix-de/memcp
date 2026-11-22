@@ -467,6 +467,10 @@ func (s *storageShard) acquireReadForScan(currentTx *TxContext, policy *scanAcce
 	if s.hasWriteOwnerForTx(currentTx) {
 		return ReadAccess{}
 	}
+	if policy != nil && policy.initializer != nil {
+		write, _ := s.getWrite(currentTx, true, policy.initializer)
+		return ReadAccess{shard: write.shard, mutation: &write}
+	}
 	if sharedClusterSource(s.t) && policy != nil && policy.mutation {
 		if s.state() == COLD {
 			activeNodeCluster().prepareLocalScan(s, currentTx, true)

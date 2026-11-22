@@ -104,7 +104,7 @@ func (scope *relationScope) beginSchemaChange(key string, tx *TxContext, creatin
 	if tx.coordinator != nil {
 		panic("relation schema declaration requires its native transaction coordinator")
 	}
-	finish := tx.beginCatalogConstruction(catalogDeclarationConstruction)
+	finish := tx.beginCatalogConstruction(catalogDeclarationConstruction, nil)
 	admitted := false
 	defer func() {
 		if !admitted {

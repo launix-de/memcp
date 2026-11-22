@@ -388,7 +388,7 @@ func (record *catalogDecisionRecord) hasColumnPropertyClaimActions() bool {
 }
 
 func (record *catalogDecisionRecord) validateColumnPropertyProfile() error {
-	if record.Format != 20 && record.Format != 22 && record.Format != 23 {
+	if record.Format != 20 && record.Format != 21 && record.Format != 22 && record.Format != 23 && record.Format != 24 {
 		return nil
 	}
 	claimed := make(map[string]bool)

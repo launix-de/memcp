@@ -43,12 +43,12 @@ func (tx *TxContext) stageStatementTrigger(t *table, definition *statementTrigge
 	if tx == nil || tx.transactionState == nil {
 		panic("statement trigger declaration requires an active native transaction")
 	}
-	finish := tx.beginCatalogConstruction(catalogStatementTriggerConstruction, t)
+	finish := tx.beginCatalogConstruction(catalogStatementTriggerConstruction, nil, t)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
 	if tx.State != TxActive || tx.decisionStarted || tx.coordinator != nil || tx.catalogIntents.Load() != nil {
 		panic("statement trigger declaration requires a local public catalog transaction")
 	}
-	return tx.stagePublicCatalogDeclaration(t.schema, catalogStatementTriggerKind, func(changes *publicCatalogChanges) bool {
+	return tx.stagePublicCatalogDeclaration(t.schema, catalogStatementTriggerKind, nil, func(changes *publicCatalogChanges) bool {
 		return changes.stageStatementTrigger(tx, t, definition, name, replace, mustExist, ignore, expected)
 	})
 }

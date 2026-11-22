@@ -105,7 +105,7 @@ func (tx *TxContext) renameCatalogTable(t *table, newName string, ignoreCase boo
 	if tx == nil || tx.State != TxActive || tx.coordinator != nil || tx.remoteObject != nil || activeReplication(t.schema) != nil || sharedClusterDatabase(t.schema.Name) || t.Ephemeral || t.ScopedSchema {
 		panic("table rename requires an original local native transaction")
 	}
-	finish := tx.beginCatalogConstruction(catalogValidationConstruction, t)
+	finish := tx.beginCatalogConstruction(catalogValidationConstruction, nil, t)
 	defer func() {
 		failure := recover()
 		finish()
@@ -125,7 +125,7 @@ func (tx *TxContext) renameCatalogTable(t *table, newName string, ignoreCase boo
 	if err := validateTableRenameShape(d); err != nil {
 		panic(err)
 	}
-	return tx.stagePublicCatalogDeclaration(t.schema, catalogColumnKind, func(changes *publicCatalogChanges) bool { return changes.stageTableRename(tx, t, d) })
+	return tx.stagePublicCatalogDeclaration(t.schema, catalogColumnKind, nil, func(changes *publicCatalogChanges) bool { return changes.stageTableRename(tx, t, d) })
 }
 
 func (changes *publicCatalogChanges) stageTableRename(tx *TxContext, t *table, d *catalogTableRename) bool {

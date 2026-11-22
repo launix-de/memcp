@@ -1644,6 +1644,9 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 		panic("scan received an invalid compiled access schema")
 	}
 	access.producerInput = requiredAccess.producerInput
+	if requiredAccess.runtime != nil && requiredAccess.runtime.initializer != nil {
+		access.ensureRuntime().initializer = requiredAccess.runtime.initializer
+	}
 	if requiredAccess.len() > 0 || source != nil {
 		runtime := access.ensureRuntime()
 		// Batch join keys are equality seeks, not advisory trailing hooks.

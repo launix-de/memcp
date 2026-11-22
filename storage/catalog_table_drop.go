@@ -119,7 +119,7 @@ func (tx *TxContext) dropCatalogTable(db *database, name string, ifexists bool) 
 	if tx == nil || tx.transactionState == nil || tx.State != TxActive || tx.decisionStarted {
 		panic("table removal requires an active native transaction")
 	}
-	finish := tx.beginCatalogConstruction(catalogDeclarationConstruction)
+	finish := tx.beginCatalogConstruction(catalogDeclarationConstruction, nil)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
 	t := db.GetTableForTx(name, false, tx)
 	if t == nil {
@@ -153,7 +153,7 @@ func (tx *TxContext) dropCatalogTable(db *database, name string, ifexists bool) 
 			lease.Close()
 		}
 	}()
-	result := tx.stagePublicCatalogDeclaration(db, catalogTableDropKind, func(changes *publicCatalogChanges) bool {
+	result := tx.stagePublicCatalogDeclaration(db, catalogTableDropKind, nil, func(changes *publicCatalogChanges) bool {
 		return changes.stageTableDrop(tx, t, lease)
 	})
 	accepted = result

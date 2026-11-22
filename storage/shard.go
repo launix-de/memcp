@@ -1143,21 +1143,23 @@ func (s *storageShard) getRead(currentTx *TxContext, options shardReadOptions) R
 	return result
 }
 func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
-	access, _ := s.getWrite(currentTx, true)
+	access, _ := s.getWrite(currentTx, true, nil)
 	return access
 }
 
 // Both ordinary acquisition and multi-shard admission use this one native
 // loading/participant boundary. Nonblocking admission performs no acquisition
 // wait; callers must release any earlier writers before trying the blocking path.
-func (s *storageShard) getWrite(currentTx *TxContext, blocking bool) (WriteAccess, bool) {
+func (s *storageShard) getWrite(currentTx *TxContext, blocking bool, initializer *nativeColumnInitializer) (WriteAccess, bool) {
 	if s.t != nil && s.t.mutationReadOnly {
 		panic("native result relation is read-only")
 	}
 	if currentTx != nil {
 		currentTx.noteNativeRowAccess(s.t)
 	}
-	if currentTx != nil {
+	if initializer != nil {
+		initializer.admitShard(s, currentTx)
+	} else if currentTx != nil {
 		currentTx.admitCatalogMutation(s.t)
 	}
 	origin := s
@@ -2151,7 +2153,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					locked = t.lockReplacementSuccessors(targetIdx, currentTx)
 					defer unlockReplacementSuccessors(locked)
 				}
-				newRecid = t.replacePreparedRowLocked(targetIdx, payloadCols, payloadRow, currentTx, false, false, &successorBarriers, locked)
+				newRecid = t.replacePreparedRowLocked(targetIdx, payloadCols, payloadRow, currentTx, false, false, &successorBarriers, locked, nil)
 				if exactUpdate {
 					idx = newRecid
 				}
@@ -2427,7 +2429,7 @@ func unlockReplacementSuccessors(locked []*storageShard) {
 // admitted UPDATE and its rebuild replica. The complete stored payload has
 // already passed logical validation/default/trigger processing at the source.
 // Caller holds t.mu; no logical callbacks or UNIQUE probes run in this step.
-func (t *storageShard) replacePreparedRowLocked(oldRecid uint32, columns []string, row []scm.Scmer, currentTx *TxContext, replica, oldStaged bool, successorBarriers *[]replacementWALBarrier, lockedSuccessors []*storageShard) uint32 {
+func (t *storageShard) replacePreparedRowLocked(oldRecid uint32, columns []string, row []scm.Scmer, currentTx *TxContext, replica, oldStaged bool, successorBarriers *[]replacementWALBarrier, lockedSuccessors []*storageShard, columnsInput *tableColumnNamesSnapshot) uint32 {
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	generation := t.generation.Load()
 	active := generation == nil || !generation.retired.Load()
@@ -2435,7 +2437,7 @@ func (t *storageShard) replacePreparedRowLocked(oldRecid uint32, columns []strin
 	// its ready successor, not another WAL/transaction participant incarnation.
 	journal := currentTx != nil && (!replica || active)
 	newRecid := t.main_count + uint32(len(t.deltaRows()))
-	t.insertDataset(columns, [][]scm.Scmer{row}, nil, nil, currentTx)
+	t.insertDataset(columns, [][]scm.Scmer{row}, nil, columnsInput, currentTx)
 	// Forward/log actual stored values if the native append supplied an ID.
 	// Ordinary complete replacement payloads already match and need no copy.
 	stored := t.deltaRows()[newRecid-t.main_count]
@@ -2507,7 +2509,7 @@ func (t *storageShard) replacePreparedRowLocked(oldRecid uint32, columns []strin
 		}
 	}
 	if next := t.nextForMaintenanceLocked(&oldRecid); next != nil {
-		t.propagateUpdateToNext(next, oldRecid, newRecid, columns, row, currentTx, oldStaged, successorBarriers, lockedSuccessors)
+		t.propagateUpdateToNext(next, oldRecid, newRecid, columns, row, currentTx, oldStaged, successorBarriers, lockedSuccessors, columnsInput)
 	}
 	return newRecid
 }
@@ -2515,7 +2517,7 @@ func (t *storageShard) replacePreparedRowLocked(oldRecid uint32, columns []strin
 // propagateUpdateToNext mirrors a completed physical replacement while the
 // source mutation lock still orders writers. Every new source version receives
 // its own successor version; no logical UPDATE/default/trigger runs twice.
-func (t *storageShard) propagateUpdateToNext(next *storageShard, oldRecid, replacementRecid uint32, columns []string, row []scm.Scmer, currentTx *TxContext, oldStaged bool, successorBarriers *[]replacementWALBarrier, lockedSuccessors []*storageShard) {
+func (t *storageShard) propagateUpdateToNext(next *storageShard, oldRecid, replacementRecid uint32, columns []string, row []scm.Scmer, currentTx *TxContext, oldStaged bool, successorBarriers *[]replacementWALBarrier, lockedSuccessors []*storageShard, columnsInput *tableColumnNamesSnapshot) {
 	targetRecid, ok := t.translateNextRecid(oldRecid)
 	if !ok {
 		panic("completed rebuild is missing a live row translation")
@@ -2539,7 +2541,7 @@ func (t *storageShard) propagateUpdateToNext(next *storageShard, oldRecid, repla
 	} else if generation == nil && currentTx == nil && next.t.PersistencyMode == Safe && next.logfile != nil {
 		*successorBarriers = append(*successorBarriers, replacementWALBarrier{shard: next})
 	}
-	nextRecid := next.replacePreparedRowLocked(targetRecid, columns, row, currentTx, true, oldStaged, successorBarriers, lockedSuccessors)
+	nextRecid := next.replacePreparedRowLocked(targetRecid, columns, row, currentTx, true, oldStaged, successorBarriers, lockedSuccessors, columnsInput)
 	// This is an exact native mutation result, never a post-write delta-length
 	// guess or a key lookup. Publish it before another source writer can use the
 	// replacement, and preserve it for commit/rollback and later generations.
@@ -4232,7 +4234,10 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext) {
 	rows := slices.Grow(t.deltaRows(), len(values))
 	firstNew := len(rows)
-	snapshot := t.t.columnNamesForTx(currentTx)
+	snapshot := validatedSchema
+	if snapshot == nil {
+		snapshot = t.t.columnNamesForTx(currentTx)
+	}
 	var declarations []*column
 	if snapshot != nil {
 		declarations = snapshot.declarations

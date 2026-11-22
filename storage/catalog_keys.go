@@ -160,7 +160,7 @@ func (tx *TxContext) amendCatalogDeclaration(t *table, amend func(*table) bool) 
 	if tx == nil || tx.State != TxActive || tx.decisionStarted || !tx.ownsPendingTable(t) {
 		panic("declaration amendment requires its active native catalog owner")
 	}
-	finish := tx.beginCatalogConstruction(catalogDeclarationConstruction)
+	finish := tx.beginCatalogConstruction(catalogDeclarationConstruction, nil)
 	defer finish()
 	if tx.catalogDeclarationDataEntered(t) {
 		panic("transactional declaration amendments must precede native row access")

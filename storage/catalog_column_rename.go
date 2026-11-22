@@ -124,7 +124,7 @@ func (tx *TxContext) renamePublicColumn(t *table, before, after, storage string,
 	if tx == nil || tx.transactionState == nil || tx.State != TxActive || tx.coordinator != nil || t == nil || activeReplication(t.schema) != nil || sharedClusterDatabase(t.schema.Name) || t.Ephemeral || t.ScopedSchema {
 		panic("column rename requires an original local native transaction")
 	}
-	finish := tx.beginCatalogConstruction(catalogValidationConstruction, t)
+	finish := tx.beginCatalogConstruction(catalogValidationConstruction, nil, t)
 	defer func() {
 		failure := recover()
 		finish()
@@ -138,7 +138,7 @@ func (tx *TxContext) renamePublicColumn(t *table, before, after, storage string,
 	if err := validateColumnRenameShape(d); err != nil {
 		panic(err)
 	}
-	return tx.stagePublicCatalogDeclaration(t.schema, catalogColumnKind, func(changes *publicCatalogChanges) bool { return changes.stageColumnRename(tx, t, d) })
+	return tx.stagePublicCatalogDeclaration(t.schema, catalogColumnKind, nil, func(changes *publicCatalogChanges) bool { return changes.stageColumnRename(tx, t, d) })
 }
 
 func (changes *publicCatalogChanges) stageColumnRename(tx *TxContext, t *table, d *catalogColumnRename) bool {
@@ -178,7 +178,7 @@ func (changes *publicCatalogChanges) stageColumnRename(tx *TxContext, t *table, 
 	if d.Before == d.After {
 		return true
 	}
-	view, bytes := replaceStoredColumnMetadata(t, base, columns)
+	view, bytes := replaceStoredColumnMetadata(t, base, columns, observed.metadata.columnNames)
 	a := &catalogStoredColumnAmendment{rename: d, table: t, columns: columns, previous: changes.views.Load().tables[t], columnBytes: storedColumnBytes(columns[base.metadata.columnNames.exact[d.Storage].ordinal])}
 	a.retainedBytes = uint(unsafe.Sizeof(*a)) + uint(cap(columns))*uint(unsafe.Sizeof((*column)(nil))) + a.columnBytes + bytes + d.memory()
 	history := appendCatalogDeclarationHistory(tx.publicForeignAmendments(), catalogDeclarationAmendment{column: a})

@@ -21,7 +21,7 @@ func (tx *TxContext) createScopedRelationKey(t *table, key uniqueKey) bool {
 	if scope == nil || !scope.transactionalSchema || tx.coordinator != nil {
 		panic("scoped key declaration requires its native relation lifetime owner")
 	}
-	finish := tx.beginCatalogConstruction(catalogDeclarationConstruction)
+	finish := tx.beginCatalogConstruction(catalogDeclarationConstruction, nil)
 	defer finish()
 	releaseScope := scope.beginUse()
 	defer releaseScope()

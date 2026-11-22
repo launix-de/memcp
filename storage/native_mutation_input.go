@@ -182,13 +182,18 @@ func (tx *TxContext) mutationInputFor(t *table) *nativeMutationInput {
 // Source/history and descriptors come from the same immutable publication.
 // Statement programs use the same later-producer admission; other enforcing
 // programs outside this bounded input still prohibit writes.
-func checkedCatalogWriters(history []catalogDeclarationAmendment, statements map[*table]struct{}, owner *transactionState, leased map[*table]*tableWriteLease) map[*table]nativeMutationInputProfile {
+func checkedCatalogWriters(history []catalogDeclarationAmendment, statements, columns map[*table]struct{}, owner *transactionState, leased map[*table]*tableWriteLease) map[*table]nativeMutationInputProfile {
 	result, blocked := make(map[*table]nativeMutationInputProfile), make(map[*table]struct{})
 	// Rewound heads still have their original reserved slot/declaration lease.
 	// The later checked owner binds its actual baseline programs, not a dropped
 	// historical recipe. Current endpoint amendments below retain every veto.
 	for t := range statements {
 		result[t] = nativeStatementTriggerRowInput
+	}
+	for t := range columns {
+		// The retained lease alone selects an unchanged baseline. Actual key,
+		// property and layout amendments below impose their narrower profiles.
+		result[t] = nativeColumnBindingRowInput
 	}
 	for t, lease := range leased {
 		if lease != nil && lease.owner == &t.writeAdmission && lease.transaction == owner && (catalogForeignEndpointScope{owner: owner}).owns(t) {
@@ -223,7 +228,7 @@ func checkedCatalogWriters(history []catalogDeclarationAmendment, statements map
 			}
 		}
 		if c := entry.column; c != nil && c.appendDeclaration != nil {
-			if c.appendDeclaration.Initialization != nil {
+			if c.appendDeclaration.Initialization != nil || c.appendDeclaration.RowInitialization != nil {
 				result[c.table] = nativeDeclarationRowInput
 			} else {
 				blocked[c.table] = struct{}{}

@@ -119,7 +119,7 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 		if !staged && tx.publicCatalogEntered.Load() {
 			panic("public and private catalog declarations cannot be mixed")
 		}
-		done := tx.beginCatalogConstruction(catalogDeclarationConstruction)
+		done := tx.beginCatalogConstruction(catalogDeclarationConstruction, nil)
 		defer done()
 		// Public phase entry shares the construction scope: repeat the carrier
 		// check after admission before any independently visible publication.

@@ -65,7 +65,7 @@ func (tx *TxContext) alterPublicStoredColumn(t *table, name, operation string, v
 	if operation == "declaration" || operation == "claim_property" {
 		profile = catalogValidationConstruction
 	}
-	finish := tx.beginCatalogConstruction(profile, t)
+	finish := tx.beginCatalogConstruction(profile, nil, t)
 	defer func() {
 		failure := recover()
 		finish()
@@ -86,7 +86,7 @@ func (tx *TxContext) alterPublicStoredColumn(t *table, name, operation string, v
 	if operation == "declaration" {
 		kind = catalogColumnKind
 	}
-	tx.stagePublicCatalogDeclaration(t.schema, kind, func(changes *publicCatalogChanges) bool {
+	tx.stagePublicCatalogDeclaration(t.schema, kind, nil, func(changes *publicCatalogChanges) bool {
 		result = changes.stageStoredColumn(tx, t, name, operation, value)
 		return scm.ToBool(result)
 	})
@@ -145,6 +145,9 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 	defer changes.mu.Unlock()
 	defer changes.refreshMemoryLocked()
 	accepted := false
+	if operation == "drop_property" && tx.hasRowInitializedColumns() && !tx.hasColumnPropertyClaims(tx.publicForeignAmendments()) {
+		panic("unordered property retirement cannot share row-initialized append")
+	}
 	if operation == "claim_property" {
 		tx.requireColumnPropertyRetirementProfile()
 	} else if operation == "declaration" {
@@ -245,7 +248,7 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 		if base == nil {
 			base = observed
 		}
-		view, bytes := replaceStoredColumnMetadata(t, base, updated)
+		view, bytes := replaceStoredColumnMetadata(t, base, updated, t.columnNamesSnapshot.Load())
 		amendment := &catalogStoredColumnAmendment{defaultDeclaration: catalogColumnDefaultDeclaration{t.Name, t.RuntimeIdentity, previous.Name, replacement.Default, replacement.DefaultExpression, replacement.DefaultName, replacement.DefaultDeferred}, declaration: declaration, table: t, columns: updated, previous: before}
 		amendment.propertyRemoval = propertyRemoval
 		amendment.propertyChange = propertyChange
@@ -373,6 +376,10 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	for t := range statementInputs {
 		statementInput(t)
 	}
+	columnInputs := changes.retainedColumnInputTables()
+	for t := range columnInputs {
+		statementInput(t)
+	}
 	for _, entry := range history {
 		if rename := entry.tableRename; rename != nil {
 			blocked[rename.table] = struct{}{}
@@ -432,7 +439,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 						break
 					}
 				}
-				if amendment.appendDeclaration.Initialization == nil {
+				if amendment.appendDeclaration.Initialization == nil && amendment.appendDeclaration.RowInitialization == nil {
 					if nullColumns[amendment.table] == nil {
 						nullColumns[amendment.table] = make(map[string]struct{})
 					}
@@ -455,7 +462,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	for t := range blocked {
 		delete(writers, t)
 	}
-	checked := checkedCatalogWriters(history, statementInputs, changes.owner, changes.leases)
+	checked := checkedCatalogWriters(history, statementInputs, columnInputs, changes.owner, changes.leases)
 	changes.viewsHighWater = max(changes.viewsHighWater, len(tables))
 	changes.checkedWritersHighWater = max(changes.checkedWritersHighWater, len(checked))
 	changes.columnWritersHighWater = max(changes.columnWritersHighWater, len(writers))
@@ -469,13 +476,13 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	changes.views.Store(&publicCatalogViews{names: names, keys: keys, tables: tables, columnWriters: writers, nullColumns: nullColumns, appendedColumns: appendedColumns, blockedWriters: blocked, dropped: dropped, checkedWriters: checked, history: history, foreignHistory: foreignHistory})
 }
 
-func replaceStoredColumnMetadata(t *table, base *tableShowColumnsSnapshot, columns []*column) (*tableShowColumnsSnapshot, uint) {
+func replaceStoredColumnMetadata(t *table, base *tableShowColumnsSnapshot, columns []*column, public *tableColumnNamesSnapshot) (*tableShowColumnsSnapshot, uint) {
 	if len(columns) == len(base.metadata.columnNames.declarations) {
 		for i, c := range columns {
 			if c.displayName() == base.metadata.columnNames.declarations[i].displayName() {
 				continue
 			}
-			names := t.buildColumnNamesSnapshot(columns)
+			names := t.buildColumnNamesSnapshot(columns, public)
 			result := t.buildShowColumnsSnapshot(base.rowEstimate, names)
 			result.metadata.catalogVersion, result.metadata.catalogPrevious = base.metadata.catalogVersion, base.metadata.catalogPrevious
 			result.metadata.statistics = base.metadata.statistics
@@ -490,8 +497,8 @@ func replaceStoredColumnMetadata(t *table, base *tableShowColumnsSnapshot, colum
 	if len(columns) != len(base.metadata.columnNames.declarations) {
 		// Preserve earlier private key/default/type descriptions on the prefix;
 		// build only the actual newly appended columns beyond that predecessor.
-		prefix, prefixBytes := replaceStoredColumnMetadata(t, base, columns[:len(base.metadata.columnNames.declarations)])
-		names := t.buildColumnNamesSnapshot(columns)
+		prefix, prefixBytes := replaceStoredColumnMetadata(t, base, columns[:len(base.metadata.columnNames.declarations)], public)
+		names := t.buildColumnNamesSnapshot(columns, public)
 		result := t.buildShowColumnsSnapshot(base.rowEstimate, names)
 		result.metadata.catalogVersion, result.metadata.catalogPrevious = base.metadata.catalogVersion, base.metadata.catalogPrevious
 		result.metadata.statistics = base.metadata.statistics

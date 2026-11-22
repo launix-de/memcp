@@ -41,7 +41,7 @@ func (tx *TxContext) stageConstraintState(child *table, names []string, all, ena
 	}
 	// Resolve only already-owned pending constraints below. Their original
 	// endpoint leases survive this state change; no new enforcement is admitted.
-	finish := tx.beginCatalogConstruction(catalogValidationConstruction, child)
+	finish := tx.beginCatalogConstruction(catalogValidationConstruction, nil, child)
 	defer finish()
 	if tx.State != TxActive || tx.decisionStarted || validate && !enabled {
 		panic("invalid native foreign state request")

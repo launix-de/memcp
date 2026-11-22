@@ -232,7 +232,7 @@ func (tx *TxContext) stageCatalogForeign(child, parent *table, fk foreignKey, ex
 	if owned {
 		profile = catalogValidationConstruction
 	}
-	finish := tx.beginCatalogConstruction(profile, child, parent)
+	finish := tx.beginCatalogConstruction(profile, nil, child, parent)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
 	if tx.State != TxActive || tx.decisionStarted {
 		panic("public foreign declaration requires an active native transaction")
@@ -256,7 +256,7 @@ func (tx *TxContext) stageCatalogForeign(child, parent *table, fk foreignKey, ex
 	if tx.foreignReplacement(fk.Id, child, parent) {
 		kind = catalogForeignReplacementKind
 	}
-	return tx.stagePublicCatalogDeclaration(child.schema, kind, func(changes *publicCatalogChanges) bool {
+	return tx.stagePublicCatalogDeclaration(child.schema, kind, nil, func(changes *publicCatalogChanges) bool {
 		return changes.stageForeign(tx, child, parent, fk, expected, validateExisting)
 	})
 }
@@ -264,7 +264,7 @@ func (tx *TxContext) stageCatalogForeign(child, parent *table, fk foreignKey, ex
 // The existing construction admission is held by this caller. A complete first
 // declaration runs INSIDE the resource producer; a failed constructor retires
 // its retained state before the factory wakes any other caller.
-func (tx *TxContext) stagePublicCatalogDeclaration(db *database, kind catalogDeclarationKind, stage func(*publicCatalogChanges) bool) bool {
+func (tx *TxContext) stagePublicCatalogDeclaration(db *database, kind catalogDeclarationKind, initializer *nativeColumnInitializer, stage func(*publicCatalogChanges) bool) bool {
 	modePin := db.admitLocalCatalog(false)
 	transferredPin := false
 	defer func() {
@@ -272,7 +272,7 @@ func (tx *TxContext) stagePublicCatalogDeclaration(db *database, kind catalogDec
 			_ = modePin.Close()
 		}
 	}()
-	tx.beginCatalogDeclaration(db, kind)
+	tx.beginCatalogDeclaration(db, kind, initializer)
 	tx.enterPublicCatalogPhase()
 	created := false
 	firstResult := false
@@ -1088,7 +1088,7 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 		if input := columnInputs[endpoint.table]; input.columns != nil {
 			var columnBytes uint
 			endpoint.columns = input.columns
-			endpoint.snapshot, columnBytes = replaceStoredColumnMetadata(endpoint.table, endpoint.snapshot, input.columns)
+			endpoint.snapshot, columnBytes = replaceStoredColumnMetadata(endpoint.table, endpoint.snapshot, input.columns, nil)
 			snapshotBytes += columnBytes
 			publication.columnPayloadBytes += input.payloadBytes
 		}

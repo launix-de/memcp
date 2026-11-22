@@ -66,7 +66,7 @@ func (tx *TxContext) stageCatalogSource(db *database, definition *ProcedureDescr
 	if tx == nil || tx.transactionState == nil {
 		panic("source declaration requires an active native transaction")
 	}
-	finish := tx.beginCatalogConstruction(catalogDeclarationConstruction)
+	finish := tx.beginCatalogConstruction(catalogDeclarationConstruction, nil)
 	defer func() {
 		failure := recover()
 		finish()
@@ -87,7 +87,7 @@ func (tx *TxContext) stageCatalogSource(db *database, definition *ProcedureDescr
 	if definition != nil && (!utf8.ValidString(definition.Source) || !utf8.ValidString(definition.Language)) {
 		panic("source declaration requires UTF-8 source and language")
 	}
-	return tx.stagePublicCatalogDeclaration(db, catalogSourceKind, func(changes *publicCatalogChanges) bool {
+	return tx.stagePublicCatalogDeclaration(db, catalogSourceKind, nil, func(changes *publicCatalogChanges) bool {
 		return changes.stageSource(tx, definition, name, replace, mustExist, ignore)
 	})
 }

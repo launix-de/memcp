@@ -35,7 +35,7 @@ func (scope catalogForeignEndpointScope) retires(t *table) bool {
 // Caller has decoded and accepted the complete decision, registered these exact
 // generations, and retained the predecessor catalog version until publication.
 func recoveredForeignEndpointScope(db *database, record *catalogDecisionRecord) catalogForeignEndpointScope {
-	if record.Format != 22 && record.Format != 23 {
+	if record.Format != 22 && record.Format != 23 && record.Format != 24 {
 		return catalogForeignEndpointScope{}
 	}
 	if record.Database != db.Name || record.Incarnation != db.incarnationID() || record.Version != db.catalogVersion+1 {

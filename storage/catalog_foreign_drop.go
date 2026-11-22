@@ -35,12 +35,12 @@ func (tx *TxContext) dropCatalogForeign(child *table, name string) bool {
 	if !child.mayHaveForeignDeclaration(name, tx) {
 		return false
 	}
-	finish := tx.beginCatalogConstruction(catalogDeclarationConstruction, child)
+	finish := tx.beginCatalogConstruction(catalogDeclarationConstruction, nil, child)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
 	if tx.coordinator != nil || tx.clusterNumber.Load() != 0 || tx.remoteObject != nil || tx.remoteInvocation || tx.catalogIntents.Load() != nil || tx.hasTableDrops() || child.Ephemeral || child.ScopedSchema {
 		panic("foreign removal requires a local public declaration transaction")
 	}
-	return tx.stagePublicCatalogDeclaration(child.schema, catalogForeignDropKind, func(changes *publicCatalogChanges) bool {
+	return tx.stagePublicCatalogDeclaration(child.schema, catalogForeignDropKind, nil, func(changes *publicCatalogChanges) bool {
 		return changes.stageForeignDrop(tx, child, name)
 	})
 }

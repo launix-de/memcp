@@ -16,7 +16,7 @@ func (tx *TxContext) validateLateCreateOwnerLocked(db *database, participants bo
 	if tx.publicCatalogChanges() != nil {
 		// A public phase already owns this original local decision. Preserve its
 		// participant proof and writer restrictions while adding private names.
-		return tx.validateLatePublicOwnerLocked(db, participants)
+		return tx.validateLatePublicOwnerLocked(db, participants, nil)
 	}
 	if tx.Mode != TxACID || tx.State != TxActive || tx.decisionStarted || tx.prepared != nil ||
 		tx.catalogCommit != nil || tx.coordinator != nil || tx.clusterNumber.Load() != 0 || tx.clusterID != "" ||

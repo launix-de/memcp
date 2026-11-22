@@ -75,12 +75,12 @@ func (tx *TxContext) beginCatalogCreate(db *database) {
 					_ = lease.Close()
 				}
 			}()
-			tx.beginCatalogDeclaration(db, catalogCreateKind)
+			tx.beginCatalogDeclaration(db, catalogCreateKind, nil)
 			accepted = true
 			return scm.NewAny(lease)
 		}))
 	}
-	tx.beginCatalogDeclaration(db, catalogCreateKind)
+	tx.beginCatalogDeclaration(db, catalogCreateKind, nil)
 }
 
 // Caller owns the existing construction scope and transaction mutexes. A
@@ -129,7 +129,7 @@ func (scope *transactionResources) catalogReadOnlyLocked() bool {
 	return true
 }
 
-func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarationKind) {
+func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarationKind, initializer *nativeColumnInitializer) {
 	public := kind == catalogDefaultKind || kind == catalogSourceKind || kind == catalogTableDropKind || kind == catalogForeignDropKind || kind == catalogForeignReplacementKind || kind == catalogPublicKeyKind || kind == catalogColumnKind || kind == catalogStatementTriggerKind || kind == catalogOwnedForeignKind
 	privateCreate := kind == catalogCreateKind
 
@@ -174,9 +174,9 @@ func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarati
 		var entryError error
 		if valid && allowed {
 			if public && tx.catalogIntents.Load() != nil || privateCreate && tx.publicCatalogEntered.Load() {
-				entryError = tx.validateLatePublicOwnerLocked(db, false)
+				entryError = tx.validateLatePublicOwnerLocked(db, false, initializer)
 			} else if identity.latePublic {
-				entryError = tx.validateLatePublicOwnerLocked(db, false)
+				entryError = tx.validateLatePublicOwnerLocked(db, false, initializer)
 			} else if identity.lateCreates {
 				entryError = tx.validateLateCreateOwnerLocked(db, false)
 			}
@@ -201,7 +201,7 @@ func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarati
 		if privateCreate {
 			entryError = tx.validateLateCreateOwnerLocked(db, true)
 		} else {
-			entryError = tx.validateLatePublicOwnerLocked(db, true)
+			entryError = tx.validateLatePublicOwnerLocked(db, true, initializer)
 		}
 		if entryError != nil {
 			unlock()
@@ -264,11 +264,11 @@ func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarati
 			panic("late private catalog phase admits only new table declarations")
 		}
 		if public && tx.catalogIntents.Load() != nil || privateCreate && tx.publicCatalogEntered.Load() {
-			if err := tx.validateLatePublicOwnerLocked(db, false); err != nil {
+			if err := tx.validateLatePublicOwnerLocked(db, false, initializer); err != nil {
 				panic(err)
 			}
 		} else if identity.latePublic {
-			if err := tx.validateLatePublicOwnerLocked(db, false); err != nil {
+			if err := tx.validateLatePublicOwnerLocked(db, false, initializer); err != nil {
 				panic(err)
 			}
 		} else if identity.lateCreates {
@@ -283,7 +283,7 @@ func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarati
 		if privateCreate {
 			entryError = tx.validateLateCreateOwnerLocked(db, true)
 		} else {
-			entryError = tx.validateLatePublicOwnerLocked(db, true)
+			entryError = tx.validateLatePublicOwnerLocked(db, true, initializer)
 		}
 		if entryError != nil {
 			panic(entryError)
@@ -514,11 +514,16 @@ func (tx *TxContext) prepareCatalogDecision() error {
 	if record.hasNameDeclarationActions() || record.hasOwnedKeyDeclarationActions() || len(record.Tables) > 0 && len(record.TableDrops) > 0 {
 		record.Format = 23
 	}
+	if record.hasRowInitializedAppends() {
+		// New writes always use the fail-closed explicit submagic. The reserved
+		// standalone V21 reader remains unchanged for its earlier artifacts.
+		record.Format = 24
+	}
 	if len(record.ColumnAppends) != 0 || len(record.NativeDeclarations) != 0 || len(record.ColumnDeclarations) != 0 || len(record.ColumnPropertyRemovals) != 0 || len(record.Checks) != 0 || len(record.ColumnDefaults) != 0 || len(record.CheckDrops) != 0 {
 		commit.publicPublication = db.preparePublicConstraintPublication(record.Checks, record.ColumnDefaults, record.ColumnDeclarations, record.ColumnAppends, record.ColumnPropertyRemovals, record.CheckDrops, record.NativeDeclarations, record.Version, tx.publicConstraintPrograms(), tx.publicCatalogChanges())
 	}
 
-	if record.Format == 23 {
+	if record.Format == 23 || record.Format == 24 {
 		var names map[*table]string
 		if views := tx.namespaceView(db); views != nil {
 			names = views.names
@@ -778,7 +783,7 @@ func (tx *TxContext) lockCatalogDecision(ctx context.Context) (releaseDecision f
 			if identity.lateCreates {
 				admissionError = tx.validateLateCreateOwnerLocked(identity.database, true)
 			} else {
-				admissionError = tx.validateLatePublicOwnerLocked(identity.database, true)
+				admissionError = tx.validateLatePublicOwnerLocked(identity.database, true, nil)
 			}
 		}
 		tx.mu.Unlock()
@@ -937,7 +942,7 @@ const (
 // is not itself a row phase. Statement-program amendments instead retain
 // their actual endpoint/input lease; their later producers capture the new
 // definition without re-executing an earlier row phase.
-func (tx *TxContext) beginCatalogConstruction(profile catalogConstructionProfile, endpoints ...*table) func() {
+func (tx *TxContext) beginCatalogConstruction(profile catalogConstructionProfile, initializer *nativeColumnInitializer, endpoints ...*table) func() {
 	switch profile {
 	case catalogDeclarationConstruction, catalogEnforcementConstruction, catalogStatementTriggerConstruction:
 		tx.noteStatementMutation(nil)
@@ -959,6 +964,14 @@ func (tx *TxContext) beginCatalogConstruction(profile catalogConstructionProfile
 		scope.mu.Unlock()
 		panic("native transaction is finishing")
 	}
+	tx.mu.Lock()
+	initializing := tx.checkedMutation
+	if initializing != nil && initializing.columnInitializer != nil && (initializer != initializing.columnInitializer || !initializer.owns(tx, initializer.target.schema)) {
+		tx.mu.Unlock()
+		scope.mu.Unlock()
+		panic(newNativeMutationBusyError(tx.transactionState, "column initialization construction"))
+	}
+	tx.mu.Unlock()
 	for _, endpoint := range endpoints {
 		if endpoint != nil {
 			owner := &endpoint.writeAdmission

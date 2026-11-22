@@ -11,11 +11,11 @@ const publicDeclarationResourceKey = "native-public-declarations"
 // names that owner's original T; catalog prepare binds T to the final decision.
 // No prepared/remote authority, isolation conversion or database migration can
 // be adopted here. Caller holds tx.mu at both identity-admission boundaries.
-func (tx *TxContext) validateLatePublicOwnerLocked(db *database, participants bool) error {
+func (tx *TxContext) validateLatePublicOwnerLocked(db *database, participants bool, initializer *nativeColumnInitializer) error {
 	if tx.Mode != TxACID || tx.State != TxActive || tx.decisionStarted || tx.prepared != nil ||
 		tx.catalogCommit != nil || tx.coordinator != nil || tx.clusterNumber.Load() != 0 || tx.clusterID != "" ||
 		len(tx.participants) != 0 || len(tx.endpoints) != 0 || tx.readViews.Load() != nil ||
-		tx.remoteActive != 0 || tx.mutationOperations != 0 || tx.checkedMutation != nil || tx.relationDataOrigins != 0 ||
+		tx.remoteActive != 0 || (!initializer.owns(tx, db) && (tx.mutationOperations != 0 || tx.checkedMutation != nil)) || tx.relationDataOrigins != 0 ||
 		db.incarnationID() == "" || GetDatabase(db.Name) != db ||
 		sharedClusterDatabase(db.Name) || activeReplication(db) != nil {
 		return errors.New("late public declarations require an unprepared local ACID transaction")
