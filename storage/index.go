@@ -1363,26 +1363,36 @@ func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext) {
 		// visits recids in the sort's effectively random order and forces a
 		// fresh bisection on nearly every call (measured: >99% of buildIndex
 		// time for a StorageSeq-encoded column).
-		// Single flat, row-major buffer (materialized[recid*numCols+colIdx]):
+		// A raw StorageConst belongs to this exact immutable main generation.
+		// Its coordinate cannot distinguish main rows; keep it in the index
+		// definition, bounds and delta order, but omit its temporary sort work.
+		// Neither a computed mapper nor a column statistic proves this property.
+		sortCols := make([]int, 0, len(cols))
+		for colIdx, g := range cols {
+			if !s.columnIsSorted(colIdx) {
+				continue
+			}
+			if _, constant := g.source.(*StorageConst); constant && g.mapFn == nil {
+				continue
+			}
+			sortCols = append(sortCols, colIdx)
+		}
+		// Single flat, row-major buffer (materialized[recid*numSortCols+keyIdx]):
 		// one contiguous allocation total. The comparator (called ~N*log(N)
 		// times) reads every sorted column of the same recid together, so
 		// keeping a row's values in one cache line matters more than keeping
 		// each column's materialization write sequential (called only N*K
 		// times total, i.e. far less often).
-		numCols := len(cols)
+		numSortCols := len(sortCols)
 		mainCount := uint(s.t.main_count)
-		materialized := make([]scm.Scmer, mainCount*uint(numCols))
-		hasSortCol := make([]bool, numCols)
+		materialized := make([]scm.Scmer, mainCount*uint(numSortCols))
 		type materializedCollationKeys struct {
 			values  []string
 			reverse bool
 		}
-		collationKeys := make([]*materializedCollationKeys, numCols)
-		for colIdx, g := range cols {
-			if !s.columnIsSorted(colIdx) {
-				continue // query-level overlay column: never read by the comparator below
-			}
-			hasSortCol[colIdx] = true
+		collationKeys := make([]*materializedCollationKeys, numSortCols)
+		for keyIdx, colIdx := range sortCols {
+			g := cols[colIdx]
 			// Repeated random comparisons amortize one complete dictionary
 			// decode. Keep this lease through sorting and failure cleanup, never
 			// retain the decoded reader in the published index getters.
@@ -1392,14 +1402,14 @@ func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext) {
 				g.raw = reader
 			}
 			for i := uint32(0); i < s.t.main_count; i++ {
-				materialized[uint(i)*uint(numCols)+uint(colIdx)] = g.get(i)
+				materialized[uint(i)*uint(numSortCols)+uint(keyIdx)] = g.get(i)
 			}
 			if colIdx < len(state.collationKeyFns) {
 				if keyFn := state.collationKeyFns[colIdx]; keyFn != nil {
 					keys := make([]string, mainCount)
 					complete := true
 					for i := uint32(0); i < s.t.main_count; i++ {
-						value := materialized[uint(i)*uint(numCols)+uint(colIdx)]
+						value := materialized[uint(i)*uint(numSortCols)+uint(keyIdx)]
 						if value.IsNil() {
 							continue
 						}
@@ -1411,50 +1421,49 @@ func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext) {
 						keys[i] = key
 					}
 					if complete {
-						collationKeys[colIdx] = &materializedCollationKeys{values: keys, reverse: state.collationKeyReverse[colIdx]}
+						collationKeys[keyIdx] = &materializedCollationKeys{values: keys, reverse: state.collationKeyReverse[colIdx]}
 					}
 				}
 			}
 		}
-		// sort indexes; skip non-sorted matcher columns (they don't affect
-		// sort order, they are query-level overlays for pruning)
-		hybridsort.HybridSort(tmp, func(a, b uint32) bool {
-			rowA := uint(a) * uint(numCols)
-			rowB := uint(b) * uint(numCols)
-			for colIdx := range cols {
-				if !hasSortCol[colIdx] {
-					continue
-				}
-				va := materialized[rowA+uint(colIdx)]
-				vb := materialized[rowB+uint(colIdx)]
-				if keys := collationKeys[colIdx]; keys != nil {
-					if va.IsNil() || vb.IsNil() {
-						if va.IsNil() != vb.IsNil() {
-							if keys.reverse {
-								return !va.IsNil()
+		// Matcher overlays and physically constant main coordinates cannot
+		// distinguish rows. The original index coordinates remain unchanged.
+		if numSortCols > 0 {
+			hybridsort.HybridSort(tmp, func(a, b uint32) bool {
+				rowA := uint(a) * uint(numSortCols)
+				rowB := uint(b) * uint(numSortCols)
+				for keyIdx, colIdx := range sortCols {
+					va := materialized[rowA+uint(keyIdx)]
+					vb := materialized[rowB+uint(keyIdx)]
+					if keys := collationKeys[keyIdx]; keys != nil {
+						if va.IsNil() || vb.IsNil() {
+							if va.IsNil() != vb.IsNil() {
+								if keys.reverse {
+									return !va.IsNil()
+								}
+								return va.IsNil()
 							}
-							return va.IsNil()
+							continue
+						}
+						comparison := strings.Compare(keys.values[a], keys.values[b])
+						if comparison != 0 {
+							if keys.reverse {
+								return comparison > 0
+							}
+							return comparison < 0
 						}
 						continue
 					}
-					comparison := strings.Compare(keys.values[a], keys.values[b])
-					if comparison != 0 {
-						if keys.reverse {
-							return comparison > 0
-						}
-						return comparison < 0
+					if relations[colIdx](va, vb) {
+						return true // less
+					} else if relations[colIdx](vb, va) {
+						return false // greater
 					}
-					continue
+					// otherwise: next iteration
 				}
-				if relations[colIdx](va, vb) {
-					return true // less
-				} else if relations[colIdx](vb, va) {
-					return false // greater
-				}
-				// otherwise: next iteration
-			}
-			return false // fully equal
-		})
+				return false // fully equal
+			})
+		}
 		// store sorted values into compressed format
 		state.mainIndexes.prepare()
 		for i, v := range tmp {
