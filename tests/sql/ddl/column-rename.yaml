@@ -492,6 +492,43 @@ test_cases:
         rows: 1
         data:
         - value: 43
+- name: Reused SQL spelling cannot retarget an existing computed dependency
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_computed_reuse
+  - sql: CREATE TABLE rename_computed_reuse(id INT NOT NULL PRIMARY KEY,old_value INT,total AS(old_value+2))
+  - sql: INSERT rename_computed_reuse(id,old_value) VALUES(1,17)
+  tds:
+    statements:
+    - connection: owner
+      sql: SELECT total FROM rename_computed_reuse
+      expect:
+        rows: 1
+        data:
+        - total: 19
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_computed_reuse.old_value',N'new_value',N'COLUMN'
+    - connection: owner
+      sql: ALTER TABLE rename_computed_reuse ADD old_value INT NULL DEFAULT 100
+    - connection: owner
+      sql: SELECT new_value,old_value,total FROM rename_computed_reuse
+      expect:
+        rows: 1
+        data:
+        - new_value: 17
+          old_value: 100
+          total: 19
+    - connection: owner
+      sql: UPDATE rename_computed_reuse SET new_value=23 WHERE id=1
+    - connection: owner
+      sql: UPDATE rename_computed_reuse SET old_value=101 WHERE id=1
+    - connection: owner
+      sql: SELECT new_value,old_value,total FROM rename_computed_reuse
+      expect:
+        rows: 1
+        data:
+        - new_value: 23
+          old_value: 101
+          total: 25
 - name: A renamed ordinary column remains writable from every SQL dialect
   setup:
   - sql: DROP TABLE IF EXISTS rename_dialects
@@ -669,6 +706,14 @@ test_cases:
         - assigned: 1
           old_total: 23
           new_total: 29
+- name: Reload retains the original computed dependency after SQL name reuse
+  sql: SELECT new_value,old_value,total FROM rename_computed_reuse
+  expect:
+    rows: 1
+    data:
+    - new_value: 23
+      old_value: 101
+      total: 25
 cleanup:
 - sql: DROP TRIGGER IF EXISTS rename_trigger_tracking
 - sql: DROP TABLE IF EXISTS rename_trigger_audit
@@ -687,3 +732,4 @@ cleanup:
 - sql: DROP TABLE IF EXISTS rename_spelling
 - sql: DROP TABLE IF EXISTS rename_literal
 - sql: DROP TABLE IF EXISTS rename_checks
+- sql: DROP TABLE IF EXISTS rename_computed_reuse

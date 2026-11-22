@@ -1175,13 +1175,14 @@ test_cases:
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
-      (renametable "memcp-tests" "identity_mode_a" "identity_mode_renamed")
+      (define rename_target (table "memcp-tests" false "identity_mode_a" false nil))
+      (renametable rename_target "identity_mode_renamed" false (show rename_target "identity" nil) nil)
       (define blocked (failure "SET IDENTITY_INSERT identity_mode_b ON"))
       (run "INSERT identity_mode_renamed(id,value) VALUES(29,4)")
       (run "SET IDENTITY_INSERT identity_mode_renamed OFF")
       (define denied (failure "INSERT identity_mode_renamed(id,value) VALUES(30,5)"))
       (define value ((run "SELECT id FROM identity_mode_renamed") "id"))
-      (renametable "memcp-tests" "identity_mode_renamed" "identity_mode_a")
+      (renametable rename_target "identity_mode_a" false (show rename_target "identity" nil) nil)
       (list blocked denied value)
     )
   expect:

@@ -258,7 +258,7 @@ test_cases:
         (lambda () (createkey parent "blocked_key" true '("category")))
         (lambda () (dropkey parent "loaded_parent_key"))
         (lambda () (droptable "memcp-tests" "loaded_fk_parent" false))
-        (lambda () (renametable "memcp-tests" "loaded_fk_parent" "loaded_fk_renamed"))
+        (lambda () (renametable parent "loaded_fk_renamed" false (show parent "identity" nil) nil))
         (lambda () (dropdatabase "memcp-tests" false)))
         (lambda (valid operation) (and valid (try (lambda () (begin (operation) false))
           (lambda (failure) (strlike (concat failure) "%pending declaration%"))))) true))
