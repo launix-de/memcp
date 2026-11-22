@@ -395,7 +395,86 @@ test_cases:
         value: 23
       - id: 3
         value: 29
+- name: Published constraint columns name the current SQL addresses
+  syntax: mysql
+  sql: SELECT table_name,column_name,referenced_table_name,referenced_column_name FROM information_schema.key_column_usage WHERE table_schema='memcp-tests'
+    AND table_name='cold_alias_child' AND constraint_name='cold_alias_foreign' ORDER BY ordinal_position
+  expect: &cold_alias_names
+    rows: 1
+    data:
+    - table_name: cold_alias_child
+      column_name: parent_id
+      referenced_table_name: cold_alias_after
+      referenced_column_name: new_id
+  setup:
+  - sql: DROP TABLE IF EXISTS cold_alias_new_child
+  - sql: DROP TABLE IF EXISTS cold_alias_child
+  - sql: DROP TABLE IF EXISTS cold_alias_after
+  - sql: DROP TABLE IF EXISTS cold_alias_before
+  - sql: CREATE TABLE cold_alias_before(old_id INT NOT NULL CONSTRAINT cold_alias_primary PRIMARY KEY,value INT)
+  - sql: CREATE TABLE cold_alias_child(id INT NOT NULL PRIMARY KEY,old_parent INT,value INT,CONSTRAINT cold_alias_foreign FOREIGN KEY(old_parent) REFERENCES
+      cold_alias_before(old_id) ON UPDATE CASCADE)
+  - sql: INSERT cold_alias_before VALUES(7,11)
+  - sql: INSERT cold_alias_child VALUES(1,7,17)
+  - syntax: tsql
+    sql: EXEC sp_rename N'dbo.cold_alias_before.old_id',N'new_id',N'COLUMN'
+  - syntax: tsql
+    sql: EXEC sp_rename N'dbo.cold_alias_before',N'cold_alias_after',N'OBJECT'
+  - syntax: tsql
+    sql: EXEC sp_rename N'dbo.cold_alias_child.old_parent',N'parent_id',N'COLUMN'
+- name: Later public key publication retains the renamed foreign endpoints
+  syntax: mysql
+  steps:
+  - sql: CREATE UNIQUE INDEX cold_alias_value ON cold_alias_child(value)
+  - sql: SELECT table_name,column_name,referenced_table_name,referenced_column_name FROM information_schema.key_column_usage WHERE table_schema='memcp-tests'
+      AND table_name='cold_alias_child' AND constraint_name='cold_alias_foreign' ORDER BY ordinal_position
+    expect: *cold_alias_names
+- name: Cold load both endpoint declarations
+  action: restart
+- name: Recovered constraint columns name the same SQL addresses
+  syntax: mysql
+  sql: SELECT table_name,column_name,referenced_table_name,referenced_column_name FROM information_schema.key_column_usage WHERE table_schema='memcp-tests'
+    AND table_name='cold_alias_child' AND constraint_name='cold_alias_foreign' ORDER BY ordinal_position
+  expect: *cold_alias_names
+- name: A newly registered foreign key uses the selected renamed parent
+  steps:
+  - sql: CREATE TABLE cold_alias_new_child(id INT NOT NULL PRIMARY KEY,parent_id INT,CONSTRAINT cold_alias_new_foreign FOREIGN KEY(parent_id) REFERENCES
+      cold_alias_after(new_id) ON UPDATE CASCADE)
+  - sql: INSERT cold_alias_new_child VALUES(2,7)
+- name: A newly registered foreign endpoint exposes current SQL names
+  syntax: mysql
+  sql: SELECT table_name,column_name,referenced_table_name,referenced_column_name FROM information_schema.key_column_usage WHERE table_schema='memcp-tests'
+    AND table_name='cold_alias_new_child' AND constraint_name='cold_alias_new_foreign' ORDER BY ordinal_position
+  expect:
+    rows: 1
+    data:
+    - table_name: cold_alias_new_child
+      column_name: parent_id
+      referenced_table_name: cold_alias_after
+      referenced_column_name: new_id
+- name: Recovered physical foreign enforcement updates the correct child
+  steps:
+  - sql: UPDATE cold_alias_after SET new_id=9 WHERE new_id=7
+  - sql: SELECT id,parent_id,value FROM cold_alias_child
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        parent_id: 9
+        value: 17
+- name: The newly registered foreign key enforces the same recovered native parent
+  sql: SELECT id,parent_id FROM cold_alias_new_child
+  expect:
+    rows: 1
+    data:
+    - id: 2
+      parent_id: 9
+
 cleanup:
+- sql: DROP TABLE IF EXISTS cold_alias_new_child
+- sql: DROP TABLE IF EXISTS cold_alias_child
+- sql: DROP TABLE IF EXISTS cold_alias_after
+- sql: DROP TABLE IF EXISTS cold_alias_before
 - sql: DROP TABLE IF EXISTS rename_swap_child
 - sql: DROP TABLE IF EXISTS rename_swap_source
 - sql: DROP TABLE IF EXISTS rename_swap_replacement
