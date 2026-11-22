@@ -535,7 +535,7 @@ func TestDeltaBatchPublicationAllowsLockFreeReaders(t *testing.T) {
 			values[i] = []scm.Scmer{scm.NewInt(id), scm.NewString("initialized")}
 		}
 		shard.mu.Lock()
-		shard.insertDataset([]string{"id", "payload"}, values, nil, nil, nil)
+		shard.insertDataset([]string{"id", "payload"}, values, nil, nil, nil, nil)
 		shard.mu.Unlock()
 	}
 	close(done)

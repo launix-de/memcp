@@ -2446,7 +2446,7 @@ func (t *storageShard) replacePreparedRowLocked(oldRecid uint32, columns []strin
 	// its ready successor, not another WAL/transaction participant incarnation.
 	journal := currentTx != nil && (!replica || active)
 	newRecid := t.main_count + uint32(len(t.deltaRows()))
-	t.insertDataset(columns, [][]scm.Scmer{row}, nil, columnsInput, currentTx)
+	t.insertDataset(columns, [][]scm.Scmer{row}, nil, nil, currentTx, columnsInput)
 	// Forward/log actual stored values if the native append supplied an ID.
 	// Ordinary complete replacement payloads already match and need no copy.
 	stored := t.deltaRows()[newRecid-t.main_count]
@@ -4139,7 +4139,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 		fireRowTriggers = fireTriggers && (len(input.beforeInsert) != 0 || len(input.afterInsert) != 0)
 	}
 	var triggerInsertRows []dataset
-	t.insertDataset(columns, values, onFirstInsertId, validatedSchema, currentTx)
+	t.insertDataset(columns, values, onFirstInsertId, validatedSchema, currentTx, nil)
 	if fireRowTriggers {
 		newRows := t.deltaRows()[firstNewInsertIdx:]
 		triggerInsertRows = make([]dataset, len(newRows))
@@ -4240,10 +4240,13 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 }
 
 // contract: must only be called inside full write mutex mu.Lock()
-func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext) {
+func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onFirstInsertId func(int64), validatedSchema *tableColumnNamesSnapshot, currentTx *TxContext, columnsInput *tableColumnNamesSnapshot) {
 	rows := slices.Grow(t.deltaRows(), len(values))
 	firstNew := len(rows)
-	snapshot := validatedSchema
+	// Ordinary validation is a proof against an earlier declaration, not a
+	// replacement for this append's actual-T view. Only historical column
+	// initialization supplies an explicit complete target row declaration.
+	snapshot := columnsInput
 	if snapshot == nil {
 		snapshot = t.t.columnNamesForTx(currentTx)
 	}

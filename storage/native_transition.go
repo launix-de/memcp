@@ -121,7 +121,7 @@ func (writer *nativeTransitionWriter) flush(chunk [][]scm.Scmer, guard *uniqueWr
 		func() {
 			shard.mu.Lock()
 			defer shard.mu.Unlock()
-			shard.insertDataset(writer.relation.columns, chunk, nil, writer.relation.table.columnNamesSnapshot.Load(), nil)
+			shard.insertDataset(writer.relation.columns, chunk, nil, writer.relation.table.columnNamesSnapshot.Load(), nil, nil)
 		}()
 		// Rotate the PRIVATE destination at the usual native shard boundary.
 		// The source lock is released, but this caller may still own UNIQUE
