@@ -235,6 +235,9 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 	newTable.Name = tblName
 	if db.tables.Get(tblName) != nil {
 		newTable.Name = "native-table:" + uuid.NewString()
+		if strings.HasPrefix(tblName, ".") {
+			newTable.Name = "." + newTable.Name
+		}
 		logical := tblName
 		newTable.publishedName.Store(&logical)
 	}
@@ -474,6 +477,9 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 	}
 	if db.tables.Get(newTable.Name) != nil {
 		newTable.Name = "native-table:" + uuid.NewString()
+		if strings.HasPrefix(tblName, ".") {
+			newTable.Name = "." + newTable.Name
+		}
 		logical := tblName
 		newTable.publishedName.Store(&logical)
 		for i := range newTable.Foreign {
