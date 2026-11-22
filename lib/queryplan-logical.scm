@@ -5229,14 +5229,16 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 							(neumann_fail "untangle_query" "window offset function requires ORDER BY")
 							true)
 						(define offset (window_offset_arg args))
-						(define value_col (order_column_for_alias src (canonical_column_expr_for_alias alias (car args))))
+						/* Bind frontend name flags against this source before reducing
+						window coordinates to native column names. */
+						(define value_col (order_column_for_alias src (car args)))
 						(define partition_cols (map partition_exprs (lambda (expr)
-							(order_column_for_alias src (canonical_column_expr_for_alias alias expr)))))
+							(order_column_for_alias src expr))))
 						(if (contains? partition_cols value_col)
 							(neumann_fail "untangle_query" "window offset value column must not duplicate partition columns yet")
 							true)
 						(define order_cols (map (window_order_exprs order_items) (lambda (expr)
-							(order_column_for_alias src (canonical_column_expr_for_alias alias expr)))))
+							(order_column_for_alias src expr))))
 						(define order_dirs (window_order_dirs_for_orc order_items))
 						(define sortdirs (merge (list
 							(map partition_exprs (lambda (_expr) false))
@@ -5371,9 +5373,9 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 							(neumann_fail "untangle_query" "rank window function requires ORDER BY")
 							true)
 						(define partition_cols (map partition_exprs (lambda (expr)
-							(order_column_for_alias src (canonical_column_expr_for_alias alias expr)))))
+							(order_column_for_alias src expr))))
 						(define order_cols (map (window_order_exprs order_items) (lambda (expr)
-							(order_column_for_alias src (canonical_column_expr_for_alias alias expr)))))
+							(order_column_for_alias src expr))))
 						(define sortcols (merge (list partition_cols order_cols)))
 						(define sortdirs (merge (list
 							(map partition_exprs (lambda (_expr) false))
@@ -5418,9 +5420,9 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 							(neumann_fail "untangle_query" "ROW_NUMBER requires ORDER BY for ORC lowering")
 							true)
 						(define partition_cols (map partition_exprs (lambda (expr)
-							(order_column_for_alias src (canonical_column_expr_for_alias alias expr)))))
+							(order_column_for_alias src expr))))
 						(define order_cols (map (window_order_exprs order_items) (lambda (expr)
-							(order_column_for_alias src (canonical_column_expr_for_alias alias expr)))))
+							(order_column_for_alias src expr))))
 						(define sortcols (merge (list partition_cols order_cols)))
 						(define sortdirs (merge (list
 							(map partition_exprs (lambda (_expr) false))
