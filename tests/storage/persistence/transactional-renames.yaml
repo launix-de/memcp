@@ -306,6 +306,60 @@ test_cases:
     rows: 1
     data:
     - absent_id: null
+- name: A statement trigger binds the selected renamed table within its original transaction
+  setup:
+  - sql: CREATE TABLE rename_program_before(id INT NOT NULL,value INT)
+  - sql: CREATE TABLE rename_program_audit(id INT,value INT)
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_program_before',N'rename_program_after',N'OBJECT'
+    - connection: owner
+      sql: CREATE TRIGGER rename_program_insert ON rename_program_after AFTER INSERT AS INSERT rename_program_audit(id,value) SELECT id,value FROM inserted
+    - connection: owner
+      sql: INSERT rename_program_after VALUES(1,17)
+    - connection: owner
+      sql: SELECT id,value FROM rename_program_audit
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 17
+    - connection: observer
+      sql: SELECT id,value FROM rename_program_audit
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: owner
+      sql: INSERT rename_program_after VALUES(2,23)
+    - connection: observer
+      sql: SELECT id,value FROM rename_program_audit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+        - id: 2
+          value: 23
+- name: Reload a renamed table and its statement trigger
+  action: restart
+- name: Recovered statement trigger consumes the same renamed native table
+  steps:
+  - sql: INSERT rename_program_after VALUES(3,29)
+  - sql: SELECT id,value FROM rename_program_audit ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        value: 17
+      - id: 2
+        value: 23
+      - id: 3
+        value: 29
 cleanup:
 - sql: DROP TABLE IF EXISTS rename_swap_child
 - sql: DROP TABLE IF EXISTS rename_swap_source
@@ -319,3 +373,6 @@ cleanup:
 - sql: DROP TABLE IF EXISTS rename_occupied_source
 - sql: DROP TABLE IF EXISTS rename_occupied_target
 - sql: DROP TABLE IF EXISTS rename_table_abandoned
+- sql: DROP TABLE IF EXISTS rename_program_after
+- sql: DROP TABLE IF EXISTS rename_program_before
+- sql: DROP TABLE IF EXISTS rename_program_audit
