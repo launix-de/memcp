@@ -515,11 +515,7 @@ func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32, alreadyLocke
 		if !p.validMask.AtomicGet(uint(idx)) {
 			// Invalid row → on-demand incremental recompute (or wait for the
 			// ongoing one to complete).
-			p.shard.t.orcMu.Lock()
-			if !p.validMask.AtomicGet(uint(idx)) {
-				p.shard.t.incrementalRecomputeORC(p.colName, p.shard, idx)
-			}
-			p.shard.t.orcMu.Unlock()
+			p.repairOrderedValue(idx)
 		}
 		// Valid: return from delta or main
 		p.mu.RLock()
@@ -569,6 +565,17 @@ func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32, alreadyLocke
 	p.validMask.AtomicSet(uint(idx), true)
 
 	return val
+}
+
+// repairOrderedValue releases the existing repair ownership even when a source
+// reader or reducer fails. Such a failure must remain retryable by later readers;
+// it neither makes the requested row valid nor replaces the original panic.
+func (p *StorageComputeProxy) repairOrderedValue(idx uint32) {
+	p.shard.t.orcMu.Lock()
+	defer p.shard.t.orcMu.Unlock()
+	if !p.validMask.AtomicGet(uint(idx)) {
+		p.shard.t.incrementalRecomputeORC(p.colName, p.shard, idx)
+	}
 }
 
 // storedORCValue returns the currently published ORC value without triggering
