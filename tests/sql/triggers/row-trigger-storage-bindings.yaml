@@ -169,9 +169,122 @@ test_cases:
         data:
         - id: 2
           observed_a: 30
+- name: Statement trigger creation state and removal use the renamed containing table through rollback
+  tds:
+    statements:
+    - connection: owner
+      sql: DROP TABLE IF EXISTS statement_name_after
+    - connection: owner
+      sql: DROP TABLE IF EXISTS statement_name_before
+    - connection: owner
+      sql: DROP TABLE IF EXISTS statement_name_audit
+    - connection: owner
+      sql: CREATE TABLE statement_name_before(id INT NOT NULL PRIMARY KEY,payload INT)
+    - connection: owner
+      sql: CREATE TABLE statement_name_audit(id INT,payload INT)
+    - connection: owner
+      sql: INSERT statement_name_before VALUES(1,10)
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.statement_name_before',N'statement_name_after',N'OBJECT'
+    - connection: owner
+      sql: CREATE TRIGGER statement_name_tracking ON statement_name_after AFTER UPDATE AS BEGIN INSERT statement_name_audit(id,payload)
+        SELECT id,payload FROM inserted; END
+    - connection: owner
+      sql: UPDATE statement_name_after SET payload=20 WHERE id=1
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_audit ORDER BY id,payload
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 20
+    - connection: owner
+      sql: DISABLE TRIGGER statement_name_tracking ON statement_name_after
+    - connection: owner
+      sql: UPDATE statement_name_after SET payload=30 WHERE id=1
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_audit ORDER BY id,payload
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 20
+    - connection: owner
+      sql: ENABLE TRIGGER statement_name_tracking ON statement_name_after
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE statement_name_after SET payload=40 WHERE id=1
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_after ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 40
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_audit ORDER BY id,payload
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          payload: 20
+        - id: 1
+          payload: 40
+    - connection: observer
+      sql: SELECT id,payload FROM statement_name_after ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 30
+    - connection: observer
+      sql: SELECT id,payload FROM statement_name_audit ORDER BY id,payload
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 20
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_after ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 30
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_audit ORDER BY id,payload
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 20
+    - connection: owner
+      sql: DROP TRIGGER statement_name_tracking
+    - connection: owner
+      sql: UPDATE statement_name_after SET payload=50 WHERE id=1
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_after ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 50
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_audit ORDER BY id,payload
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 20
 cleanup:
 - sql: DROP TABLE IF EXISTS row_binding_after
 - sql: DROP TABLE IF EXISTS row_binding_before
 - sql: DROP TABLE IF EXISTS row_binding_audit
 - sql: DROP TABLE IF EXISTS trigger_binding_isolation
 - sql: DROP TABLE IF EXISTS trigger_binding_isolation_audit
+- sql: DROP TABLE IF EXISTS statement_name_after
+- sql: DROP TABLE IF EXISTS statement_name_before
+- sql: DROP TABLE IF EXISTS statement_name_audit
