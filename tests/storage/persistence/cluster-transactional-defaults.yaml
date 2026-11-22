@@ -11,6 +11,9 @@ metadata:
     nodes: 4
     gomaxprocs: 2
 setup:
+# The legacy/local controls below use a coordinator-local database distinct
+# from the shared {database} fixture. Retain a pre-existing local catalog.
+- scm: (createdatabase "memcp-tests" true)
 - sql: DROP TABLE IF EXISTS cluster_intent_shared
 - sql: DROP TABLE IF EXISTS cluster_intent_cached
 - sql: DROP TABLE IF EXISTS cluster_intent_probe_cold
