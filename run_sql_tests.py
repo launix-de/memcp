@@ -2077,6 +2077,9 @@ class SQLTestRunner:
                 memcp_pid = find_memcp_pid(self.base_url) if is_perf_test else None
                 start_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
                 samples_ns: list = []
+                # Only the existing profiled diagnostic process collects spans.
+                # Primary measurements perform no extra log reads or requests.
+                profile_samples = [] if os.environ.get("MEMCP_CPU_PROFILE_FILE") else None
                 response = None
                 adaptive_repetitions = (
                     is_perf_test
@@ -2091,11 +2094,22 @@ class SQLTestRunner:
                 validate_each_sample = fixture_trial or (repeatable_query and (repeat > 1 or adaptive_repetitions))
                 measured_total_ns = 0
                 for sample_index in range(repeat):
+                    log_start = profile_native_log_offset() if profile_samples is not None else None
                     start_ns = time.monotonic_ns()
                     response = execute_sample()
-                    sample_ns = time.monotonic_ns() - start_ns
+                    end_ns = time.monotonic_ns()
+                    sample_ns = end_ns - start_ns
                     samples_ns.append(sample_ns)
                     measured_total_ns += sample_ns
+                    if profile_samples is not None:
+                        profile_samples.append({
+                            "sample_index": sample_index,
+                            "start_monotonic_ns": start_ns,
+                            "end_monotonic_ns": end_ns,
+                            "native_log_pid": memcp_pid,
+                            "native_log_start_bytes": log_start,
+                            "native_log_end_bytes": profile_native_log_offset(),
+                        })
                     if validate_each_sample and ((fixture_trial and response is None)
                             or (response is not None and not self.validate_expectation(
                                 test_case, response, self.parse_jsonl_response(response)))):
@@ -2227,6 +2241,8 @@ class SQLTestRunner:
             }
             if os.environ.get("PERF_FIXTURE_TRIAL"):
                 result["samples_ns"] = samples_ns
+            if profile_samples is not None:
+                result["profile_samples"] = profile_samples
             self.perf_results[perf_key if PERF_AB_MODE else name] = result
         else:
             self._record_success(name, is_noncritical, elapsed_ms, hard_limit_ms)
@@ -2780,6 +2796,16 @@ def cleanup_memcp_artifacts(owned_data_dir: Optional[Path]) -> None:
             Path(_memcp_log_file).unlink()
         except FileNotFoundError:
             pass
+
+
+def profile_native_log_offset() -> Optional[int]:
+    """Diagnostic-only byte position in this managed process's existing log."""
+    if not _memcp_log_file:
+        return None
+    try:
+        return os.stat(_memcp_log_file).st_size
+    except OSError:
+        return None
 
 
 def start_memcp_process(
@@ -3469,6 +3495,7 @@ def summarize_performance_fixtures(trials: List[Dict[str, Any]], count: int) -> 
                                 threshold_ms=None, waiver_reason=None, passed=count == 7)
             summary[key].pop("samples_ns", None)
             summary[key].pop("total_ms", None)
+            summary[key].pop("profile_samples", None)
             continue
         baseline, candidate = statistics.median(a), statistics.median(b)
         repetitions = sum(value[key]["repetitions"] for value in roles["B"])
@@ -3488,6 +3515,7 @@ def summarize_performance_fixtures(trials: List[Dict[str, Any]], count: int) -> 
         summary[key].pop("baseline_failure", None)
         summary[key].pop("samples_ns", None)
         summary[key].pop("total_ms", None)
+        summary[key].pop("profile_samples", None)
     return summary
 
 
