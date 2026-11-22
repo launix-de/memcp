@@ -4546,8 +4546,12 @@ row producer publishes every real group; only the outer scalar stage owns
 			values_for_stage (qb_sources inner) outer_sources))
 		(define residual_refs (merge_unique (list predicate_refs payload_refs)))
 		(define lookup_pairs (domain_correlation_pairs_with_outer_refs predicate_pairs payload_refs))
-		(define range_lookup_pairs (if (empty_list? range_domains)
-			raw_lookup_pairs candidate_range_lookup_pairs))
+		/* A consumed predicate bound is not a point key. A caller coordinate
+		also read by the payload is a value parameter, including that same bound;
+		range-carrier lowering must not discard its complete payload binding. */
+		(define range_lookup_pairs (domain_correlation_pairs_with_outer_refs
+			(if (empty_list? range_domains) raw_lookup_pairs candidate_range_lookup_pairs)
+			payload_refs))
 		(define range_invariant_terms
 			(qassoc_get analysis (quote range_invariant_terms) local_terms))
 		(define outer_aliases (source_aliases outer_sources))

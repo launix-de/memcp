@@ -307,26 +307,36 @@ test_cases:
 - name: sql Ordered LIMIT 1 range keeps projected caller values outside its bound
   syntax: sql
   sql: SELECT q.seq,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
-    c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS found FROM projection_payload_inputs q ORDER BY q.seq
+    c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS found,(SELECT CASE WHEN c.value IS NULL THEN q.id ELSE c.value+c.id+q.id
+    END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS bound_value FROM projection_payload_inputs
+    q ORDER BY q.seq
   expect:
     rows: 8
     data:
     - seq: 1
       found: 111
+      bound_value: 102
     - seq: 2
       found: 111
+      bound_value: 102
     - seq: 3
       found: 141
+      bound_value: 102
     - seq: 4
       found: null
+      bound_value: 102
     - seq: 5
       found: 222
+      bound_value: 204
     - seq: 6
       found: 30
+      bound_value: 3
     - seq: 7
       found: 60
+      bound_value: 4
     - seq: 8
       found: null
+      bound_value: null
 - name: psql LIMIT 1 mixed payload keeps repeated and nullable caller values
   syntax: psql
   sql: SELECT q.seq,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
@@ -377,26 +387,36 @@ test_cases:
 - name: psql Ordered LIMIT 1 range keeps projected caller values outside its bound
   syntax: psql
   sql: SELECT q.seq,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
-    c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS found FROM projection_payload_inputs q ORDER BY q.seq
+    c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS found,(SELECT CASE WHEN c.value IS NULL THEN q.id ELSE c.value+c.id+q.id
+    END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS bound_value FROM projection_payload_inputs
+    q ORDER BY q.seq
   expect:
     rows: 8
     data:
     - seq: 1
       found: 111
+      bound_value: 102
     - seq: 2
       found: 111
+      bound_value: 102
     - seq: 3
       found: 141
+      bound_value: 102
     - seq: 4
       found: null
+      bound_value: 102
     - seq: 5
       found: 222
+      bound_value: 204
     - seq: 6
       found: 30
+      bound_value: 3
     - seq: 7
       found: 60
+      bound_value: 4
     - seq: 8
       found: null
+      bound_value: null
 - name: tsql LIMIT 1 mixed payload keeps repeated and nullable caller values
   syntax: tsql
   sql: SELECT q.seq,(SELECT TOP(1) CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
@@ -447,23 +467,33 @@ test_cases:
 - name: tsql Ordered LIMIT 1 range keeps projected caller values outside its bound
   syntax: tsql
   sql: SELECT q.seq,(SELECT TOP(1) CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
-    c WHERE c.id<=q.id ORDER BY c.id DESC) AS found FROM projection_payload_inputs q ORDER BY q.seq
+    c WHERE c.id<=q.id ORDER BY c.id DESC) AS found,(SELECT TOP(1) CASE WHEN c.value IS NULL THEN q.id ELSE c.value+c.id+q.id
+    END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC) AS bound_value FROM projection_payload_inputs
+    q ORDER BY q.seq
   expect:
     rows: 8
     data:
     - seq: 1
       found: 111
+      bound_value: 102
     - seq: 2
       found: 111
+      bound_value: 102
     - seq: 3
       found: 141
+      bound_value: 102
     - seq: 4
       found: null
+      bound_value: 102
     - seq: 5
       found: 222
+      bound_value: 204
     - seq: 6
       found: 30
+      bound_value: 3
     - seq: 7
       found: 60
+      bound_value: 4
     - seq: 8
       found: null
+      bound_value: null
