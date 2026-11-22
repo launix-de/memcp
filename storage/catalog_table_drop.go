@@ -175,7 +175,9 @@ func (changes *publicCatalogChanges) stageTableDrop(tx *TxContext, t *table, lea
 	acquired := changes.leases[t] == nil
 	accepted := false
 	if acquired {
-		writer, err := t.writeAdmission.admit(scanQueryContext(tx, context.Background()), tx.transactionState, tableCatalogDeclarationAdmission, false)
+		// Reuse the validated constructor upgrade: only this original T may
+		// retain an earlier framed writer; escaped callbacks still reject.
+		writer, err := t.writeAdmission.admit(scanQueryContext(tx, context.Background()), tx.transactionState, tableValidatedDeclarationAdmission, false)
 		if err != nil {
 			panic(err)
 		}
