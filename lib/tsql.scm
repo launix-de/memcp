@@ -253,13 +253,13 @@ first and specialize this finite profile at the frontend cache boundary. */
 			(define declaration (if (and source (source_is_base_table? source))
 				(source_column_declaration source column column_ic) nil))
 			(if (not (and declaration (declaration "Computed"))) node (begin
-				(define handle (table (source_schema source) false (source_relation source) false tx))
+				(define handle (table (source_schema source) false (source_storage_relation source) false tx))
 				(define recipe (show handle "computation" (sql_column_storage_name declaration) false tx))
 				(if (nil? recipe) node (begin
 					/* Declarations are immutable until replacement of the relation.
 					The native identity is an O(1) scalar guard on this borrowed recipe. */
 					(planner_record_guard_condition (list 'equal?
-						(list 'show (list 'table (source_schema source) false (source_relation source) false 'tx) "identity" 'tx)
+						(list 'show (source_native_table_expr source 'tx) "identity" 'tx)
 						(show handle "identity" tx)) planning)
 					(define inputs (map (car recipe) (lambda (name) (begin
 						(define input (find (source_columns source) (lambda (column)
