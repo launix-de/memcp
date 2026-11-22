@@ -2245,9 +2245,11 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				if alreadyLocked {
 					eventDeletedRow = readDeletedRow()
 				} else {
-					t.mu.RLock()
-					eventDeletedRow = readDeletedRow()
-					t.mu.RUnlock()
+					eventDeletedRow = func() dataset {
+						t.mu.RLock()
+						defer t.mu.RUnlock()
+						return readDeletedRow()
+					}()
 				}
 				if withTrigger && hasDeleteTriggers {
 					triggerDeletedRow = eventDeletedRow
