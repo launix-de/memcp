@@ -120,9 +120,7 @@ func (tx *TxContext) renameCatalogTable(t *table, newName string, ignoreCase boo
 	if identityValue.IsNil() || identityValue.String() != identity {
 		panic("table rename lost its expected native generation")
 	}
-	if !declaredTableMaintenanceCapabilities(t.schema.Name, t.Name).allows(maintenanceRename) {
-		panic("Table " + t.schema.Name + "." + t.visibleNameAt(tx, t.schema.catalogView()) + " is required by MemCP and does not allow rename")
-	}
+	tx.requireDeclarationEndpoint(t, maintenanceRename)
 	d := &catalogTableRename{t.Name, identity, t.visibleNameAt(tx, t.schema.catalogView()), newName, ignoreCase}
 	if err := validateTableRenameShape(d); err != nil {
 		panic(err)

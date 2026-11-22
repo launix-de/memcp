@@ -138,7 +138,7 @@ func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation
 		db.schemalock.RLock()
 		defer db.schemalock.RUnlock()
 		changes.validateConstraintStateEndpointsLocked(tx)
-		requireTableMaintenance(db.Name, t.Name, maintenanceAlter)
+		tx.requireDeclarationEndpoint(t, maintenanceAlter)
 		if t.schema != db || db.tables.Get(t.Name) != t || (!t.committedAt(db.catalogView().version) && !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t)) {
 			panic("unique declaration endpoint generation was replaced")
 		}

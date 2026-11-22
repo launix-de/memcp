@@ -60,17 +60,17 @@ func recoveredForeignEndpointScope(db *database, record *catalogDecisionRecord) 
 	return scope
 }
 
-func (tx *TxContext) requireForeignEndpoint(t *table) {
+func (tx *TxContext) requireDeclarationEndpoint(t *table, operation maintenanceOperation) {
 	if t == nil || t.schema == nil || t.schema.tables.Get(t.Name) != t {
-		panic("foreign declaration endpoint generation was replaced")
+		panic("catalog declaration endpoint generation was replaced")
 	}
 	if t.committedAt(t.schema.catalogView().version) {
-		requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+		requireTableMaintenance(t.schema.Name, t.Name, operation)
 		return
 	}
 	if !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) ||
-		!declaredTableMaintenanceCapabilities(t.schema.Name, t.Name).allows(maintenanceAlter) {
-		panic("foreign declaration requires its original native endpoint owner")
+		!declaredTableMaintenanceCapabilities(t.schema.Name, t.Name).allows(operation) {
+		panic("catalog declaration requires its original native endpoint owner")
 	}
 }
 

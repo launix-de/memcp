@@ -237,8 +237,8 @@ func (tx *TxContext) stageCatalogForeign(child, parent *table, fk foreignKey, ex
 	if tx.State != TxActive || tx.decisionStarted {
 		panic("public foreign declaration requires an active native transaction")
 	}
-	tx.requireForeignEndpoint(child)
-	tx.requireForeignEndpoint(parent)
+	tx.requireDeclarationEndpoint(child, maintenanceAlter)
+	tx.requireDeclarationEndpoint(parent, maintenanceAlter)
 	requireSelfForeignModes(child, parent, fk)
 	if child.Ephemeral || parent.Ephemeral || child.isEphemeralQueryTable() || parent.isEphemeralQueryTable() {
 		panic("public foreign declaration requires durable native table declarations")
