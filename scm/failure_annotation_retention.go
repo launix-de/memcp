@@ -54,6 +54,14 @@ func RetainFailureAnnotations(original, incoming any) any {
 }
 
 func sameFailureIdentity(original, incoming any) bool {
+	// A source location is decoration, never a new causal identity. In
+	// particular it cannot turn a textual failure into an opaque native datum.
+	if decorated, ok := original.(*sourceFailure); ok {
+		return sameFailureIdentity(decorated.cause, incoming)
+	}
+	if decorated, ok := incoming.(*sourceFailure); ok {
+		return sameFailureIdentity(original, decorated.cause)
+	}
 	if value, ok := original.(Scmer); ok {
 		if value.GetTag() == tagAny {
 			return sameFailureIdentity(value.Any(), incoming)
