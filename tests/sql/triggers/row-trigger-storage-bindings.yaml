@@ -1,0 +1,110 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: mysql
+  isolated: true
+  requires_tds: true
+  description: Row trigger source binds visible names once to selected native row and DML coordinates
+setup:
+- sql: DROP TABLE IF EXISTS row_binding_after
+- sql: DROP TABLE IF EXISTS row_binding_before
+- sql: DROP TABLE IF EXISTS row_binding_audit
+- sql: CREATE TABLE row_binding_before(id INT PRIMARY KEY,old_value INT,payload INT) ENGINE=sloppy
+- sql: CREATE TABLE row_binding_audit(old_audit_id INT,before_value INT,after_value INT) ENGINE=sloppy
+test_cases:
+- name: Existing native row and audit inputs receive new SQL-visible names
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.row_binding_before.old_value',N'new_value',N'COLUMN'
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.row_binding_audit.old_audit_id',N'audit_id',N'COLUMN'
+- name: A new MySQL BEFORE program writes the selected physical NEW coordinates in sequence
+  sql: CREATE TRIGGER row_binding_bi BEFORE INSERT ON row_binding_before FOR EACH ROW BEGIN SET NEW.new_value=NEW.new_value+2;
+    SET NEW.payload=NEW.new_value+1; END
+- name: A new MySQL AFTER program binds both row images and its renamed native INSERT destination
+  sql: CREATE TRIGGER row_binding_au AFTER UPDATE ON row_binding_before FOR EACH ROW BEGIN INSERT INTO row_binding_audit(audit_id,before_value,after_value)
+    VALUES(NEW.id,OLD.new_value,NEW.new_value); END
+- name: Cold row programs retain complete updated rows and actual OLD NEW audit values
+  steps:
+  - sql: INSERT INTO row_binding_before(id,new_value,payload) VALUES(1,5,0)
+  - sql: UPDATE row_binding_before SET new_value=11 WHERE id=1
+  - sql: SELECT id,new_value,payload FROM row_binding_before ORDER BY id
+    expect:
+      data:
+      - id: 1
+        new_value: 11
+        payload: 8
+      rows: 1
+  - sql: SELECT audit_id,before_value,after_value FROM row_binding_audit ORDER BY audit_id,after_value
+    expect:
+      data:
+      - audit_id: 1
+        before_value: 7
+        after_value: 11
+      rows: 1
+- name: A table address rename preserves the same native row program inputs
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.row_binding_before',N'row_binding_after',N'OBJECT'
+- name: Compiled row programs consume the renamed table without changing their source
+  steps:
+  - sql: INSERT INTO row_binding_after(id,new_value,payload) VALUES(2,13,0)
+  - sql: UPDATE row_binding_after SET new_value=19 WHERE id=2
+  - sql: SELECT id,new_value,payload FROM row_binding_after ORDER BY id
+    expect:
+      data:
+      - id: 1
+        new_value: 11
+        payload: 8
+      - id: 2
+        new_value: 19
+        payload: 16
+      rows: 2
+  - sql: SELECT audit_id,before_value,after_value FROM row_binding_audit ORDER BY audit_id,after_value
+    expect:
+      data:
+      - audit_id: 1
+        before_value: 7
+        after_value: 11
+      - audit_id: 2
+        before_value: 15
+        after_value: 19
+      rows: 2
+- name: Reload language-owned row programs using actual native input declarations
+  action: restart
+- name: Recovered row programs retain values through both column and table address changes
+  steps:
+  - sql: INSERT INTO row_binding_after(id,new_value,payload) VALUES(3,23,0)
+  - sql: UPDATE row_binding_after SET new_value=29 WHERE id=3
+  - sql: SELECT id,new_value,payload FROM row_binding_after ORDER BY id
+    expect:
+      data:
+      - id: 1
+        new_value: 11
+        payload: 8
+      - id: 2
+        new_value: 19
+        payload: 16
+      - id: 3
+        new_value: 29
+        payload: 26
+      rows: 3
+  - sql: SELECT audit_id,before_value,after_value FROM row_binding_audit ORDER BY audit_id,after_value
+    expect:
+      data:
+      - audit_id: 1
+        before_value: 7
+        after_value: 11
+      - audit_id: 2
+        before_value: 15
+        after_value: 19
+      - audit_id: 3
+        before_value: 25
+        after_value: 29
+      rows: 3
+cleanup:
+- sql: DROP TABLE IF EXISTS row_binding_after
+- sql: DROP TABLE IF EXISTS row_binding_before
+- sql: DROP TABLE IF EXISTS row_binding_audit

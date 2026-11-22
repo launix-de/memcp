@@ -433,12 +433,15 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 	/* (get_column "OLD" _ col _) -> (get_assoc OLD col) */
 	/* (get_column nil _ col _) -> (get_assoc NEW col) for unqualified columns in trigger context */
 	/* ('session var) stays a normal session-function call in trigger scope */
-	(define transform_trigger_expr (lambda (expr) (match expr
-		'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-		'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-		'('get_column nil _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+	(define transform_trigger_expr (lambda (expr columns) (match expr
+		'('get_column "NEW" _ col column_ic) (list (symbol "get_assoc") (symbol "NEW")
+			(sql_column_storage_name (sql_bound_column columns col column_ic)))
+		'('get_column "OLD" _ col column_ic) (list (symbol "get_assoc") (symbol "OLD")
+			(sql_column_storage_name (sql_bound_column columns col column_ic)))
+		'('get_column nil _ col column_ic) (list (symbol "get_assoc") (symbol "NEW")
+			(sql_column_storage_name (sql_bound_column columns col column_ic)))
 		'('session var) (list (symbol "session") var)
-		'('session var value) (list (symbol "session") var (transform_trigger_expr value))
+		'('session var value) (list (symbol "session") var (transform_trigger_expr value columns))
 
 		(cons head tail) (if (or (equal?? head "inner_select") (equal?? head (quote inner_select)))
 			/* scalar subselect in trigger: compile via build_queryplan_term.
@@ -447,8 +450,10 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 				/* Transform NEW/OLD refs in the subselect before passing to query planner.
 				Use a shallow transform that does NOT recurse into nested inner_selects. */
 				(define transform_new_old_shallow (lambda (e) (match e
-					'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-					'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+					'('get_column "NEW" _ col column_ic) (list (symbol "get_assoc") (symbol "NEW")
+						(sql_column_storage_name (sql_bound_column columns col column_ic)))
+					'('get_column "OLD" _ col column_ic) (list (symbol "get_assoc") (symbol "OLD")
+						(sql_column_storage_name (sql_bound_column columns col column_ic)))
 					(cons h t) (cons (transform_new_old_shallow h) (map t transform_new_old_shallow))
 					e)))
 				(define transformed_subquery (match subquery '(s tables fields condition group having order limit offset)
@@ -473,17 +478,18 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 				(equal?? head "inner_select_exists") (equal?? head (quote inner_select_exists)))
 				/* IN/EXISTS subselects: compile via build_queryplan_term */
 				expr /* TODO: implement IN/EXISTS in trigger context */
-				(cons (transform_trigger_expr head) (map tail transform_trigger_expr))))
+				(cons (transform_trigger_expr head columns) (map tail (lambda (child) (transform_trigger_expr child columns))))))
 		expr
 	)))
 
 	/* helper function to build nested set_assoc calls at compile time */
 	/* (build_trigger_sets NEW ((col1 expr1) (col2 expr2))) -> (set_assoc (set_assoc NEW "col1" expr1) "col2" expr2) */
-	(define build_trigger_sets (lambda (acc assignments)
+	(define build_trigger_sets (lambda (acc assignments columns)
 		(match assignments
 			'() acc
 			(cons assignment rest) (match assignment '(col expr)
-				(build_trigger_sets (list (symbol "set_assoc") acc col (transform_trigger_expr expr)) rest)))))
+				(build_trigger_sets (list (symbol "set_assoc") acc
+					(sql_column_storage_name (sql_bound_column columns col true)) (transform_trigger_expr expr columns)) rest columns)))))
 
 	/* compile_trigger_body: compile parsed trigger body to executable lambda */
 	/* Input: schema (database name for INSERT/UPDATE/DELETE statements) */
@@ -493,7 +499,7 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 	/*   - (list (col1 expr1) (col2 expr2) ...) for SET statements */
 	/* Output: (lambda (OLD NEW session tx) ...) that can be applied by ExecuteTriggers */
 	/* Uses set_assoc approach: (set changed_rows (set_assoc changed_rows key value)) */
-	(define compile_trigger_body (lambda (schema timing body) (begin
+	(define compile_trigger_body (lambda (schema timing body columns) (begin
 		(define params (list (symbol "OLD") (symbol "NEW") (symbol "session") (symbol "tx")))
 		(define is_after (or (equal? timing "after_insert") (equal? timing "after_update") (equal? timing "after_delete")))
 		(define changed_rows_sym (symbol "changed_rows"))
@@ -503,10 +509,12 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 		sequential changed_rows reads and is deliberately not adapted here. */
 		(define mark_after_row_inputs (lambda (expression) (match expression
 			((symbol quote) _datum) expression
-			((symbol get_column) "NEW" _column_ic column _name_ic)
-			(list relational_iteration_parameter (list 'get_assoc 'NEW column))
-			((symbol get_column) "OLD" _column_ic column _name_ic)
-			(list relational_iteration_parameter (list 'get_assoc 'OLD column))
+			((symbol get_column) "NEW" _column_ic column name_ic)
+			(list relational_iteration_parameter (list 'get_assoc 'NEW
+				(sql_column_storage_name (sql_bound_column columns column name_ic))))
+			((symbol get_column) "OLD" _column_ic column name_ic)
+			(list relational_iteration_parameter (list 'get_assoc 'OLD
+				(sql_column_storage_name (sql_bound_column columns column name_ic))))
 			(cons head tail) (cons (mark_after_row_inputs head) (map tail mark_after_row_inputs))
 			_ expression)))
 		(define body (if is_after (mark_after_row_inputs body) body))
@@ -516,7 +524,8 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 		(define compile_set_assignments (lambda (assignments)
 			(map assignments (lambda (a) (match a '(col expr)
 				(list (symbol "set") changed_rows_sym
-					(list (symbol "set_assoc") changed_rows_sym col (transform_trigger_expr expr))))))))
+					(list (symbol "set_assoc") changed_rows_sym
+						(sql_column_storage_name (sql_bound_column columns col true)) (transform_trigger_expr expr columns))))))))
 
 		/* Helper to compile a single statement */
 		/* For BEFORE triggers with SET: returns (set changed_rows ...) statements */
@@ -552,18 +561,19 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 									(cons '!begin valid_else)
 									(if (> (count valid_else) 0) (car valid_else) nil)))))
 						/* Return as single-element list to be flattened by caller */
-						(list (list (symbol "if") (transform_trigger_expr condition) then_body else_body)))
+						(list (list (symbol "if") (transform_trigger_expr condition columns) then_body else_body)))
 
 					/* INSERT INTO table - stmt is (!insert tbl cols vals ignore) */
 					'!insert
 					(begin
 						(define tbl (car (cdr stmt)))
-						(define cols (car (cdr (cdr stmt))))
+						(define cols (sql_storage_column_names
+							(sql_write_column_declarations schema tbl planning_session tx) (car (cdr (cdr stmt))) true))
 						(define vals (car (cdr (cdr (cdr stmt)))))
 						(define ignore (car (cdr (cdr (cdr (cdr stmt))))))
 						(list (physical_insert_producer (list (symbol "insert") (list (symbol "table") schema false tbl false (symbol "tx"))
 							(cons (symbol "list") cols)
-							(cons (symbol "list") (map vals (lambda (row) (cons (symbol "list") (map row transform_trigger_expr)))))
+							(cons (symbol "list") (map vals (lambda (row) (cons (symbol "list") (map row (lambda (value) (transform_trigger_expr value columns)))))))
 							(list (symbol "list")) (if ignore (list (symbol "lambda") '() 0) nil) false nil (symbol "tx")))))
 
 					/* INSERT INTO tbl (cols) <full SELECT> - stmt is (!insert_select tbl cols inner_select ignore) */
@@ -571,15 +581,16 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 					'!insert_select
 					(begin
 						(define tbl (car (cdr stmt)))
-						(define cols (car (cdr (cdr stmt))))
+						(define cols (sql_storage_column_names
+							(sql_write_column_declarations schema tbl planning_session tx) (car (cdr (cdr stmt))) true))
 						(define inner (car (cdr (cdr (cdr stmt)))))
 						(define ignore (car (cdr (cdr (cdr (cdr stmt))))))
 						/* Transform: replace NEW/OLD column refs with get_assoc for trigger context */
 						(define transform_new_old (lambda (expr) (match expr
-							((symbol get_column) "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-							((quote get_column) "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-							((symbol get_column) "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-							((quote get_column) "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+							((symbol get_column) "NEW" _ col column_ic) (list (symbol "get_assoc") (symbol "NEW") (sql_column_storage_name (sql_bound_column columns col column_ic)))
+							((quote get_column) "NEW" _ col column_ic) (list (symbol "get_assoc") (symbol "NEW") (sql_column_storage_name (sql_bound_column columns col column_ic)))
+							((symbol get_column) "OLD" _ col column_ic) (list (symbol "get_assoc") (symbol "OLD") (sql_column_storage_name (sql_bound_column columns col column_ic)))
+							((quote get_column) "OLD" _ col column_ic) (list (symbol "get_assoc") (symbol "OLD") (sql_column_storage_name (sql_bound_column columns col column_ic)))
 							(cons h t) (cons (transform_new_old h) (map t transform_new_old))
 							expr)))
 						(define inner_t (transform_new_old inner))
@@ -623,12 +634,16 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 						(define where_raw (car (cdr (cdr (cdr stmt)))))
 						/* Transform NEW/OLD -> get_assoc */
 						(define fix_expr (lambda (expr) (match expr
-							'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-							'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+							'('get_column "NEW" _ col column_ic) (list (symbol "get_assoc") (symbol "NEW")
+								(sql_column_storage_name (sql_bound_column columns col column_ic)))
+							'('get_column "OLD" _ col column_ic) (list (symbol "get_assoc") (symbol "OLD")
+								(sql_column_storage_name (sql_bound_column columns col column_ic)))
 							(cons h t) (cons (fix_expr h) (map t fix_expr))
 							expr)))
 						(define t_cond (if (nil? where_raw) true (fix_expr where_raw)))
-						(define t_cols (map_assoc assignments (lambda (col expr) (fix_expr expr))))
+						(define t_cols (sql_canonical_assignments
+							(sql_write_column_declarations schema tbl planning_session tx)
+							(map_assoc assignments (lambda (col expr) (fix_expr expr))) true))
 						(list (build_dml_plan tbl nil
 							(make_query_block schema (list (list tbl schema tbl false nil nil)) t_cols t_cond
 								nil nil nil nil nil nil nil nil) planning_session tx)))
@@ -639,8 +654,10 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 						(define tbl (car (cdr stmt)))
 						(define where_raw (car (cdr (cdr stmt))))
 						(define fix_expr (lambda (expr) (match expr
-							'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-							'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+							'('get_column "NEW" _ col column_ic) (list (symbol "get_assoc") (symbol "NEW")
+								(sql_column_storage_name (sql_bound_column columns col column_ic)))
+							'('get_column "OLD" _ col column_ic) (list (symbol "get_assoc") (symbol "OLD")
+								(sql_column_storage_name (sql_bound_column columns col column_ic)))
 							(cons h t) (cons (fix_expr h) (map t fix_expr))
 							expr)))
 						(define t_cond (if (nil? where_raw) true (fix_expr where_raw)))
@@ -656,8 +673,10 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 						(define raw_defs (car (cdr (cdr stmt))))
 						(define where_raw (car (cdr (cdr (cdr stmt)))))
 						(define transform_dml (lambda (expr) (match expr
-							'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-							'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+							'('get_column "NEW" _ col column_ic) (list (symbol "get_assoc") (symbol "NEW")
+								(sql_column_storage_name (sql_bound_column columns col column_ic)))
+							'('get_column "OLD" _ col column_ic) (list (symbol "get_assoc") (symbol "OLD")
+								(sql_column_storage_name (sql_bound_column columns col column_ic)))
 							(cons head tail) (cons (transform_dml head) (map tail transform_dml))
 							expr
 						)))
@@ -680,8 +699,10 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 						(define assignments_raw (merge (car (cdr (cdr stmt)))))
 						(define where_raw (car (cdr (cdr (cdr stmt)))))
 						(define transform_dml (lambda (expr) (match expr
-							'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-							'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+							'('get_column "NEW" _ col column_ic) (list (symbol "get_assoc") (symbol "NEW")
+								(sql_column_storage_name (sql_bound_column columns col column_ic)))
+							'('get_column "OLD" _ col column_ic) (list (symbol "get_assoc") (symbol "OLD")
+								(sql_column_storage_name (sql_bound_column columns col column_ic)))
 							(cons head tail) (cons (transform_dml head) (map tail transform_dml))
 							expr
 						)))
@@ -690,7 +711,9 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 						(define target_alias (match target_def '(id _ _ _ _ _declarations) id))
 						(define target_tbl (match target_def '(_ _ tbl _ _ _declarations) tbl))
 						(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
-						(define t_cols (map_assoc assignments_raw (lambda (col expr) (transform_dml expr))))
+						(define t_cols (sql_canonical_assignments
+							(sql_write_column_declarations (source_schema target_def) target_tbl planning_session tx)
+							(map_assoc assignments_raw (lambda (col expr) (transform_dml expr))) true))
 						(list (build_dml_plan target_tbl target_alias
 							(make_query_block schema all_defs t_cols t_where
 								nil nil nil nil nil nil nil nil) planning_session tx)))
@@ -736,7 +759,7 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 				/* Validate: SET NEW is not allowed in AFTER triggers */
 				(if is_after
 					(error "SET NEW is not allowed in AFTER triggers - the row has already been written")
-					(list (symbol "lambda") params (build_trigger_sets (symbol "NEW") assignments)))
+					(list (symbol "lambda") params (build_trigger_sets (symbol "NEW") assignments columns)))
 			)
 			/* Unknown body type - return no-op */
 			_ (list (symbol "lambda") params nil)
@@ -2445,15 +2468,27 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 				/* MySQL validates trigger syntax now, but resolves referenced
 				relations when it fires. Retry unresolved names through the registered
 				source compiler; retain the error if the schema is still invalid. */
-				(define compiled (try (lambda () (compile_trigger_body schema timing (car (cdr body))))
+				(define row_columns (if (if planning_session (planning_session "__compile_trigger_source") false)
+					(begin
+						(define columns (planning_session "__compile_trigger_columns"))
+						(if (list? columns) columns (error "SQL trigger compiler requires bound row declarations")))
+					(sql_write_column_declarations schema tbl planning_session tx)))
+				/* Only inert selected name bindings may enter a deferred source plan;
+				other native ANY/default metadata is not a row lookup capability. */
+				(define row_columns (map row_columns (lambda (column)
+					(list "Field" (sql_declaration_data (column "Field")) "StorageField"
+						(sql_declaration_data (sql_column_storage_name column))))))
+				(define compiled (try (lambda () (compile_trigger_body schema timing (car (cdr body)) row_columns))
 					(lambda (err) (if (and
 						(not (and planning_session (planning_session "__compile_trigger_source")))
 						(or (equal? err "table does not exist")
 							(match err '("sql-binding-error" kind _message)
 								(has? '("missing-relation" "missing-column") kind) _ false)))
 						/* The source compiler returns (quote (deferred_trigger plan)). */
-						'('eval '('nth '('nth '('sql_trigger_source_compile (car body)
-							'('list "schema" schema "table" tbl "name" name "timing" timing)) 1) 1))
+						(list 'eval (list 'nth (list 'nth
+							(list 'sql_trigger_source_compile (car body)
+								(list 'list "schema" schema "table" tbl "name" name "timing" timing
+									"columns" (list 'quote row_columns))) 1) 1))
 						(error err)))))
 				(list '!begin (list 'createtrigger (list 'table schema false tbl false (quote tx)) name timing (car body) "sql" (list 'quote (list 'deferred_trigger compiled)) true) 0)
 		))
@@ -2505,6 +2540,12 @@ different frontend (for example RDF) is used. */
 		(sql_trigger_quote_identifier (context "table")) " FOR EACH ROW " source))
 	(define compile_session (newsession))
 	(compile_session "__compile_trigger_source" true)
+	/* Current native compilers supply their already selected declarations.
+	Legacy explicit source-compiler calls keep their ordinary visible-name
+	lookup; they never receive a physical catalog-key fallback. */
+	(compile_session "__compile_trigger_columns"
+		(if (list? (context "columns")) (context "columns")
+			(get_schema (context "schema") (context "table") nil)))
 	(define source_policy (lambda (schema table write)
 		(if (or (not (context "schema_only")) (equal? schema (context "schema"))) true
 			(error "replicated trigger may only access its own schema"))))
