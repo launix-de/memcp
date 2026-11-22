@@ -256,3 +256,214 @@ test_cases:
       found: '100a '
     - seq: 5
       found: 100A
+
+- name: sql LIMIT 1 mixed payload keeps repeated and nullable caller values
+  syntax: sql
+  sql: SELECT q.seq,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
+    c WHERE c.id=q.id LIMIT 1) AS found FROM projection_payload_inputs q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: null
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: 30
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: sql LIMIT 1 sibling presence output remains an explicit payload coordinate
+  syntax: sql
+  sql: SELECT q.seq,(SELECT CASE WHEN q.present THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=c.id
+    AND z.value=q.token) END FROM projection_values c WHERE c.id=q.id LIMIT 1) AS found FROM (SELECT i.seq,i.id,i.token,EXISTS(SELECT
+    1 FROM projection_values a WHERE a.id=1) AS present FROM projection_payload_inputs i) q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: true
+    - seq: 2
+      found: true
+    - seq: 3
+      found: true
+    - seq: 4
+      found: true
+    - seq: 5
+      found: true
+    - seq: 6
+      found: true
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: sql Ordered LIMIT 1 range keeps projected caller values outside its bound
+  syntax: sql
+  sql: SELECT q.seq,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
+    c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS found FROM projection_payload_inputs q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: null
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: 30
+    - seq: 7
+      found: 60
+    - seq: 8
+      found: null
+- name: psql LIMIT 1 mixed payload keeps repeated and nullable caller values
+  syntax: psql
+  sql: SELECT q.seq,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
+    c WHERE c.id=q.id LIMIT 1) AS found FROM projection_payload_inputs q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: null
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: 30
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: psql LIMIT 1 sibling presence output remains an explicit payload coordinate
+  syntax: psql
+  sql: SELECT q.seq,(SELECT CASE WHEN q.present THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=c.id
+    AND z.value=q.token) END FROM projection_values c WHERE c.id=q.id LIMIT 1) AS found FROM (SELECT i.seq,i.id,i.token,EXISTS(SELECT
+    1 FROM projection_values a WHERE a.id=1) AS present FROM projection_payload_inputs i) q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: true
+    - seq: 2
+      found: true
+    - seq: 3
+      found: true
+    - seq: 4
+      found: true
+    - seq: 5
+      found: true
+    - seq: 6
+      found: true
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: psql Ordered LIMIT 1 range keeps projected caller values outside its bound
+  syntax: psql
+  sql: SELECT q.seq,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
+    c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS found FROM projection_payload_inputs q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: null
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: 30
+    - seq: 7
+      found: 60
+    - seq: 8
+      found: null
+- name: tsql LIMIT 1 mixed payload keeps repeated and nullable caller values
+  syntax: tsql
+  sql: SELECT q.seq,(SELECT TOP(1) CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
+    c WHERE c.id=q.id) AS found FROM projection_payload_inputs q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: null
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: 30
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: tsql LIMIT 1 sibling presence output remains an explicit payload coordinate
+  syntax: tsql
+  sql: SELECT q.seq,(SELECT TOP(1) CASE WHEN q.present THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE
+    z.id=c.id AND z.value=q.token) END FROM projection_values c WHERE c.id=q.id) AS found FROM (SELECT i.seq,i.id,i.token,EXISTS(SELECT
+    1 FROM projection_values a WHERE a.id=1) AS present FROM projection_payload_inputs i) q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: true
+    - seq: 2
+      found: true
+    - seq: 3
+      found: true
+    - seq: 4
+      found: true
+    - seq: 5
+      found: true
+    - seq: 6
+      found: true
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: tsql Ordered LIMIT 1 range keeps projected caller values outside its bound
+  syntax: tsql
+  sql: SELECT q.seq,(SELECT TOP(1) CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
+    c WHERE c.id<=q.id ORDER BY c.id DESC) AS found FROM projection_payload_inputs q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: null
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: 30
+    - seq: 7
+      found: 60
+    - seq: 8
+      found: null

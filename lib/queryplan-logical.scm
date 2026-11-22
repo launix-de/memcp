@@ -4528,9 +4528,24 @@ row producer publishes every real group; only the outer scalar stage owns
 		with an inner equality key. Keep that coordinate in the complete D
 		seen by enclosing dependent joins; the range point domain below
 		continues to exclude the consumed bound. */
-		(define residual_refs (qassoc_get analysis (quote residual_outer_refs) '()))
-		(define lookup_pairs (domain_correlation_pairs_with_outer_refs
-			raw_lookup_pairs residual_refs))
+		(define predicate_refs (qassoc_get analysis (quote residual_outer_refs) '()))
+		(define predicate_pairs (domain_correlation_pairs_with_outer_refs
+			raw_lookup_pairs predicate_refs))
+		(define values_for_inner (map value_exprs (lambda (value_expr)
+			(canonical_column_expr_for_alias inner_default
+				(decorrelate_expr_with_pairs inner_default predicate_pairs value_expr)))))
+		(define outer_values (map values_for_inner (lambda (value_expr)
+			(scalar_projection_outer_only? local_sources outer_sources value_expr))))
+		(define values_for_stage (mapIndex values_for_inner (lambda (i value_expr)
+			(if (nth outer_values i) 1 value_expr))))
+		/* A LIMIT 1 payload has the same complete caller domain as an unbounded
+		scalar projection. Outer-only values remain lifted after row existence;
+		any caller value still evaluated inside belongs to D, including a
+		sibling stage output which predicate analysis does not consume. */
+		(define payload_refs (btw2025_terms_outer_column_refs
+			values_for_stage (qb_sources inner) outer_sources))
+		(define residual_refs (merge_unique (list predicate_refs payload_refs)))
+		(define lookup_pairs (domain_correlation_pairs_with_outer_refs predicate_pairs payload_refs))
 		(define range_lookup_pairs (if (empty_list? range_domains)
 			raw_lookup_pairs candidate_range_lookup_pairs))
 		(define range_invariant_terms
@@ -4551,13 +4566,6 @@ row producer publishes every real group; only the outer scalar stage owns
 		(define range_outer_domain (correlation_domain range_lookup_pairs))
 		(define range_lookup_keys (correlation_lookup_keys range_lookup_pairs))
 		(define condition (combine_where_terms local_terms true))
-		(define values_for_inner (map value_exprs (lambda (value_expr)
-			(canonical_column_expr_for_alias inner_default
-				(decorrelate_expr_with_pairs inner_default lookup_pairs value_expr)))))
-		(define outer_values (map values_for_inner (lambda (value_expr)
-			(scalar_projection_outer_only? local_sources outer_sources value_expr))))
-		(define values_for_stage (mapIndex values_for_inner (lambda (i value_expr)
-			(if (nth outer_values i) 1 value_expr))))
 		(define order_for_inner (map (coalesceNil (qb_order inner) '()) (lambda (item)
 			(match item '(expr dir) (list (canonical_column_expr_for_alias inner_default
 				(decorrelate_expr_with_pairs inner_default lookup_pairs expr)) dir)))))
