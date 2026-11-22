@@ -135,3 +135,141 @@ test_cases:
 - name: Protected referenced input and its dependent row remain valid after all replacement decisions
   sql: SELECT input.id,input.value,dependent.input_id FROM replacement_input AS input INNER JOIN replacement_dependencies AS dependent ON dependent.input_id=input.id
   expect: {rows: 1,data: [{id: 2,value: 20,input_id: 2}]}
+
+- name: A late original-transaction replacement captures OLD without selecting any DELETE row program
+  setup:
+  - sql: DROP TABLE IF EXISTS replacement_late_target
+  - sql: DROP TABLE IF EXISTS replacement_late_prior
+  - sql: DROP TABLE IF EXISTS replacement_late_audit
+  - sql: CREATE TABLE replacement_late_target(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+  - sql: INSERT replacement_late_target VALUES(1,10),(2,20)
+  - sql: CREATE TABLE replacement_late_prior(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+  - sql: INSERT replacement_late_prior VALUES(1,10)
+  - sql: CREATE TABLE replacement_late_audit(id INT NOT NULL,value INT NOT NULL)
+  cleanup:
+  - sql: DROP TRIGGER IF EXISTS replacement_late_delete
+  - sql: DROP TABLE IF EXISTS replacement_late_target
+  - sql: DROP TABLE IF EXISTS replacement_late_prior
+  - sql: DROP TABLE IF EXISTS replacement_late_audit
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE replacement_late_prior SET value=11 WHERE id=1
+    - connection: owner
+      sql: CREATE TRIGGER replacement_late_delete ON replacement_late_target INSTEAD OF DELETE AS INSERT replacement_late_audit SELECT id,value
+        FROM deleted
+    - connection: owner
+      sql: DELETE FROM replacement_late_target WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM replacement_late_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: SELECT id,value FROM replacement_late_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+    - connection: owner
+      sql: SELECT id,value FROM replacement_late_prior
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - connection: observer
+      sql: SELECT id,value FROM replacement_late_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: observer
+      sql: SELECT id,value FROM replacement_late_audit ORDER BY id
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: SELECT id,value FROM replacement_late_prior
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM replacement_late_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: observer
+      sql: SELECT id,value FROM replacement_late_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+    - connection: observer
+      sql: SELECT id,value FROM replacement_late_prior
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: DELETE FROM replacement_late_target WHERE id=2
+    - connection: owner
+      sql: SELECT id,value FROM replacement_late_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: SELECT id,value FROM replacement_late_audit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM replacement_late_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: observer
+      sql: SELECT id,value FROM replacement_late_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10

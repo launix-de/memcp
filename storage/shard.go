@@ -2193,10 +2193,12 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 		} else {
 			// delete
 			var eventChunk nativeMutationEventChunk
+			var eventDeletedRow dataset
 			var triggerDeletedRow dataset // for BEFORE/AFTER DELETE trigger
 
-			// capture row data for triggers before deletion (outside lock for BEFORE trigger)
-			if withTrigger && hasDeleteTriggers {
+			// Statement transitions need the complete OLD tuple independently of
+			// row programs. Read it under the same source owner before deletion.
+			if eventWriter != nil || withTrigger && hasDeleteTriggers {
 				readDeletedRow := func() dataset {
 					row := make(dataset, len(declarations))
 					for i, col := range declarations {
@@ -2241,13 +2243,18 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				}
 
 				if alreadyLocked {
-					triggerDeletedRow = readDeletedRow()
+					eventDeletedRow = readDeletedRow()
 				} else {
 					t.mu.RLock()
-					triggerDeletedRow = readDeletedRow()
+					eventDeletedRow = readDeletedRow()
 					t.mu.RUnlock()
 				}
+				if withTrigger && hasDeleteTriggers {
+					triggerDeletedRow = eventDeletedRow
+				}
+			}
 
+			if triggerDeletedRow != nil {
 				// Execute BEFORE DELETE triggers (can abort delete by returning false)
 				beforeDeleteOk := true
 				if alreadyLocked {
@@ -2288,7 +2295,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						maintenanceNext = t.loadNext()
 					}
 					if eventWriter != nil {
-						eventChunk = eventWriter.capture(nativeMutationDelete, triggerDeletedRow, nil)
+						eventChunk = eventWriter.capture(nativeMutationDelete, eventDeletedRow, nil)
 					}
 					result = true
 				}()
@@ -2313,7 +2320,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					}
 					maintenanceNext = t.nextForMaintenanceLocked(&idx)
 					if eventWriter != nil {
-						eventChunk = eventWriter.capture(nativeMutationDelete, triggerDeletedRow, nil)
+						eventChunk = eventWriter.capture(nativeMutationDelete, eventDeletedRow, nil)
 					}
 					result = true
 				}()
