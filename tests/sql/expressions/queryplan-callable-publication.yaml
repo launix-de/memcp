@@ -471,7 +471,7 @@ test_cases:
           (answer "rows" '())
           (sql_execute_formula input nil
             (cached_parse cache "psql" (list parse_psql) "memcp-tests"
-              query nil "root" input true nil)
+              query nil "root" input false nil)
             (lambda (row) (answer "rows"
               (append (answer "rows") (list (row "id") (row "payload")))))
             (lambda (_fields) true))
@@ -598,7 +598,7 @@ test_cases:
           (answer "rows" '())
           (sql_execute_formula input nil
             (cached_parse cache "psql" (list parse_psql) "memcp-tests"
-              query nil "root" input true nil)
+              query nil "root" input false nil)
             (lambda (row) (answer "rows"
               (append (answer "rows") (list (row "id") (row "payload")))))
             (lambda (_fields) true))
