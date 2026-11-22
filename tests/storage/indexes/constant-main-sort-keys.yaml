@@ -23,7 +23,7 @@ test_cases:
       (define run (lambda (query) (begin
         (define answer (newsession)) (answer "rows" (list))
         (sql_execute_formula input nil
-          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" input true nil)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" input true nil)
           (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
         (answer "rows"))))
       (define expected (map (produceN 2000) (lambda (_i) (list "region" "same"))))
@@ -43,7 +43,7 @@ test_cases:
       (define run (lambda (query) (begin
         (define answer (newsession)) (answer "rows" (list))
         (sql_execute_formula input nil
-          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" input true nil)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" input true nil)
           (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
         (answer "rows"))))
       (map (produceN 4) (lambda (_i) (run "SELECT id,region,note,stamp FROM constant_main_sort_keys WHERE region='same' ORDER BY note ASC,stamp DESC,id DESC LIMIT 4"))))
@@ -93,7 +93,7 @@ test_cases:
       (define run (lambda (query) (begin
         (define answer (newsession)) (answer "rows" (list))
         (sql_execute_formula input nil
-          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" input true nil)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" input true nil)
           (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
         (answer "rows"))))
       (map (produceN 4) (lambda (_i) (run "SELECT id,region,note,stamp FROM constant_main_sort_keys ORDER BY region DESC,note DESC,stamp ASC,id ASC LIMIT 4"))))
@@ -143,7 +143,7 @@ test_cases:
       (define run (lambda (query) (begin
         (define answer (newsession)) (answer "rows" (list))
         (sql_execute_formula input nil
-          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" input true nil)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" input true nil)
           (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
         (answer "rows"))))
       (map (produceN 4) (lambda (_i) (run "SELECT id,region,note,stamp FROM constant_main_sort_keys WHERE region='same' ORDER BY note ASC,stamp DESC,id DESC LIMIT 4"))))
@@ -195,7 +195,7 @@ test_cases:
       (define run (lambda (query) (begin
         (define answer (newsession)) (answer "rows" (list))
         (sql_execute_formula input nil
-          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" input true nil)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" input true nil)
           (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
         (answer "rows"))))
       (map (produceN 4) (lambda (_i) (run "SELECT id,region,note,stamp FROM constant_main_sort_keys WHERE region='same' ORDER BY note ASC,stamp DESC,id DESC LIMIT 3 OFFSET 1999"))))
@@ -237,7 +237,7 @@ test_cases:
       (define run (lambda (query) (begin
         (define answer (newsession)) (answer "rows" (list))
         (sql_execute_formula input nil
-          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" input true nil)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" input true nil)
           (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
         (answer "rows"))))
       (map (produceN 4) (lambda (_i) (run "SELECT id,region,note,stamp FROM constant_main_sort_keys WHERE region='other' ORDER BY note ASC,stamp DESC,id DESC"))))
@@ -271,7 +271,7 @@ test_cases:
       (define run (lambda (query) (begin
         (define answer (newsession)) (answer "rows" (list))
         (sql_execute_formula input nil
-          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" input true nil)
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" input true nil)
           (lambda (row) (answer "rows" (append (answer "rows") row))) (lambda args true))
         (answer "rows"))))
       (map (produceN 4) (lambda (_i) (run "SELECT id,region,note,stamp FROM constant_main_sort_keys WHERE region='same' ORDER BY note ASC,stamp DESC,id DESC LIMIT 4"))))
