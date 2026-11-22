@@ -318,7 +318,7 @@ on every concurrent private view declaration under native SERIALIZABLE. Native
 source admission still validates the actual predecessor and replacement owner. */
 (define tsql_require_function_name (lambda (database name kind replace tx) (begin
 	(define existing (if replace (tsql_require_function_kind database name kind tx) nil))
-	(if (or (show (table database false name true tx) "name")
+	(if (or (show (table database false name true tx) "name" tx)
 		(and (nil? existing) (tsql_view_name database name tx)))
 		(tsql_raise_error 2714 (concat "a relation already owns this object name: " name) 1) true)
 	existing)))

@@ -379,15 +379,15 @@ Only consumed name bindings enter the shared plan guards, never catalog epochs. 
 		already carries its exact native identity, which is hidden from that catalog. */
 		(table database false name (not (sql_private_relation? name)) tx))) sql_private_relation?)))
 (define tsql_relation_name (lambda (database name tx)
-	(coalesceNil (show (tsql_native_relation_handle database name tx) "name") (tsql_view_name database name tx) name)))
+	(coalesceNil (show (tsql_native_relation_handle database name tx) "name" tx) (tsql_view_name database name tx) name)))
 (define tsql_table_name (lambda (database name planning_session tx) (begin
 	(if (tsql_legacy_catalog_name? name) (error "system compatibility relations are read only") true)
 	(define resolved (tsql_resolve_relation database name planning_session tx))
 	(define database (car resolved))
 	(define name (cadr resolved))
-	(define canonical (show (tsql_native_relation_handle database name tx) "name"))
+	(define canonical (show (tsql_native_relation_handle database name tx) "name" tx))
 	(planner_record_guard_condition
-		(list (quote equal?) (list (quote show) (list (quote tsql_native_relation_handle) database name (quote tx)) "name") canonical)
+		(list (quote equal?) (list (quote show) (list (quote tsql_native_relation_handle) database name (quote tx)) "name" (quote tx)) canonical)
 		planning_session)
 	(coalesceNil canonical name))))
 (define tsql_create_relation (lambda (database name columns options ifnotexists tx session) (begin
@@ -411,7 +411,7 @@ Only consumed name bindings enter the shared plan guards, never catalog epochs. 
 		(tsql_type_ddl database tx session publish) (publish)))))
 (define tsql_create_view_definition (lambda (tx database name dialect text query mode) (begin
 	(if (tsql_scalar_function_reserved? database name tx) (error "a scalar function already owns this object name: " name) true)
-	(if (show (table database false name true tx) "name") (error "a table already owns this relation name: " name) true)
+	(if (show (table database false name true tx) "name" tx) (error "a table already owns this relation name: " name) true)
 	(define existing (tsql_view_name database name tx))
 	(if (and (nil? existing) (equal? mode "alter")) (error "view does not exist: " name) true)
 	(create_sql_view tx database (coalesceNil existing name) dialect text query
@@ -760,7 +760,7 @@ transaction-bound relation. Resolve all recipes before native publication. */
 				(error "foreign declaration requires an existing native unique target"))
 			(list "foreign" (coalesceNil key (concat name "_" ((car child) "Field") "_fk"))
 				(map child (lambda (column) (column "Field")))
-				(show parent_handle "name") (map parent sql_column_storage_name) update_mode delete_mode))
+				(show parent_handle "name" tx) (map parent sql_column_storage_name) update_mode delete_mode))
 		_ definition))))))
 /* Changing comparison rules preserves existing text values when its declared
 code page is unchanged (national text retains its UTF16 value domain). Native
@@ -2757,7 +2757,7 @@ The current directory/name and column descriptors remain native metadata. */
 (define tsql_identity_mode_live? (lambda (mode tx)
 	(if (nil? mode) false (begin
 		(define handle (cadr mode))
-		(define current (table (car mode) false (show handle "name") false tx))
+		(define current (table (car mode) false (show handle "name" tx) false tx))
 		(if (identical? current handle)
 			(begin (define declaration (find (show handle "columns" tx)
 				(lambda (column) (equal? (sql_column_storage_name column) (nth mode 2))) nil))
@@ -4576,7 +4576,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(define object ((parser '( (? (define owner tsql_identifier) ".")
 			(define name tsql_identifier)) (list (if (or (nil? owner) (equal?? owner "dbo")) database owner) name)) relation))
 		(define object_schema (car object))
-		(define name (coalesceNil (show (table object_schema false (cadr object) true tx) "name") (cadr object)))
+		(define name (coalesceNil (show (table object_schema false (cadr object) true tx) "name" tx) (cadr object)))
 		(if policy (policy object_schema name false) true)
 		(define handle (table object_schema false name false tx))
 		(define declaration (if (nil? handle) nil (tsql_effective_column (show handle "column" column true tx) nil)))
