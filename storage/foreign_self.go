@@ -102,7 +102,11 @@ func supportsSelfForeign(t *table, fk foreignKey) bool {
 			seen[name] = true
 		}
 	}
-	for _, row := range t.Constraints().Slice()[1].Slice() {
+	snapshot := t.catalogVisibleMetadata()
+	if snapshot == nil {
+		return false
+	}
+	for _, row := range snapshot.nativeConstraints().Slice()[1].Slice() {
 		if slices.Equal(selfForeignColumns(foreignMetadataValue(row, "Cols")), fk.Cols2) {
 			return true
 		}
@@ -122,9 +126,13 @@ func requireSelfForeign(tx *TxContext, t *table, id string, childColumns, parent
 	if row.IsNil() {
 		panic("self foreign recipe requires its unambiguous native declaration")
 	}
-	name := t.clusterPublishedName()
+	// The directory retains the native recipe, never its visible SHOW aliases.
+	// Both roles must still resolve to this exact registered generation under
+	// the executing transaction, including after a namespace rename.
+	db := t.schema
+	view := db.catalogView()
 	other := foreignMetadataValue(row, "OtherTable").String()
-	if t.schema.GetTableForTx(name, false, tx) != t || t.schema.GetTableForTx(other, false, tx) != t ||
+	if GetDatabase(db.Name) != db || db.tables.Get(t.Name) != t || db.tables.Get(other) != t || !t.visibleIn(tx, view.version) ||
 		foreignMetadataValue(row, "Role").String() != "referencing" ||
 		!slices.Equal(selfForeignColumns(foreignMetadataValue(row, "LocalColumns")), childColumns) ||
 		!slices.Equal(selfForeignColumns(foreignMetadataValue(row, "OtherColumns")), parentColumns) ||

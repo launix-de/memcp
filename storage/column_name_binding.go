@@ -187,7 +187,9 @@ func (t *table) projectConstraintNames(snapshot *tableShowColumnsSnapshot, views
 		metadata.constraints = scm.NewSlice(projected)
 		bytes += uint(cap(projected)) * uint(unsafe.Sizeof(scm.Scmer{}))
 	}
-	metadata.foreignByID = buildForeignMetadataDirectory(metadata.constraints)
+	// Native row guards consume physical recipe coordinates. Visible aliases
+	// belong only to the descriptive constraints/declarations packet.
+	metadata.foreignByID = snapshot.metadata.foreignByID
 	metadata.declarations = buildTableDeclarations(metadata.columnRows, metadata.constraints)
 	bytes += uint(unsafe.Sizeof(result)) + uint(unsafe.Sizeof(metadata)) + uint(cap(metadata.declarations.Slice()))*uint(unsafe.Sizeof(scm.Scmer{}))
 	return &result, bytes
