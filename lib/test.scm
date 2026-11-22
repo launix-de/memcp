@@ -3326,7 +3326,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* once with custom error message */
 	(define p9 (newpromise))
 	(p9 "once" 1)
-	(assert (equal? (try (lambda () (begin (p9 "once" 2 "scalar subselect returned more than one row") false)) (lambda (e) (equal? e "scalar subselect returned more than one row"))) true) true "once custom error message")
+	(assert (equal? (try (lambda () (begin (p9 "once" 2 "scalar subselect returned more than one row") false)) (lambda (e) (equal? (failure_value e) "scalar subselect returned more than one row"))) true) true "once custom error message")
 	/* promise interface error handling */
 	(define p10 (newpromise))
 	(assert (equal? (try (lambda () (p10)) (lambda (e) "caught")) "caught") true "promise: 0 args panics")
