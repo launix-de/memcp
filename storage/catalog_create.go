@@ -37,7 +37,7 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 	// We still confirm under schemalock after the optimistic probe so the
 	// result stays race-free under concurrent creators.
 	if ifnotexists {
-		if existing := db.tables.Get(tblName); existing != nil {
+		if existing := db.GetTableForTx(tblName, false, tx); existing != nil {
 			if !existing.Ephemeral && (existing.OnInit.Load() != nil || existing.onInitComplete.Load()) && scmerToTxContext(currentTx).retainQueryTable(existing) {
 				// This also reruns persisted oninit for data-empty MEMORY/CACHE
 				// tables after restart. The local barrier affects no other table.
@@ -233,6 +233,11 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 	newTable := new(table)
 	newTable.schema = db
 	newTable.Name = tblName
+	if db.tables.Get(tblName) != nil {
+		newTable.Name = "native-table:" + uuid.NewString()
+		logical := tblName
+		newTable.publishedName.Store(&logical)
+	}
 	newTable.RuntimeIdentity = uuid.NewString()
 	newTable.DroppedColumns = make(map[string]bool)
 	published := false
@@ -303,11 +308,19 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 			if len(def) > 6 {
 				deletemode = getForeignKeyMode(def[6])
 			}
+			parentName := scm.String(def[3])
+			if def[3].IsSlice() {
+				parentName = db.resolveNativeAddress(def[3], tx).Name
+			} else if parent := db.GetTableForTx(parentName, nameIgnoreCase, tx); parent != nil {
+				parentName = parent.Name
+			} else if db.tables.Get(parentName) != nil {
+				panic("foreign target is not present in the visible native namespace")
+			}
 			newTable.Foreign = append(newTable.Foreign, ownForeignPayload(foreignKey{
 				Id:         scm.String(def[1]),
 				Tbl1:       newTable.Name,
 				Cols1:      cols1,
-				Tbl2:       scm.String(def[3]),
+				Tbl2:       parentName,
 				Cols2:      cols2,
 				Updatemode: updatemode,
 				Deletemode: deletemode,
@@ -354,19 +367,7 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 				db.schemalock.Unlock()
 			}
 		}()
-		existing := db.tables.Get(tblName)
-		if nameIgnoreCase {
-			key := scm.CaseFoldKey(tblName)
-			existing = nil
-			for _, candidate := range db.tables.GetAll() {
-				if scm.CaseFoldKey(candidate.Name) == key {
-					if existing != nil && existing != candidate {
-						panic("ambiguous table name: " + tblName)
-					}
-					existing = candidate
-				}
-			}
-		}
+		existing := db.namespaceOccupant(tx, tblName, nameIgnoreCase, nil)
 		resolved = true
 		return existing
 	}()
@@ -375,7 +376,7 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 			db.schemalock.Unlock()
 			panic("scoped schema declaration requires a fresh physical generation")
 		}
-		if !existing.visibleIn(tx, db.catalogView().version) {
+		if !existing.visibleIn(tx, db.catalogView().version) || (existing.visibleNameAt(tx, db.catalogView()) != tblName && !(nameIgnoreCase && scm.CaseFoldKey(existing.visibleNameAt(tx, db.catalogView())) == scm.CaseFoldKey(tblName))) {
 			db.schemalock.Unlock()
 			panic("table name is reserved by another native transaction")
 		}
@@ -471,7 +472,15 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 			}
 		}
 	}
-	if prev := db.tables.Set(tblName, newTable); prev != nil {
+	if db.tables.Get(newTable.Name) != nil {
+		newTable.Name = "native-table:" + uuid.NewString()
+		logical := tblName
+		newTable.publishedName.Store(&logical)
+		for i := range newTable.Foreign {
+			newTable.Foreign[i].Tbl1 = newTable.Name
+		}
+	}
+	if prev := db.tables.Set(newTable.Name, newTable); prev != nil {
 		if staged || scopedChange != nil {
 			createTableTriggerMu.Unlock()
 		}
@@ -498,7 +507,7 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 
 	if !staged {
 		for _, fk := range newTable.Foreign {
-			if t2 := newTable.schema.GetTable(fk.Tbl2); t2 != nil {
+			if t2 := newTable.schema.tables.Get(fk.Tbl2); t2 != nil {
 				t2.Foreign = append(t2.Foreign, sharedForeignMirror(fk))
 				installFKTriggers(newTable.schema, newTable, t2, fk)
 				t2.publishShowColumnsSnapshot(true)

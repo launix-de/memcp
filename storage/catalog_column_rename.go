@@ -26,6 +26,11 @@ type catalogColumnRename struct {
 }
 
 func (record *catalogDecisionRecord) hasNameDeclarationActions() bool {
+	for _, t := range record.Tables {
+		if t != nil && (t.rawVisibleName() != t.Name || t.hasBoundColumnNames()) {
+			return true
+		}
+	}
 	for _, d := range record.ColumnAppends {
 		if d.NameBinding != nil {
 			return true
@@ -192,4 +197,13 @@ func (changes *publicCatalogChanges) stageColumnRename(tx *TxContext, t *table, 
 	changes.publishViews(history, views)
 	accepted = true
 	return true
+}
+
+func (t *table) hasBoundColumnNames() bool {
+	for _, c := range t.Columns {
+		if c.visibleName != "" {
+			return true
+		}
+	}
+	return false
 }

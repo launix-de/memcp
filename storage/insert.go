@@ -642,7 +642,7 @@ func (s *storageShard) mutationGuard(tx *TxContext) *uniqueWriteGuard {
 
 func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext, input *nativeMutationInput, initializedColumns *nativeColumnInitialInput) (*uniqueWriteGuard, uint32, bool) {
 	keys := mutationUniqueKeys(s.t, input)
-	if activeReplication(s.t.schema) == nil && ((input != nil && len(input.beforeUpdate) != 0) || (input == nil && len(s.t.Triggers) != 0 && len(s.t.GetTriggers(BeforeUpdate, nil, nativeTriggerProfileFor(tx))) != 0)) {
+	if activeReplication(s.t.schema) == nil && ((input != nil && len(input.beforeUpdate) != 0) || (input == nil && len(s.t.Triggers) != 0 && len(s.t.GetTriggers(BeforeUpdate, nil, nativeTriggerProfileFor(tx), nil)) != 0)) {
 		guard := s.mutationGuard(tx)
 		guard.input = input
 		s.mu.RLock()

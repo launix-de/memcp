@@ -158,7 +158,7 @@ func (definition *statementTriggerDefinition) callable(t *table, event nativeMut
 		if name == "" {
 			name = t.clusterPublishedName()
 		}
-		context := triggerCompilerContext(t.schema.Name, name, &definition.header)
+		context := triggerCompilerContext(t.schema.Name, name, &definition.header, t.columnDeclarations())
 		context.FastDict().Set(scm.NewString("timing"), scm.NewString(definition.header.Timing.sourceName()+"_"+event.String()), nil)
 		value := scm.Apply(language.compiler, scm.NewString(definition.header.Source), context)
 		program, plan := unwrapDeferredTriggerBody(value)

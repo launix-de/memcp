@@ -1749,7 +1749,7 @@ func TestReplicationSchemaAdmissionPreservesSQLSource(t *testing.T) {
 	if !tr.SchemaOnly || tr.Source != "SET NEW.id = 7" || !tr.Func.IsNil() {
 		t.Fatal("source restriction was not persisted")
 	}
-	compileTriggerForUse(db.Name, tbl.Name, &tr)
+	compileTriggerForUse(db.Name, tbl.Name, &tr, tbl.columnDeclarations())
 }
 
 func TestReplicationSchemaAdmissionRejectsExecutableFields(t *testing.T) {

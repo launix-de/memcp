@@ -270,6 +270,9 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 			delete(added, name)
 		}
 	}
+	if len(p.tableNames) > 0 {
+		db.validateNameNamespace(p.tableNames, scope)
+	}
 	return p
 }
 

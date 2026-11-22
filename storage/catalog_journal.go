@@ -829,7 +829,8 @@ func (db *database) recoverCatalogDecisions() {
 			db.recoverColumnDefaultDeclarations(declarations.ColumnDefaults)
 			db.recoverColumnDeclarations(declarations.ColumnDeclarations)
 		}
-		db.recoverNativeDeclarations(declarations.NativeDeclarations, catalogNativeCurrent, recoveredForeignEndpointScope(db, declarations))
+		scope := recoveredForeignEndpointScope(db, declarations)
+		db.recoverNativeDeclarations(declarations.NativeDeclarations, catalogNativeCurrent, scope)
 		db.recoverPublicForeignHistory(declarations.ForeignHistory)
 		db.recoverPublicForeignDrops(declarations.ForeignDrops, catalogForeignEndpointScope{})
 		db.recoverPublicForeignDeclarations(declarations.ForeignKeys, catalogForeignEndpointScope{})
@@ -842,6 +843,9 @@ func (db *database) recoverCatalogDecisions() {
 		}
 		db.recoverColumnPropertyRemovals(declarations.ColumnPropertyRemovals)
 		db.recoverTableDrops(declarations.TableDrops)
+		if record.Format == 23 {
+			db.validateNameNamespace(nil, scope)
+		}
 		db.catalogVersion = record.Version
 	}
 	db.catalogProofVersion.Store(db.catalogVersion)

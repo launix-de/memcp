@@ -534,7 +534,7 @@ func TestRestoredComputeDependencyTriggersRefreshGuards(t *testing.T) {
 			src.mu.Unlock()
 			// Exercise lazy compilation too: cached native/vector code from the
 			// restored body must not survive replacement of its scalar procedure.
-			src.GetTriggers(AfterUpdate, nil, nativeAllTriggers)
+			src.GetTriggers(AfterUpdate, nil, nativeAllTriggers, nil)
 			before := make([]string, len(src.Triggers))
 			for i, tr := range src.Triggers {
 				before[i] = tr.Name
@@ -914,7 +914,7 @@ func TestOrderedKeysetScanRetainsTargetAndProducerDependencies(t *testing.T) {
 	if !found {
 		t.Fatalf("ordered keyset lost prefix dependency: %#v", refs[0])
 	}
-	if findScanNode(target, "keys", "items") == nil || !containsScan(target) {
+	if findScanNode(target, tableRef{schema: "keys", table: "items"}) == nil || !containsScan(target) {
 		t.Fatal("ordered keyset was not recognized as a scan")
 	}
 }

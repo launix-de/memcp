@@ -906,14 +906,14 @@ func (t *table) orcInvalidationTriggerBody(name string, col *column, timing Trig
 		// Invalidate from composite sort key onwards via validMask scan
 		switch timing {
 		case AfterInsert:
-			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false), scm.NewSymbol("tx")})
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), t.nativeAddressExpression(), scm.NewBool(false), scm.NewSymbol("tx")})
 			body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("NEW")})
 		case AfterDelete:
-			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false), scm.NewSymbol("tx")})
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), t.nativeAddressExpression(), scm.NewBool(false), scm.NewSymbol("tx")})
 			body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("OLD")})
 		case AfterUpdate:
 			// For UPDATE: invalidate from both OLD and NEW positions
-			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false), scm.NewSymbol("tx")})
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), t.nativeAddressExpression(), scm.NewBool(false), scm.NewSymbol("tx")})
 			body = scm.NewSlice([]scm.Scmer{
 				scm.NewSymbol("begin"),
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("OLD")}),
@@ -922,7 +922,7 @@ func (t *table) orcInvalidationTriggerBody(name string, col *column, timing Trig
 		}
 	} else {
 		// No sort key: full column invalidation
-		tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false), scm.NewSymbol("tx")})
+		tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), t.nativeAddressExpression(), scm.NewBool(false), scm.NewSymbol("tx")})
 		body = scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
 			tblExpr,
@@ -960,18 +960,26 @@ func (t *table) regenerateORCTriggerAfterLoad(trigger *TriggerDescription) bool 
 	return false
 }
 
-type tableRef struct{ schema, table string }
+type tableRef struct {
+	schema, table         string
+	incarnation, identity string
+}
 
 func scanTableReference(expr scm.Scmer) (tableRef, bool) {
 	expr = stripSourceInfo(expr)
 	if expr.IsCustom(TagTable) {
 		t := TableFromScmer(expr)
-		return tableRef{schema: t.schema.Name, table: t.Name}, true
+		return tableRef{schema: t.schema.Name, table: t.Name, incarnation: t.schema.incarnationID(), identity: t.RuntimeIdentity}, true
 	}
 	if expr.IsSlice() {
 		items := expr.Slice()
 		if len(items) == 6 && callHeadIs(items[0], "table") {
-			schema, name := scm.String(items[1]), scm.String(items[3])
+			schema := scm.String(items[1])
+			if address, ok := staticNativeTableAddress(items[3]); ok {
+				f := address.Slice()
+				return tableRef{schema: schema, table: f[3].String(), incarnation: f[1].String(), identity: f[2].String()}, true
+			}
+			name := scm.String(items[3])
 			if items[2].Bool() || items[4].Bool() {
 				db := GetDatabase(schema, items[2].Bool())
 				if db == nil {
@@ -985,7 +993,7 @@ func scanTableReference(expr scm.Scmer) (tableRef, bool) {
 				if t == nil {
 					return tableRef{}, false
 				}
-				return tableRef{schema: db.Name, table: t.clusterPublishedName()}, true
+				return tableRef{schema: db.Name, table: t.Name, incarnation: db.incarnationID(), identity: t.RuntimeIdentity}, true
 			}
 			return tableRef{schema: schema, table: name}, true
 		}
@@ -1005,13 +1013,14 @@ func scanTableReference(expr scm.Scmer) (tableRef, bool) {
 // scanJoinInfo describes a source table scanned by a computor and the equality
 // join conditions connecting source columns to computor input columns.
 type scanJoinInfo struct {
-	schema       string
-	table        string
-	srcCols      []string // source table columns in equality filter
-	inputCols    []string // corresponding computor input column names
-	condCols     []string // complete filter readset supplied by the plan producer
-	unknownReads bool     // preparation-local: no complete filter dependency metadata available
-	mapCols      []string // source table columns read by the scan mapper
+	incarnation, identity string
+	schema                string
+	table                 string
+	srcCols               []string // source table columns in equality filter
+	inputCols             []string // corresponding computor input column names
+	condCols              []string // complete filter readset supplied by the plan producer
+	unknownReads          bool     // preparation-local: no complete filter dependency metadata available
+	mapCols               []string // source table columns read by the scan mapper
 }
 
 // resolveComputeInputCols maps planner lambda parameter names to physical
@@ -1020,6 +1029,12 @@ type scanJoinInfo struct {
 func (t *table) resolveComputeInputCols(inputCols []string) ([]string, bool) {
 	resolved := make([]string, len(inputCols))
 	for i, name := range inputCols {
+		if names := t.columnNamesSnapshot.Load(); names != nil {
+			if entry, ok := names.exact[name]; ok {
+				resolved[i] = entry.name
+				continue
+			}
+		}
 		if col, ok := t.ResolveColumnName(name, false); ok {
 			resolved[i] = col
 			continue
@@ -1028,7 +1043,14 @@ func (t *table) resolveComputeInputCols(inputCols []string) ([]string, bool) {
 		if dot < 0 {
 			return nil, false
 		}
-		col, ok := t.ResolveColumnName(name[dot+1:], false)
+		suffix := name[dot+1:]
+		if names := t.columnNamesSnapshot.Load(); names != nil {
+			if entry, ok := names.exact[suffix]; ok {
+				resolved[i] = entry.name
+				continue
+			}
+		}
+		col, ok := t.ResolveColumnName(suffix, false)
 		if !ok {
 			return nil, false
 		}
@@ -1105,7 +1127,7 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 			}
 		}
 		if ref, ok := scanTableReference(tableExpr); ok {
-			info.schema, info.table = ref.schema, ref.table
+			info.schema, info.table, info.incarnation, info.identity = ref.schema, ref.table, ref.incarnation, ref.identity
 		}
 		condCols := extractStringListFromAST(items[condColsIdx])
 		info.condCols = condCols
@@ -1451,10 +1473,10 @@ func computorInputColumn(name string, computorParams []scm.Scmer) (string, bool)
 
 // findScanNode walks a computor expression and returns the scan AST node
 // (as a []Scmer slice) for the given source schema+table. Returns nil if not found.
-func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
+func findScanNode(expr scm.Scmer, target tableRef) []scm.Scmer {
 	expr = stripSourceInfo(expr)
 	if expr.IsProc() {
-		return findScanNode(expr.Proc().Body, schema, table)
+		return findScanNode(expr.Proc().Body, target)
 	}
 	if !expr.IsSlice() {
 		return nil
@@ -1470,13 +1492,13 @@ func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
 				}
 			}
 			ref, ok := scanTableReference(tableExpr)
-			if ok && ref.schema == schema && ref.table == table {
+			if ok && ref.sameSource(target) {
 				return items
 			}
 		}
 	}
 	for _, item := range items {
-		if found := findScanNode(item, schema, table); found != nil {
+		if found := findScanNode(item, target); found != nil {
 			return found
 		}
 	}
@@ -2096,7 +2118,7 @@ func (t *table) dependencyCleanupProgram(name string, refs []scanJoinInfo, order
 		if db == nil {
 			continue
 		}
-		source := db.GetTable(ref.table)
+		source := ref.sourceRef().resolve(nil)
 		if source == nil || source == t {
 			continue
 		}
@@ -2131,7 +2153,7 @@ func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable
 	tblExpr := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("table"),
 		scm.NewString(targetTable.schema.Name), scm.NewBool(false),
-		scm.NewString(targetTable.Name), scm.NewBool(false),
+		targetTable.nativeAddressExpression(), scm.NewBool(false),
 		scm.NewSymbol("tx")})
 	srcTable.installComputeDependencyTrigger(TriggerDescription{
 		Name:     triggerName,
@@ -2232,7 +2254,7 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 		if srcDB == nil {
 			continue
 		}
-		srcTable := srcDB.GetTable(ref.table)
+		srcTable := ref.sourceRef().resolve(nil)
 		if srcTable == nil {
 			continue
 		}
@@ -2262,7 +2284,7 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 		var scanNode []scm.Scmer
 		incremental := false
 		if selective {
-			scanNode = findScanNode(computor, ref.schema, ref.table)
+			scanNode = findScanNode(computor, ref.sourceRef())
 			if scanNode != nil && isAdditiveAggregate(scanNode) {
 				incremental = true
 			}
@@ -2276,7 +2298,7 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 					// scan layout: [fn, tx, table, accessSchema, accessValues,
 					// filterCols, filter, mapCols, mapreduce, ...]
 					mapColsIdx, mapReduceIdx := 7, 8
-					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false), scm.NewSymbol("tx")})
+					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), t.nativeAddressExpression(), scm.NewBool(false), scm.NewSymbol("tx")})
 					if isConstantOneAggregate(scanNode[mapReduceIdx]) {
 						body = scm.NewSlice([]scm.Scmer{
 							scm.NewSymbol("invalidatecolumn"),
@@ -2296,7 +2318,7 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 				} else {
 					// Opaque scans have no proven reverse mapping. They must retain the
 					// complete invalidation fallback for correctness.
-					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false), scm.NewSymbol("tx")})
+					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), t.nativeAddressExpression(), scm.NewBool(false), scm.NewSymbol("tx")})
 					body = scm.NewSlice([]scm.Scmer{
 						scm.NewSymbol("invalidatecolumn"),
 						tblExpr,
@@ -2397,7 +2419,7 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 		if srcDB == nil {
 			continue
 		}
-		srcTable := srcDB.GetTable(ref.table)
+		srcTable := ref.sourceRef().resolve(nil)
 		if srcTable == nil {
 			continue
 		}
@@ -2419,7 +2441,7 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 			if srcTable.reuseComputeDependencyTrigger(triggerName, t, acquireTarget, releaseTarget) {
 				continue
 			}
-			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false), scm.NewSymbol("tx")})
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), t.nativeAddressExpression(), scm.NewBool(false), scm.NewSymbol("tx")})
 			body := scm.NewSlice([]scm.Scmer{
 				scm.NewSymbol("invalidatecolumn"),
 				tblExpr,

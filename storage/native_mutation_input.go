@@ -355,13 +355,13 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 	input := &nativeMutationInput{target: t, source: source, owner: tx.transactionState, event: event,
 		columns: source.tables[t].metadata.columnNames.declarations, unique: uniqueKeysInView(t, source.keys), foreign: foreign}
 	profile := nativeTriggerProfileFor(tx)
-	input.beforeInsert = t.GetTriggers(BeforeInsert, retired, profile)
-	input.afterInsert = t.GetTriggers(AfterInsert, retired, profile)
-	input.beforeUpdate = t.GetTriggers(BeforeUpdate, retired, profile)
-	input.afterUpdate = t.GetTriggers(AfterUpdate, retired, profile)
+	input.beforeInsert = t.GetTriggers(BeforeInsert, retired, profile, input.columns)
+	input.afterInsert = t.GetTriggers(AfterInsert, retired, profile, input.columns)
+	input.beforeUpdate = t.GetTriggers(BeforeUpdate, retired, profile, input.columns)
+	input.afterUpdate = t.GetTriggers(AfterUpdate, retired, profile, input.columns)
 	if event == nativeMutationDelete {
-		input.beforeDelete = t.GetTriggers(BeforeDelete, retired, profile)
-		input.afterDelete = t.GetTriggers(AfterDelete, retired, profile)
+		input.beforeDelete = t.GetTriggers(BeforeDelete, retired, profile, input.columns)
+		input.afterDelete = t.GetTriggers(AfterDelete, retired, profile, input.columns)
 	}
 	for _, program := range addedPrograms {
 		switch program.Timing {
@@ -427,7 +427,7 @@ func (t *table) mutationTriggers(timing TriggerTiming, input *nativeMutationInpu
 			return input.afterDelete
 		}
 	}
-	return t.GetTriggers(timing, nil, nativeTriggerProfileFor(tx))
+	return t.GetTriggers(timing, nil, nativeTriggerProfileFor(tx), nil)
 }
 
 // All callers bind the input during setup. Row callbacks retain this immutable

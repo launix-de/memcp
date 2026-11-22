@@ -2985,54 +2985,81 @@ func RenameTable(t *table, newname string, ignoreCase bool, expectedIdentity str
 	if tx != nil {
 		return tx.renameCatalogTable(t, newname, ignoreCase, expectedIdentity)
 	}
-	schema, oldname := t.schema.Name, t.clusterPublishedName()
-	db := GetDatabase(schema)
-	if db == nil {
-		panic("Database " + schema + " does not exist")
+	db := t.schema
+	if db == nil || GetDatabase(db.Name) != db {
+		panic("table rename belongs to a replaced database")
 	}
 	defer db.GetWrite(nil).Release()
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	db.ensureLoaded()
-	if r := replication.Load(); r != nil && validReplicaDatabase(schema) {
-		if target := db.tables.Get(oldname); target != nil {
-			for _, shard := range target.ActiveShards() {
-				if shard != nil {
-					r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", nil)
-				}
+	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
+		for _, shard := range t.ActiveShards() {
+			if shard != nil {
+				r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", nil)
 			}
 		}
 	}
 	db.schemalock.Lock()
-	if db.tables.Get(t.Name) != t || t.RuntimeIdentity != expectedIdentity || !t.committedAt(db.catalogView().version) {
-		db.schemalock.Unlock()
-		panic("Table " + schema + "." + oldname + " does not exist")
-	}
-	if !tableMaintenanceCapabilities(schema, oldname).canRename {
-		db.schemalock.Unlock()
-		requireTableMaintenance(schema, oldname, maintenanceRename)
-	}
-	if !tableMaintenanceCapabilities(schema, newname).canRename {
-		db.schemalock.Unlock()
-		requireTableMaintenance(schema, newname, maintenanceRename)
-	}
-	var releaseAdmission func()
-	func() {
-		defer func() {
-			if failure := recover(); failure != nil {
-				db.schemalock.Unlock()
-				panic(failure)
-			}
-		}()
-		releaseAdmission = t.admitNativeMaintenance()
+	locked := true
+	defer func() {
+		if locked {
+			db.schemalock.Unlock()
+		}
 	}()
-	defer releaseAdmission()
+	if db.tables.Get(t.Name) != t || t.RuntimeIdentity != expectedIdentity || !t.committedAt(db.catalogView().version) {
+		panic("table rename lost its native generation")
+	}
+	before := t.visibleNameAt(nil, db.catalogView())
+	requireTableMaintenance(db.Name, before, maintenanceRename)
+	requireTableMaintenance(db.Name, newname, maintenanceRename)
+	if newname == "" || !utf8.ValidString(newname) {
+		panic("invalid native table rename target")
+	}
 	if db.namespaceOccupant(nil, newname, ignoreCase, t) != nil {
-		db.schemalock.Unlock()
-		panic("Table " + schema + "." + newname + " already exists")
+		panic("table rename target already exists")
+	}
+	endpoints := map[*table]bool{t: true}
+	for _, row := range t.showColumnsSnapshot.Load().nativeConstraints().Slice()[3].Slice() {
+		if other := db.tables.Get(foreignMetadataValue(row, "OtherTable").String()); other != nil {
+			endpoints[other] = true
+		}
+	}
+	ordered := make([]*table, 0, len(endpoints))
+	for endpoint := range endpoints {
+		ordered = append(ordered, endpoint)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Name < ordered[j].Name })
+	var releases []func()
+	defer func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+	}()
+	for _, endpoint := range ordered {
+		releases = append(releases, endpoint.admitNativeMaintenance())
+	}
+	version := db.catalogVersion + 1
+	views := make(map[*table]*tableShowColumnsSnapshot, len(endpoints))
+	for _, endpoint := range ordered {
+		snapshot, _ := appendConstraintMetadata(endpoint, endpoint.showColumnsSnapshot.Load(), nil, nil, version)
+		views[endpoint] = snapshot
+	}
+	names := &catalogNamespaceView{names: map[*table]string{t: newname}}
+	for _, endpoint := range ordered {
+		snapshot, _ := endpoint.projectConstraintNames(views[endpoint], views, names)
+		views[endpoint] = snapshot
+	}
+	// All descriptions carry the future cut and its exact predecessor. Readers
+	// retain the old names until the one catalog snapshot publication below.
+	for _, endpoint := range ordered {
+		endpoint.showColumnsSnapshot.Store(views[endpoint])
+		endpoint.publishPlannerStatsToken()
 	}
 	t.publishedName.Store(&newname)
+	db.catalogVersion = version
 	db.publishTableNamesLocked(db.catalogView().pendingNames)
+	locked = false
 	db.saveLockedAndUnlock(t.schemaSaveMode())
 	return true
 }

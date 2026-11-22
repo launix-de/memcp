@@ -34,7 +34,11 @@ func (t *table) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	if raw[0] == '"' {
-		return json.Unmarshal(raw, &t.Name)
+		if err := json.Unmarshal(raw, &t.Name); err != nil {
+			return err
+		}
+		t.publishedName.Store(nil)
+		return nil
 	}
 	var binding columnNameBinding
 	decoder := json.NewDecoder(bytes.NewReader(raw))

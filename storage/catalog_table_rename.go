@@ -312,3 +312,25 @@ func (db *database) projectTableRename(d *catalogTableRename, p *catalogNativePr
 		p.propertyColumns[t] = t.columnDeclarations()
 	}
 }
+
+// The existing schema owner checks the final namespace as one set. This also
+// validates newly created tagged headers when no explicit rename action exists.
+func (db *database) validateNameNamespace(names map[*table]string, scope catalogForeignEndpointScope) {
+	used := make(map[string]*table)
+	for _, t := range db.tables.GetAll() {
+		if t.droppedAt(db.catalogView().version) || scope.retires(t) {
+			continue
+		}
+		if !t.committedAt(db.catalogView().version) && !scope.owns(t) {
+			continue
+		}
+		name, found := names[t]
+		if !found {
+			name = t.rawVisibleName()
+		}
+		if before := used[name]; before != nil && before != t {
+			panic("native final table namespace has duplicate names")
+		}
+		used[name] = t
+	}
+}

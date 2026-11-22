@@ -2249,7 +2249,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	input := currentTx.mutationInputFor(t.t)
 	if scanMutates(callbackCols) && activeReplication(t.t.schema) == nil &&
 		(input != nil && len(input.beforeUpdate) != 0 ||
-			input == nil && len(t.t.Triggers) != 0 && len(t.t.GetTriggers(BeforeUpdate, nil, nativeTriggerProfileFor(currentTx))) != 0) {
+			input == nil && len(t.t.Triggers) != 0 && len(t.t.GetTriggers(BeforeUpdate, nil, nativeTriggerProfileFor(currentTx), nil)) != 0) {
 		mutationGuard = t.mutationGuard(currentTx)
 		mutationGuard.input = input
 		defer mutationGuard.release()

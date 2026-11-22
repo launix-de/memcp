@@ -4209,6 +4209,14 @@ func Init(en scm.Env) {
 				if len(a) == 3 && a[1].IsString() && a[1].String() == "identity" {
 					return t.NativeIdentity(scmerToTxContext(a[2]))
 				}
+				if (len(a) == 2 || len(a) == 3) && a[1].IsString() && a[1].String() == "name" {
+					var tx *TxContext
+					if len(a) == 3 {
+						tx = scmerToTxContext(a[2])
+						t.requireCatalogDataVisibility(tx)
+					}
+					return scm.NewString(t.visibleNameAt(tx, t.schema.catalogView()))
+				}
 				if (len(a) == 2 || len(a) == 3) && a[1].IsString() && a[1].String() == "statement_triggers" {
 					var tx *TxContext
 					if len(a) == 3 {
@@ -4267,12 +4275,7 @@ func Init(en scm.Env) {
 					if a[1].IsString() && scm.String(a[1]) == "memory" {
 						return showBuildMemory(t.residentMemory())
 					}
-					if a[1].IsString() && a[1].String() == "name" {
-						if name := t.publishedName.Load(); name != nil {
-							return scm.NewString(*name)
-						}
-						return scm.NewNil()
-					}
+
 					if a[1].IsString() && a[1].String() == "declarations" {
 						return t.Declarations()
 					}

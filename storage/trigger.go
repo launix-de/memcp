@@ -471,18 +471,25 @@ func checkLanguageCompiler(language string) scm.Scmer {
 	return definition.compiler
 }
 
-func triggerCompilerContext(schemaName, tableName string, trigger *TriggerDescription) scm.Scmer {
-	context := scm.NewFastDictValue(6)
+func triggerCompilerContext(schemaName, tableName string, trigger *TriggerDescription, columns []*column) scm.Scmer {
+	context := scm.NewFastDictValue(7)
 	context.Set(scm.NewString("schema"), scm.NewString(schemaName), nil)
 	context.Set(scm.NewString("table"), scm.NewString(tableName), nil)
 	context.Set(scm.NewString("name"), scm.NewString(trigger.Name), nil)
 	context.Set(scm.NewString("timing"), scm.NewString(trigger.Timing.sourceName()), nil)
 	context.Set(scm.NewString("hidden"), scm.NewBool(trigger.Hidden), nil)
 	context.Set(scm.NewString("schema_only"), scm.NewBool(trigger.SchemaOnly), nil)
+	if columns != nil {
+		rows := make([]scm.Scmer, len(columns))
+		for i, c := range columns {
+			rows[i] = c.show("", 0, 0, nil)
+		}
+		context.Set(scm.NewString("columns"), scm.NewSlice(rows), nil)
+	}
 	return scm.NewFastDict(context)
 }
 
-func loadPersistedTriggerPlan(schemaName, tableName string, trigger *TriggerDescription) {
+func loadPersistedTriggerPlan(schemaName, tableName string, trigger *TriggerDescription, columns []*column) {
 	if trigger.Timing.isStatement() {
 		return // event-specific programs belong to the immutable statement definition
 	}
@@ -493,7 +500,7 @@ func loadPersistedTriggerPlan(schemaName, tableName string, trigger *TriggerDesc
 	if !ok {
 		panic(fmt.Sprintf("trigger %s.%s:%s requires unregistered language %q", schemaName, tableName, trigger.Name, trigger.Language))
 	}
-	compiled := scm.Apply(compiler, scm.NewString(trigger.Source), triggerCompilerContext(schemaName, tableName, trigger))
+	compiled := scm.Apply(compiler, scm.NewString(trigger.Source), triggerCompilerContext(schemaName, tableName, trigger, columns))
 	trigger.Func, trigger.FuncPlan = unwrapDeferredTriggerBody(compiled)
 	if triggerScmerMissing(trigger.Func) && triggerScmerMissing(trigger.FuncPlan) {
 		panic(fmt.Sprintf("trigger language %q returned an empty trigger for %s.%s:%s", trigger.Language, schemaName, tableName, trigger.Name))
@@ -542,7 +549,7 @@ func evaluateTriggerPlan(plan scm.Scmer) scm.Scmer {
 	return scm.Eval(scm.Optimize(ownedPlan, &scm.Globalenv, nil), &scm.Globalenv)
 }
 
-func compileTriggerForUse(schemaName, tableName string, trigger *TriggerDescription) {
+func compileTriggerForUse(schemaName, tableName string, trigger *TriggerDescription, columns []*column) {
 	if !triggerScmerMissing(trigger.Func) {
 		finalizeTriggerCompilation(trigger)
 		return
@@ -553,7 +560,7 @@ func compileTriggerForUse(schemaName, tableName string, trigger *TriggerDescript
 		finalizeTriggerCompilation(trigger)
 		return
 	}
-	loadPersistedTriggerPlan(schemaName, tableName, trigger)
+	loadPersistedTriggerPlan(schemaName, tableName, trigger, columns)
 	if !triggerScmerMissing(trigger.FuncPlan) {
 		trigger.Func = evaluateTriggerPlan(trigger.FuncPlan)
 		trigger.FuncPlan = scm.NewNil()
@@ -562,7 +569,7 @@ func compileTriggerForUse(schemaName, tableName string, trigger *TriggerDescript
 }
 
 // GetTriggers returns all triggers for a specific timing
-func (t *table) GetTriggers(timing TriggerTiming, retired map[nativeTriggerSlot]struct{}, profile nativeTriggerProfile) []TriggerDescription {
+func (t *table) GetTriggers(timing TriggerTiming, retired map[nativeTriggerSlot]struct{}, profile nativeTriggerProfile, columns []*column) []TriggerDescription {
 	t.mu.Lock()
 	result := make([]TriggerDescription, 0, len(t.Triggers))
 	type lazyTrigger struct {
@@ -593,6 +600,9 @@ func (t *table) GetTriggers(timing TriggerTiming, retired map[nativeTriggerSlot]
 		}
 	}
 	t.mu.Unlock()
+	if len(lazy) != 0 && columns == nil {
+		columns = t.columnDeclarations()
+	}
 	for _, item := range lazy {
 		tr := result[item.resultIndex]
 		if tr.checkDefinition != nil {
@@ -622,7 +632,7 @@ func (t *table) GetTriggers(timing TriggerTiming, retired map[nativeTriggerSlot]
 			}
 			tr.FuncPlan, tr.VectorFunc = scm.NewNil(), scm.NewNil()
 		} else {
-			compileTriggerForUse(t.schema.Name, t.Name, &tr)
+			compileTriggerForUse(t.schema.Name, t.clusterPublishedName(), &tr, columns)
 		}
 		tr.initialFKFootprint = nil
 		tr.preservesUpdateValues = false
@@ -1156,7 +1166,7 @@ func (t *table) rowToDictWithColumns(row dataset, columns []string) scm.Scmer {
 // ExecuteTableLifecycleTriggers executes non-row-level table lifecycle triggers.
 // These are non-row-level triggers: OLD and NEW are both nil.
 func (t *table) ExecuteTableLifecycleTriggers(timing TriggerTiming, tx *TxContext) {
-	triggers := t.GetTriggers(timing, nil, nativeTriggerProfileFor(tx))
+	triggers := t.GetTriggers(timing, nil, nativeTriggerProfileFor(tx), nil)
 	session := txSessionScmer(tx)
 	for _, tr := range triggers {
 		if tr.Func.IsNil() {
@@ -1181,7 +1191,7 @@ func executeRegisteredCreateTableTriggers(t *table, tx *TxContext) {
 	session := txSessionScmer(tx)
 	for _, reg := range registrations {
 		trigger := reg.triggerDescription()
-		compileTriggerForUse(t.schema.Name, t.Name, &trigger)
+		compileTriggerForUse(t.schema.Name, t.clusterPublishedName(), &trigger, t.columnDeclarations())
 		if triggerScmerMissing(trigger.Func) {
 			continue
 		}

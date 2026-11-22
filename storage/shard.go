@@ -3981,7 +3981,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		if t.t.hasCheckConstraints.Load() {
 			panic("native final INSERT validation requires the outer table INSERT owner")
 		}
-		beforeInsertTriggers = t.t.GetTriggers(BeforeInsert, nil, nativeTriggerProfileFor(currentTx))
+		beforeInsertTriggers = t.t.GetTriggers(BeforeInsert, nil, nativeTriggerProfileFor(currentTx), nil)
 		for _, trigger := range beforeInsertTriggers {
 			if trigger.needsFinalInsertValues {
 				panic("native final INSERT validation requires the outer table INSERT owner")
