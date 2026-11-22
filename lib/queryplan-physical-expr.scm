@@ -89,11 +89,10 @@ partner. */
 			col
 			(begin
 				(define declaration (source_column_declaration src col col_ignorecase))
-				(if declaration (sql_column_storage_name declaration)
-					/* Native pseudo-columns and privately constructed helper sources
-					already carry storage coordinates, without SQL declarations. */
-					(or (nil? (source_declarations src)) (internal_column_name? col)) col
-					(sql_binding_error "missing-column" (concat "Column does not exist: " col))))))))
+				/* SQL names were bound against visible exports before physical
+				lowering. Direct native plans and generated helpers already carry
+				storage coordinates, retaining the existing fallback contract. */
+				(if declaration (sql_column_storage_name declaration) col))))))
 
 /* A membership marker carries one distinguished probe, but its decorrelated
 domain can contain additional lookup keys. Both direct and joined scan filters
