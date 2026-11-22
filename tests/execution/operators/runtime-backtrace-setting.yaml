@@ -19,3 +19,30 @@ test_cases:
       (list (strlike enabled "%runtime setting failure%in runtime-backtrace-setting:7:11%") disabled))
   expect:
     result: [true, "runtime setting failure"]
+- name: Backtrace decoration preserves a structured language failure
+  scm: |
+    (begin
+      (define original (settings "Backtrace"))
+      (settings "Backtrace" true)
+      (define failure (try (lambda () (eval (source "structured-failure" 13 5
+        (list 'error (list 'list "declared-error" 29))))) (lambda (cause) cause)))
+      (settings "Backtrace" original)
+      (list (failure_value failure)
+        (strlike (string failure) "%in structured-failure:13:5%")))
+  expect:
+    result: [[declared-error, 29], true]
+- name: Nested backtraces preserve a native diagnostic and its language annotation
+  scm: |
+    (begin
+      (define original (settings "Backtrace"))
+      (settings "Backtrace" true)
+      (define failure (try (lambda () (eval (source "outer-failure" 19 3
+        (list 'error (failure_annotate
+          (try (lambda () (eval (source "inner-failure" 17 7
+            (list 'error (list 'cardinality_failure "too many actual rows"))))) (lambda (cause) cause))
+          "phase" "execution"))))) (lambda (cause) cause)))
+      (settings "Backtrace" original)
+      (list (failure_value failure) (failure_annotation failure "phase")
+        (strlike (string failure) "%in inner-failure:17:7%in outer-failure:19:3%")))
+  expect:
+    result: [[cardinality-error, too many actual rows], execution, true]

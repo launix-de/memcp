@@ -89,6 +89,25 @@ func mustNthLocalVar(v Scmer) NthLocalVar {
 	panic("expected numbered local variable")
 }
 
+// Source decoration retains the original diagnostic datum as well as the
+// native error chain. Formatting alone must not turn a typed failure into text.
+type sourceFailure struct {
+	cause  any
+	source string
+	line   int
+	col    int
+}
+
+func (failure *sourceFailure) Error() string {
+	return fmt.Sprintf("%s\nin %s:%d:%d", fmt.Sprint(failure.cause), failure.source, failure.line, failure.col)
+}
+
+func (failure *sourceFailure) OriginalFailure() any { return failure.cause }
+func (failure *sourceFailure) Unwrap() error {
+	cause, _ := failure.cause.(error)
+	return cause
+}
+
 func evalWithSourceInfo(si *SourceInfo, en *Env) (value Scmer) {
 	if si == nil {
 		return NewNil()
@@ -99,12 +118,7 @@ func evalWithSourceInfo(si *SourceInfo, en *Env) (value Scmer) {
 	}
 	defer func(src SourceInfo) {
 		if err := recover(); err != nil {
-			if cause, ok := err.(error); ok {
-				// Backtrace decoration must not erase native failure identity.
-				// The visible text stays the same; error owners may unwrap it.
-				panic(fmt.Errorf("%w\nin %s:%d:%d", cause, src.source, src.line, src.col))
-			}
-			panic(fmt.Sprintf("%s\nin %s:%d:%d", fmt.Sprint(err), src.source, src.line, src.col))
+			panic(&sourceFailure{err, src.source, src.line, src.col})
 		}
 	}(*si)
 	return Eval(si.value, en)
