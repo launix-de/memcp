@@ -2881,6 +2881,9 @@ func dropTableIdentity(schema, name string, ifexists bool, expected *table) {
 	db.ensureLoaded()
 	db.schemalock.Lock()
 	t := db.tables.Get(name)
+	if expected == nil {
+		t = db.GetTable(name)
+	}
 	if expected != nil && (t == nil || !t.Ephemeral || t.RuntimeIdentity != expected.RuntimeIdentity) {
 		db.schemalock.Unlock()
 		return
@@ -2932,7 +2935,7 @@ func dropTableIdentity(schema, name string, ifexists bool, expected *table) {
 		releaseForeign()
 		releaseAdmission()
 	}()
-	db.tables.Remove(name)
+	db.tables.Remove(t.Name)
 	t.mu.Lock()
 	t.releaseStatementTriggerMemory(db)
 	t.mu.Unlock()

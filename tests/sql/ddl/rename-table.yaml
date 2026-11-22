@@ -62,6 +62,47 @@ test_cases:
       data:
         - { cnt: 3 }
 
+  - name: Public DROP retires the renamed visible table
+    steps:
+    - sql: DROP TABLE IF EXISTS drop_visible_before
+    - sql: DROP TABLE IF EXISTS drop_visible_after
+    - sql: CREATE TABLE drop_visible_before(id INT PRIMARY KEY,payload INT)
+    - sql: INSERT INTO drop_visible_before VALUES(7,11)
+    - sql: RENAME TABLE drop_visible_before TO drop_visible_after
+    - sql: SELECT id,payload FROM drop_visible_after ORDER BY id
+      expect:
+        data:
+        - id: 7
+          payload: 11
+    - sql: DROP TABLE drop_visible_after
+    - scm: (nil? (table "memcp-tests" false "drop_visible_after" false nil))
+      expect:
+        result: true
+  - name: Public DROP does not use a renamed generation hidden behind a reused old name
+    steps:
+    - sql: DROP TABLE IF EXISTS drop_visible_before
+    - sql: DROP TABLE IF EXISTS drop_visible_after
+    - sql: CREATE TABLE drop_visible_before(id INT PRIMARY KEY,payload INT)
+    - sql: INSERT INTO drop_visible_before VALUES(7,11)
+    - sql: RENAME TABLE drop_visible_before TO drop_visible_after
+    - sql: CREATE TABLE drop_visible_before(id INT PRIMARY KEY,payload INT)
+    - sql: INSERT INTO drop_visible_before VALUES(7,22)
+    - sql: DROP TABLE drop_visible_before
+    - sql: SELECT id,payload FROM drop_visible_after ORDER BY id
+      expect:
+        data:
+        - id: 7
+          payload: 11
+    - scm: (nil? (table "memcp-tests" false "drop_visible_before" false nil))
+      expect:
+        result: true
+    - sql: DROP TABLE drop_visible_after
+    - scm: (nil? (table "memcp-tests" false "drop_visible_after" false nil))
+      expect:
+        result: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS ren_new"
   - sql: "DROP TABLE IF EXISTS ren_old"
+  - sql: "DROP TABLE IF EXISTS drop_visible_before"
+  - sql: "DROP TABLE IF EXISTS drop_visible_after"
