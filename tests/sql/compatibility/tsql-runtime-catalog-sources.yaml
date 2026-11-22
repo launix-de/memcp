@@ -81,3 +81,19 @@ test_cases:
   expect:
     rows: 0
     data: []
+- name: A scalar count reduces the current generated column source
+  sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'runtime_meta_A')
+  expect: {rows: 1, data: [{n: 2}]}
+- name: A scalar count applies membership to the generated column rows
+  sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'runtime_meta_A') AND name IN ('id','value')
+  expect: {rows: 1, data: [{n: 2}]}
+- name: An empty generated column membership retains the neutral count
+  sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'runtime_meta_A') AND name IN ('absent')
+  expect: {rows: 1, data: [{n: 0}]}
+- name: Generated column property casts retain complete named rows
+  sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'runtime_meta_A') AND name IN ('id','value') ORDER BY column_id
+  expect:
+    rows: 2
+    data:
+    - {name: id, marked: 0}
+    - {name: value, marked: 0}

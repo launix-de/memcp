@@ -429,7 +429,10 @@ query generation is the scope that releases them after execution. */
 (define make_stage_output_relation (lambda (stage_id)
 	(list (quote stage-output) stage_id)))
 
-(define logical_op (lambda (node) (if (and (list? node) (not (empty_list? node))) (car node) nil)))
+/* Operator tags are symbols. Generic value equality also compares Boolean
+truth, so a data tuple headed by TRUE must never become a logical operator. */
+(define logical_op (lambda (node)
+	(if (and (list? node) (not (empty_list? node)) (symbol? (car node))) (car node) nil)))
 (define query_block? (lambda (node) (equal? (logical_op node) (quote query-block))))
 (define group_stage? (lambda (node) (equal? (logical_op node) (quote group-stage))))
 (define union_block? (lambda (node) (equal? (logical_op node) (quote union-block))))
@@ -7996,11 +7999,13 @@ bindings are stable here, unlike mutable SQL session variables. */
 													(prepend_derived_rewrite alias (nth staged 1) tail_rewrites)
 													(rewrite_derived_where_terms alias (nth staged 1) tail_wheres)
 													(cons (nth staged 2) (merge (list (qb_stages inner) tail_stages)))))))))
-							(query_requires_fresh_invocation? inner nil false)
-							/* The producer still owns its exported values when a fresh
-							FROM-less query acquired a literal unit during untangling.
-							Inlining its projection would repeat volatile expressions
-							at each consumer instead of reading the produced column. */
+							(query_requires_fresh_invocation?
+								(list (qb_fields inner) (qb_where inner) (qb_hidden inner)
+									(map (qb_sources inner) source_join_expr)) nil false)
+							/* Preserve values and predicates whose inlining would repeat
+							volatile work. Invocation-local source rows retain their own
+							producer lifetime when pure projections are inlined; that source
+							freshness alone is not a projection/materialization barrier. */
 							(list (cons (source_with_relation src inner) tail_sources)
 								tail_rewrites tail_wheres tail_stages)
 							(begin
