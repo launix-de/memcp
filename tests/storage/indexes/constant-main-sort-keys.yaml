@@ -11,9 +11,10 @@ setup:
     VARCHAR(12),stamp INT) ENGINE=sloppy
 - scm: |-
     (begin
-      (insert (table "memcp-tests" false "constant_main_sort_keys" false) '("id" "region" "note" "stamp")
+      (define fixture (table "memcp-tests" false "constant_main_sort_keys" false nil))
+      (insert fixture '("id" "region" "note" "stamp")
         (map (produceN 2000) (lambda (i) (list (+ i 1) "same" nil i))))
-      (rebuild))
+      (rebuild fixture true false nil true))
 test_cases:
 - name: A complete constant main coordinate preserves every projected value
   scm: |-
