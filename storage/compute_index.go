@@ -130,13 +130,13 @@ func containsNthLocalVar(expr scm.Scmer) bool {
 
 // isRawDataset reports whether expr uses only:
 //   - param symbols (or NthLocalVar within param range)
-//   - constants (int, float, string, bool, nil)
+//   - constants (int, float, string, bool, nil, immutable compiled regex)
 //   - pure function calls (function is not a param reference, all args are rawDataset)
 //
 // Returns false for outer refs, scan calls, standalone lambdas, and unknown symbols.
 func isRawDataset(params []scm.Scmer, expr scm.Scmer) bool {
 	// constants
-	if expr.IsInt() || expr.IsFloat() || expr.IsString() || expr.IsBool() || expr.IsNil() {
+	if expr.IsInt() || expr.IsFloat() || expr.IsString() || expr.IsBool() || expr.IsNil() || expr.IsRegex() {
 		return true
 	}
 	// param symbol reference

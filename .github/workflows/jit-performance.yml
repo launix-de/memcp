@@ -179,6 +179,23 @@ jobs:
             PERF_REGRESSION_WAIVERS_FILE="$GITHUB_WORKSPACE/jit-perf-regression-waivers.txt" \
             python3 -u "$runner" --perf-ab "$GITHUB_WORKSPACE/base" "$GITHUB_WORKSPACE/candidate"
 
+      - name: Retain exact failing JIT executables
+        if: ${{ failure() && steps.measure.outcome == 'failure' }}
+        shell: bash
+        run: |
+          mkdir -p jit-perf-runtime
+          cp base/memcp jit-perf-runtime/base-memcp
+          cp candidate/memcp jit-perf-runtime/candidate-memcp
+          sha256sum jit-perf-runtime/*-memcp > jit-perf-runtime/sha256.txt
+          go version -m base/memcp candidate/memcp > jit-perf-runtime/buildinfo.txt
+          git -C base rev-parse HEAD > jit-perf-runtime/base-revision.txt
+          git -C candidate rev-parse HEAD > jit-perf-runtime/candidate-revision.txt
+          git -C candidate/.third_party/go-jit rev-parse HEAD > jit-perf-runtime/compiler-revision.txt
+          git -C base diff -- scm storage > jit-perf-runtime/base-generated.diff
+          git -C candidate diff -- scm storage > jit-perf-runtime/candidate-generated.diff
+          readelf -d base/memcp > jit-perf-runtime/base-dynamic.txt
+          readelf -d candidate/memcp > jit-perf-runtime/candidate-dynamic.txt
+
       - name: Profile failing JIT performance suites
         if: ${{ failure() && steps.measure.outcome == 'failure' }}
         timeout-minutes: 10
@@ -206,6 +223,7 @@ jobs:
           exec env \
             PERF_SHARD_INDEX=0 PERF_SHARD_COUNT=1 \
             MEMCP_CPU_PROFILE=1 \
+            GODEBUG="${GODEBUG:+$GODEBUG,}gctrace=1" \
             PERF_BASELINE_FILE="$GITHUB_WORKSPACE/jit-perf-diagnostic.json" \
             PERF_BASELINE_SEED="$GITHUB_WORKSPACE/base/tests/performance/ci-workloads.json" \
             PERF_REPEAT=1000 PERF_MIN_MEASURE_MS=1000 PERF_AB_JITTER_MS=50 \
@@ -223,4 +241,13 @@ jobs:
             jit-perf-baseline.trials/
             jit-perf-diagnostic.json
             jit-perf-diagnostic.trials/
+          if-no-files-found: warn
+
+      - name: Upload exact failing JIT runtime
+        if: ${{ failure() && steps.measure.outcome == 'failure' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jit-performance-runtime-${{ matrix.shard }}
+          path: jit-perf-runtime/
+          retention-days: 7
           if-no-files-found: warn

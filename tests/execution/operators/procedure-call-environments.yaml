@@ -1,0 +1,90 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  isolated: true
+  description: Dynamic procedure calls retain independent lexical values and captures
+setup: []
+test_cases:
+- name: A zero-argument callback keeps the actual captured state
+  scm: |
+    (begin
+      (define state (newsession))
+      (define callbacks (newsession))
+      (state "value" 17)
+      (callbacks "read" (eval (quote (lambda () (state "value")))))
+      (define first (apply (callbacks "read") (list)))
+      (state "value" 29)
+      (list first (apply (callbacks "read") (list))))
+  expect:
+    result: [17, 29]
+- name: Unoptimized named calls retain separate escaped arguments
+  scm: |
+    (begin
+      (define producer (eval (quote (lambda (value) (lambda () value)))))
+      (define first (apply producer (list 11)))
+      (define second (apply producer (list 23)))
+      (list (apply first (list)) (apply second (list)) (apply first (list))))
+  expect:
+    result: [11, 23, 11]
+- name: Optimized one-argument producers retain separate escaped arguments
+  scm: |
+    (begin
+      (define producer (eval (optimize (clone_optimizer_expression (quote (lambda (value) (lambda () value)))))))
+      (define first (apply producer (list 31)))
+      (define second (apply producer (list 47)))
+      (list (apply first (list)) (apply second (list)) (apply first (list))))
+  expect:
+    result: [31, 47, 31]
+- name: Optimized two-argument producers retain both original coordinates
+  scm: |
+    (begin
+      (define producer (eval (optimize (clone_optimizer_expression (quote (lambda (left right)
+        (lambda (suffix) (list left right suffix))))))))
+      (define first (apply producer (list 5 19)))
+      (define second (apply producer (list 7 29)))
+      (list (apply first (list 41)) (apply second (list 43)) (apply first (list 47))))
+  expect:
+    result: [[5, 19, 41], [7, 29, 43], [5, 19, 47]]
+- name: A nested local survives after its creating invocation has returned
+  scm: |
+    (begin
+      (define producer (eval (optimize (clone_optimizer_expression (quote (lambda (input) (begin
+        (define doubled (+ input input))
+        (lambda (suffix) (list input doubled (+ doubled suffix))))))))))
+      (define first (apply producer (list 13)))
+      (define second (apply producer (list 17)))
+      (list (apply first (list 3)) (apply second (list 5)) (apply first (list 7))))
+  expect:
+    result: [[13, 26, 29], [17, 34, 39], [13, 26, 33]]
+- name: Larger calls retain every coordinate across independent closures
+  scm: |
+    (begin
+      (define producer (eval (optimize (clone_optimizer_expression (quote (lambda (a b c d e)
+        (lambda () (list a b c d e))))))))
+      (define first (apply producer (list 2 3 5 7 11)))
+      (define second (apply producer (list 13 17 19 23 29)))
+      (list (apply first (list)) (apply second (list)) (apply first (list))))
+  expect:
+    result: [[2, 3, 5, 7, 11], [13, 17, 19, 23, 29], [2, 3, 5, 7, 11]]
+- name: Variadic named calls keep each invocation's complete argument list
+  scm: |
+    (begin
+      (define producer (eval (quote (lambda values (lambda () values)))))
+      (define first (apply producer (list 3 5 7)))
+      (define empty (apply producer (list)))
+      (define last (apply producer (list 11 13)))
+      (list (apply first (list)) (apply empty (list)) (apply last (list)) (apply first (list))))
+  expect:
+    result: [[3, 5, 7], [], [11, 13], [3, 5, 7]]
+- name: Closing an escaped callback preserves its actual lexical values
+  scm: |
+    (begin
+      (define producer (eval (optimize (clone_optimizer_expression (quote (lambda (value)
+        (lambda (suffix) (+ value suffix))))))))
+      (define first (close_procedure (apply producer (list 101))))
+      (define second (close_procedure (apply producer (list 211))))
+      (list (apply first (list 3)) (apply second (list 5)) (apply first (list 7))))
+  expect:
+    result: [104, 216, 108]
+cleanup: []

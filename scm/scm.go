@@ -406,6 +406,30 @@ type smallProcCallEnv struct {
 }
 
 func newProcCallEnv(proc Proc) *Env {
+	// Each escaping call keeps its own environment. Size the embedded storage
+	// for the small frames actually used, rather than retaining four slots in
+	// every zero-, one- or two-local invocation. The complete numbered length
+	// still includes any capture slots supplied by the procedure compiler.
+	switch proc.NumVars {
+	case 0:
+		return &Env{VarsNumbered: []Scmer{}, Outer: proc.En}
+	case 1:
+		frame := &struct {
+			env      Env
+			numbered [1]Scmer
+		}{}
+		frame.env.Outer = proc.En
+		frame.env.VarsNumbered = frame.numbered[:]
+		return &frame.env
+	case 2:
+		frame := &struct {
+			env      Env
+			numbered [2]Scmer
+		}{}
+		frame.env.Outer = proc.En
+		frame.env.VarsNumbered = frame.numbered[:]
+		return &frame.env
+	}
 	if proc.NumVars <= 4 {
 		frame := &smallProcCallEnv{}
 		frame.env.Outer = proc.En
