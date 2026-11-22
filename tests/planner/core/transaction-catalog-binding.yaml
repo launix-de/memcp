@@ -482,7 +482,7 @@ test_cases:
       (and (expression_equal? (source_declarations (gs_input rewritten)) declarations)
         (expression_equal? (gs_domain rewritten) '("value" 7))
         (expression_equal? (gs_output rewritten) '("value" 7))
-        (expression_equal? (gs_facts rewritten) (list 'condition (list 'equal? 7 7)))
+        (expression_equal? (gs_facts rewritten) (list (list 'aggregate_output_columns '()) 'condition (list 'equal? 7 7)))
         (expression_equal? (rewrite_derived_ref "eliminated" '("value" 7) shadowed) shadowed)))
   expect: {result: true}
 
