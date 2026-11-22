@@ -727,8 +727,11 @@ user table merely to discard a newly constructed policy closure. */
 							The existing variant path collapses source-free constant
 							queries with no dependencies to a direct compiled procedure. */
 							select_query
+							/* INSERT and REPLACE consume storage coordinates and SELECT
+							source generations too. Preserve their emitted dependencies in
+							the same exact-variant owner as UPDATE and DELETE. */
 							(match (toUpper parse_query)
-								(regex "^\\s*(?:UPDATE|DELETE)\\b" _) true _ false))
+								(regex "^\\s*(?:INSERT|REPLACE|UPDATE|DELETE)\\b" _) true _ false))
 							(begin
 								(define exact_compile (lambda () (begin
 									(define resolved_policy (sql_policy_spec_resolve policy))
