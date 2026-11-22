@@ -333,6 +333,19 @@ adding a raw value equality would needlessly partition the cache per user. */
 				(or needed (sql_queryplan_guard_references_symbol? (cadr consumer) (car binding)))) false))
 			(cons binding live) live)) '())))
 
+/* Keep an original leading condition before producers whose lexical values
+it does not consume. Later conditions retain their order once a dependency
+requires the binding scope; quoted data never creates a dependency. */
+(define sql_queryplan_guard_leading_conditions (lambda (conditions bindings)
+	(match conditions
+		(cons condition rest)
+		(if (reduce bindings (lambda (found binding)
+			(or found (sql_queryplan_guard_references_symbol? condition (car binding)))) false)
+			(list '() conditions)
+			(match (sql_queryplan_guard_leading_conditions rest bindings) '(leading remaining)
+				(list (cons condition leading) remaining)))
+		_ (list '() '()))))
+
 (define sql_queryplan_guard_from_session (lambda (planning_session)
 	(begin
 		(define condition_accumulator (planning_session "__memcp_queryplan_guard_conditions"))
@@ -358,18 +371,29 @@ adding a raw value equality would needlessly partition the cache per user. */
 		(reduce bindings (lambda (_ binding)
 			(reduce (nth binding 2) (lambda (_ expr)
 				(covered (if (nil? condition_catalog) (string expr) expr) true)) nil)) nil)
-		(define complete_guard (sql_queryplan_conjoin_guards
-			(cons raw_guard (sql_queryplan_uncovered_binding_conditions planning_session))))
+		(define uncovered_conditions (sql_queryplan_uncovered_binding_conditions planning_session))
+		(define complete_guard (sql_queryplan_conjoin_guards (cons raw_guard uncovered_conditions)))
+		(define split (if (empty_list? bindings) (list '() conditions)
+			(sql_queryplan_guard_leading_conditions conditions bindings)))
+		(define leading (car split))
+		(define scoped_guard (if (empty_list? leading) complete_guard
+			(sql_queryplan_conjoin_guards (cons
+				(sql_queryplan_conjoin_guards (merge (list (cadr split) (list statistics_guard))))
+				uncovered_conditions))))
 		/* Bind producers in dependency order inside one lexical scope. A lambda
 		per binding duplicates the remaining guard through nested compilation;
-		sequential definitions preserve dependencies without that nesting. */
+		sequential definitions preserve dependencies without that nesting. The
+		binding-free prefix must reject stale source declarations before any
+		dependent estimate dereferences its retained generation address. */
+		(define guard_body (if (empty_list? bindings) complete_guard
+			(list (list (quote lambda) '()
+				(cons (quote !begin) (merge (list
+					(map bindings (lambda (binding)
+						(list (quote define) (car binding) (cadr binding))))
+					(list scoped_guard))))))))
 		(sql_queryplan_runtime_guard_expr
-			(if (empty_list? bindings) complete_guard
-				(list (list (quote lambda) '()
-					(cons (quote !begin) (merge (list
-						(map bindings (lambda (binding)
-							(list (quote define) (car binding) (cadr binding))))
-						(list complete_guard)))))))
+			(if (empty_list? leading) guard_body
+				(sql_queryplan_conjoin_guards (merge (list leading (list guard_body)))))
 			(map (sql_queryplan_preparations_from_session planning_session)
 				(lambda (preparation) (planner_queryplan_observation_metric_key (car preparation))))))))
 
