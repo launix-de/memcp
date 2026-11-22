@@ -434,7 +434,8 @@ Local native handles are lexical physical inputs, not catalog-name lookups. */
 	(if (and target (local_relation_reference? (source_relation target))) true
 		(neumann_fail "build_queryplan" "local UPDATE target lost its lexical declaration"))
 	(list 'begin
-		(physical_mutation_producer (list (source_table_expr target)) (physical_dml_descriptor input)
+		(physical_mutation_producer (list (source_table_expr target))
+			(physical_dml_descriptor input (qb_schema input) relation)
 			(lower_dml_query_block_with_stages input (qb_schema input) relation))
 		(qassoc_get (gs_facts stage) 'state_symbol nil)))))
 
