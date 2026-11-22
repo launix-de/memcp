@@ -13,12 +13,15 @@ setup:
 - sql: INSERT INTO projection_string_inputs VALUES(1,1,'A'),(2,1,'a'),(3,1,'A '),(4,1,'a '),(5,1,'A')
 - sql: INSERT INTO projection_values VALUES(1,100),(2,200),(3,NULL)
 - sql: INSERT INTO projection_payload_inputs VALUES(1,1,10),(2,1,10),(3,1,40),(4,1,NULL),(5,2,20),(6,3,30),(7,4,60),(8,NULL,50)
+- sql: CREATE TABLE projection_feature_flags(actor INT PRIMARY KEY,active BOOLEAN)
+- sql: INSERT INTO projection_feature_flags VALUES(7,TRUE),(8,FALSE),(9,FALSE)
 cleanup:
 - sql: DROP TABLE IF EXISTS projection_inputs
 - sql: DROP TABLE IF EXISTS projection_values
 - sql: DROP TABLE IF EXISTS projection_empty
 - sql: DROP TABLE IF EXISTS projection_payload_inputs
 - sql: DROP TABLE IF EXISTS projection_string_inputs
+- sql: DROP TABLE IF EXISTS projection_feature_flags
 test_cases:
 - name: A nested MAX remains in the scalar input rather than escaping its producer
   sql: SELECT q.token,(SELECT c.value+(SELECT MAX(z.value) FROM projection_values z) FROM projection_values c WHERE c.id=q.id) AS found FROM projection_inputs q ORDER BY q.token
@@ -497,3 +500,262 @@ test_cases:
     - seq: 8
       found: null
       bound_value: null
+
+- name: Bind projection actor 9 for initial inactive actor
+  sql: SET @projection_actor=9
+  session_id: projection-invariant-owner
+- name: Initial inactive actor binds the actual outer and nested invariant
+  sql: |-
+    SELECT q.seq,r.outer_flag,r.found
+    FROM projection_payload_inputs q
+    LEFT JOIN (
+      SELECT c.id,
+        EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE) AS outer_flag,
+        COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE)
+          THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=n.id AND z.value=999) END
+          FROM projection_values n WHERE n.id=c.id LIMIT 1),FALSE) AS found
+      FROM projection_values c
+    ) r ON r.id=q.id ORDER BY q.seq
+  session_id: projection-invariant-owner
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      outer_flag: false
+      found: false
+    - seq: 2
+      outer_flag: false
+      found: false
+    - seq: 3
+      outer_flag: false
+      found: false
+    - seq: 4
+      outer_flag: false
+      found: false
+    - seq: 5
+      outer_flag: false
+      found: false
+    - seq: 6
+      outer_flag: false
+      found: false
+    - seq: 7
+      outer_flag: null
+      found: null
+    - seq: 8
+      outer_flag: null
+      found: null
+- name: Bind projection actor 7 for active actor after inactive caller
+  sql: SET @projection_actor=7
+  session_id: projection-invariant-owner
+- name: Active actor after inactive caller binds the actual outer and nested invariant
+  sql: |-
+    SELECT q.seq,r.outer_flag,r.found
+    FROM projection_payload_inputs q
+    LEFT JOIN (
+      SELECT c.id,
+        EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE) AS outer_flag,
+        COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE)
+          THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=n.id AND z.value=999) END
+          FROM projection_values n WHERE n.id=c.id LIMIT 1),FALSE) AS found
+      FROM projection_values c
+    ) r ON r.id=q.id ORDER BY q.seq
+  session_id: projection-invariant-owner
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      outer_flag: true
+      found: true
+    - seq: 2
+      outer_flag: true
+      found: true
+    - seq: 3
+      outer_flag: true
+      found: true
+    - seq: 4
+      outer_flag: true
+      found: true
+    - seq: 5
+      outer_flag: true
+      found: true
+    - seq: 6
+      outer_flag: true
+      found: true
+    - seq: 7
+      outer_flag: null
+      found: null
+    - seq: 8
+      outer_flag: null
+      found: null
+- name: Bind projection actor 8 for second inactive actor after active caller
+  sql: SET @projection_actor=8
+  session_id: projection-invariant-owner
+- name: Second inactive actor after active caller binds the actual outer and nested invariant
+  sql: |-
+    SELECT q.seq,r.outer_flag,r.found
+    FROM projection_payload_inputs q
+    LEFT JOIN (
+      SELECT c.id,
+        EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE) AS outer_flag,
+        COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE)
+          THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=n.id AND z.value=999) END
+          FROM projection_values n WHERE n.id=c.id LIMIT 1),FALSE) AS found
+      FROM projection_values c
+    ) r ON r.id=q.id ORDER BY q.seq
+  session_id: projection-invariant-owner
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      outer_flag: false
+      found: false
+    - seq: 2
+      outer_flag: false
+      found: false
+    - seq: 3
+      outer_flag: false
+      found: false
+    - seq: 4
+      outer_flag: false
+      found: false
+    - seq: 5
+      outer_flag: false
+      found: false
+    - seq: 6
+      outer_flag: false
+      found: false
+    - seq: 7
+      outer_flag: null
+      found: null
+    - seq: 8
+      outer_flag: null
+      found: null
+- name: Bind projection actor 7 for active actor restored in the cached query
+  sql: SET @projection_actor=7
+  session_id: projection-invariant-owner
+- name: Active actor restored in the cached query binds the actual outer and nested invariant
+  sql: |-
+    SELECT q.seq,r.outer_flag,r.found
+    FROM projection_payload_inputs q
+    LEFT JOIN (
+      SELECT c.id,
+        EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE) AS outer_flag,
+        COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE)
+          THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=n.id AND z.value=999) END
+          FROM projection_values n WHERE n.id=c.id LIMIT 1),FALSE) AS found
+      FROM projection_values c
+    ) r ON r.id=q.id ORDER BY q.seq
+  session_id: projection-invariant-owner
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      outer_flag: true
+      found: true
+    - seq: 2
+      outer_flag: true
+      found: true
+    - seq: 3
+      outer_flag: true
+      found: true
+    - seq: 4
+      outer_flag: true
+      found: true
+    - seq: 5
+      outer_flag: true
+      found: true
+    - seq: 6
+      outer_flag: true
+      found: true
+    - seq: 7
+      outer_flag: null
+      found: null
+    - seq: 8
+      outer_flag: null
+      found: null
+- name: Delete the current actor flag without changing its session coordinate
+  sql: DELETE FROM projection_feature_flags WHERE actor=7
+  session_id: projection-invariant-owner
+- name: Same actor invalidates outer and nested truth after actual DELETE
+  sql: |-
+    SELECT q.seq,r.outer_flag,r.found
+    FROM projection_payload_inputs q
+    LEFT JOIN (
+      SELECT c.id,
+        EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE) AS outer_flag,
+        COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE)
+          THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=n.id AND z.value=999) END
+          FROM projection_values n WHERE n.id=c.id LIMIT 1),FALSE) AS found
+      FROM projection_values c
+    ) r ON r.id=q.id ORDER BY q.seq
+  session_id: projection-invariant-owner
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      outer_flag: false
+      found: false
+    - seq: 2
+      outer_flag: false
+      found: false
+    - seq: 3
+      outer_flag: false
+      found: false
+    - seq: 4
+      outer_flag: false
+      found: false
+    - seq: 5
+      outer_flag: false
+      found: false
+    - seq: 6
+      outer_flag: false
+      found: false
+    - seq: 7
+      outer_flag: null
+      found: null
+    - seq: 8
+      outer_flag: null
+      found: null
+- name: Restore the current actor flag without changing its session coordinate
+  sql: INSERT INTO projection_feature_flags VALUES(7,TRUE)
+  session_id: projection-invariant-owner
+- name: Same actor observes restored outer and nested truth
+  sql: |-
+    SELECT q.seq,r.outer_flag,r.found
+    FROM projection_payload_inputs q
+    LEFT JOIN (
+      SELECT c.id,
+        EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE) AS outer_flag,
+        COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE)
+          THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=n.id AND z.value=999) END
+          FROM projection_values n WHERE n.id=c.id LIMIT 1),FALSE) AS found
+      FROM projection_values c
+    ) r ON r.id=q.id ORDER BY q.seq
+  session_id: projection-invariant-owner
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      outer_flag: true
+      found: true
+    - seq: 2
+      outer_flag: true
+      found: true
+    - seq: 3
+      outer_flag: true
+      found: true
+    - seq: 4
+      outer_flag: true
+      found: true
+    - seq: 5
+      outer_flag: true
+      found: true
+    - seq: 6
+      outer_flag: true
+      found: true
+    - seq: 7
+      outer_flag: null
+      found: null
+    - seq: 8
+      outer_flag: null
+      found: null

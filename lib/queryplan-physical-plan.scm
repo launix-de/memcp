@@ -5629,6 +5629,8 @@ stage requested-column. The recursive result is ordered driver -> final. */
 		(define stage_lookup
 			(stage_lookup_with_query_invariant_probe_bindings
 				raw_stage_lookup invariant_probe_entries))
+		(define caller_invariant_symbols
+			(query_invariant_probe_symbol_index stage_lookup (qb_sources raw_block)))
 		(define range_cache_prepares
 			(range_cache_prepare_exprs_for_block stage_lookup raw_block))
 		(define relational_candidates
@@ -5659,7 +5661,7 @@ stage requested-column. The recursive result is ordered driver -> final. */
 					(scalar_query_probe_recipe_plans stage_lookup probe_recipe_entries bounded_probe_recipe_keys))
 				(define recipe_block (query_block_with_scalar_query_probe_recipes block probe_recipe_entries))
 				(define probe_recipe_bindings
-					(scalar_query_probe_recipe_bindings probe_recipe_plans))
+					(scalar_query_probe_recipe_bindings probe_recipe_plans caller_invariant_symbols))
 				(define probe_recipe_prepares
 					(scalar_query_probe_recipe_prepare_exprs probe_recipe_plans))
 				(list
@@ -5765,7 +5767,7 @@ stage requested-column. The recursive result is ordered driver -> final. */
 				(define prepared_block
 					(query_block_with_scalar_query_probe_recipes carrier_block probe_recipe_entries))
 				(define probe_recipe_bindings
-					(scalar_query_probe_recipe_bindings probe_recipe_plans))
+					(scalar_query_probe_recipe_bindings probe_recipe_plans caller_invariant_symbols))
 				(define probe_recipe_prepares
 					(scalar_query_probe_recipe_prepare_exprs probe_recipe_plans))
 				/* Different logical stage IDs may resolve to one physical carrier.

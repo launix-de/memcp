@@ -1655,7 +1655,7 @@ both names therefore bind to the same parameter. */
 				(rewrite_scalar_query_probe_params index item)))))
 		_ expr)))))
 
-(define scalar_query_probe_recipe_binding (lambda (plan)
+(define scalar_query_probe_recipe_binding (lambda (plan caller_invariant_symbols)
 	(match plan
 		'(stage requested_col nested_stages _hoisted_stages prepare_stages inline_probe_stages bounded_consumer) (begin
 			(define raw_keys (gs_keys stage))
@@ -1684,7 +1684,11 @@ both names therefore bind to the same parameter. */
 			(define invariant_sources
 				(query_invariant_probe_sources annotated_nested_lookup input_sources))
 			(define invariant_symbol_index
-				(query_invariant_probe_symbol_index annotated_nested_lookup input_sources))
+				/* Caller-owned invariant outputs may occur only in this payload,
+				outside the recipe's nested dependency closure. Their actual binding
+				is emitted by the same query preparation owner before these recipes. */
+				(merge_assoc caller_invariant_symbols
+					(query_invariant_probe_symbol_index annotated_nested_lookup input_sources)))
 			(define rewrite_invariants (lambda (expr)
 				(rewrite_query_invariant_probe_symbols invariant_symbol_index
 					(rewrite_query_invariant_probe_expr
@@ -1732,8 +1736,9 @@ both names therefore bind to the same parameter. */
 				(list (quote lambda) params memoized_probe_expr)))
 		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe plan"))))
 
-(define scalar_query_probe_recipe_bindings (lambda (plans)
-	(map (coalesceNil plans '()) scalar_query_probe_recipe_binding)))
+(define scalar_query_probe_recipe_bindings (lambda (plans caller_invariant_symbols)
+	(map (coalesceNil plans '()) (lambda (plan)
+		(scalar_query_probe_recipe_binding plan caller_invariant_symbols)))))
 
 (define scalar_query_probe_recipe_hoisted_stages (lambda (plans)
 	(unique_stages_by_id (merge (map (coalesceNil plans '()) (lambda (plan)
