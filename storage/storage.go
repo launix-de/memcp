@@ -1111,6 +1111,23 @@ func Init(en scm.Env) {
 	})
 
 	scm.Declare(&en, &scm.Declaration{
+		Name: "table_size_estimate",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			t := TableFromScmer(a[0])
+			if t != nil {
+				if snapshot := t.showColumnsSnapshot.Load(); snapshot != nil && snapshot.metadata.statistics != nil {
+					return scm.NewInt(snapshot.metadata.statistics.sizeBytes)
+				}
+			}
+			return scm.NewNil()
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "published storage size estimate, or nil when unknown; never loads or visits data",
+			Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}},
+			Return: &scm.TypeDescriptor{Kind: "any"},
+		},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
 		Name: "table_planner_statistics",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {

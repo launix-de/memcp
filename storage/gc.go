@@ -371,11 +371,19 @@ func writeBlobManifestReferences(shard *storageShard, references map[string]stru
 // Reads the active UUID set from in-memory table structures (always current),
 // under schemalock.RLock to prevent concurrent DDL from modifying the table map.
 func cleanShards(db *database) int {
-	// Checkpoint capture owns schema before the catalog publication gate.
-	// Acquire in that same order, never hold the gate waiting for schema.
+	epoch := catalogPublicationEpoch.Load()
+	if catalogPublications.Load() != 0 {
+		return 0
+	}
+	// Enumerate before proving ownership. Any publication beginning after the
+	// proof creates fresh UUIDs, which cannot be among these candidates.
+	var candidates []string
+	db.persistence.WalkShardFiles(func(name string) {
+		if extractShardUUID(name) != "" {
+			candidates = append(candidates, name)
+		}
+	})
 	db.schemalock.RLock()
-	catalogPersistenceMu.Lock()
-	defer catalogPersistenceMu.Unlock()
 	// Collect active UUIDs from in-memory shards under read-lock.
 	activeUUIDs := map[string]bool{}
 	for _, t := range db.tables.GetAll() {
@@ -391,20 +399,24 @@ func cleanShards(db *database) int {
 	for _, shard := range registeredClusterShards(db.Name) {
 		activeUUIDs[shard.uuid.String()] = true
 	}
+	db.schemalock.RUnlock()
+	// Reading durable anchors can involve remote backends. No schema or
+	// publication lock is retained while collecting these roots.
 	for _, id := range db.catalogShardIDs() {
 		activeUUIDs[id] = true
 	}
-	db.schemalock.RUnlock()
+	if catalogPublications.Load() != 0 || catalogPublicationEpoch.Load() != epoch {
+		return 0
+	}
 
-	// Walk disk shard files one by one; delete those with an unknown UUID.
 	deleted := 0
-	db.persistence.WalkShardFiles(func(name string) {
+	for _, name := range candidates {
 		uuid := extractShardUUID(name)
-		if uuid != "" && !activeUUIDs[uuid] {
+		if !activeUUIDs[uuid] {
 			db.persistence.DeleteShardFile(name)
 			deleted++
 		}
-	})
+	}
 	return deleted
 }
 

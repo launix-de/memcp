@@ -746,6 +746,6 @@ Only bounded scalar formatting remains in frontend helpers. */
 (define sql_catalog_table_rows (lambda (schema name)
 	(get_assoc (table_planner_statistics (table schema false name false)) "row_count")))
 (define sql_catalog_table_size (lambda (schema name)
-	(get_assoc (show (table schema false name false) "memory") "size_bytes")))
+	(table_size_estimate (table schema false name false))))
 
 (define sql_catalog_key_part (lambda (name) (concat (strlen name) ":" name)))
