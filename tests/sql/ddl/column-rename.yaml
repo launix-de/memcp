@@ -515,7 +515,7 @@ test_cases:
         rows: 1
         data:
         - new_value: 17
-          old_value: 100
+          old_value: null
           total: 19
     - connection: owner
       sql: UPDATE rename_computed_reuse SET new_value=23 WHERE id=1
