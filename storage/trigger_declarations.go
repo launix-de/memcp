@@ -313,7 +313,7 @@ func (t *table) borrowTriggerDeclarations(tx *TxContext) *triggerDeclarationLeas
 	defer db.persistenceLifecycle.RUnlock()
 	db.schemalock.RLock()
 	defer db.schemalock.RUnlock()
-	if db.tables.Get(t.clusterPublishedName()) != t {
+	if db.tables.Get(t.Name) != t {
 		panic("trigger declarations belong to a retired native relation")
 	}
 	// Reuse the native generation and visibility proof; legacy IDs remain

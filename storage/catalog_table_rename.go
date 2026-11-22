@@ -114,7 +114,15 @@ func (tx *TxContext) renameCatalogTable(t *table, newName string, ignoreCase boo
 			panic(failure)
 		}
 	}()
-	requireTableMaintenance(t.schema.Name, t.visibleNameAt(tx, t.schema.catalogView()), maintenanceRename)
+	// The original owner may rename its exact unpublished generation. Public
+	// name lookup intentionally rejects that generation for every other caller.
+	identityValue := t.NativeIdentity(tx)
+	if identityValue.IsNil() || identityValue.String() != identity {
+		panic("table rename lost its expected native generation")
+	}
+	if !declaredTableMaintenanceCapabilities(t.schema.Name, t.Name).allows(maintenanceRename) {
+		panic("Table " + t.schema.Name + "." + t.visibleNameAt(tx, t.schema.catalogView()) + " is required by MemCP and does not allow rename")
+	}
 	d := &catalogTableRename{t.Name, identity, t.visibleNameAt(tx, t.schema.catalogView()), newName, ignoreCase}
 	if err := validateTableRenameShape(d); err != nil {
 		panic(err)
