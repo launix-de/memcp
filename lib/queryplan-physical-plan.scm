@@ -13335,12 +13335,27 @@ in storage. The nested lambda receives an independently bound invocation. */
 
 /* Operation identity is already explicit in logical DML field ownership.
 Validate every UNION branch before emitting a single outer native producer. */
+(define physical_dml_target_source (lambda (block target_schema target_tbl)
+	(if (query_block? block) (begin
+		(define target (dml_target_source (qb_sources block) target_schema target_tbl
+			(qassoc_get (qb_facts block) 'dml_target_alias nil)))
+		(if target target (neumann_fail "build_queryplan" "DML target relation mismatch")))
+		(union_block? block) (begin
+			(define targets (map (union_branches block) (lambda (branch)
+				(physical_dml_target_source branch target_schema target_tbl))))
+			(if (empty_list? targets)
+				(neumann_fail "build_queryplan" "DML UNION requires a target")
+				(find (cdr targets) (lambda (target)
+					(not (expression_equal? (source_table_expr target) (source_table_expr (car targets))))) nil)
+				(neumann_fail "build_queryplan" "DML UNION branches require one target generation")
+				(car targets)))
+		(neumann_fail "build_queryplan" "DML target requires a logical block"))))
+
 (define physical_dml_descriptor (lambda (block target_schema target_tbl)
 	(if (query_block? block)
 		(list (if (empty_list? (coalesceNil (qb_fields block) '())) "delete" "update")
 			(extract_assoc (dml_storage_assignments
-				(dml_target_source (qb_sources block) target_schema target_tbl
-					(qassoc_get (qb_facts block) 'dml_target_alias nil)) (qb_fields block))
+				(physical_dml_target_source block target_schema target_tbl) (qb_fields block))
 				(lambda (name _expr) name)))
 		(union_block? block) (begin
 			(define events (map (union_branches block) (lambda (branch)
@@ -14651,8 +14666,8 @@ prepare bindings; no key enumeration or storage artifact enters logical IR. */
 					/* The logical local-relation descriptor names an already bound
 					native handle. It is not executable SQL-name syntax for TABLE;
 					the outer producer must borrow the same handle as its scan. */
-					(list (if (local_relation_reference? target_tbl) (local_relation_symbol target_tbl)
-						(list 'table target_schema false target_tbl false 'tx)))
+					(list (source_table_expr
+						(physical_dml_target_source (ir_root ir) target_schema target_tbl)))
 					(physical_dml_descriptor (ir_root ir) target_schema target_tbl)
 					(match (logical_op (ir_root ir))
 						(symbol query-block) (lower_dml_query_block_with_stages (ir_root ir) target_schema target_tbl)
@@ -14662,7 +14677,8 @@ prepare bindings; no key enumeration or storage artifact enters logical IR. */
 					(symbol query-block) (physical_mutation_producer
 						(map target_specs (lambda (spec) (begin
 							(define source (dml_target_source_for_spec (qb_sources (ir_root ir)) spec))
-							(source_native_table_expr source 'tx))))
+							(if source (source_table_expr source)
+								(neumann_fail "build_queryplan" "DELETE target relation mismatch")))))
 						(list "delete" '())
 						(lower_multi_target_delete_with_stages (ir_root ir) target_specs))
 					_ (neumann_fail "build_queryplan" "multi-target DELETE lowering expects a query-block root"))
