@@ -7598,18 +7598,23 @@ every nested query/group scope before substitution. */
 			((symbol query-block) database sources fields condition grouping having ordering limit offset hidden stages facts)
 			(rewrite_derived_block_body alias projection expr)
 			((symbol group-stage) id input domain keys aggregates having output ordering limit offset facts)
-			(make_group_stage id
-				(if (source_alias input) (rewrite_derived_source alias projection input)
-					(rewrite_derived_ref alias projection input))
-				(rewrite_derived_ref alias projection domain) (rewrite_derived_ref alias projection keys)
-				(rewrite_derived_ref alias projection aggregates) (rewrite_derived_ref alias projection having)
-				(rewrite_derived_ref alias projection output) (rewrite_derived_ref alias projection ordering)
-				(rewrite_derived_ref alias projection limit) (rewrite_derived_ref alias projection offset)
-				/* Consumers already address this stage's output columns. Closing a
-				caller coordinate over a derived projection changes executable
-				operands, not the published aggregate interface. */
-				(rewrite_derived_ref alias projection
-					(gs_facts (freeze_group_stage_aggregate_outputs expr))))
+			/* With no free read anywhere in this stage, substitution cannot
+			introduce capture. In particular, do not alpha-rename an input QB
+			separately from its aggregate/key consumers in the enclosing stage. */
+			(if (not (derived_projection_reads_alias? alias expr))
+				(freeze_group_stage_aggregate_outputs expr)
+				(make_group_stage id
+					(if (source_alias input) (rewrite_derived_source alias projection input)
+						(rewrite_derived_ref alias projection input))
+					(rewrite_derived_ref alias projection domain) (rewrite_derived_ref alias projection keys)
+					(rewrite_derived_ref alias projection aggregates) (rewrite_derived_ref alias projection having)
+					(rewrite_derived_ref alias projection output) (rewrite_derived_ref alias projection ordering)
+					(rewrite_derived_ref alias projection limit) (rewrite_derived_ref alias projection offset)
+					/* Consumers already address this stage's output columns. Closing a
+					caller coordinate over a derived projection changes executable
+					operands, not the published aggregate interface. */
+					(rewrite_derived_ref alias projection
+						(gs_facts (freeze_group_stage_aggregate_outputs expr)))))
 			((symbol get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (equal? tblvar alias)
 				(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
 				expr)
