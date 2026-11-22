@@ -1,5 +1,6 @@
 # Copyright (C) 2026 Carl-Philip Hänsch
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Literal SYSNAME reference: https://dbfiddle.uk/NdvHBCtS
 metadata:
   syntax: tsql
   isolated: true
@@ -187,7 +188,7 @@ test_cases:
   tds:
     statements:
     - connection: owner
-      sql: EXEC sp_rename N'[memcp-tests].[dbo].[rename.address].[old]]value]',N'[new.value]',N'COLUMN'
+      sql: EXEC sp_rename N'[memcp-tests].[dbo].[rename.address].[old]]value]',N'new.value',N'COLUMN'
     - connection: owner
       sql: SELECT [new.value] FROM [rename.address]
       expect:
@@ -202,6 +203,35 @@ test_cases:
         rows: 1
         data:
         - newer: 31
+- name: New names are literal SYSNAME values even when they contain qualification punctuation
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_literal
+  - sql: CREATE TABLE rename_literal(old_id INT)
+  - sql: INSERT rename_literal VALUES(47)
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_literal.old_id',N'dbo.new_id',N'COLUMN'
+    - connection: owner
+      sql: SELECT [dbo.new_id] AS value FROM rename_literal
+      expect:
+        rows: 1
+        data:
+        - value: 47
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_literal.[dbo.new_id]',N'[new.id]',N'COLUMN'
+    - connection: owner
+      sql: SELECT [[new.id]]] AS value FROM rename_literal
+      expect:
+        rows: 1
+        data:
+        - value: 47
+    - connection: owner
+      sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'rename_literal')
+      expect:
+        rows: 1
+        data:
+        - name: '[new.id]'
 - name: Invalid rename arguments leave the existing declaration and rows intact
   setup:
   - sql: DROP TABLE IF EXISTS rename_invalid
@@ -215,14 +245,6 @@ test_cases:
         error: true
     - connection: owner
       sql: EXEC sp_rename N'other_database.dbo.rename_invalid.old_id',N'new_id',N'COLUMN'
-      expect:
-        error: true
-    - connection: owner
-      sql: EXEC sp_rename N'dbo.rename_invalid.old_id',N'.private',N'COLUMN'
-      expect:
-        error: true
-    - connection: owner
-      sql: EXEC sp_rename N'dbo.rename_invalid.old_id',N'dbo.new_id',N'COLUMN'
       expect:
         error: true
     - connection: owner
@@ -289,6 +311,40 @@ test_cases:
           id: 1
         - new_id: 3
           id: 2
+- name: Existing and newly declared CHECKs retain physical dependencies across rename
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_checks
+  - sql: CREATE TABLE rename_checks(id INT NOT NULL PRIMARY KEY,old_value INT,CONSTRAINT rename_check_before CHECK(old_value>=0))
+  - sql: INSERT rename_checks VALUES(1,3)
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_checks.old_value',N'new_value',N'COLUMN'
+    - connection: owner
+      sql: BEGIN TRY INSERT rename_checks VALUES(2,-1); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number;
+        END CATCH
+      expect:
+        rows: 1
+        data:
+        - error_number: 547
+    - connection: owner
+      sql: ALTER TABLE rename_checks ADD CONSTRAINT rename_check_after CHECK(new_value<10)
+    - connection: owner
+      sql: BEGIN TRY INSERT rename_checks VALUES(2,11); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number;
+        END CATCH
+      expect:
+        rows: 1
+        data:
+        - error_number: 547
+    - connection: owner
+      sql: UPDATE rename_checks SET new_value=7 WHERE id=1
+    - connection: owner
+      sql: SELECT id,new_value FROM rename_checks
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          new_value: 7
 - name: Computed inputs and deferred defaults retain the original physical binding
   setup:
   - sql: DROP TABLE IF EXISTS rename_computed
@@ -314,6 +370,21 @@ test_cases:
         - id: 2
           new_value: 3
           total: 5
+    - connection: owner
+      sql: SET ANSI_WARNINGS OFF
+    - connection: owner
+      sql: SELECT id,new_value,total FROM rename_computed ORDER BY id
+      expect:
+        rows: 2
+        data: &id001
+        - id: 1
+          new_value: 7
+          total: 9
+        - id: 2
+          new_value: 3
+          total: 5
+    - connection: owner
+      sql: SET ANSI_WARNINGS ON
 - name: Reusing the retired SQL name allocates a distinct physical column
   setup:
   - sql: DROP TABLE IF EXISTS rename_reuse
@@ -485,6 +556,46 @@ test_cases:
     - id: 2
       new_value: 19
       old_value: 37
+- name: Reloaded computed OFF profile binds the renamed physical input
+  tds:
+    statements:
+    - connection: owner
+      sql: SET ANSI_WARNINGS OFF
+    - connection: owner
+      sql: SELECT id,new_value,total FROM rename_computed ORDER BY id
+      expect:
+        rows: 2
+        data: *id001
+    - connection: owner
+      sql: SET ANSI_WARNINGS ON
+- name: Reloaded CHECKs reject both sides of the permitted interval
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRY INSERT rename_checks VALUES(2,-1); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number;
+        END CATCH
+      expect:
+        rows: 1
+        data:
+        - error_number: 547
+    - connection: owner
+      sql: BEGIN TRY INSERT rename_checks VALUES(2,11); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS error_number;
+        END CATCH
+      expect:
+        rows: 1
+        data:
+        - error_number: 547
+    - connection: owner
+      sql: INSERT rename_checks(id,new_value) VALUES(2,8)
+    - connection: owner
+      sql: SELECT id,new_value FROM rename_checks ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          new_value: 7
+        - id: 2
+          new_value: 8
 cleanup:
 - sql: DROP TABLE IF EXISTS rename_child
 - sql: DROP TABLE IF EXISTS rename_parent
@@ -498,3 +609,5 @@ cleanup:
 - sql: DROP TABLE IF EXISTS rename_computed
 - sql: DROP TABLE IF EXISTS rename_reuse
 - sql: DROP TABLE IF EXISTS rename_spelling
+- sql: DROP TABLE IF EXISTS rename_literal
+- sql: DROP TABLE IF EXISTS rename_checks

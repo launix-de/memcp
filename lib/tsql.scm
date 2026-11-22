@@ -254,15 +254,18 @@ first and specialize this finite profile at the frontend cache boundary. */
 				(source_column_declaration source column column_ic) nil))
 			(if (not (and declaration (declaration "Computed"))) node (begin
 				(define handle (table (source_schema source) false (source_relation source) false tx))
-				(define recipe (show handle "computation" (declaration "Field") false tx))
+				(define recipe (show handle "computation" (sql_column_storage_name declaration) false tx))
 				(if (nil? recipe) node (begin
 					/* Declarations are immutable until replacement of the relation.
 					The native identity is an O(1) scalar guard on this borrowed recipe. */
 					(planner_record_guard_condition (list 'equal?
 						(list 'show (list 'table (source_schema source) false (source_relation source) false 'tx) "identity" 'tx)
 						(show handle "identity" tx)) planning)
-					(define inputs (map (car recipe) (lambda (name)
-						(visit (list 'get_column (source_alias source) false name false) outer))))
+					(define inputs (map (car recipe) (lambda (name) (begin
+						(define input (find (source_columns source) (lambda (column)
+							(equal? (sql_column_storage_name column) name)) nil))
+						(if input true (error "computed physical input declaration disappeared: " name))
+						(visit (list 'get_column (source_alias source) false (input "Field") false) outer)))))
 					(define info ((tsql_column_compiler planning) (sql_expr_info outer node) declaration))
 					(list 'sql_type_expr (cons (tsql_computed_off_function source declaration recipe) inputs)
 						(sql_info_datatype info) (sql_info_collation info)))))))
@@ -528,6 +531,14 @@ Restore only those exact data encodings before applying the pure recipe checks. 
 	(cons head arguments) (cons (tsql_computed_recipe_data head)
 		(map arguments tsql_computed_recipe_data))
 	_ expression)))
+/* Stored row recipes carry physical dependency names. Build their lexical
+input declaration from those same coordinates, rather than rebinding an old
+SQL spelling after a rename. Ordinary SQL sources retain their visible names. */
+(define tsql_computed_input_source (lambda (source)
+	(list "__computed" (source_schema source) (source_relation source) false nil
+		(set_assoc (source_declarations source) "columns"
+			(map (source_columns source) (lambda (column)
+				(set_assoc column "Field" (sql_column_storage_name column))))))))
 (define tsql_computed_off_function (lambda (source declaration recipe) (begin
 	(define properties (coalesceNil (declaration "Properties") '()))
 	(define encoded (properties "tsql.computed.off"))
@@ -537,8 +548,7 @@ Restore only those exact data encodings before applying the pure recipe checks. 
 		_ (error "invalid computed expression profile")))
 	(if (and (tsql_computed_formula_safe? formula) (tsql_computed_recipe_comparisons? formula)) true
 		(error "computed expression profile is not a supported pure scalar"))
-	(define input_source (list "__computed" (source_schema source) (source_relation source) false nil
-		(source_declarations source)))
+	(define input_source (tsql_computed_input_source source))
 	(define inputs (extract_columns_for_alias input_source formula))
 	(if (expression_equal? inputs (car recipe)) true
 		(error "computed expression profile input declaration changed"))
@@ -563,7 +573,9 @@ Restore only those exact data encodings before applying the pure recipe checks. 
 				true nil nil nil nil nil nil nil nil) '()))
 			(define source (car (qb_sources bound)))
 			(define info (sql_expr_info (list source) (cadr (qb_fields bound))))
-			(define raw_formula (sql_type_lower_annotations (list source) (sql_info_formula info)))
+			(define raw_formula (sql_storage_column_references (source_columns source)
+				(sql_type_lower_annotations (list source) (sql_info_formula info))))
+			(define source (tsql_computed_input_source source))
 			(define formula (tsql_computed_policy_formula raw_formula true))
 			(define off_formula (tsql_computed_recipe_expr (tsql_computed_policy_formula raw_formula false)))
 			(if (and (tsql_computed_formula_safe? formula) (tsql_computed_formula_safe? off_formula)
@@ -2640,12 +2652,11 @@ https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sp
 	(if (has? '("COLUMN" "OBJECT") kind) true
 		(error "sp_rename object type is not supported: " kind))
 	(define address (tsql_rename_address schema name kind caller))
-	(define replacement_parts (if (nil? replacement) nil (tsql_name_parts replacement)))
-	(if (and (equal? (count replacement_parts) 1) (not (nil? (car replacement_parts)))
-		(not (equal? (car replacement_parts) ""))
-		(not (sql_private_relation? (car replacement_parts)))) true
-		(tsql_raise_error 15248 "The new name must be a single public identifier." 1))
-	(define replacement (car replacement_parts))
+	/* @newname is one literal SYSNAME, not a multipart address. Dots and
+	brackets remain part of that name, unlike the parsed @objname argument.
+	SQL Server 2022 reference: https://dbfiddle.uk/NdvHBCtS */
+	(if (or (nil? replacement) (equal? replacement "") (sql_private_relation? replacement))
+		(tsql_raise_error 15248 "The new name must be a nonempty public identifier." 1) true)
 	(define database (car address))
 	(tsql_require_permission (tsql_session_actor caller) database "ALTER")
 	(tsql_statement_call statement caller "rename object" false (lambda (tx) (begin
