@@ -120,7 +120,7 @@ func (operation *nativeMutationOperation) admitCompletionStatementTable(t *table
 		private = coordinates.owner == t.dataOwner && coordinates.writable && t.dataOwner.owns(t)
 		finish()
 	}
-	if name == nil || GetDatabase(t.schema.Name) != t.schema || t.schema.tables.Get(*name) != t ||
+	if name == nil || GetDatabase(t.schema.Name) != t.schema || t.schema.tables.Get(t.Name) != t ||
 		(!private && !t.visibleIn(operation.invocation, t.schema.catalogView().version)) {
 		_ = lease.Close()
 		panic("native statement requires the current transaction-visible target")

@@ -18,7 +18,7 @@ import "github.com/launix-de/memcp/scm"
 // and conflict with another declaration already owned by this transaction.
 func (t *table) declarationLookupSnapshot(tx *TxContext) *tableShowColumnsSnapshot {
 	name := t.publishedName.Load()
-	if name == nil || GetDatabase(t.schema.Name) != t.schema || t.schema.tables.Get(*name) != t {
+	if name == nil || GetDatabase(t.schema.Name) != t.schema || t.schema.tables.Get(t.Name) != t {
 		// A coherence acquisition may replace a local handle. Only the existing
 		// mutation owner may rebind and validate that successor; an old snapshot
 		// must not establish absence in the current native relation.
