@@ -407,15 +407,23 @@ test_cases:
       referenced_table_name: cold_alias_after
       referenced_column_name: new_id
   setup:
-  - sql: DROP TABLE IF EXISTS cold_alias_new_child
-  - sql: DROP TABLE IF EXISTS cold_alias_child
-  - sql: DROP TABLE IF EXISTS cold_alias_after
-  - sql: DROP TABLE IF EXISTS cold_alias_before
-  - sql: CREATE TABLE cold_alias_before(old_id INT NOT NULL CONSTRAINT cold_alias_primary PRIMARY KEY,value INT)
-  - sql: CREATE TABLE cold_alias_child(id INT NOT NULL PRIMARY KEY,old_parent INT,value INT,CONSTRAINT cold_alias_foreign FOREIGN KEY(old_parent) REFERENCES
+  - syntax: tsql
+    sql: DROP TABLE IF EXISTS cold_alias_new_child
+  - syntax: tsql
+    sql: DROP TABLE IF EXISTS cold_alias_child
+  - syntax: tsql
+    sql: DROP TABLE IF EXISTS cold_alias_after
+  - syntax: tsql
+    sql: DROP TABLE IF EXISTS cold_alias_before
+  - syntax: tsql
+    sql: CREATE TABLE cold_alias_before(old_id INT NOT NULL CONSTRAINT cold_alias_primary PRIMARY KEY,value INT)
+  - syntax: tsql
+    sql: CREATE TABLE cold_alias_child(id INT NOT NULL PRIMARY KEY,old_parent INT,value INT,CONSTRAINT cold_alias_foreign FOREIGN KEY(old_parent) REFERENCES
       cold_alias_before(old_id) ON UPDATE CASCADE)
-  - sql: INSERT cold_alias_before VALUES(7,11)
-  - sql: INSERT cold_alias_child VALUES(1,7,17)
+  - syntax: tsql
+    sql: INSERT cold_alias_before VALUES(7,11)
+  - syntax: tsql
+    sql: INSERT cold_alias_child VALUES(1,7,17)
   - syntax: tsql
     sql: EXEC sp_rename N'dbo.cold_alias_before.old_id',N'new_id',N'COLUMN'
   - syntax: tsql

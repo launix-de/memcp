@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # https://learn.microsoft.com/sql/relational-databases/system-information-schema-views/key-column-usage-transact-sql
 # https://learn.microsoft.com/sql/relational-databases/system-information-schema-views/referential-constraints-transact-sql
+# https://learn.microsoft.com/sql/relational-databases/errors-events/mssqlserver-916-database-engine-error
 metadata:
   version: '1.0'
   syntax: tsql
@@ -372,23 +373,23 @@ test_cases:
       table_name: key_catalog_parent
       column_name: code
       ordinal_position: 1
-- name: An ungranted explicit catalog exports no key rows
+- name: An ungranted explicit catalog rejects key access
   username: key_catalog_reader
   password: pw
   sql: SELECT constraint_catalog,constraint_schema,constraint_name,table_catalog,table_schema,table_name,column_name,ordinal_position FROM key_catalog_hidden.INFORMATION_SCHEMA.KEY_COLUMN_USAGE
     WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code') ORDER BY constraint_name,ordinal_position
   expect:
-    rows: 0
-    data: []
-- name: An ungranted explicit catalog exports no reference rows
+    error: true
+    contains: ["access denied: database key_catalog_hidden"]
+- name: An ungranted explicit catalog rejects reference access
   username: key_catalog_reader
   password: pw
   sql: SELECT constraint_catalog,constraint_schema,constraint_name,unique_constraint_catalog,unique_constraint_schema,unique_constraint_name,match_option,update_rule,delete_rule
     FROM key_catalog_hidden.INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code')
     ORDER BY constraint_name
   expect:
-    rows: 0
-    data: []
+    error: true
+    contains: ["access denied: database key_catalog_hidden"]
 - name: Original transaction column aliases project actual key facts without changing observer or rollback rows
   tds:
     statements:
