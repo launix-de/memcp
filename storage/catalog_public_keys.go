@@ -187,6 +187,7 @@ func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation
 	// All data callbacks and index preparation run outside schema/table/shard
 	// locks. The native declaration lease retains the complete validation cut.
 	if operation == "add" {
+		t.enterPendingCatalogData(tx, changes.leases[t])
 		validateExistingUniqueRows(tx, t, key)
 	}
 	views := maps.Clone(changes.views.Load().tables)
