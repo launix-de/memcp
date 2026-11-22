@@ -24,7 +24,7 @@ setup:
           (define names (list 'info_schema_selected_databases 'info_schema_name_matches 'literal_false? 'info_schema_selected_tables
             'information_schema_rows 'info_schema_table_rows 'info_schema_columns_for_table 'info_schema_column_default
             'info_schema_column_character_length 'info_schema_column_collation 'info_schema_table_row 'info_schema_trigger_rows
-            'info_schema_constraint_rows 'info_schema_referential_constraints_for_table 'info_schema_key_column_usage_rows 'info_schema_fk_unique_name
+            'info_schema_constraint_rows 'info_schema_referential_constraints_for_table 'info_schema_key_column_usage_rows 'info_schema_key_column_usage_for_table 'info_schema_fk_unique_name
             'info_schema_unique_column_rows 'info_schema_fk_column_rows 'sql_key_constraint_name 'sql_metadata_identity
             'sql_stored_view_catalog_rows 'tsql_catalog_rows_for_database 'tsql_catalog_object_tuples 'tsql_catalog_column_tuples
             'tsql_catalog_default_tuples 'tsql_catalog_trigger_tuples 'tsql_catalog_key_tuples 'tsql_catalog_lookup_object_tuples

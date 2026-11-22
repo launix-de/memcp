@@ -1,0 +1,823 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/relational-databases/system-information-schema-views/key-column-usage-transact-sql
+# https://learn.microsoft.com/sql/relational-databases/system-information-schema-views/referential-constraints-transact-sql
+metadata:
+  version: '1.0'
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: SQL Server key and reference views retain selected catalog dbo native grants and actual renamed declarations
+setup:
+- sql: DROP TABLE IF EXISTS key_catalog_child
+- sql: DROP TABLE IF EXISTS key_catalog_parent
+- sql: DROP DATABASE IF EXISTS key_catalog_other
+- sql: DROP DATABASE IF EXISTS key_catalog_hidden
+- sql: CREATE DATABASE key_catalog_other
+- sql: CREATE DATABASE key_catalog_hidden
+- sql: CREATE TABLE key_catalog_parent([Left] INT NOT NULL,[Right] INT NOT NULL,code INT NOT NULL,CONSTRAINT PK_key_catalog_parent PRIMARY KEY([Left],[Right]),CONSTRAINT
+    UQ_key_catalog_code UNIQUE(code))
+- sql: CREATE TABLE key_catalog_child(id INT NOT NULL,a INT,b INT,ref_code INT,CONSTRAINT PK_key_catalog_child PRIMARY KEY(id),CONSTRAINT FK_key_catalog_pair FOREIGN
+    KEY(a,b) REFERENCES key_catalog_parent([Left],[Right]) ON UPDATE CASCADE ON DELETE SET NULL,CONSTRAINT FK_key_catalog_code FOREIGN KEY(ref_code) REFERENCES key_catalog_parent(code))
+- sql: INSERT key_catalog_parent VALUES(7,8,17)
+- sql: INSERT key_catalog_child VALUES(1,7,8,17)
+- sql: CREATE TABLE key_catalog_other.dbo.key_catalog_parent([Left] INT NOT NULL,[Right] INT NOT NULL,code INT NOT NULL,CONSTRAINT PK_key_catalog_parent PRIMARY KEY([Left],[Right]),CONSTRAINT
+    UQ_key_catalog_code UNIQUE(code))
+- sql: CREATE TABLE key_catalog_other.dbo.key_catalog_child(id INT NOT NULL,a INT,b INT,ref_code INT,CONSTRAINT PK_key_catalog_child PRIMARY KEY(id),CONSTRAINT FK_key_catalog_pair
+    FOREIGN KEY(a,b) REFERENCES key_catalog_other.dbo.key_catalog_parent([Left],[Right]) ON UPDATE CASCADE ON DELETE SET NULL,CONSTRAINT FK_key_catalog_code FOREIGN
+    KEY(ref_code) REFERENCES key_catalog_other.dbo.key_catalog_parent(code))
+- sql: INSERT key_catalog_other.dbo.key_catalog_parent VALUES(71,81,171)
+- sql: INSERT key_catalog_other.dbo.key_catalog_child VALUES(11,71,81,171)
+- sql: CREATE TABLE key_catalog_hidden.dbo.key_catalog_parent([Left] INT NOT NULL,[Right] INT NOT NULL,code INT NOT NULL,CONSTRAINT PK_key_catalog_parent PRIMARY
+    KEY([Left],[Right]),CONSTRAINT UQ_key_catalog_code UNIQUE(code))
+- sql: CREATE TABLE key_catalog_hidden.dbo.key_catalog_child(id INT NOT NULL,a INT,b INT,ref_code INT,CONSTRAINT PK_key_catalog_child PRIMARY KEY(id),CONSTRAINT FK_key_catalog_pair
+    FOREIGN KEY(a,b) REFERENCES key_catalog_hidden.dbo.key_catalog_parent([Left],[Right]) ON UPDATE CASCADE ON DELETE SET NULL,CONSTRAINT FK_key_catalog_code FOREIGN
+    KEY(ref_code) REFERENCES key_catalog_hidden.dbo.key_catalog_parent(code))
+- sql: INSERT key_catalog_hidden.dbo.key_catalog_parent VALUES(71,81,171)
+- sql: INSERT key_catalog_hidden.dbo.key_catalog_child VALUES(11,71,81,171)
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS key_catalog_reader" nil (newsession) nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER key_catalog_reader IDENTIFIED BY 'pw'" nil (newsession) nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO key_catalog_reader" nil))
+cleanup:
+- sql: DROP TABLE IF EXISTS key_catalog_child
+- sql: DROP TABLE IF EXISTS key_catalog_parent
+- sql: DROP DATABASE IF EXISTS key_catalog_other
+- sql: DROP DATABASE IF EXISTS key_catalog_hidden
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS key_catalog_reader" nil (newsession) nil))
+test_cases:
+- name: Key columns expose the selected catalog and dbo for composite PK unique and FK rows
+  sql: SELECT constraint_catalog,constraint_schema,constraint_name,table_catalog,table_schema,table_name,column_name,ordinal_position FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+    WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code') ORDER BY constraint_name,ordinal_position
+  expect:
+    rows: 7
+    data:
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: FK_key_catalog_code
+      table_catalog: memcp-tests
+      table_schema: dbo
+      table_name: key_catalog_child
+      column_name: ref_code
+      ordinal_position: 1
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: FK_key_catalog_pair
+      table_catalog: memcp-tests
+      table_schema: dbo
+      table_name: key_catalog_child
+      column_name: a
+      ordinal_position: 1
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: FK_key_catalog_pair
+      table_catalog: memcp-tests
+      table_schema: dbo
+      table_name: key_catalog_child
+      column_name: b
+      ordinal_position: 2
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: PK_key_catalog_child
+      table_catalog: memcp-tests
+      table_schema: dbo
+      table_name: key_catalog_child
+      column_name: id
+      ordinal_position: 1
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: PK_key_catalog_parent
+      table_catalog: memcp-tests
+      table_schema: dbo
+      table_name: key_catalog_parent
+      column_name: Left
+      ordinal_position: 1
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: PK_key_catalog_parent
+      table_catalog: memcp-tests
+      table_schema: dbo
+      table_name: key_catalog_parent
+      column_name: Right
+      ordinal_position: 2
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: UQ_key_catalog_code
+      table_catalog: memcp-tests
+      table_schema: dbo
+      table_name: key_catalog_parent
+      column_name: code
+      ordinal_position: 1
+- name: Referential constraints use SQL Server names matching and action values
+  sql: SELECT constraint_catalog,constraint_schema,constraint_name,unique_constraint_catalog,unique_constraint_schema,unique_constraint_name,match_option,update_rule,delete_rule
+    FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code')
+    ORDER BY constraint_name
+  expect:
+    rows: 2
+    data:
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: FK_key_catalog_code
+      unique_constraint_catalog: memcp-tests
+      unique_constraint_schema: dbo
+      unique_constraint_name: UQ_key_catalog_code
+      match_option: SIMPLE
+      update_rule: NO ACTION
+      delete_rule: NO ACTION
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: FK_key_catalog_pair
+      unique_constraint_catalog: memcp-tests
+      unique_constraint_schema: dbo
+      unique_constraint_name: PK_key_catalog_parent
+      match_option: SIMPLE
+      update_rule: CASCADE
+      delete_rule: SET NULL
+- name: A qualified key view describes only the explicitly selected catalog
+  sql: SELECT constraint_catalog,constraint_schema,constraint_name,table_catalog,table_schema,table_name,column_name,ordinal_position FROM key_catalog_other.INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+    WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code') ORDER BY constraint_name,ordinal_position
+  expect:
+    rows: 7
+    data:
+    - constraint_catalog: key_catalog_other
+      constraint_schema: dbo
+      constraint_name: FK_key_catalog_code
+      table_catalog: key_catalog_other
+      table_schema: dbo
+      table_name: key_catalog_child
+      column_name: ref_code
+      ordinal_position: 1
+    - constraint_catalog: key_catalog_other
+      constraint_schema: dbo
+      constraint_name: FK_key_catalog_pair
+      table_catalog: key_catalog_other
+      table_schema: dbo
+      table_name: key_catalog_child
+      column_name: a
+      ordinal_position: 1
+    - constraint_catalog: key_catalog_other
+      constraint_schema: dbo
+      constraint_name: FK_key_catalog_pair
+      table_catalog: key_catalog_other
+      table_schema: dbo
+      table_name: key_catalog_child
+      column_name: b
+      ordinal_position: 2
+    - constraint_catalog: key_catalog_other
+      constraint_schema: dbo
+      constraint_name: PK_key_catalog_child
+      table_catalog: key_catalog_other
+      table_schema: dbo
+      table_name: key_catalog_child
+      column_name: id
+      ordinal_position: 1
+    - constraint_catalog: key_catalog_other
+      constraint_schema: dbo
+      constraint_name: PK_key_catalog_parent
+      table_catalog: key_catalog_other
+      table_schema: dbo
+      table_name: key_catalog_parent
+      column_name: Left
+      ordinal_position: 1
+    - constraint_catalog: key_catalog_other
+      constraint_schema: dbo
+      constraint_name: PK_key_catalog_parent
+      table_catalog: key_catalog_other
+      table_schema: dbo
+      table_name: key_catalog_parent
+      column_name: Right
+      ordinal_position: 2
+    - constraint_catalog: key_catalog_other
+      constraint_schema: dbo
+      constraint_name: UQ_key_catalog_code
+      table_catalog: key_catalog_other
+      table_schema: dbo
+      table_name: key_catalog_parent
+      column_name: code
+      ordinal_position: 1
+- name: A qualified reference view describes only the explicitly selected catalog
+  sql: SELECT constraint_catalog,constraint_schema,constraint_name,unique_constraint_catalog,unique_constraint_schema,unique_constraint_name,match_option,update_rule,delete_rule
+    FROM key_catalog_other.INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code')
+    ORDER BY constraint_name
+  expect:
+    rows: 2
+    data:
+    - constraint_catalog: key_catalog_other
+      constraint_schema: dbo
+      constraint_name: FK_key_catalog_code
+      unique_constraint_catalog: key_catalog_other
+      unique_constraint_schema: dbo
+      unique_constraint_name: UQ_key_catalog_code
+      match_option: SIMPLE
+      update_rule: NO ACTION
+      delete_rule: NO ACTION
+    - constraint_catalog: key_catalog_other
+      constraint_schema: dbo
+      constraint_name: FK_key_catalog_pair
+      unique_constraint_catalog: key_catalog_other
+      unique_constraint_schema: dbo
+      unique_constraint_name: PK_key_catalog_parent
+      match_option: SIMPLE
+      update_rule: CASCADE
+      delete_rule: SET NULL
+- name: Current database changes scope both key views without leaking the previous catalog
+  tds:
+    statements:
+    - sql: USE key_catalog_other
+    - sql: SELECT constraint_catalog,constraint_schema,constraint_name,table_catalog,table_schema,table_name,column_name,ordinal_position FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+        WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code') ORDER BY constraint_name,ordinal_position
+      expect:
+        rows: 7
+        data:
+        - constraint_catalog: key_catalog_other
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_code
+          table_catalog: key_catalog_other
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: ref_code
+          ordinal_position: 1
+        - constraint_catalog: key_catalog_other
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_pair
+          table_catalog: key_catalog_other
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: a
+          ordinal_position: 1
+        - constraint_catalog: key_catalog_other
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_pair
+          table_catalog: key_catalog_other
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: b
+          ordinal_position: 2
+        - constraint_catalog: key_catalog_other
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_child
+          table_catalog: key_catalog_other
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: id
+          ordinal_position: 1
+        - constraint_catalog: key_catalog_other
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_parent
+          table_catalog: key_catalog_other
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: Left
+          ordinal_position: 1
+        - constraint_catalog: key_catalog_other
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_parent
+          table_catalog: key_catalog_other
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: Right
+          ordinal_position: 2
+        - constraint_catalog: key_catalog_other
+          constraint_schema: dbo
+          constraint_name: UQ_key_catalog_code
+          table_catalog: key_catalog_other
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: code
+          ordinal_position: 1
+    - sql: SELECT constraint_catalog,constraint_schema,constraint_name,unique_constraint_catalog,unique_constraint_schema,unique_constraint_name,match_option,update_rule,delete_rule
+        FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code')
+        ORDER BY constraint_name
+      expect:
+        rows: 2
+        data:
+        - constraint_catalog: key_catalog_other
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_code
+          unique_constraint_catalog: key_catalog_other
+          unique_constraint_schema: dbo
+          unique_constraint_name: UQ_key_catalog_code
+          match_option: SIMPLE
+          update_rule: NO ACTION
+          delete_rule: NO ACTION
+        - constraint_catalog: key_catalog_other
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_pair
+          unique_constraint_catalog: key_catalog_other
+          unique_constraint_schema: dbo
+          unique_constraint_name: PK_key_catalog_parent
+          match_option: SIMPLE
+          update_rule: CASCADE
+          delete_rule: SET NULL
+- name: Database membership grants the actual current key metadata
+  username: key_catalog_reader
+  password: pw
+  sql: SELECT constraint_catalog,constraint_schema,constraint_name,table_catalog,table_schema,table_name,column_name,ordinal_position FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+    WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code') ORDER BY constraint_name,ordinal_position
+  expect:
+    rows: 7
+    data:
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: FK_key_catalog_code
+      table_catalog: memcp-tests
+      table_schema: dbo
+      table_name: key_catalog_child
+      column_name: ref_code
+      ordinal_position: 1
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: FK_key_catalog_pair
+      table_catalog: memcp-tests
+      table_schema: dbo
+      table_name: key_catalog_child
+      column_name: a
+      ordinal_position: 1
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: FK_key_catalog_pair
+      table_catalog: memcp-tests
+      table_schema: dbo
+      table_name: key_catalog_child
+      column_name: b
+      ordinal_position: 2
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: PK_key_catalog_child
+      table_catalog: memcp-tests
+      table_schema: dbo
+      table_name: key_catalog_child
+      column_name: id
+      ordinal_position: 1
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: PK_key_catalog_parent
+      table_catalog: memcp-tests
+      table_schema: dbo
+      table_name: key_catalog_parent
+      column_name: Left
+      ordinal_position: 1
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: PK_key_catalog_parent
+      table_catalog: memcp-tests
+      table_schema: dbo
+      table_name: key_catalog_parent
+      column_name: Right
+      ordinal_position: 2
+    - constraint_catalog: memcp-tests
+      constraint_schema: dbo
+      constraint_name: UQ_key_catalog_code
+      table_catalog: memcp-tests
+      table_schema: dbo
+      table_name: key_catalog_parent
+      column_name: code
+      ordinal_position: 1
+- name: An ungranted explicit catalog exports no key rows
+  username: key_catalog_reader
+  password: pw
+  sql: SELECT constraint_catalog,constraint_schema,constraint_name,table_catalog,table_schema,table_name,column_name,ordinal_position FROM key_catalog_hidden.INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+    WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code') ORDER BY constraint_name,ordinal_position
+  expect:
+    rows: 0
+    data: []
+- name: An ungranted explicit catalog exports no reference rows
+  username: key_catalog_reader
+  password: pw
+  sql: SELECT constraint_catalog,constraint_schema,constraint_name,unique_constraint_catalog,unique_constraint_schema,unique_constraint_name,match_option,update_rule,delete_rule
+    FROM key_catalog_hidden.INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code')
+    ORDER BY constraint_name
+  expect:
+    rows: 0
+    data: []
+- name: Original transaction column aliases project actual key facts without changing observer or rollback rows
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.key_catalog_parent.Left',N'left_key',N'COLUMN'
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.key_catalog_child.a',N'parent_left',N'COLUMN'
+    - connection: owner
+      sql: SELECT constraint_catalog,constraint_schema,constraint_name,table_catalog,table_schema,table_name,column_name,ordinal_position FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+        WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code') ORDER BY constraint_name,ordinal_position
+      expect:
+        rows: 7
+        data:
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_code
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: ref_code
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_pair
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: parent_left
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_pair
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: b
+          ordinal_position: 2
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_child
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: id
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_parent
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: left_key
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_parent
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: Right
+          ordinal_position: 2
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: UQ_key_catalog_code
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: code
+          ordinal_position: 1
+    - connection: owner
+      sql: SELECT constraint_catalog,constraint_schema,constraint_name,unique_constraint_catalog,unique_constraint_schema,unique_constraint_name,match_option,update_rule,delete_rule
+        FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code')
+        ORDER BY constraint_name
+      expect:
+        rows: 2
+        data:
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_code
+          unique_constraint_catalog: memcp-tests
+          unique_constraint_schema: dbo
+          unique_constraint_name: UQ_key_catalog_code
+          match_option: SIMPLE
+          update_rule: NO ACTION
+          delete_rule: NO ACTION
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_pair
+          unique_constraint_catalog: memcp-tests
+          unique_constraint_schema: dbo
+          unique_constraint_name: PK_key_catalog_parent
+          match_option: SIMPLE
+          update_rule: CASCADE
+          delete_rule: SET NULL
+    - connection: observer
+      sql: SELECT constraint_catalog,constraint_schema,constraint_name,table_catalog,table_schema,table_name,column_name,ordinal_position FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+        WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code') ORDER BY constraint_name,ordinal_position
+      expect:
+        rows: 7
+        data:
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_code
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: ref_code
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_pair
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: a
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_pair
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: b
+          ordinal_position: 2
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_child
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: id
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_parent
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: Left
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_parent
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: Right
+          ordinal_position: 2
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: UQ_key_catalog_code
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: code
+          ordinal_position: 1
+    - connection: owner
+      sql: SELECT left_key,[Right],code FROM key_catalog_parent
+      expect:
+        rows: 1
+        data:
+        - left_key: 7
+          Right: 8
+          code: 17
+    - connection: owner
+      sql: SELECT id,parent_left,b,ref_code FROM key_catalog_child
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          parent_left: 7
+          b: 8
+          ref_code: 17
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT constraint_catalog,constraint_schema,constraint_name,table_catalog,table_schema,table_name,column_name,ordinal_position FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+        WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code') ORDER BY constraint_name,ordinal_position
+      expect:
+        rows: 7
+        data:
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_code
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: ref_code
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_pair
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: a
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_pair
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: b
+          ordinal_position: 2
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_child
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: id
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_parent
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: Left
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_parent
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: Right
+          ordinal_position: 2
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: UQ_key_catalog_code
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: code
+          ordinal_position: 1
+    - connection: observer
+      sql: SELECT id,a,b,ref_code FROM key_catalog_child
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          a: 7
+          b: 8
+          ref_code: 17
+- name: Committed visible key spellings retain real composite cascade and reference values
+  tds:
+    statements:
+    - sql: BEGIN TRANSACTION
+    - sql: EXEC sp_rename N'dbo.key_catalog_parent.Left',N'left_key',N'COLUMN'
+    - sql: EXEC sp_rename N'dbo.key_catalog_child.a',N'parent_left',N'COLUMN'
+    - sql: COMMIT TRANSACTION
+    - sql: SELECT constraint_catalog,constraint_schema,constraint_name,table_catalog,table_schema,table_name,column_name,ordinal_position FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+        WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code') ORDER BY constraint_name,ordinal_position
+      expect:
+        rows: 7
+        data:
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_code
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: ref_code
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_pair
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: parent_left
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_pair
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: b
+          ordinal_position: 2
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_child
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_child
+          column_name: id
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_parent
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: left_key
+          ordinal_position: 1
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: PK_key_catalog_parent
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: Right
+          ordinal_position: 2
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: UQ_key_catalog_code
+          table_catalog: memcp-tests
+          table_schema: dbo
+          table_name: key_catalog_parent
+          column_name: code
+          ordinal_position: 1
+    - sql: SELECT constraint_catalog,constraint_schema,constraint_name,unique_constraint_catalog,unique_constraint_schema,unique_constraint_name,match_option,update_rule,delete_rule
+        FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS WHERE constraint_name IN(N'FK_key_catalog_pair',N'FK_key_catalog_code',N'PK_key_catalog_parent',N'PK_key_catalog_child',N'UQ_key_catalog_code')
+        ORDER BY constraint_name
+      expect:
+        rows: 2
+        data:
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_code
+          unique_constraint_catalog: memcp-tests
+          unique_constraint_schema: dbo
+          unique_constraint_name: UQ_key_catalog_code
+          match_option: SIMPLE
+          update_rule: NO ACTION
+          delete_rule: NO ACTION
+        - constraint_catalog: memcp-tests
+          constraint_schema: dbo
+          constraint_name: FK_key_catalog_pair
+          unique_constraint_catalog: memcp-tests
+          unique_constraint_schema: dbo
+          unique_constraint_name: PK_key_catalog_parent
+          match_option: SIMPLE
+          update_rule: CASCADE
+          delete_rule: SET NULL
+    - sql: UPDATE key_catalog_parent SET left_key=9 WHERE left_key=7
+    - sql: SELECT left_key,[Right],code FROM key_catalog_parent
+      expect:
+        rows: 1
+        data:
+        - left_key: 9
+          Right: 8
+          code: 17
+    - sql: SELECT id,parent_left,b,ref_code FROM key_catalog_child
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          parent_left: 9
+          b: 8
+          ref_code: 17
+  cleanup:
+  - sql: UPDATE key_catalog_parent SET left_key=7 WHERE left_key=9
+  - sql: EXEC sp_rename N'dbo.key_catalog_child.parent_left',N'a',N'COLUMN'
+  - sql: EXEC sp_rename N'dbo.key_catalog_parent.left_key',N'Left',N'COLUMN'
+- name: Empty key and reference results retain SQL Server wire types
+  tds:
+    statements:
+    - sql: SELECT constraint_catalog,constraint_schema,constraint_name,table_catalog,table_schema,table_name,column_name,ordinal_position FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+        WHERE 1=0
+      expect:
+        rows: 0
+        column_types:
+        - name: constraint_catalog
+          type: NVARCHAR
+        - name: constraint_schema
+          type: NVARCHAR
+        - name: constraint_name
+          type: NVARCHAR
+        - name: table_catalog
+          type: NVARCHAR
+        - name: table_schema
+          type: NVARCHAR
+        - name: table_name
+          type: NVARCHAR
+        - name: column_name
+          type: NVARCHAR
+        - name: ordinal_position
+          type: INT
+    - sql: SELECT constraint_catalog,constraint_schema,constraint_name,unique_constraint_catalog,unique_constraint_schema,unique_constraint_name,match_option,update_rule,delete_rule
+        FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS WHERE 1=0
+      expect:
+        rows: 0
+        column_types:
+        - name: constraint_catalog
+          type: NVARCHAR
+        - name: constraint_schema
+          type: NVARCHAR
+        - name: constraint_name
+          type: NVARCHAR
+        - name: unique_constraint_catalog
+          type: NVARCHAR
+        - name: unique_constraint_schema
+          type: NVARCHAR
+        - name: unique_constraint_name
+          type: NVARCHAR
+        - name: match_option
+          type: VARCHAR
+        - name: update_rule
+          type: VARCHAR
+        - name: delete_rule
+          type: VARCHAR
+- name: The shared MySQL key metadata contract remains unchanged
+  syntax: mysql
+  sql: SELECT constraint_catalog,table_catalog,table_schema,table_name,column_name,referenced_table_schema,referenced_table_name,referenced_column_name FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+    WHERE table_schema='memcp-tests' AND constraint_name='FK_key_catalog_pair' ORDER BY ordinal_position
+  expect:
+    rows: 2
+    data:
+    - constraint_catalog: def
+      table_catalog: def
+      table_schema: memcp-tests
+      table_name: key_catalog_child
+      column_name: a
+      referenced_table_schema: memcp-tests
+      referenced_table_name: key_catalog_parent
+      referenced_column_name: Left
+    - constraint_catalog: def
+      table_catalog: def
+      table_schema: memcp-tests
+      table_name: key_catalog_child
+      column_name: b
+      referenced_table_schema: memcp-tests
+      referenced_table_name: key_catalog_parent
+      referenced_column_name: Right

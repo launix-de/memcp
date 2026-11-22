@@ -5300,26 +5300,48 @@ that context explicitly; stored views refuse this scalar before publication. */
 				_ (error "APPLY currently requires a SELECT query"))
 			outer nil nil))))
 
-	/* SQL Server TABLES/COLUMNS describe one selected catalog. The native
+	/* SQL Server table and key views describe one selected catalog. The native
 	metadata relation remains shared with other frontends; only this logical
 	projection maps its database namespace to TABLE_CATALOG / dbo. */
 	(define tsql_information_schema_source (lambda (alias qualifier name) (begin
 		(define kind (toLower name))
-		(if (not (has? '("tables" "columns") kind))
-			(error "unsupported T-SQL table metadata relation: " name)
+		(if (not (has? '("tables" "columns" "key_column_usage" "referential_constraints") kind))
+			(error "unsupported T-SQL information schema relation: " name)
 			(begin
 				(define owner (database_name (tsql_qualifier_database qualifier schema frontend_options) true))
 				(if (nil? owner) (error "catalog database does not exist") true)
 				(if policy (policy owner kind false) true)
 				(define metadata_alias "__tsql_information_schema")
 				(define column (lambda (name) (list 'get_column metadata_alias false name false)))
-				(define fields (merge (map (information_schema_column_catalog "information_schema" kind)
+				/* These two standard views have eight/nine fields respectively;
+				MySQL's extra referenced-table coordinates remain internal inputs.
+				https://learn.microsoft.com/sql/relational-databases/system-information-schema-views/key-column-usage-transact-sql
+				https://learn.microsoft.com/sql/relational-databases/system-information-schema-views/referential-constraints-transact-sql */
+				(define key_fields (if (equal? kind "key_column_usage")
+					'("constraint_catalog" "constraint_schema" "constraint_name" "table_catalog" "table_schema" "table_name" "column_name" "ordinal_position")
+					(equal? kind "referential_constraints")
+					'("constraint_catalog" "constraint_schema" "constraint_name" "unique_constraint_catalog" "unique_constraint_schema" "unique_constraint_name" "match_option" "update_rule" "delete_rule") nil))
+				(define declarations (filter (information_schema_column_catalog "information_schema" kind)
+					(lambda (declaration) (or (nil? key_fields) (has? key_fields (declaration "Field"))))))
+				(define fields (merge (map declarations
 					(lambda (declaration) (begin
 						(define name (declaration "Field"))
-						(list name (if (equal? name "table_catalog")
+						(list name (if (has? '("table_catalog" "constraint_catalog" "unique_constraint_catalog") name)
 							(list 'sql_type_expr owner (list "NVARCHAR" '(128)) nil)
-							(equal? name "table_schema")
+							(has? '("table_schema" "constraint_schema" "unique_constraint_schema") name)
 							(list 'sql_type_expr (tsql_schema_name_value 1) (list "NVARCHAR" '(128)) nil)
+							(equal? kind "key_column_usage")
+							(list 'sql_type_expr (column name)
+								(if (equal? name "ordinal_position") "INT" (list "NVARCHAR" '(128))) nil)
+							(equal? kind "referential_constraints")
+							(list 'sql_type_expr
+								(if (equal? name "match_option") "SIMPLE"
+									(has? '("update_rule" "delete_rule") name)
+									(list 'if (list 'equal?? (column name) "RESTRICT") "NO ACTION" (column name))
+									(column name))
+								(if (equal? name "match_option") (list "VARCHAR" '(7))
+									(has? '("update_rule" "delete_rule") name) (list "VARCHAR" '(11))
+									(list "NVARCHAR" '(128))) nil)
 							(equal? name "character_maximum_length")
 							/* The shared producer exposes declared bounds. Legacy LOB
 							limits and XML's -1 are this frontend's type contracts:
@@ -5333,7 +5355,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 							(list 'sql_type_expr (column name) (list "NVARCHAR" '(128)) nil)
 							(list 'sql_compile_column 'tsql_compile_column (column name)))))))))
 				(define condition (list 'and
-					(list 'equal? (column "table_schema") owner)
+					(list 'equal? (column (if (equal? kind "referential_constraints") "constraint_schema" "table_schema")) owner)
 					(list tsql_metadata_visible? (tsql_actor_formula) owner true)
 					(list 'not (list internal_column_name? (column "table_name")))))
 				(list alias owner (make_query_block owner
@@ -5352,11 +5374,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(list (quote equal?) (list (quote tsql_relation_name) database name (quote tx)) canonical)
 				planning_session)
 			(if policy (policy database canonical false) true)
-			(if (and (equal?? database "information_schema") (has? '("tables" "columns") (toLower canonical)))
+			(if (and (equal?? database "information_schema") (has? '("tables" "columns" "key_column_usage" "referential_constraints") (toLower canonical)))
 				(tsql_information_schema_source alias nil canonical)
 				(equal?? database "information_schema") (begin
 					/* Other historical metadata views retain their existing contract;
-					TABLES/COLUMNS above own the SQL Server catalog/schema projection.
+					The projected views above own the SQL Server catalog/schema contract.
 					Keep the native relation logical; never copy metadata rows here. */
 					(define kind (toLower canonical))
 					(define entry (find (list
@@ -5397,7 +5419,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		must not capture a still-uninitialized local tsql_read_source binding. */))
 
 	(define tsql_information_schema_read_source (lambda (alias qualifier name)
-		(if (has? '("tables" "columns") (toLower name))
+		(if (has? '("tables" "columns" "key_column_usage" "referential_constraints") (toLower name))
 			(tsql_information_schema_source alias qualifier name)
 			(nil? qualifier) (tsql_read_source alias
 				(tsql_qualifier_database "information_schema" schema frontend_options) name)

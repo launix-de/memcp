@@ -6000,7 +6000,7 @@ value equality is not native identifier lookup: multiple native names may match.
 
 (define metadata_source_selection_expr (lambda (src condition)
 	(if (not (and (information_schema_source? (source_schema src) (source_relation src))
-		(has? '("schemata" "tables" "columns" "statistics" "referential_constraints" "table_constraints" "check_constraints") (toLower (source_relation src))))) nil
+		(has? '("schemata" "tables" "columns" "statistics" "key_column_usage" "referential_constraints" "table_constraints" "check_constraints") (toLower (source_relation src))))) nil
 		/* A necessary FALSE conjunct excludes the whole metadata domain, even
 		when a nested UNION/stage has not folded its residual predicate. */
 		(reduce (split_and_terms condition) (lambda (excluded term)

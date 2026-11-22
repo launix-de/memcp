@@ -320,19 +320,16 @@ carries a generic default Collation field. */
 )))
 	sql_key_constraint_name NULL)))
 
-(define info_schema_key_column_usage_rows (close_procedure ((lambda (info_schema_unique_column_rows info_schema_fk_column_rows)
-	(lambda (tx)
-		(merge (map (show) (lambda (schema)
-			(merge (map (show schema false tx) (lambda (tbl) (begin
-				(define meta (show (table schema false tbl false tx) "constraints" tx))
-				(define unique_rows (merge (map (meta "Unique") (lambda (key)
-					(info_schema_unique_column_rows schema tbl key (key "Cols") 1)))))
-				(define foreign_rows (merge (map (filter (meta "ForeignKeys") (lambda (fk)
-					(equal? (fk "Role") "referencing"))) (lambda (fk)
-						(info_schema_fk_column_rows schema tbl fk
-							(fk "LocalColumns") (fk "OtherColumns") 1)))))
-				(merge unique_rows foreign_rows)
-)))))))))
+(define info_schema_key_column_usage_for_table (close_procedure ((lambda (info_schema_unique_column_rows info_schema_fk_column_rows)
+	(lambda (schema tbl tx) (begin
+		(define meta (show (table schema false tbl false tx) "constraints" tx))
+		(define unique_rows (merge (map (meta "Unique") (lambda (key)
+			(info_schema_unique_column_rows schema tbl key (key "Cols") 1)))))
+		(define foreign_rows (merge (map (filter (meta "ForeignKeys") (lambda (fk)
+			(equal? (fk "Role") "referencing"))) (lambda (fk)
+				(info_schema_fk_column_rows schema tbl fk
+					(fk "LocalColumns") (fk "OtherColumns") 1)))))
+		(merge unique_rows foreign_rows))))
 	info_schema_unique_column_rows info_schema_fk_column_rows)))
 
 (define info_schema_referential_constraints_for_table (close_procedure ((lambda (info_schema_fk_unique_name)
@@ -603,6 +600,13 @@ its existing explicit transaction visibility. */
 				(rows_for_table db name tx)))))))))))
 (define info_schema_table_rows (close_procedure (info_schema_table_rows_factory info_schema_selected_databases info_schema_selected_tables)))
 
+/* Key metadata uses the same finite namespace selector as other catalog rows.
+The unrestricted shared contract is unchanged when selection is nil. */
+(define info_schema_key_column_usage_rows (close_procedure ((lambda (info_schema_table_rows info_schema_key_column_usage_for_table)
+	(lambda (tx selection)
+		(info_schema_table_rows tx selection info_schema_key_column_usage_for_table)))
+	info_schema_table_rows info_schema_key_column_usage_for_table)))
+
 (define info_schema_native_table_rows_factory (close_procedure (lambda (info_schema_selected_databases info_schema_name_matches info_schema_table_row)
 	(lambda (tx selection)
 		(merge (map (info_schema_selected_databases selection) (lambda (db)
@@ -638,7 +642,7 @@ its existing explicit transaction visibility. */
 		'((ignorecase "information_schema") (ignorecase "table_constraints"))
 		(info_schema_table_rows tx selection (lambda (database name tx) (info_schema_constraint_rows database name tx false)))
 		'((ignorecase "information_schema") (ignorecase "key_column_usage"))
-		(info_schema_key_column_usage_rows tx)
+		(info_schema_key_column_usage_rows tx selection)
 
 		'((ignorecase "information_schema") (ignorecase "referential_constraints"))
 		(info_schema_table_rows tx selection info_schema_referential_constraints_for_table)
