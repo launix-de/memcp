@@ -64,8 +64,19 @@ scope/cache. Transition data and lifetime remain native, never Scheme row bags. 
 		(tsql_require_database_access (tsql_session_actor caller) schema)
 		/* The generic completion API attests the actual operation, not this SQL
 		module's current child DML or the contents of its transition relations. */
-		(define columns (mutation_columns tx))
-		(define declared (map (show OLD) (lambda (column) (column "Field"))))
+		(define declarations (show OLD))
+		(define declared (map declarations (lambda (column) (column "Field"))))
+	/* Completion attests physical assignment coordinates. UPDATE(column)
+		consumes the SQL names from this exact transition declaration. Resolve
+		that bounded metadata vector once, never while reading transition rows. */
+		(define columns (if (find declarations (lambda (column) (column "StorageField")) nil)
+			(begin
+				(define names (reduce declarations (lambda (names column)
+					(set_assoc names (sql_column_storage_name column) (column "Field"))) '()))
+				(map (mutation_columns tx) (lambda (name)
+					(coalesceNil (get_assoc names name nil)
+						(error "statement assignment declaration disappeared: " name)))))
+			(mutation_columns tx)))
 		(define scoped (tsql_scope_session caller contracts schema true))
 		(scoped "__tsql_xact_abort" true)
 		(scoped "__tsql_quoted_identifier" quoted)
@@ -80,8 +91,8 @@ scope/cache. Transition data and lifetime remain native, never Scheme row bags. 
 			(tsql_temporary_name? (car binding)))) (lambda (binding)
 				(list (car binding) (cadr binding) (nth binding 2) "trigger_temporary"))))
 		(temporary "bindings" (merge (list (list
-			(list "deleted" schema (show OLD "name") "transition")
-			(list "inserted" schema (show NEW "name") "transition")) borrowed)))
+			(list "deleted" schema (show OLD "name" tx) "transition")
+			(list "inserted" schema (show NEW "name" tx) "transition")) borrowed)))
 		/* A SQL leaf borrows this admitted completion. Nested DML still opens its
 		own native operation through the normal physical writer, never the request
 		statement CAS or an implicit COMMIT/ROLLBACK in this callback. */

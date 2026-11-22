@@ -1005,7 +1005,9 @@ return through ordinary recompilation and validation. */
 (define source_columns (lambda (src) (begin
 	(define columns (if (nil? (source_declarations src)) nil ((source_declarations src) "columns")))
 	(if (nil? columns)
-		(if (table_function_relation? (source_relation src))
+		(if (local_relation_reference? (source_relation src))
+			(local_relation_columns (source_relation src))
+			(table_function_relation? (source_relation src))
 			(map (table_function_columns (source_relation src)) (lambda (name)
 				(list "Field" name "RawType" "any" "Null" true))) '()) columns))))
 (define source_constraints (lambda (src)
@@ -3692,7 +3694,7 @@ whereas an aggregate inside a scalar subquery belongs to that other query. */
 (define exists_query_has_window? (lambda (block)
 	(reduce (merge (list (qb_fields block) (qb_hidden block)
 		(map (coalesceNil (qb_order block) '()) car))) (lambda (found expr)
-		(or found (expr_contains_window? expr))) false)))
+			(or found (expr_contains_window? expr))) false)))
 (define exists_query_presence_input (lambda (inner original)
 	(if (and (query_block? inner) (exists_positive_window_without_offset? inner)
 		(not (exists_order_has_local_aggregates? (if (query_block? original) original inner)))
@@ -3865,26 +3867,26 @@ untouched and UNION ALL/DISTINCT retain their ordinary branch semantics. */
 
 (define make_exists_union_stage_rewrite (lambda (original_inner args)
 	(begin
-	(define inner (exists_union_presence_input original_inner))
-	(if (not (union_block? inner))
-		(neumann_fail "untangle_query" "EXISTS UNION lowering expects union-block")
-		(if (or (not (empty_list? (union_order inner)))
-			(or (not (nil? (union_limit inner))) (not (nil? (union_offset inner)))))
-			(neumann_fail "untangle_query" "EXISTS over UNION currently supports plain unordered branches")
-			(begin
-				(define results (map (union_branches inner) (lambda (branch)
-					(if (and (query_block_no_from? branch) (empty_list? (qb_stages branch)))
-						/* A scalar SELECT contributes its one row exactly when its
-						WHERE is true; projected NULL still establishes presence. */
-						(list (zero_domain_exists_truth branch) '() '())
-						(make_exists_stage_rewrite branch (list
-							(nth args 0)
-							branch
-							(if (>= (count args) 3) (nth args 2) nil)))))))
-				(if (and (equal? (union_mode inner) (quote all))
-					(exists_union_results_compatible? results))
-					(make_combined_exists_union_stage_rewrite inner results args)
-					(combine_exists_union_results results))))))))
+		(define inner (exists_union_presence_input original_inner))
+		(if (not (union_block? inner))
+			(neumann_fail "untangle_query" "EXISTS UNION lowering expects union-block")
+			(if (or (not (empty_list? (union_order inner)))
+				(or (not (nil? (union_limit inner))) (not (nil? (union_offset inner)))))
+				(neumann_fail "untangle_query" "EXISTS over UNION currently supports plain unordered branches")
+				(begin
+					(define results (map (union_branches inner) (lambda (branch)
+						(if (and (query_block_no_from? branch) (empty_list? (qb_stages branch)))
+							/* A scalar SELECT contributes its one row exactly when its
+							WHERE is true; projected NULL still establishes presence. */
+							(list (zero_domain_exists_truth branch) '() '())
+							(make_exists_stage_rewrite branch (list
+								(nth args 0)
+								branch
+								(if (>= (count args) 3) (nth args 2) nil)))))))
+					(if (and (equal? (union_mode inner) (quote all))
+						(exists_union_results_compatible? results))
+						(make_combined_exists_union_stage_rewrite inner results args)
+						(combine_exists_union_results results))))))))
 
 /* Canonicalization is the only layer that should know IN was written over a
 UNION. In positive WHERE truth context, each branch becomes one membership
@@ -7973,24 +7975,24 @@ bindings are stable here, unlike mutable SQL session variables. */
 									bounds or move a parent's predicate below its window. */
 									(list (cons (source_with_relation src inner) tail_sources)
 										tail_rewrites tail_wheres tail_stages)
-								(if (ordered_limited_derived_supported? inner src)
-									(begin
-										(define staged (make_ordered_limited_derived_rewrite src alias inner))
-										(define requalified_inner_stages (requalify_stages_for_derived (source_alias (car (qb_sources inner))) alias (qb_stages inner)))
-										(list
-											(merge (list (nth staged 0) tail_sources))
-											(prepend_derived_rewrite alias (nth staged 1) tail_rewrites)
-											(cons (nth staged 2) (rewrite_derived_where_terms alias (nth staged 1) tail_wheres))
-											(cons (nth staged 3) (merge (list requalified_inner_stages tail_stages)))))
-									(if (or (source_outer? src) (not (nil? (source_join_expr src))))
-										(neumann_fail "untangle_query" "derived relation stage with outer join needs relation-unit lowering")
+									(if (ordered_limited_derived_supported? inner src)
 										(begin
-											(define staged (make_limited_derived_stage_source alias inner relation))
+											(define staged (make_ordered_limited_derived_rewrite src alias inner))
+											(define requalified_inner_stages (requalify_stages_for_derived (source_alias (car (qb_sources inner))) alias (qb_stages inner)))
 											(list
-												(cons (nth staged 0) tail_sources)
+												(merge (list (nth staged 0) tail_sources))
 												(prepend_derived_rewrite alias (nth staged 1) tail_rewrites)
-												(rewrite_derived_where_terms alias (nth staged 1) tail_wheres)
-												(cons (nth staged 2) (merge (list (qb_stages inner) tail_stages)))))))))
+												(cons (nth staged 2) (rewrite_derived_where_terms alias (nth staged 1) tail_wheres))
+												(cons (nth staged 3) (merge (list requalified_inner_stages tail_stages)))))
+										(if (or (source_outer? src) (not (nil? (source_join_expr src))))
+											(neumann_fail "untangle_query" "derived relation stage with outer join needs relation-unit lowering")
+											(begin
+												(define staged (make_limited_derived_stage_source alias inner relation))
+												(list
+													(cons (nth staged 0) tail_sources)
+													(prepend_derived_rewrite alias (nth staged 1) tail_rewrites)
+													(rewrite_derived_where_terms alias (nth staged 1) tail_wheres)
+													(cons (nth staged 2) (merge (list (qb_stages inner) tail_stages)))))))))
 							(begin
 								(define inner_sources (coalesceNil (qb_sources inner) '()))
 								(if (empty_list? inner_sources)
@@ -8078,7 +8080,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 												internal one; moving this INNER ON into an internal
 												LEFT ON would change complete-operand filtering. */
 												(if (reduce inner_sources (lambda (valid member)
-														(and valid (join_operand_source_supported? member (query_block_stage_catalog inner)))) true)
+													(and valid (join_operand_source_supported? member (query_block_stage_catalog inner)))) true)
 													(list (cons (source_with_relation src inner) tail_sources)
 														tail_rewrites tail_wheres tail_stages)
 													(neumann_fail "untangle_query" "joined operand streaming requires supported native or bounded relation inputs")))
@@ -8456,8 +8458,8 @@ names in projections, predicates, and correlated subqueries. */
 	(begin
 		(define inner (logical_union_align_branch branch canonical_fields))
 		/* The branch's window selects its own input rows before the enclosing
-		   projection and filter. Let ordinary derived-relation lowering keep
-		   that boundary instead of fusing the two query blocks. */
+		projection and filter. Let ordinary derived-relation lowering keep
+		that boundary instead of fusing the two query blocks. */
 		(if (or (not (nil? (qb_limit inner))) (not (nil? (qb_offset inner))))
 			(make_query_block (qb_schema outer) (list (source_with_relation source inner))
 				(qb_fields outer) (qb_where outer) (qb_group outer) (qb_having outer)
@@ -8881,7 +8883,7 @@ Column declarations are compile-time SQL facts, never sampled row values. */
 					"Collation" (sql_collation_name info))))))
 		(list "columns" columns "constraints" (list "Unique"
 			(if (union_block? relation)
-			(if (equal? (canonical_union_mode (union_mode relation)) (quote union_distinct))
+				(if (equal? (canonical_union_mode (union_mode relation)) (quote union_distinct))
 					(list (list "Name" "union_tuple" "Cols" names "NullsNotDistinct" true)) '()) '())
 			"ForeignKeys" '()) "references" '()))))
 

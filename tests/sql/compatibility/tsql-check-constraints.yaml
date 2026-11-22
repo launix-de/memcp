@@ -48,6 +48,7 @@ cleanup:
 - sql: DROP TABLE IF EXISTS check_tds_parent
 - sql: DROP TABLE IF EXISTS check_tds_values
 - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS check_tds_member" nil))
+- sql: DROP TABLE IF EXISTS check_tds_inline_probe
 test_cases:
 - name: Real TDS ALTER adds and commits a historically validated CHECK
   tds:
@@ -668,3 +669,14 @@ test_cases:
       expect: {rows: 1, data: [{id: 1, final_v: 9}]}
     - sql: SELECT check_clause FROM information_schema.check_constraints WHERE constraint_name=N'CK_rename_bound'
       expect: {rows: 1, data: [{check_clause: 'new_v >= 0'}]}
+- name: Inline table CHECK declaration produces the same enforced values
+  noncritical: true
+  setup:
+  - sql: DROP TABLE IF EXISTS check_tds_inline_probe
+  steps:
+  - sql: CREATE TABLE check_tds_inline_probe(id INT PRIMARY KEY,v INT,CONSTRAINT CK_tds_inline CHECK(v>=0))
+  - sql: INSERT check_tds_inline_probe VALUES(1,7)
+  - sql: SELECT id,v FROM check_tds_inline_probe
+    expect:
+      rows: 1
+      data: [{id: 1, v: 7}]

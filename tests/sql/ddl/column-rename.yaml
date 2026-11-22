@@ -45,27 +45,27 @@ test_cases:
         data:
         - present: 1
     - connection: owner
-      sql: SELECT payload AS old_id FROM rename_named ORDER BY old_id
+      sql: SELECT COALESCE(payload,5) AS old_id FROM rename_named ORDER BY old_id
       expect:
         rows: 2
         data:
-        - old_id: null
+        - old_id: 5
         - old_id: 17
 - name: psql projection aliases can reuse the retired spelling
   syntax: psql
-  sql: SELECT payload AS old_id FROM rename_named ORDER BY old_id
+  sql: SELECT COALESCE(payload,5) AS old_id FROM rename_named ORDER BY old_id
   expect:
     rows: 2
     data:
-    - old_id: null
+    - old_id: 5
     - old_id: 17
 - name: mysql projection aliases can reuse the retired spelling
   syntax: mysql
-  sql: SELECT payload AS old_id FROM rename_named ORDER BY old_id
+  sql: SELECT COALESCE(payload,5) AS old_id FROM rename_named ORDER BY old_id
   expect:
     rows: 2
     data:
-    - old_id: null
+    - old_id: 5
     - old_id: 17
 - name: Earlier data changes and rename share the original commit
   setup:
@@ -334,10 +334,47 @@ test_cases:
           id: 1
         - new_id: 3
           id: 2
+- name: Statement trigger assignment facts use visible names from the actual transition declaration
+  setup:
+  - sql: DROP TRIGGER IF EXISTS rename_trigger_tracking
+  - sql: DROP TABLE IF EXISTS rename_trigger_audit
+  - sql: DROP TABLE IF EXISTS rename_trigger_source
+  - sql: CREATE TABLE rename_trigger_source(id INT NOT NULL PRIMARY KEY,old_value INT)
+  - sql: CREATE TABLE rename_trigger_audit(seq INT IDENTITY(1,1),assigned INT,old_total INT,new_total INT)
+  - sql: INSERT rename_trigger_source VALUES(1,17)
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_trigger_source.old_value',N'new_value',N'COLUMN'
+    - connection: owner
+      sql: "CREATE TRIGGER rename_trigger_tracking ON rename_trigger_source AFTER UPDATE AS\nBEGIN\n  INSERT rename_trigger_audit(assigned,old_total,new_total)\n\
+        \  SELECT CASE WHEN UPDATE(new_value) THEN 1 ELSE 0 END,\n    (SELECT SUM(new_value) FROM deleted),(SELECT\
+        \ SUM(new_value) FROM inserted);\nEND"
+    - connection: owner
+      sql: UPDATE rename_trigger_source SET new_value=23 WHERE id=1
+    - connection: owner
+      sql: UPDATE rename_trigger_source SET new_value=31 WHERE id=99
+    - connection: owner
+      sql: UPDATE rename_trigger_source SET id=id WHERE id=1
+    - connection: owner
+      sql: SELECT assigned,old_total,new_total FROM rename_trigger_audit ORDER BY seq
+      expect:
+        rows: 3
+        data:
+        - assigned: 1
+          old_total: 17
+          new_total: 23
+        - assigned: 1
+          old_total: null
+          new_total: null
+        - assigned: 0
+          old_total: 23
+          new_total: 23
 - name: Existing and newly declared CHECKs retain physical dependencies across rename
   setup:
   - sql: DROP TABLE IF EXISTS rename_checks
-  - sql: CREATE TABLE rename_checks(id INT NOT NULL PRIMARY KEY,old_value INT,CONSTRAINT rename_check_before CHECK(old_value>=0))
+  - sql: CREATE TABLE rename_checks(id INT NOT NULL PRIMARY KEY,old_value INT)
+  - sql: ALTER TABLE rename_checks ADD CONSTRAINT rename_check_before CHECK(old_value>=0)
   - sql: INSERT rename_checks VALUES(1,3)
   tds:
     statements:
@@ -619,7 +656,23 @@ test_cases:
           new_value: 7
         - id: 2
           new_value: 8
+- name: Reloaded statement trigger uses the same visible assignment contract
+  tds:
+    statements:
+    - connection: owner
+      sql: UPDATE rename_trigger_source SET new_value=29 WHERE id=1
+    - connection: owner
+      sql: SELECT assigned,old_total,new_total FROM rename_trigger_audit WHERE seq=4
+      expect:
+        rows: 1
+        data:
+        - assigned: 1
+          old_total: 23
+          new_total: 29
 cleanup:
+- sql: DROP TRIGGER IF EXISTS rename_trigger_tracking
+- sql: DROP TABLE IF EXISTS rename_trigger_audit
+- sql: DROP TABLE IF EXISTS rename_trigger_source
 - sql: DROP TABLE IF EXISTS rename_child
 - sql: DROP TABLE IF EXISTS rename_parent
 - sql: DROP TABLE IF EXISTS rename_dialects

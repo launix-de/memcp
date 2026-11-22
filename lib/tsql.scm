@@ -297,7 +297,8 @@ profile supplies its error boundary at the ordinary relational expression. */
 		(tsql_bind_computed_profile (sql_bind_catalog_declarations query tx planning_session) planning_session tx enabled)))
 	(define formula (build_dml_plan name alias expanded planning_session tx))
 	(if (local_relation_reference? name)
-		(tsql_independent_dml_expr (local_relation_symbol name) (physical_dml_descriptor expanded) formula)
+		(tsql_independent_dml_expr (local_relation_symbol name)
+			(physical_dml_descriptor expanded (qb_schema expanded) name) formula)
 		formula))))
 (define create_sql_type_alias (lambda (database name base dimensions nullable tx session)
 	(tsql_type_ddl database tx session (lambda () (begin
