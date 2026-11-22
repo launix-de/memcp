@@ -306,6 +306,41 @@ test_cases:
     rows: 1
     data:
     - absent_id: null
+- name: A fresh table key validates under the same owner after an earlier rename
+  setup:
+  - sql: CREATE TABLE rename_key_before(id INT)
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_key_before',N'rename_key_after',N'OBJECT'
+    - connection: owner
+      sql: CREATE TABLE rename_later_key(id INT NOT NULL,value INT)
+    - connection: owner
+      sql: ALTER TABLE rename_later_key ADD CONSTRAINT rename_later_primary PRIMARY KEY(id)
+    - connection: owner
+      sql: INSERT rename_later_key VALUES(1,17)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM rename_later_key
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 17
+    - connection: observer
+      sql: INSERT rename_later_key VALUES(1,23)
+      expect:
+        error: true
+    - connection: observer
+      sql: SELECT id,value FROM rename_later_key
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 17
 - name: A statement trigger binds the selected renamed table within its original transaction
   setup:
   - sql: CREATE TABLE rename_program_before(id INT NOT NULL,value INT)
@@ -376,3 +411,6 @@ cleanup:
 - sql: DROP TABLE IF EXISTS rename_program_after
 - sql: DROP TABLE IF EXISTS rename_program_before
 - sql: DROP TABLE IF EXISTS rename_program_audit
+- sql: DROP TABLE IF EXISTS rename_key_before
+- sql: DROP TABLE IF EXISTS rename_key_after
+- sql: DROP TABLE IF EXISTS rename_later_key
