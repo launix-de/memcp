@@ -2655,7 +2655,7 @@ func (t *table) publishShowColumnsSnapshot(constraintsChanged bool) scm.Scmer {
 			// its immutable name/column packets therefore remain stable here.
 			// Unregistered constructors get their selected projection at their
 			// actual namespace publication; load also performs one final pass.
-			if t.schema != nil && t.schema.tables.Get(t.Name) == t {
+			if t.schema != nil && t.schema.tables != nil && t.schema.tables.Get(t.Name) == t {
 				snapshot, _ = t.projectConstraintNames(snapshot, nil, nil)
 			}
 		}
