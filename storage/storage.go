@@ -5336,8 +5336,10 @@ func initFKBuiltins(en scm.Env) {
 				panic("foreign key " + fkId + ": database " + schema + " does not exist")
 			}
 			db.GetRead(currentTx)
-			tbl := db.GetTableForTx(parentTable, false, currentTx)
-			if tbl == nil {
+			// Generated FK recipes retain native storage keys. Resolving one as
+			// a public SQL spelling would lose its endpoint after a rename.
+			tbl := db.tables.Get(parentTable)
+			if tbl == nil || !tbl.visibleIn(currentTx, db.catalogView().version) {
 				panic("foreign key " + fkId + ": parent table " + schema + "." + parentTable + " does not exist")
 			}
 			lookup := newForeignKeyLookup(tbl, parentCols)
@@ -5370,7 +5372,7 @@ func initFKBuiltins(en scm.Env) {
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "check that FK values exist in the parent table, panic if not",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", Label: "schema", Description: "database name"},
-				{Kind: "string", Label: "parent_table", Description: "parent table name"},
+				{Kind: "string", Label: "parent_table", Description: "native parent table storage key"},
 				{Kind: "list", Label: "parent_cols", Description: "parent column names"},
 				{Kind: "list", Label: "values", Description: "FK values to check"},
 				{Kind: "string", Label: "fk_id", Description: "FK constraint name"},
@@ -5404,8 +5406,8 @@ func initFKBuiltins(en scm.Env) {
 				return scm.NewNil()
 			}
 			db.GetRead(currentTx)
-			tbl := db.GetTableForTx(childTable, false, currentTx)
-			if tbl == nil {
+			tbl := db.tables.Get(childTable)
+			if tbl == nil || !tbl.visibleIn(currentTx, db.catalogView().version) {
 				return scm.NewNil()
 			}
 			lookup := newForeignKeyLookup(tbl, childCols)
@@ -5438,7 +5440,7 @@ func initFKBuiltins(en scm.Env) {
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "enforce FK constraint when parent row is deleted",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", Label: "schema", Description: "database name"},
-				{Kind: "string", Label: "child_table", Description: "child table name"},
+				{Kind: "string", Label: "child_table", Description: "native child table storage key"},
 				{Kind: "list", Label: "child_cols", Description: "child FK column names"},
 				{Kind: "list", Label: "parent_vals", Description: "old parent PK values"},
 				{Kind: "string", Label: "fk_id", Description: "FK constraint name"},
@@ -5480,8 +5482,8 @@ func initFKBuiltins(en scm.Env) {
 				return scm.NewNil()
 			}
 			db.GetRead(currentTx)
-			tbl := db.GetTableForTx(childTable, false, currentTx)
-			if tbl == nil {
+			tbl := db.tables.Get(childTable)
+			if tbl == nil || !tbl.visibleIn(currentTx, db.catalogView().version) {
 				return scm.NewNil()
 			}
 			identityColumns := childCols
@@ -5529,7 +5531,7 @@ func initFKBuiltins(en scm.Env) {
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "enforce FK constraint when parent PK is updated",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", Label: "schema", Description: "database name"},
-				{Kind: "string", Label: "child_table", Description: "child table name"},
+				{Kind: "string", Label: "child_table", Description: "native child table storage key"},
 				{Kind: "list", Label: "child_cols", Description: "child FK column names"},
 				{Kind: "list", Label: "old_vals", Description: "old parent PK values"},
 				{Kind: "list", Label: "new_vals", Description: "new parent PK values"},
