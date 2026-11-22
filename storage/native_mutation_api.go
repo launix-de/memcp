@@ -77,6 +77,10 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 			}
 			declarationSource, declarationTarget = source, target
 			checked = true
+		} else if len(targets) == 1 && parent.catalogCreationRowSource(target) {
+			// This source needs the actual prepared statement/input below. The
+			// raw parent still has no grant to mutate this committed endpoint.
+			declarationTarget, checked = target, true
 		} else {
 			release := target.admitNativeWrite(parent)
 			defer release()
@@ -162,8 +166,14 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 		if operation.undoOwner == nil {
 			operation.prepareStatement()
 		}
-		if declarationSource != nil {
+		if declarationTarget != nil {
 			binding.declarationInput = declarationTarget.bindMutationInput(binding, declarationSource, descriptor.event)
+			if declarationSource == nil {
+				// A public baseline borrows no declaration lease. Retain its real
+				// ordinary writer through the same original transaction decision.
+				release := declarationTarget.admitNativeWrite(binding)
+				defer release()
+			}
 		}
 		physicalTargets := make([]*table, 0, len(targets))
 		for _, target := range targets {

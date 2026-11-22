@@ -276,8 +276,32 @@ func checkedCatalogWriters(history []catalogDeclarationAmendment, statements, co
 	return result
 }
 
+// A clean private CREATE owner can acquire public data only through a real
+// local checked producer. This selects setup, never grants a raw row writer.
+func (tx *TxContext) catalogCreationRowSource(t *table) bool {
+	if tx == nil || tx.transactionState == nil || tx.Mode != TxACID || tx.State != TxActive ||
+		tx.remoteObject != nil || tx.remoteInvocation || tx.coordinator != nil || tx.relationData != nil ||
+		tx.publicCatalogEntered.Load() || t == nil || t.Ephemeral || t.ScopedSchema {
+		return false
+	}
+	identity := tx.catalogIdentity.Load()
+	return identity != nil && !identity.lateCreates && identity.Namespace == "" &&
+		identity.database == t.schema && identity.Incarnation == t.schema.incarnationID() &&
+		GetDatabase(identity.Database) == identity.database && t.schema.tables.Get(t.Name) == t &&
+		t.committedAt(t.schema.catalogView().version) && tx.catalogIntents.Load() != nil
+}
+
 func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, event nativeMutationEvent) *nativeMutationInput {
-	if source == nil || tx.privateMutationSource(t) != source || source.tables[t] == nil || !source.mutationEventAllowed(t, event) {
+	if source == nil {
+		if !tx.catalogCreationRowSource(t) {
+			panic("native mutation input lost its original creation source")
+		}
+		for _, created := range *tx.catalogIntents.Load() {
+			if !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(created) {
+				panic("native mutation input lost its original private generation")
+			}
+		}
+	} else if tx.privateMutationSource(t) != source || source.tables[t] == nil || !source.mutationEventAllowed(t, event) {
 		panic("native mutation input lost its private declaration source")
 	}
 	operation := tx.mutationOperation
@@ -290,7 +314,8 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 	root.mu.Lock()
 	statement := root.statement
 	var lease *statementTableWriteLease
-	if statement != nil && !statement.finished {
+	if statement != nil && !statement.finished && (source != nil ||
+		statement.ready && statement.database == t.schema && root.localOrigin && root.state == tx.transactionState) {
 		lease = statement.tables[t]
 	}
 	root.mu.Unlock()
@@ -299,16 +324,33 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 	}
 	owner := &t.writeAdmission
 	owner.mu.Lock()
-	valid := owner.statement == lease && owner.declaration == tx.transactionState && lease.transaction == tx.transactionState
+	valid := owner.statement == lease && lease.transaction == tx.transactionState &&
+		(source != nil && owner.declaration == tx.transactionState || source == nil && owner.declaration == nil)
 	owner.mu.Unlock()
 	if !valid {
 		panic("private declaration input lost its actual endpoint lease")
 	}
 	// Compilation is outside all operation/schema/table/UNIQUE locks. Existing
 	// producer work keeps the statement lease live until its checked drain.
+	var history []catalogDeclarationAmendment
+	var selected *tableShowColumnsSnapshot
+	var keys []uniqueKey
+	if source != nil {
+		history, selected, keys = source.history, source.tables[t], uniqueKeysInView(t, source.keys)
+	} else {
+		// Use the same original-T declaration selector as SHOW/source binding,
+		// under its actual statement lease. Never guess from a fresh SQL name.
+		selected, keys = t.declarationMetadataForTx(tx), t.Unique
+		published := t.showColumnsSnapshot.Load()
+		if selected == nil || published == nil || selected.metadata.declarations != published.metadata.declarations ||
+			selected.metadata.columnNames != published.metadata.columnNames || selected.metadata.columnNames != t.columnNamesForTx(tx) ||
+			!t.visibleIn(tx, t.schema.catalogView().version) {
+			panic("native creation source lost its selected declaration cut")
+		}
+	}
 	retired := make(map[nativeTriggerSlot]struct{})
 	retiredForeign := make(map[catalogForeignIdentity][]catalogForeignDeclaration)
-	for _, entry := range source.history {
+	for _, entry := range history {
 		if drop := entry.foreignDrop; drop != nil {
 			identity := foreignIdentity(drop.declaration)
 			retiredForeign[identity] = append(retiredForeign[identity], drop.declaration)
@@ -340,8 +382,8 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 		}
 	}
 	var addedPrograms []TriggerDescription
-	active := currentForeignAdditions(source.history)
-	for _, entry := range source.history {
+	active := currentForeignAdditions(history)
+	for _, entry := range history {
 		addition := entry.foreign
 		if addition == nil || active[foreignIdentity(addition.declaration)] != addition {
 			continue
@@ -358,7 +400,7 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 		}
 	}
 	input := &nativeMutationInput{target: t, source: source, owner: tx.transactionState, event: event,
-		columns: source.tables[t].metadata.columnNames.declarations, unique: uniqueKeysInView(t, source.keys), foreign: foreign}
+		columns: selected.metadata.columnNames.declarations, unique: keys, foreign: foreign}
 	profile := nativeTriggerProfileFor(tx)
 	input.beforeInsert = t.GetTriggers(BeforeInsert, retired, profile, input)
 	input.afterInsert = t.GetTriggers(AfterInsert, retired, profile, input)
@@ -393,22 +435,31 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 			sort.SliceStable(programs, func(i, j int) bool { return programs[i].Priority < programs[j].Priority })
 		}
 	}
-	if tx.privateMutationSource(t) != source {
+	if tx.privateMutationSource(t) != source || source == nil && (!tx.catalogCreationRowSource(t) ||
+		t.declarationMetadataForTx(tx).metadata.declarations != selected.metadata.declarations) {
 		panic("private declaration input changed while preparing its programs")
 	}
 	// Private source programs and new header/vector containers belong to this
 	// producer. Column, key and FK-string payloads retain their existing owners.
 	input.bytes += uint64(unsafe.Sizeof(*input)) + uint64(cap(input.foreign))*uint64(unsafe.Sizeof(foreignKey{})) +
 		uint64(cap(input.beforeInsert)+cap(input.afterInsert)+cap(input.beforeUpdate)+cap(input.afterUpdate)+cap(input.beforeDelete)+cap(input.afterDelete))*uint64(unsafe.Sizeof(TriggerDescription{}))
-	input.memory = tx.publicCatalogChanges().memory
-	input.memory.mutationInputBytes.Add(input.bytes)
+	if source != nil {
+		input.memory = tx.publicCatalogChanges().memory
+		input.memory.mutationInputBytes.Add(input.bytes)
+	} else {
+		t.schema.adjustMetadataMemory(0, uint(input.bytes))
+	}
 	return input
 }
 
 // The actual producer calls this only after its checked frame/work drain.
 func (input *nativeMutationInput) release() {
 	if input != nil {
-		input.memory.mutationInputBytes.Add(^(input.bytes - 1))
+		if input.memory != nil {
+			input.memory.mutationInputBytes.Add(^(input.bytes - 1))
+		} else {
+			input.target.schema.adjustMetadataMemory(uint(input.bytes), 0)
+		}
 	}
 }
 

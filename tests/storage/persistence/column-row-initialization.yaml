@@ -103,7 +103,35 @@ setup:
 - sql: DROP TABLE IF EXISTS generated_joint_failure
 - sql: CREATE TABLE generated_joint_failure(id INT NOT NULL PRIMARY KEY,value INT)
 - sql: INSERT generated_joint_failure VALUES(1,10),(2,20),(3,30)
+- sql: DROP TABLE IF EXISTS generated_admission_scope
+- sql: DROP TABLE IF EXISTS generated_admission_probe
+- sql: DROP TABLE IF EXISTS generated_admission_enforced
+- sql: DROP TABLE IF EXISTS generated_admission_ref
+- sql: DROP TABLE IF EXISTS generated_admission_audit
+- sql: DROP TABLE IF EXISTS generated_admission_checked_scope
+- sql: CREATE TABLE generated_admission_probe(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_admission_probe VALUES(1,10)
+- sql: CREATE TABLE generated_admission_ref(id INT NOT NULL PRIMARY KEY)
+- sql: INSERT generated_admission_ref VALUES(1)
+- sql: CREATE TABLE generated_admission_enforced(id INT NOT NULL PRIMARY KEY,parent_id INT NOT NULL,value INT NOT NULL,note VARCHAR(8) NOT NULL
+    DEFAULT('base'))
+- sql: INSERT generated_admission_enforced VALUES(1,1,10,'a'),(2,1,20,'b')
+- sql: ALTER TABLE generated_admission_enforced ADD CONSTRAINT generated_admission_fk FOREIGN KEY(parent_id) REFERENCES generated_admission_ref(id)
+- sql: ALTER TABLE generated_admission_enforced ADD CONSTRAINT generated_admission_check CHECK(value>=0)
+- sql: CREATE TABLE generated_admission_audit(id INT NOT NULL,old_value INT NOT NULL,new_value INT NOT NULL,note VARCHAR(8) NOT NULL)
+- syntax: mysql
+  sql: CREATE TRIGGER generated_admission_before BEFORE UPDATE ON generated_admission_enforced FOR EACH ROW SET NEW.value=NEW.value+100
+- sql: CREATE TRIGGER generated_admission_after ON generated_admission_enforced AFTER UPDATE AS INSERT generated_admission_audit SELECT i.id,d.value,i.value,i.note
+    FROM inserted i INNER JOIN deleted d ON i.id=d.id
+- sql: DROP TABLE IF EXISTS generated_admission_rollback_scope
 cleanup:
+- sql: DROP TABLE IF EXISTS generated_admission_rollback_scope
+- sql: DROP TABLE IF EXISTS generated_admission_scope
+- sql: DROP TABLE IF EXISTS generated_admission_probe
+- sql: DROP TABLE IF EXISTS generated_admission_enforced
+- sql: DROP TABLE IF EXISTS generated_admission_ref
+- sql: DROP TABLE IF EXISTS generated_admission_audit
+- sql: DROP TABLE IF EXISTS generated_admission_checked_scope
 - sql: DROP TABLE IF EXISTS generated_joint_failure_created
 - sql: DROP TABLE IF EXISTS generated_joint_failure
 - sql: DROP TABLE IF EXISTS generated_joint_capture
@@ -538,19 +566,32 @@ test_cases:
     - connection: owner
       sql: COMMIT TRANSACTION
 - name: A real third-row generator exception restores all batch columns and retains its original committable prefix
-  scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner \"__memcp_tx\"))\n (define\
-    \ target (table \"memcp-tests\" false \"generated_failure\" false tx))\n (define calls (newsession)) (calls \"n\" 0)\n (define gate (mutex))\n\
-    \ (try (lambda () (begin\n  (with_table_mutation (list target) (list \"update\" '(\"value\")) tx owner (lambda (bound)\n   (scan bound target\
-    \ '() '() '(\"id\") (lambda (id) (equal? id 1)) '(\"$update\")\n    (lambda (n update) (begin (update '(\"value\" 11)) (+ n 1))) 0 +)))\n\
-    \  (define failed (try (lambda () (createcolumns target\n   (list (list \"prefix\" \"INT\" '() '(\"null\" false \"default\" 7) nil)\n    (list\
-    \ \"token\" \"INT\" '() '(\"null\" false \"default_expression\" \"1\" \"default_deferred\" true)\n     (lambda () (gate (lambda () (begin\n\
-    \      (define n (+ (calls \"n\") 1)) (calls \"n\" n)\n      (if (equal? n 3) (error (list \"tsql-error\" 50001 \"generator fixture\" 1))\
-    \ n))))))) tx))\n    (lambda (cause) (equal? (failure_value cause) '(\"tsql-error\" 50001 \"generator fixture\" 1)))))\n  (define own (scan\
-    \ tx target '() '() '() (lambda () true) '(\"id\" \"value\")\n   (lambda (rows id value) (merge rows (list (list id value)))) '() merge))\n\
-    \  (define observed (scan nil target '() '() '() (lambda () true) '(\"id\" \"value\")\n   (lambda (rows id value) (merge rows (list (list\
-    \ id value)))) '() merge))\n  (define absent (and (nil? (show target \"column\" \"prefix\" false tx)) (nil? (show target \"column\" \"token\"\
-    \ false tx))))\n  (define state (tx_state tx)) (tx_commit owner)\n  (list failed (calls \"n\") state absent (sort own (lambda (a b) (< (car\
-    \ a) (car b)))) (sort observed (lambda (a b) (< (car a) (car b)))))))\n  (lambda (cause) (begin (tx_rollback owner) (error cause)))))"
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+     (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "generated_failure" false tx))
+     (define calls (newsession)) (calls "n" 0)
+     (define gate (mutex))
+     (try (lambda () (begin
+      (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+       (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+        (lambda (n update) (begin (update '("value" 11)) (+ n 1))) 0 +)))
+      (define failed (try (lambda () (createcolumns target
+       (list (list "prefix" "INT" '() '("null" false "default" 7) nil)
+        (list "token" "INT" '() '("null" false "default_expression" "1" "default_deferred" true)
+         (lambda () (gate (lambda () (begin
+          (define n (+ (calls "n") 1)) (calls "n" n)
+          (if (equal? n 3) (error (list "tsql-error" 50001 "generator fixture" 1)) n))))))) tx))
+        (lambda (cause) (equal? (failure_value cause) '("tsql-error" 50001 "generator fixture" 1)))))
+      (define own (scan tx target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define observed (scan nil target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define absent (and (nil? (show target "column" "prefix" false tx)) (nil? (show target "column" "token" false tx))))
+      (define state (tx_state tx)) (tx_commit owner)
+      (list failed (calls "n") state absent (sort own (lambda (a b) (< (car a) (car b)))) (sort observed (lambda (a b) (< (car a) (car b)))))))
+      (lambda (cause) (begin (tx_rollback owner) (error cause)))))
   expect:
     result:
     - true
@@ -619,10 +660,16 @@ test_cases:
     - id: 3
       value: 30
 - name: Crash during a generator leaves unaccepted wider row WAL below the old public header
-  scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner \"__memcp_tx\"))\n (define\
-    \ target (table \"memcp-tests\" false \"generated_unpublished\" false tx))\n (define calls (newsession)) (calls \"n\" 0)\n (createcolumns\
-    \ target (list\n  (list \"token\" \"UNIQUEIDENTIFIER\" '() '(\"null\" false \"default_expression\" \"NEWID\")\n   (lambda () (begin (define\
-    \ n (+ (calls \"n\") 1)) (calls \"n\" n)\n    (if (equal? n 3) (crash) (uuid_v4)))))) tx))"
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+     (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "generated_unpublished" false tx))
+     (define calls (newsession)) (calls "n" 0)
+     (createcolumns target (list
+      (list "token" "UNIQUEIDENTIFIER" '() '("null" false "default_expression" "NEWID")
+       (lambda () (begin (define n (+ (calls "n") 1)) (calls "n" n)
+        (if (equal? n 3) (crash) (uuid_v4)))))) tx))
   expect:
     interrupted_ok: true
 - name: Restart rejects unaccepted initialized row versions without requiring their column header
@@ -642,15 +689,31 @@ test_cases:
       value: 30
       token_length: null
 - name: Existing parallel native scans invoke a generator once per historical row and bound their highwater
-  scm: "(begin\n (define previous (settings \"ShardSize\"))\n (try\n  (lambda () (begin\n   (define target (table \"memcp-tests\" false \"generated_parallel\"\
-    \ false nil))\n   (insert target '(\"id\" \"value\") (produceN 125 (lambda (index) (begin (define id (+ index 4)) (list id (* id 10))))))\n\
-    \   (settings \"ShardSize\" 32)\n   (rebuild target true true nil true)\n   (settings \"ShardSize\" previous)\n   (define owner (newsession))\
-    \ (owner \"username\" \"root\") (tx_begin_acid owner)\n   (define tx (owner \"__memcp_tx\"))\n   (define calls (newsession)) (calls \"n\"\
-    \ 0) (define gate (mutex))\n   (try\n    (lambda () (begin\n     (createcolumns target\n      (list (list \"sequence\" \"INT\" '() '(\"null\"\
-    \ false \"default_expression\" \"1\" \"default_deferred\" true)\n       (lambda () (gate (lambda () (begin\n        (define n (+ (calls \"\
-    n\") 1)) (calls \"n\" n) n)))))) tx)\n     (define rows (scan tx target '() '() '() (lambda () true) '(\"sequence\")\n      (lambda (items\
-    \ value) (merge items (list value))) '() merge))\n     (tx_commit owner)\n     (list (calls \"n\") (count rows) (sort rows <))))\n    (lambda\
-    \ (cause) (begin (tx_rollback owner) (error cause))))))\n  (lambda (cause) (begin (settings \"ShardSize\" previous) (error cause)))))\n"
+  scm: |
+    (begin
+     (define previous (settings "ShardSize"))
+     (try
+      (lambda () (begin
+       (define target (table "memcp-tests" false "generated_parallel" false nil))
+       (insert target '("id" "value") (produceN 125 (lambda (index) (begin (define id (+ index 4)) (list id (* id 10))))))
+       (settings "ShardSize" 32)
+       (rebuild target true true nil true)
+       (settings "ShardSize" previous)
+       (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+       (define tx (owner "__memcp_tx"))
+       (define calls (newsession)) (calls "n" 0) (define gate (mutex))
+       (try
+        (lambda () (begin
+         (createcolumns target
+          (list (list "sequence" "INT" '() '("null" false "default_expression" "1" "default_deferred" true)
+           (lambda () (gate (lambda () (begin
+            (define n (+ (calls "n") 1)) (calls "n" n) n)))))) tx)
+         (define rows (scan tx target '() '() '() (lambda () true) '("sequence")
+          (lambda (items value) (merge items (list value))) '() merge))
+         (tx_commit owner)
+         (list (calls "n") (count rows) (sort rows <))))
+        (lambda (cause) (begin (tx_rollback owner) (error cause))))))
+      (lambda (cause) (begin (settings "ShardSize" previous) (error cause)))))
   expect:
     result:
     - 128
@@ -877,20 +940,33 @@ test_cases:
         data:
         - value: 8
 - name: Exactly once counts the original visible inserted updated and deleted row overlays
-  scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner \"__memcp_tx\"))\n (define\
-    \ target (table \"memcp-tests\" false \"generated_native_masks\" false tx))\n (define calls (newsession)) (calls \"n\" 0) (define gate (mutex))\n\
-    \ (try (lambda () (begin\n  (with_table_mutation (list target) (list \"update\" '(\"value\")) tx owner (lambda (bound)\n   (scan bound target\
-    \ '() '() '(\"id\") (lambda (id) (equal? id 1)) '(\"$update\")\n    (lambda (n update) (begin (update '(\"value\" 11)) (+ n 1))) 0 +)))\n\
-    \  (with_table_mutation (list target) (list \"delete\" '()) tx owner (lambda (bound)\n   (scan bound target '() '() '(\"id\") (lambda (id)\
-    \ (equal? id 2)) '(\"$update\")\n    (lambda (n update) (begin (update) (+ n 1))) 0 +)))\n  (with_table_mutation (list target) (list \"insert\"\
-    \ '()) tx owner (lambda (bound)\n   (insert target '(\"id\" \"value\") (list (list 4 40)) '() nil false nil bound)))\n  (createcolumns target\n\
-    \   (list (list \"token\" \"INT\" '() '(\"null\" false \"default_expression\" \"1\" \"default_deferred\" true)\n    (lambda () (gate (lambda\
-    \ () (begin (define n (+ (calls \"n\") 1)) (calls \"n\" n) n)))))) tx)\n  (define rows (scan tx target '() '() '() (lambda () true) '(\"id\"\
-    \ \"value\" \"token\")\n   (lambda (rows id value token) (merge rows (list (list id value token)))) '() merge))\n  (define observer (scan\
-    \ nil target '() '() '() (lambda () true) '(\"id\" \"value\")\n   (lambda (rows id value) (merge rows (list (list id value)))) '() merge))\n\
-    \  (define same (identical? tx (owner \"__memcp_tx\")))\n  (tx_commit owner)\n  (list same (calls \"n\") (sort (map rows (lambda (row) (list\
-    \ (car row) (cadr row)))) (lambda (a b) (< (car a) (car b))))\n   (sort (map rows (lambda (row) (nth row 2))) <) (sort observer (lambda (a\
-    \ b) (< (car a) (car b)))))))\n  (lambda (cause) (begin (tx_rollback owner) (error cause)))))"
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+     (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "generated_native_masks" false tx))
+     (define calls (newsession)) (calls "n" 0) (define gate (mutex))
+     (try (lambda () (begin
+      (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+       (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+        (lambda (n update) (begin (update '("value" 11)) (+ n 1))) 0 +)))
+      (with_table_mutation (list target) (list "delete" '()) tx owner (lambda (bound)
+       (scan bound target '() '() '("id") (lambda (id) (equal? id 2)) '("$update")
+        (lambda (n update) (begin (update) (+ n 1))) 0 +)))
+      (with_table_mutation (list target) (list "insert" '()) tx owner (lambda (bound)
+       (insert target '("id" "value") (list (list 4 40)) '() nil false nil bound)))
+      (createcolumns target
+       (list (list "token" "INT" '() '("null" false "default_expression" "1" "default_deferred" true)
+        (lambda () (gate (lambda () (begin (define n (+ (calls "n") 1)) (calls "n" n) n)))))) tx)
+      (define rows (scan tx target '() '() '() (lambda () true) '("id" "value" "token")
+       (lambda (rows id value token) (merge rows (list (list id value token)))) '() merge))
+      (define observer (scan nil target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define same (identical? tx (owner "__memcp_tx")))
+      (tx_commit owner)
+      (list same (calls "n") (sort (map rows (lambda (row) (list (car row) (cadr row)))) (lambda (a b) (< (car a) (car b))))
+       (sort (map rows (lambda (row) (nth row 2))) <) (sort observer (lambda (a b) (< (car a) (car b)))))))
+      (lambda (cause) (begin (tx_rollback owner) (error cause)))))
   expect:
     result:
     - true
@@ -1021,16 +1097,27 @@ test_cases:
       - n: 9
         distinct_tokens: 8
 - name: Nested original-transaction declaration from a row initializer is rejected before effects and restores its owner
-  scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner \"__memcp_tx\"))\n (define\
-    \ target (table \"memcp-tests\" false \"generated_nested\" false tx))\n (define calls (newsession)) (calls \"n\" 0)\n (try (lambda () (begin\n\
-    \  (define failed (try (lambda () (createcolumns target\n   (list (list \"nested_token\" \"UNIQUEIDENTIFIER\" '() '(\"null\" false \"default_expression\"\
-    \ \"NEWID\")\n    (lambda () (begin (calls \"n\" (+ (calls \"n\") 1)) (createcolumn target \"nested_extra\" \"INT\" '() '(\"null\" true) nil\
-    \ nil tx) (uuid_v4))))) tx))\n   (lambda (_cause) true)))\n  (define rows (scan tx target '() '() '() (lambda () true) '(\"id\" \"value\"\
-    )\n   (lambda (rows id value) (merge rows (list (list id value)))) '() merge))\n  (define observed (scan nil target '() '() '() (lambda ()\
-    \ true) '(\"id\" \"value\")\n   (lambda (rows id value) (merge rows (list (list id value)))) '() merge))\n  (define absent (and (nil? (show\
-    \ target \"column\" \"nested_token\" false tx))\n   (nil? (show target \"column\" \"nested_extra\" false tx))))\n  (define state (tx_state\
-    \ tx)) (tx_commit owner)\n  (list failed (calls \"n\") state absent (sort rows (lambda (a b) (< (car a) (car b))))\n   (sort observed (lambda\
-    \ (a b) (< (car a) (car b)))))))\n  (lambda (cause) (begin (tx_rollback owner) (error cause)))))"
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+     (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "generated_nested" false tx))
+     (define calls (newsession)) (calls "n" 0)
+     (try (lambda () (begin
+      (define failed (try (lambda () (createcolumns target
+       (list (list "nested_token" "UNIQUEIDENTIFIER" '() '("null" false "default_expression" "NEWID")
+        (lambda () (begin (calls "n" (+ (calls "n") 1)) (createcolumn target "nested_extra" "INT" '() '("null" true) nil nil tx) (uuid_v4))))) tx))
+       (lambda (_cause) true)))
+      (define rows (scan tx target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define observed (scan nil target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define absent (and (nil? (show target "column" "nested_token" false tx))
+       (nil? (show target "column" "nested_extra" false tx))))
+      (define state (tx_state tx)) (tx_commit owner)
+      (list failed (calls "n") state absent (sort rows (lambda (a b) (< (car a) (car b))))
+       (sort observed (lambda (a b) (< (car a) (car b)))))))
+      (lambda (cause) (begin (tx_rollback owner) (error cause)))))
   expect:
     result:
     - true
@@ -1050,17 +1137,27 @@ test_cases:
       - - 3
         - 30
 - name: Nested original-transaction mutation from a row initializer is rejected before effects and restores its owner
-  scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner \"__memcp_tx\"))\n (define\
-    \ target (table \"memcp-tests\" false \"generated_nested\" false tx))\n (define calls (newsession)) (calls \"n\" 0)\n (try (lambda () (begin\n\
-    \  (define failed (try (lambda () (createcolumns target\n   (list (list \"nested_token\" \"UNIQUEIDENTIFIER\" '() '(\"null\" false \"default_expression\"\
-    \ \"NEWID\")\n    (lambda () (begin (calls \"n\" (+ (calls \"n\") 1)) (with_table_mutation (list target) (list \"update\" '(\"value\")) tx\
-    \ owner (lambda (bound) (scan bound target '() '() '(\"id\") (lambda (id) (equal? id 1)) '(\"$update\") (lambda (n update) (begin (update\
-    \ '(\"value\" 99)) (+ n 1))) 0 +))) (uuid_v4))))) tx))\n   (lambda (_cause) true)))\n  (define rows (scan tx target '() '() '() (lambda ()\
-    \ true) '(\"id\" \"value\")\n   (lambda (rows id value) (merge rows (list (list id value)))) '() merge))\n  (define observed (scan nil target\
-    \ '() '() '() (lambda () true) '(\"id\" \"value\")\n   (lambda (rows id value) (merge rows (list (list id value)))) '() merge))\n  (define\
-    \ absent (and (nil? (show target \"column\" \"nested_token\" false tx))\n   (nil? (show target \"column\" \"nested_extra\" false tx))))\n\
-    \  (define state (tx_state tx)) (tx_commit owner)\n  (list failed (calls \"n\") state absent (sort rows (lambda (a b) (< (car a) (car b))))\n\
-    \   (sort observed (lambda (a b) (< (car a) (car b)))))))\n  (lambda (cause) (begin (tx_rollback owner) (error cause)))))"
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+     (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "generated_nested" false tx))
+     (define calls (newsession)) (calls "n" 0)
+     (try (lambda () (begin
+      (define failed (try (lambda () (createcolumns target
+       (list (list "nested_token" "UNIQUEIDENTIFIER" '() '("null" false "default_expression" "NEWID")
+        (lambda () (begin (calls "n" (+ (calls "n") 1)) (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound) (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update") (lambda (n update) (begin (update '("value" 99)) (+ n 1))) 0 +))) (uuid_v4))))) tx))
+       (lambda (_cause) true)))
+      (define rows (scan tx target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define observed (scan nil target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define absent (and (nil? (show target "column" "nested_token" false tx))
+       (nil? (show target "column" "nested_extra" false tx))))
+      (define state (tx_state tx)) (tx_commit owner)
+      (list failed (calls "n") state absent (sort rows (lambda (a b) (< (car a) (car b))))
+       (sort observed (lambda (a b) (< (car a) (car b)))))))
+      (lambda (cause) (begin (tx_rollback owner) (error cause)))))
   expect:
     result:
     - true
@@ -1193,16 +1290,29 @@ test_cases:
       data:
       - current_id: 103
 - name: An original pending row followed through two rebuilt generations retains its WAL while generated ADD commits
-  scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner \"__memcp_tx\"))\n (define\
-    \ target (table \"memcp-tests\" false \"generated_forward\" false tx))\n (try (lambda () (begin\n  (with_table_mutation (list target) (list\
-    \ \"update\" '(\"value\")) tx owner (lambda (bound)\n   (scan bound target '() '() '(\"id\") (lambda (id) (equal? id 1)) '(\"$update\")\n\
-    \    (lambda (n update) (begin (update '(\"value\" 11)) (+ n 1))) 0 +)))\n  (rebuild target true false tx true)\n  (rebuild target true false\
-    \ tx true)\n  (createcolumns target (list\n   (list \"token\" \"UNIQUEIDENTIFIER\" '() '(\"null\" false \"default_expression\" \"NEWID\")\n\
-    \    (lambda () (uuid_v4)))) tx)\n  (define own (scan tx target '() '() '() (lambda () true) '(\"id\" \"value\" \"token\")\n   (lambda (rows\
-    \ id value token) (merge rows (list (list id value (not (nil? token)))))) '() merge))\n  (define observer (scan nil target '() '() '() (lambda\
-    \ () true) '(\"id\" \"value\")\n   (lambda (rows id value) (merge rows (list (list id value)))) '() merge))\n  (define same (identical? tx\
-    \ (owner \"__memcp_tx\")))\n  (tx_commit owner)\n  (list same (sort own (lambda (a b) (< (car a) (car b))))\n   (sort observer (lambda (a\
-    \ b) (< (car a) (car b)))))))\n  (lambda (cause) (begin (tx_rollback owner) (error cause)))))"
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+     (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "generated_forward" false tx))
+     (try (lambda () (begin
+      (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+       (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+        (lambda (n update) (begin (update '("value" 11)) (+ n 1))) 0 +)))
+      (rebuild target true false tx true)
+      (rebuild target true false tx true)
+      (createcolumns target (list
+       (list "token" "UNIQUEIDENTIFIER" '() '("null" false "default_expression" "NEWID")
+        (lambda () (uuid_v4)))) tx)
+      (define own (scan tx target '() '() '() (lambda () true) '("id" "value" "token")
+       (lambda (rows id value token) (merge rows (list (list id value (not (nil? token)))))) '() merge))
+      (define observer (scan nil target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define same (identical? tx (owner "__memcp_tx")))
+      (tx_commit owner)
+      (list same (sort own (lambda (a b) (< (car a) (car b))))
+       (sort observer (lambda (a b) (< (car a) (car b)))))))
+      (lambda (cause) (begin (tx_rollback owner) (error cause)))))
   expect:
     result:
     - true
@@ -1687,26 +1797,42 @@ test_cases:
         rows: 0
         data: []
 - name: A real generator failure drains and undoes the full ADD batch while retaining genuine prior private creation
-  scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner \"__memcp_tx\"))\n (define\
-    \ target (table \"memcp-tests\" false \"generated_joint_failure\" false tx))\n (define calls (newsession)) (calls \"n\" 0)\n (define gate\
-    \ (mutex))\n (try (lambda () (begin\n  (createtable \"memcp-tests\" \"generated_joint_failure_created\"\n   (list (list \"column\" \"id\"\
-    \ \"INT\" '() '(\"null\" false))) '(\"engine\" \"safe\") false tx)\n  (define created (table \"memcp-tests\" false \"generated_joint_failure_created\"\
-    \ false tx))\n  (createkey created \"generated_joint_failure_pk\" true '(\"id\") tx)\n  (insert created '(\"id\") (list (list 7)) '() nil\
-    \ false nil tx)\n  (with_table_mutation (list target) (list \"update\" '(\"value\")) tx owner (lambda (bound)\n   (scan bound target '() '()\
-    \ '(\"id\") (lambda (id) (equal? id 1)) '(\"$update\")\n    (lambda (n update) (begin (update '(\"value\" 11)) (+ n 1))) 0 +)))\n  (define\
-    \ failed (try (lambda () (createcolumns target\n   (list (list \"prefix\" \"INT\" '() '(\"null\" false \"default\" 7) nil)\n    (list \"token\"\
-    \ \"INT\" '() '(\"null\" false \"default_expression\" \"1\" \"default_deferred\" true)\n     (lambda () (gate (lambda () (begin\n      (define\
-    \ n (+ (calls \"n\") 1)) (calls \"n\" n)\n      (if (equal? n 3) (error (list \"tsql-error\" 50001 \"generator fixture\" 1)) n))))))) tx))\n\
-    \    (lambda (cause) (equal? (failure_value cause) '(\"tsql-error\" 50001 \"generator fixture\" 1)))))\n  (define own (scan tx target '()\
-    \ '() '() (lambda () true) '(\"id\" \"value\")\n   (lambda (rows id value) (merge rows (list (list id value)))) '() merge))\n  (define observed\
-    \ (scan nil target '() '() '() (lambda () true) '(\"id\" \"value\")\n   (lambda (rows id value) (merge rows (list (list id value)))) '() merge))\n\
-    \  (define absent (and (nil? (show target \"column\" \"prefix\" false tx)) (nil? (show target \"column\" \"token\" false tx))))\n  (define\
-    \ created_rows (scan tx created '() '() '() (lambda () true) '(\"id\")\n   (lambda (items id) (merge items (list (list id)))) '() merge))\n\
-    \  (define created_absent (nil? (table \"memcp-tests\" false \"generated_joint_failure_created\" false nil)))\n  (define state (tx_state tx))\
-    \ (tx_commit owner)\n  (define committed_created (scan nil (table \"memcp-tests\" false \"generated_joint_failure_created\" false nil) '()\
-    \ '() '() (lambda () true) '(\"id\")\n   (lambda (items id) (merge items (list (list id)))) '() merge))\n  (list failed (calls \"n\") state\
-    \ absent (sort own (lambda (a b) (< (car a) (car b)))) (sort observed (lambda (a b) (< (car a) (car b)))) created_rows created_absent committed_created)))\n\
-    \  (lambda (cause) (begin (tx_rollback owner) (error cause)))))"
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+     (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "generated_joint_failure" false tx))
+     (define calls (newsession)) (calls "n" 0)
+     (define gate (mutex))
+     (try (lambda () (begin
+      (createtable "memcp-tests" "generated_joint_failure_created"
+       (list (list "column" "id" "INT" '() '("null" false))) '("engine" "safe") false tx)
+      (define created (table "memcp-tests" false "generated_joint_failure_created" false tx))
+      (createkey created "generated_joint_failure_pk" true '("id") tx)
+      (insert created '("id") (list (list 7)) '() nil false nil tx)
+      (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+       (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+        (lambda (n update) (begin (update '("value" 11)) (+ n 1))) 0 +)))
+      (define failed (try (lambda () (createcolumns target
+       (list (list "prefix" "INT" '() '("null" false "default" 7) nil)
+        (list "token" "INT" '() '("null" false "default_expression" "1" "default_deferred" true)
+         (lambda () (gate (lambda () (begin
+          (define n (+ (calls "n") 1)) (calls "n" n)
+          (if (equal? n 3) (error (list "tsql-error" 50001 "generator fixture" 1)) n))))))) tx))
+        (lambda (cause) (equal? (failure_value cause) '("tsql-error" 50001 "generator fixture" 1)))))
+      (define own (scan tx target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define observed (scan nil target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define absent (and (nil? (show target "column" "prefix" false tx)) (nil? (show target "column" "token" false tx))))
+      (define created_rows (scan tx created '() '() '() (lambda () true) '("id")
+       (lambda (items id) (merge items (list (list id)))) '() merge))
+      (define created_absent (nil? (table "memcp-tests" false "generated_joint_failure_created" false nil)))
+      (define state (tx_state tx)) (tx_commit owner)
+      (define committed_created (scan nil (table "memcp-tests" false "generated_joint_failure_created" false nil) '() '() '() (lambda () true) '("id")
+       (lambda (items id) (merge items (list (list id)))) '() merge))
+      (list failed (calls "n") state absent (sort own (lambda (a b) (< (car a) (car b)))) (sort observed (lambda (a b) (< (car a) (car b)))) created_rows created_absent committed_created)))
+      (lambda (cause) (begin (tx_rollback owner) (error cause)))))
   expect:
     result:
     - true
@@ -1742,3 +1868,298 @@ test_cases:
         data:
         - prefix_length: null
           token_length: null
+- name: CREATE-first checked row admission preserves raw event and database boundaries through its original decision
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "generated_admission_probe" false tx))
+      (define signals (newsession)) (signals "foreign_calls" 0)
+      (define rows (lambda (bound)
+        (scan bound target '() '() '() (lambda () true) '("id" "value")
+          (lambda (items id value) (merge items (list (list id value)))) '() merge)))
+      (define raw (lambda () (try (lambda () (begin
+        (scan tx target '() '() '() (lambda () true) '("$update")
+          (lambda (n update) (begin (update '("value" 99)) (+ n 1))) 0 +)
+        false)) (lambda (cause)
+          (equal? (failure_value cause) "catalog transaction mutations require an owned unpublished table")))))
+      (try (lambda () (begin
+        (createtable "memcp-tests" "generated_admission_scope"
+          (list (list "column" "id" "INT" '() '("null" false))) '("engine" "safe") false tx)
+        (define created (table "memcp-tests" false "generated_admission_scope" false tx))
+        (createkey created "generated_admission_scope_pk" true '("id") tx)
+        (insert created '("id") (list (list 7)) '() nil false nil tx)
+        (define raw_before (raw))
+        (define wrong_event (try (lambda () (begin
+          (with_table_mutation (list target) (list "insert" '()) tx owner (lambda (bound)
+            (scan bound target '() '() '() (lambda () true) '("$update")
+              (lambda (n update) (begin (update '("value" 99)) (+ n 1))) 0 +)))
+          false)) (lambda (cause)
+            (equal? (failure_value cause) "private declaration input requires its checked UPDATE producer"))))
+        (define foreign (table "system" false "views" false nil))
+        (define wrong_database (try (lambda () (begin
+          (with_table_mutation (list foreign) (list "update" '("name")) tx owner (lambda (bound)
+            (signals "foreign_calls" (+ (signals "foreign_calls") 1))))
+          false)) (lambda (cause)
+            (equal? (failure_value cause) "catalog transaction mutations require an owned unpublished table"))))
+        (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+          (scan bound target '() '() '() (lambda () true) '("$update")
+            (lambda (n update) (begin (update '("value" 11)) (+ n 1))) 0 +)))
+        (define raw_after (raw))
+        (define own (rows tx)) (define observer (rows nil))
+        (define hidden (nil? (table "memcp-tests" false "generated_admission_scope" false nil)))
+        (define state (tx_state tx))
+        (tx_commit owner)
+        (list raw_before wrong_event wrong_database (signals "foreign_calls") raw_after state own observer hidden
+          (rows nil)
+          (scan nil (table "memcp-tests" false "generated_admission_scope" false nil) '() '() '() (lambda () true) '("id")
+            (lambda (items id) (merge items (list (list id)))) '() merge))))
+        (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+  expect:
+    result:
+    - true
+    - true
+    - true
+    - 0
+    - true
+    - active
+    - - - 1
+        - 11
+    - - - 1
+        - 10
+    - true
+    - - - 1
+        - 11
+    - - - 7
+- name: CREATE-first checked inputs preserve complete columns keys foreign CHECK and BEFORE AFTER programs
+  tds:
+    statements:
+    - sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+      connection: owner
+    - sql: BEGIN TRANSACTION
+      connection: owner
+    - sql: CREATE TABLE generated_admission_checked_scope(id INT NOT NULL PRIMARY KEY)
+      connection: owner
+    - sql: INSERT generated_admission_checked_scope VALUES(7)
+      connection: owner
+    - sql: UPDATE generated_admission_enforced SET value=12 WHERE id=1
+      connection: owner
+    - sql: SELECT id,parent_id,value,note FROM generated_admission_enforced ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          value: 112
+          note: a
+        - id: 2
+          parent_id: 1
+          value: 20
+          note: b
+      connection: owner
+    - sql: SELECT id,old_value,new_value,note FROM generated_admission_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 112
+          note: a
+      connection: owner
+    - sql: UPDATE generated_admission_enforced SET id=2 WHERE id=1
+      expect:
+        error: true
+      connection: owner
+    - sql: UPDATE generated_admission_enforced SET parent_id=999 WHERE id=1
+      expect:
+        error: true
+      connection: owner
+    - sql: UPDATE generated_admission_enforced SET value=-101 WHERE id=1
+      expect:
+        error: true
+      connection: owner
+    - sql: SELECT id,parent_id,value,note FROM generated_admission_enforced ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          value: 112
+          note: a
+        - id: 2
+          parent_id: 1
+          value: 20
+          note: b
+      connection: owner
+    - sql: SELECT id,old_value,new_value,note FROM generated_admission_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 112
+          note: a
+      connection: owner
+    - sql: SELECT id FROM generated_admission_checked_scope
+      expect:
+        rows: 1
+        data:
+        - id: 7
+      connection: owner
+    - connection: observer
+      sql: SELECT id,parent_id,value,note FROM generated_admission_enforced ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          value: 10
+          note: a
+        - id: 2
+          parent_id: 1
+          value: 20
+          note: b
+    - connection: observer
+      sql: SELECT id,old_value,new_value,note FROM generated_admission_audit ORDER BY id
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'generated_admission_checked_scope',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null
+    - sql: COMMIT TRANSACTION
+      connection: owner
+    - sql: SELECT id,parent_id,value,note FROM generated_admission_enforced ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          value: 112
+          note: a
+        - id: 2
+          parent_id: 1
+          value: 20
+          note: b
+      connection: owner
+    - sql: SELECT id,old_value,new_value,note FROM generated_admission_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 112
+          note: a
+      connection: owner
+    - sql: SELECT id FROM generated_admission_checked_scope
+      expect:
+        rows: 1
+        data:
+        - id: 7
+      connection: owner
+- name: Rollback retires the CREATE-first checked input and all real row programs without exposing its generation
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE TABLE generated_admission_rollback_scope(id INT NOT NULL PRIMARY KEY)
+    - connection: owner
+      sql: INSERT generated_admission_rollback_scope VALUES(8)
+    - connection: owner
+      sql: UPDATE generated_admission_enforced SET value=13 WHERE id=1
+    - connection: owner
+      sql: SELECT id,parent_id,value,note FROM generated_admission_enforced ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          value: 113
+          note: a
+        - id: 2
+          parent_id: 1
+          value: 20
+          note: b
+    - connection: owner
+      sql: SELECT id,old_value,new_value,note FROM generated_admission_audit ORDER BY old_value
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 112
+          note: a
+        - id: 1
+          old_value: 112
+          new_value: 113
+          note: a
+    - connection: owner
+      sql: SELECT id FROM generated_admission_rollback_scope
+      expect:
+        rows: 1
+        data:
+        - id: 8
+    - connection: observer
+      sql: SELECT id,parent_id,value,note FROM generated_admission_enforced ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          value: 112
+          note: a
+        - id: 2
+          parent_id: 1
+          value: 20
+          note: b
+    - connection: observer
+      sql: SELECT id,old_value,new_value,note FROM generated_admission_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 112
+          note: a
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'generated_admission_rollback_scope',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,parent_id,value,note FROM generated_admission_enforced ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          value: 112
+          note: a
+        - id: 2
+          parent_id: 1
+          value: 20
+          note: b
+    - connection: observer
+      sql: SELECT id,old_value,new_value,note FROM generated_admission_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 112
+          note: a
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'generated_admission_rollback_scope',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null

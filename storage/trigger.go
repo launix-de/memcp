@@ -606,13 +606,15 @@ func (t *table) GetTriggers(timing TriggerTiming, retired map[nativeTriggerSlot]
 	var columns []*column
 	compileName := t.clusterPublishedName()
 	if input != nil {
-		if input.target != t || input.source == nil {
+		if input.target != t || input.owner == nil || input.columns == nil {
 			panic("trigger input belongs to another native target")
 		}
 		columns = input.columns
-		if names := input.source.names; names != nil {
-			if name, present := names.names[t]; present {
-				compileName = name
+		if input.source != nil {
+			if names := input.source.names; names != nil {
+				if name, present := names.names[t]; present {
+					compileName = name
+				}
 			}
 		}
 	}

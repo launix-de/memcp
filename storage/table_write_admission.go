@@ -404,7 +404,8 @@ func (t *table) admitNativeWrite(tx *TxContext) func() {
 	if tx != nil {
 		tx.admitCatalogMutation(t)
 		tx.noteNativeRowAccess(t)
-		if tx.publicColumnMutationAllowed(t) || tx.mutationInputFor(t) != nil {
+		input := tx.mutationInputFor(t)
+		if tx.publicColumnMutationAllowed(t) || input != nil && input.source != nil {
 			// The admitted default amendment already retains this exact table's
 			// exclusive declaration lease through the same native decision.
 			return func() {}

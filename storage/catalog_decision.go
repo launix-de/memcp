@@ -164,7 +164,7 @@ func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarati
 	// profile. Clean declaration owners retain their enforcement boundary.
 	late := (public || privateCreate) && tx.Mode == TxACID && identity == nil && dirty && !readOnly
 	if tx.rowAccessed.Load() && !tx.publicCatalogEntered.Load() && !late &&
-		!(identity != nil && (kind == catalogOwnedForeignKind || identity.lateCreates && (privateCreate || public))) && !readOnly {
+		!(identity != nil && (kind == catalogOwnedForeignKind || identity.lateCreates && (privateCreate || public) || public && tx.catalogIntents.Load() != nil)) && !readOnly {
 		unlock()
 		panic("transactional catalog declarations must precede native row access")
 	}
@@ -250,7 +250,7 @@ func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarati
 		panic("transactional catalog declarations must precede native row access")
 	}
 	if tx.rowAccessed.Load() && !tx.publicCatalogEntered.Load() && !late &&
-		!(identity != nil && (kind == catalogOwnedForeignKind || identity.lateCreates && (privateCreate || public))) && !readOnly {
+		!(identity != nil && (kind == catalogOwnedForeignKind || identity.lateCreates && (privateCreate || public) || public && tx.catalogIntents.Load() != nil)) && !readOnly {
 		panic("transactional catalog declarations must precede native row access")
 	}
 	if identity != nil {
@@ -705,13 +705,17 @@ func (tx *TxContext) admitCatalogMutation(table *table) {
 			scope.mu.Unlock()
 			return
 		}
-		if table.schema.Name != identity.Database || !tx.ownsPendingTable(table) {
+		owned := tx.ownsPendingTable(table)
+		if table.schema.Name != identity.Database || !owned && tx.mutationInputFor(table) == nil {
 			scope.mu.Unlock()
 			panic("catalog transaction mutations require an owned unpublished table")
 		}
-		// Publish the row-phase boundary under the same admission as private
-		// declaration construction, before defaults, triggers or ID allocation.
+		// Publish the actual row phase; only a prepared checked input above can
+		// extend a CREATE-first owner to its committed original-T target.
 		tx.rowAccessed.Store(true)
+		if !owned {
+			scope.publicRowsEntered = true
+		}
 		scope.mu.Unlock()
 	}
 }
