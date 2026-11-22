@@ -87,9 +87,14 @@ test_cases:
       (define rejected (try (lambda () (begin
         (tsql_execute_request "memcp-tests" "DELETE FROM replacement_input WHERE id=2"
           caller nil 0 (lambda (_row) true) (lambda args true)) false))
-        (lambda (failure) (expression_equal? failure
+        (lambda (failure) (expression_equal? (failure_value failure)
           '("tsql-error" 50000 "protected row retained" 7 16)))))
-      (and rejected (nil? (caller "transaction"))))
+      /* Source positions decorate the diagnostic; compare the complete cause
+      and require the actual reusable native owner to have finished. */
+      (define native (caller "__memcp_tx"))
+      (and rejected (nil? (caller "transaction"))
+        (equal? (tsql_transaction_count caller) 0)
+        (not (nil? native)) (has? '("committed" "aborted") (tx_state native))))
   expect: {result: true}
 - name: Zero candidate rows still invoke replacement and its explicit zero row inner DELETE
   sql: DELETE FROM replacement_input WHERE id=1000
