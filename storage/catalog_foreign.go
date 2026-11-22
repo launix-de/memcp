@@ -1040,12 +1040,21 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 			publication.endpoints = append(publication.endpoints, endpoint)
 		}
 	}
-	bytes := uint(unsafe.Sizeof(*publication)) + uint(cap(publication.endpoints))*uint(unsafe.Sizeof((*publicForeignEndpoint)(nil)))
-	bytes += uint(cap(publication.programs)) * uint(unsafe.Sizeof(foreignKeyTrigger{}))
 	var columnInputs map[*table]storedColumnPublicationInput
 	if history := changes.owner.catalogAmendments.Load(); history != nil {
 		columnInputs = publicStoredColumnInputs(*history)
 	}
+	// Name-only neighbor amendments have no durable declaration of their own,
+	// but their leased descriptions must publish with the renamed endpoint.
+	for t := range columnInputs {
+		if endpoints[t] == nil {
+			endpoint := &publicForeignEndpoint{table: t, checks: append([]*checkDeclaration(nil), t.Checks...), foreign: append([]foreignKey(nil), t.Foreign...), baselineWrapperBytes: changes.baselines[t].wrapperBytes}
+			endpoints[t] = endpoint
+			publication.endpoints = append(publication.endpoints, endpoint)
+		}
+	}
+	bytes := uint(unsafe.Sizeof(*publication)) + uint(cap(publication.endpoints))*uint(unsafe.Sizeof((*publicForeignEndpoint)(nil)))
+	bytes += uint(cap(publication.programs)) * uint(unsafe.Sizeof(foreignKeyTrigger{}))
 	for _, endpoint := range publication.endpoints {
 		var snapshotBytes uint
 		original := endpoint.table.showColumnsSnapshot.Load()

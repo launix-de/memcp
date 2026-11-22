@@ -1,0 +1,228 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Referenced column descriptions publish every retained neighboring endpoint through rename reversal rollback
+    and restart
+setup:
+- sql: DROP TABLE IF EXISTS neighbor_names_child
+- sql: DROP TABLE IF EXISTS neighbor_names_parent
+- sql: CREATE TABLE neighbor_names_parent(old_id INT NOT NULL CONSTRAINT neighbor_names_pk PRIMARY KEY,value INT)
+- sql: CREATE TABLE neighbor_names_child(id INT NOT NULL PRIMARY KEY,parent_id INT,value INT,CONSTRAINT neighbor_names_fk
+    FOREIGN KEY(parent_id) REFERENCES neighbor_names_parent(old_id) ON UPDATE CASCADE)
+- sql: INSERT neighbor_names_parent VALUES(7,11)
+- sql: INSERT neighbor_names_child VALUES(1,7,17)
+cleanup:
+- sql: DROP TABLE IF EXISTS neighbor_names_child
+- sql: DROP TABLE IF EXISTS neighbor_names_parent
+test_cases:
+- name: A referenced column rename retains actual owner and observer declarations
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.neighbor_names_parent.old_id',N'new_id',N'COLUMN'
+    - connection: owner
+      sql: SELECT column_name FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE constraint_name=N'neighbor_names_pk' ORDER BY
+        ordinal_position
+      expect:
+        rows: 1
+        data:
+        - column_name: new_id
+    - connection: owner
+      sql: SELECT new_id,value FROM neighbor_names_parent
+      expect:
+        rows: 1
+        data:
+        - new_id: 7
+          value: 11
+    - connection: observer
+      sql: SELECT column_name FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE constraint_name=N'neighbor_names_pk' ORDER BY
+        ordinal_position
+      expect:
+        rows: 1
+        data:
+        - column_name: old_id
+    - connection: observer
+      sql: SELECT old_id,value FROM neighbor_names_parent
+      expect:
+        rows: 1
+        data:
+        - old_id: 7
+          value: 11
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT column_name FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE constraint_name=N'neighbor_names_pk' ORDER BY
+        ordinal_position
+      expect:
+        rows: 1
+        data:
+        - column_name: new_id
+- name: Parent-only commit publishes its foreign child description
+  syntax: mysql
+  sql: SELECT table_name,column_name,referenced_table_name,referenced_column_name FROM information_schema.key_column_usage
+    WHERE table_schema='memcp-tests' AND table_name='neighbor_names_child' AND constraint_name='neighbor_names_fk' ORDER BY
+    ordinal_position
+  expect:
+    rows: 1
+    data:
+    - table_name: neighbor_names_child
+      column_name: parent_id
+      referenced_table_name: neighbor_names_parent
+      referenced_column_name: new_id
+- name: Rollback of parent-only reversal preserves committed names and rows
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.neighbor_names_parent.new_id',N'old_id',N'COLUMN'
+    - connection: owner
+      sql: SELECT column_name FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE constraint_name=N'neighbor_names_pk' ORDER BY
+        ordinal_position
+      expect:
+        rows: 1
+        data:
+        - column_name: old_id
+    - connection: owner
+      sql: SELECT old_id,value FROM neighbor_names_parent
+      expect:
+        rows: 1
+        data:
+        - old_id: 7
+          value: 11
+    - connection: observer
+      sql: SELECT column_name FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE constraint_name=N'neighbor_names_pk' ORDER BY
+        ordinal_position
+      expect:
+        rows: 1
+        data:
+        - column_name: new_id
+    - connection: observer
+      sql: SELECT new_id,value FROM neighbor_names_parent
+      expect:
+        rows: 1
+        data:
+        - new_id: 7
+          value: 11
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT column_name FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE constraint_name=N'neighbor_names_pk' ORDER BY
+        ordinal_position
+      expect:
+        rows: 1
+        data:
+        - column_name: new_id
+- name: Rolled back reversal leaves the foreign description unchanged
+  syntax: mysql
+  sql: SELECT table_name,column_name,referenced_table_name,referenced_column_name FROM information_schema.key_column_usage
+    WHERE table_schema='memcp-tests' AND table_name='neighbor_names_child' AND constraint_name='neighbor_names_fk' ORDER BY
+    ordinal_position
+  expect:
+    rows: 1
+    data:
+    - table_name: neighbor_names_child
+      column_name: parent_id
+      referenced_table_name: neighbor_names_parent
+      referenced_column_name: new_id
+- name: A separate original transaction restores the physical spelling
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.neighbor_names_parent.new_id',N'old_id',N'COLUMN'
+    - connection: owner
+      sql: SELECT column_name FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE constraint_name=N'neighbor_names_pk' ORDER BY
+        ordinal_position
+      expect:
+        rows: 1
+        data:
+        - column_name: old_id
+    - connection: owner
+      sql: SELECT old_id,value FROM neighbor_names_parent
+      expect:
+        rows: 1
+        data:
+        - old_id: 7
+          value: 11
+    - connection: observer
+      sql: SELECT column_name FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE constraint_name=N'neighbor_names_pk' ORDER BY
+        ordinal_position
+      expect:
+        rows: 1
+        data:
+        - column_name: new_id
+    - connection: observer
+      sql: SELECT new_id,value FROM neighbor_names_parent
+      expect:
+        rows: 1
+        data:
+        - new_id: 7
+          value: 11
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT column_name FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE constraint_name=N'neighbor_names_pk' ORDER BY
+        ordinal_position
+      expect:
+        rows: 1
+        data:
+        - column_name: old_id
+- name: Restored parent spelling reaches its otherwise unaltered child
+  syntax: mysql
+  sql: SELECT table_name,column_name,referenced_table_name,referenced_column_name FROM information_schema.key_column_usage
+    WHERE table_schema='memcp-tests' AND table_name='neighbor_names_child' AND constraint_name='neighbor_names_fk' ORDER BY
+    ordinal_position
+  expect:
+    rows: 1
+    data:
+    - table_name: neighbor_names_child
+      column_name: parent_id
+      referenced_table_name: neighbor_names_parent
+      referenced_column_name: old_id
+- name: Restart the committed endpoint declarations
+  action: restart
+- name: Recovered neighbor description retains the restored names
+  syntax: mysql
+  sql: SELECT table_name,column_name,referenced_table_name,referenced_column_name FROM information_schema.key_column_usage
+    WHERE table_schema='memcp-tests' AND table_name='neighbor_names_child' AND constraint_name='neighbor_names_fk' ORDER BY
+    ordinal_position
+  expect:
+    rows: 1
+    data:
+    - table_name: neighbor_names_child
+      column_name: parent_id
+      referenced_table_name: neighbor_names_parent
+      referenced_column_name: old_id
+- name: Real foreign cascade retains complete rows after reversal and recovery
+  tds:
+    statements:
+    - connection: owner
+      sql: UPDATE neighbor_names_parent SET old_id=9 WHERE old_id=7
+    - connection: owner
+      sql: SELECT old_id,value FROM neighbor_names_parent
+      expect:
+        rows: 1
+        data:
+        - old_id: 9
+          value: 11
+    - connection: owner
+      sql: SELECT id,parent_id,value FROM neighbor_names_child
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          parent_id: 9
+          value: 17
