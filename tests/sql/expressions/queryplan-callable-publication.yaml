@@ -552,3 +552,69 @@ test_cases:
         (list before (run "SELECT id,payload FROM publication_insert_target ORDER BY id")))
     expect:
       result: [[[7,11]], [[7,11]]]
+
+  - name: MySQL commented INSERT retains its recreated source dependency
+    scm: |-
+      (begin
+        (define cache (newcachemap))
+        (define input (newsession))
+        (input "username" "root")
+        (input "schema" "memcp-tests")
+        (define run (lambda (query) (begin
+          (define answer (newsession))
+          (answer "rows" '())
+          (sql_execute_formula input nil
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests"
+              query nil "root" input true nil)
+            (lambda (row) (answer "rows"
+              (append (answer "rows") (list (row "id") (row "payload")))))
+            (lambda (_fields) true))
+          (answer "rows"))))
+        (run "DROP TABLE IF EXISTS publication_insert_target")
+        (run "DROP TABLE IF EXISTS publication_insert_source")
+        (run "CREATE TABLE publication_insert_source(id INT,payload INT)")
+        (run "CREATE TABLE publication_insert_target(id INT PRIMARY KEY,payload INT)")
+        (run "INSERT INTO publication_insert_source VALUES(1,11)")
+        (define statement "/* source dependency */ INSERT INTO publication_insert_target(id,payload) SELECT id,payload FROM publication_insert_source")
+        (run statement)
+        (define before (run "SELECT id,payload FROM publication_insert_target ORDER BY id"))
+        (run "DROP TABLE publication_insert_source")
+        (run "CREATE TABLE publication_insert_source(payload INT,id INT)")
+        (run "INSERT INTO publication_insert_source(payload,id) VALUES(22,2)")
+        (run statement)
+        (list before (run "SELECT id,payload FROM publication_insert_target ORDER BY id")))
+    expect:
+      result: [[[1,11]], [[1,11],[2,22]]]
+
+  - name: PostgreSQL line-commented INSERT retains its recreated source dependency
+    scm: |-
+      (begin
+        (define cache (newcachemap))
+        (define input (newsession))
+        (input "username" "root")
+        (input "schema" "memcp-tests")
+        (define run (lambda (query) (begin
+          (define answer (newsession))
+          (answer "rows" '())
+          (sql_execute_formula input nil
+            (cached_parse cache "psql" (list parse_psql) "memcp-tests"
+              query nil "root" input true nil)
+            (lambda (row) (answer "rows"
+              (append (answer "rows") (list (row "id") (row "payload")))))
+            (lambda (_fields) true))
+          (answer "rows"))))
+        (run "DROP TABLE IF EXISTS publication_insert_target")
+        (run "DROP TABLE IF EXISTS publication_insert_source")
+        (run "CREATE TABLE publication_insert_source(id INT,payload INT)")
+        (run "CREATE TABLE publication_insert_target(id INT PRIMARY KEY,payload INT)")
+        (run "INSERT INTO publication_insert_source VALUES(1,11)")
+        (define statement "-- source dependency\nINSERT INTO publication_insert_target(id,payload) SELECT id,payload FROM publication_insert_source")
+        (run statement)
+        (define before (run "SELECT id,payload FROM publication_insert_target ORDER BY id"))
+        (run "DROP TABLE publication_insert_source")
+        (run "CREATE TABLE publication_insert_source(payload INT,id INT)")
+        (run "INSERT INTO publication_insert_source(payload,id) VALUES(22,2)")
+        (run statement)
+        (list before (run "SELECT id,payload FROM publication_insert_target ORDER BY id")))
+    expect:
+      result: [[[1,11]], [[1,11],[2,22]]]
