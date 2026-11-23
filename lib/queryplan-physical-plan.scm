@@ -938,6 +938,22 @@ replacing both sources with independent expressions would lose the binding. */
 					(reduce (scalar_aggregate_probe_outer_exprs stage) (lambda (found expression)
 						(or found (expr_refs_one_of_aliases? expression (list (source_alias source))))) false))))) nil)))))
 
+/* A selected presence probe contributes one nullable scalar binding to its
+LEFT-joined caller. Residual coordinates belong to that actual driver row;
+they cannot be enumerated while preparing an independent group carrier. */
+(define scalar_probe_caller_presence_source? (lambda (stages sources default_alias source) (begin
+	(define stage (source_stage_output_stage stages source))
+	(define drivers (filter sources (lambda (candidate)
+		(not (equal? (source_alias source) (source_alias candidate))))))
+	(and (presence_probe_stage? stage) (source_outer? source)
+		(stage_has_residual_outer_refs? stage) (source_is_base_table? (gs_input stage))
+		(equal? (gs_aggregates stage) (list aggregate_count_descriptor))
+		(equal? (stage_result_max_rows_per_partition stage) 1)
+		(equal? (count (gs_keys stage)) (count (qassoc_get (gs_facts stage) 'lookup-keys '())))
+		(scalar_probe_bindings_supported? stage)
+		(scalar_probe_bindings_complete? stage drivers)
+		(stage_lookup_keys_resolve_in_sources? stage drivers default_alias)))))
+
 /* Probe consumers still need the real relational row that supplies their
 explicit domain coordinates. Preserve that source across successive rewrite
 passes too: an already emitted marker owns the same caller dependency. */
@@ -959,8 +975,13 @@ passes too: an already emitted marker owns the same caller dependency. */
 	(define aggregates (gs_aggregates stage))
 	(define names (merge (list (group_key_cols keys) (group_stage_aggregate_columns stage))))
 	(define values (merge (list key_values (map aggregates (lambda (aggregate)
-		(lower_scalar_aggregate_probe_expr sources default_alias stage
-			(group_stage_aggregate_column stage aggregate) (physical_query_tx_symbol)))))))
+		(if (presence_probe_stage? stage)
+			/* Keep the existing presence producer in the driver callback. The
+			logical LEFT JOIN's absent value is nil, rather than a count row. */
+			(list 'if (lower_driver_membership_probe_expr sources default_alias stage
+				(if (empty_list? lookup) nil (car lookup))) 1 nil)
+			(lower_scalar_aggregate_probe_expr sources default_alias stage
+				(group_stage_aggregate_column stage aggregate) (physical_query_tx_symbol))))))))
 	(define row (merge (mapIndex names (lambda (index name) (list name (nth values index))))))
 	(list (source_alias source) (source_schema source)
 		(list 'parameter-rows names (list row) 'all)
@@ -1018,7 +1039,8 @@ passes too: an already emitted marker owns the same caller dependency. */
 			probe_candidates
 			(merge_unique (list probe_candidates (list (nth order_lookup 0))))))
 		(define binding_sources (filter selected_probe_sources (lambda (source)
-			(and (scalar_probe_binding_row_stage? (source_stage_output_stage stages source))
+			(and (or (scalar_probe_binding_row_stage? (source_stage_output_stage stages source))
+					(scalar_probe_caller_presence_source? stages sources default_alias source))
 				(scalar_probe_source_has_dependent? stages source selected_probe_sources)))))
 		/* Lowered binding expressions no longer carry their logical stage leaf.
 		Preserve its invocation effect on the resulting executable query. */
