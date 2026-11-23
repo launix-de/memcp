@@ -18,8 +18,8 @@
 metadata:
   version: '1.0'
   isolated: true
-  description: Window input domains preserve WHERE placement, NULL membership and native invalidation
-    across SQL dialects
+  description: Window input domains, nullable/collated partition equivalence and real-row emission across
+    SQL dialects
 setup:
 - sql: DROP TABLE IF EXISTS win_domain_input
 - sql: CREATE TABLE win_domain_input(id INT PRIMARY KEY,p INT,score INT,active INT,status INT,sort_key
@@ -39,6 +39,13 @@ setup:
 - sql: CREATE TABLE win_cache_partitions(id INT PRIMARY KEY,p VARCHAR(10) COLLATE utf8mb4_general_ci,stamp
     INT NOT NULL,payload INT)
 - sql: INSERT INTO win_cache_partitions VALUES(1,NULL,1,10),(2,NULL,2,20),(3,'ab',3,30),(4,'AB',4,40)
+- sql: DROP TABLE IF EXISTS win_post_window_sink
+- sql: CREATE TABLE win_post_window_sink(id INT PRIMARY KEY,previous INT,following INT)
+- sql: DROP TABLE IF EXISTS win_short_window
+- sql: DROP TABLE IF EXISTS win_short_sink
+- sql: CREATE TABLE win_short_window(id INT PRIMARY KEY,p INT,amount INT,stamp INT NOT NULL)
+- sql: INSERT INTO win_short_window VALUES(7,1,5,1),(9,2,NULL,1),(11,2,12,2)
+- sql: CREATE TABLE win_short_sink(id INT PRIMARY KEY,p INT,following INT)
 test_cases:
 - name: 'mysql: Filtered ranking is independent of the final output order'
   sql: SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS rn FROM win_domain_input
@@ -866,9 +873,122 @@ test_cases:
       previous: 11
     - id: 1
       previous: null
+- name: Compatible offset windows filter base values after producing the window
+  sql: SELECT q.id,q.previous,q.following FROM (SELECT id,p,score,sort_key,LAG(score) OVER(PARTITION BY
+    p ORDER BY sort_key DESC,id) AS previous,LEAD(score) OVER(PARTITION BY p ORDER BY sort_key DESC,id)
+    AS following FROM win_domain_input WHERE active=1) q WHERE q.id>=2 ORDER BY q.p,q.sort_key DESC,q.id
+  expect:
+    rows: 4
+    data:
+    - id: 4
+      previous: null
+      following: null
+    - id: 2
+      previous: 30
+      following: null
+    - id: 6
+      previous: 20
+      following: null
+    - id: 5
+      previous: null
+      following: null
+- name: Compatible offset windows filter their calculated nullable values
+  sql: SELECT q.id,q.previous,q.following FROM (SELECT id,p,score,sort_key,LAG(score) OVER(PARTITION BY
+    p ORDER BY sort_key DESC,id) AS previous,LEAD(score) OVER(PARTITION BY p ORDER BY sort_key DESC,id)
+    AS following FROM win_domain_input WHERE active=1) q WHERE q.previous IS NOT NULL ORDER BY q.p,q.sort_key
+    DESC,q.id
+  expect:
+    rows: 2
+    data: &id021
+    - id: 2
+      previous: 30
+      following: null
+    - id: 6
+      previous: 20
+      following: null
+- name: A reducing consumer counts only accepted post-window rows
+  sql: SELECT SUM(q.previous) AS total,COUNT(*) AS accepted FROM (SELECT id,p,score,sort_key,LAG(score)
+    OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS previous,LEAD(score) OVER(PARTITION BY p ORDER BY
+    sort_key DESC,id) AS following FROM win_domain_input WHERE active=1) q WHERE q.id>=2
+  expect:
+    rows: 1
+    data:
+    - total: 50
+      accepted: 4
+- name: An insert consumer receives only accepted post-window rows
+  sql: INSERT INTO win_post_window_sink(id,previous,following) SELECT q.id,q.previous,q.following FROM
+    (SELECT id,p,score,sort_key,LAG(score) OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS previous,LEAD(score)
+    OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS following FROM win_domain_input WHERE active=1)
+    q WHERE q.previous IS NOT NULL ORDER BY q.p,q.sort_key DESC,q.id
+  expect:
+    affected_rows: 2
+- name: Inserted post-window rows retain their complete nullable payloads
+  sql: SELECT id,previous,following FROM win_post_window_sink ORDER BY id
+  expect:
+    rows: 2
+    data: *id021
+- name: One real row survives LEAD with a larger offset
+  sql: SELECT id,LEAD(amount,2) OVER(ORDER BY stamp,id) AS following FROM win_short_window WHERE id=7
+    ORDER BY stamp,id
+  expect:
+    rows: 1
+    data:
+    - id: 7
+      following: null
+- name: A real all-NULL projection is not padding
+  sql: SELECT NULL AS marker,LEAD(amount,2) OVER(ORDER BY stamp,id) AS following FROM win_short_window
+    WHERE id=9 ORDER BY stamp,id
+  expect:
+    rows: 1
+    data:
+    - marker: null
+      following: null
+- name: Short partitions flush only their actual selected rows
+  sql: SELECT id,p,LEAD(amount,3) OVER(PARTITION BY p ORDER BY stamp,id) AS following FROM win_short_window
+    ORDER BY p,stamp,id
+  expect:
+    rows: 3
+    data: &id022
+    - id: 7
+      p: 1
+      following: null
+    - id: 9
+      p: 2
+      following: null
+    - id: 11
+      p: 2
+      following: null
+- name: A nullable post-window predicate never admits start padding
+  sql: SELECT q.id,q.p,q.following FROM (SELECT id,p,stamp,LEAD(amount,3) OVER(PARTITION BY p ORDER BY
+    stamp,id) AS following FROM win_short_window) q WHERE q.following IS NULL ORDER BY q.p,q.stamp,q.id
+  expect:
+    rows: 3
+    data: *id022
+- name: A reducing consumer counts real short-partition rows
+  sql: SELECT COUNT(*) AS accepted,SUM(q.id) AS total FROM (SELECT id,p,stamp,LEAD(amount,3) OVER(PARTITION
+    BY p ORDER BY stamp,id) AS following FROM win_short_window) q WHERE q.following IS NULL
+  expect:
+    rows: 1
+    data:
+    - accepted: 3
+      total: 27
+- name: An insert consumer receives no synthetic short-window rows
+  sql: INSERT INTO win_short_sink(id,p,following) SELECT q.id,q.p,q.following FROM (SELECT id,p,stamp,LEAD(amount,3)
+    OVER(PARTITION BY p ORDER BY stamp,id) AS following FROM win_short_window) q WHERE q.following IS
+    NULL ORDER BY q.p,q.stamp,q.id
+  expect:
+    affected_rows: 3
+- name: The inserted short-window payloads are complete
+  sql: SELECT id,p,following FROM win_short_sink ORDER BY id
+  expect:
+    rows: 3
+    data: *id022
 cleanup:
 - sql: DROP TABLE IF EXISTS win_partition_composite
 - sql: DROP TABLE IF EXISTS win_domain_input
 - sql: DROP TABLE IF EXISTS win_partition_nulls
 - sql: DROP TABLE IF EXISTS win_partition_text
 - sql: DROP TABLE IF EXISTS win_cache_partitions
+- sql: DROP TABLE IF EXISTS win_post_window_sink
+- sql: DROP TABLE IF EXISTS win_short_sink
+- sql: DROP TABLE IF EXISTS win_short_window
