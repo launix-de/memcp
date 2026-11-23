@@ -346,6 +346,23 @@ requires the binding scope; quoted data never creates a dependency. */
 				(list (cons condition leading) remaining)))
 		_ (list '() '()))))
 
+/* These already registered checks are necessary source facts, not cost
+assumptions. Literal addresses/declarations and the executing tx are their
+only inputs; quoted metadata never depends on a preparation or binding. */
+(define sql_queryplan_source_eligibility_condition? (lambda (condition) (begin
+	(define quoted (lambda (value)
+		(and (list? value) (equal? (count value) 2)
+			(expression_equal? (car value) 'quote))))
+	(match condition
+		'(op schema relation tx expected)
+		(and (expression_equal? op 'sql_relation_declarations_match?)
+			(string? schema) (string? relation) (expression_equal? tx 'tx) (quoted expected))
+		'(op schema relation tx expected fields)
+		(and (expression_equal? op 'sql_relation_local_declarations_match?)
+			(string? schema) (string? relation) (expression_equal? tx 'tx)
+			(quoted expected) (quoted fields))
+		_ false))))
+
 (define sql_queryplan_guard_from_session (lambda (planning_session)
 	(begin
 		(define condition_accumulator (planning_session "__memcp_queryplan_guard_conditions"))
@@ -363,6 +380,11 @@ requires the binding scope; quoted data never creates a dependency. */
 			(map (binding_session) (lambda (key) (binding_session key)))
 			(map (produceN (coalesceNil (binding_session "count") 0))
 				(lambda (idx) (binding_session (concat "binding:" idx))))))
+		(planning_session "__memcp_queryplan_source_eligibility"
+			(sql_queryplan_conjoin_guards (filter conditions (lambda (condition)
+				(and (sql_queryplan_source_eligibility_condition? condition)
+					(not (reduce all_bindings (lambda (dependent binding)
+						(or dependent (sql_queryplan_guard_references_symbol? condition (car binding)))) false)))))))
 		/* Cost enumeration may bind expressions which no surviving guard uses.
 		Materializing those lambda arguments would retain the discarded planning
 		work on every cached execution. */
@@ -493,16 +515,21 @@ identical programs once outside row closures, including parameterized plans. */
 		instead of retaining and repeatedly cloning an optimizer blueprint. */
 		(define guard (if (expression_equal? guard true) true
 			(sql_queryplan_compile_formula tx (sql_queryplan_bind_execution_session guard))))
+		(define preparations (if statistics_diagnostic '()
+			(sql_queryplan_preparations_from_session planning_session)))
+		(define source_eligibility (if (empty_list? preparations) true
+			(coalesceNil (planning_session "__memcp_queryplan_source_eligibility") true)))
+		(define source_eligibility (if (expression_equal? source_eligibility true) true
+			(sql_queryplan_compile_formula tx (sql_queryplan_bind_execution_session source_eligibility))))
 		(tx_check tx)
-		(list guard plan
-			(if statistics_diagnostic '()
-				(sql_queryplan_preparations_from_session planning_session))
+		(list guard plan preparations
 			(list
 				(list (quote parameter_mode) parameter_mode)
 				(list (quote compile_ns) (- (nanotime) compile_started))
 				(list (quote execution_cost) (planning_session "__memcp_queryplan_candidate_cost"))
 				(list (quote work_profile) (planning_session "__memcp_queryplan_parameter_work"))
-				(list (quote parameters) parameter_reads))))))
+				(list (quote parameters) parameter_reads)
+				(list (quote source_eligibility) source_eligibility))))))
 
 (define sql_queryplan_preparation_expr (lambda (preparation)
 	(match preparation '(decision_id producer metric_expr) (begin
@@ -538,10 +565,16 @@ otherwise side-effect-free guard. */
 (define sql_queryplan_formula_dispatch (lambda (variants prepared_catalog miss_expr)
 	(match variants
 		(cons variant rest) (begin
+			(define source_eligibility (qassoc_get (nth variant 3) 'source_eligibility true))
 			(define new_preparations (filter (nth variant 2) (lambda (preparation)
 				(if (prepared_catalog (car preparation))
 					false
-					(begin (prepared_catalog (car preparation) true) true)))))
+					(begin
+						/* A skipped conditional branch has performed no preparation.
+						Only unconditional prefixes may deduplicate later emitted work. */
+						(if (expression_equal? source_eligibility true)
+							(prepared_catalog (car preparation) true) true)
+						true)))))
 			(define tail_expr (sql_queryplan_formula_dispatch rest prepared_catalog miss_expr))
 			(define bound_plan (if (sql_parameter_generic? variant)
 				(list (quote sql_parameter_execute) (list (quote quote) (nth variant 3))
@@ -555,11 +588,15 @@ otherwise side-effect-free guard. */
 					(list (quote apply) (car variant)
 						(list (quote list) (quote session) (quote tx) (quote resultrow) (quote resultfields)))
 					bound_plan tail_expr)))
-			(if (empty_list? new_preparations)
+			(define prepared_dispatch (if (empty_list? new_preparations)
 				dispatch
 				(cons (quote !begin)
 					(merge (list (map new_preparations sql_queryplan_preparation_expr)
 						(list dispatch))))))
+			(if (expression_equal? source_eligibility true) prepared_dispatch
+				(list 'if (list 'apply source_eligibility
+					(list 'list 'session 'tx 'resultrow 'resultfields))
+					prepared_dispatch tail_expr)))
 		_ miss_expr)))
 
 (define sql_queryplan_miss_expr (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy)
@@ -602,18 +639,23 @@ otherwise side-effect-free guard. */
 (define sql_queryplan_matching_variant (lambda (variants session tx resultrow resultfields)
 	(match variants
 		(cons variant rest) (begin
-			/* This request may hold an older formula while another request prepends a
-			variant under the compile lock. Prepare that newly visible variant before
-			rechecking its guard; preparation expressions are request-idempotent. */
-			(map (nth variant 2) (lambda (preparation)
-				((sql_queryplan_compile_formula tx
-					(sql_queryplan_preparation_expr preparation))
-					session tx resultrow resultfields)))
-			/* The guard already owns its compiled lexical frame. Forward this
-			request explicitly after preparations, without recompilation or eval. */
-			(if (if (expression_equal? (car variant) true) true
-				(apply (car variant) (list session tx resultrow resultfields)))
-				variant
+			(define source_eligibility (qassoc_get (nth variant 3) 'source_eligibility true))
+			(if (if (expression_equal? source_eligibility true) true
+				(apply source_eligibility (list session tx resultrow resultfields)))
+				(begin
+					/* This request may hold an older formula while another request prepends a
+					variant under the compile lock. Prepare that newly visible variant before
+					rechecking its guard; preparation expressions are request-idempotent. */
+					(map (nth variant 2) (lambda (preparation)
+						((sql_queryplan_compile_formula tx
+							(sql_queryplan_preparation_expr preparation))
+							session tx resultrow resultfields)))
+					/* The guard already owns its compiled lexical frame. Forward this
+					request explicitly after preparations, without recompilation or eval. */
+					(if (if (expression_equal? (car variant) true) true
+						(apply (car variant) (list session tx resultrow resultfields)))
+						variant
+						(sql_queryplan_matching_variant rest session tx resultrow resultfields)))
 				(sql_queryplan_matching_variant rest session tx resultrow resultfields)))
 		_ nil)))
 
