@@ -1072,6 +1072,11 @@ func sortedBoundariesCoverCondition(conditionCols []string, condition scm.Scmer,
 		if want.nullSafe && want.lower.IsNil() {
 			return false
 		}
+		// NULL-first upper intervals include NULL row keys. They do not prove
+		// the scalar comparison's NULL rejection without a real lower bound.
+		if want.matcher == RangeMatcher && want.lower.IsNil() {
+			return false
+		}
 		covered := false
 		rangeSeen := false
 		for i := 0; i < access.len(); i++ {

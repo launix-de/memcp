@@ -8,13 +8,13 @@ setup:
 - sql: DROP TABLE IF EXISTS nullable_upper_range_rows
 - sql: DROP TABLE IF EXISTS nullable_range_bounds
 - sql: CREATE TABLE nullable_upper_range_rows(id INT PRIMARY KEY,v INT,label VARCHAR(12),text_key VARCHAR(8),day_key
-    DATE)
-- sql: INSERT INTO nullable_upper_range_rows VALUES(1,NULL,'missing',NULL,NULL),(2,-2,'negative','a',CAST('2024-01-01'
-    AS DATE)),(3,0,'zero','a',CAST('2024-01-02' AS DATE)),(4,2,'edge','b',CAST('2024-01-03' AS DATE)),(5,7,'above','c',CAST('2024-01-04'
-    AS DATE)),(6,2,'duplicate','b',CAST('2024-01-03' AS DATE))
+    DATE,secondary_key INT)
+- sql: INSERT INTO nullable_upper_range_rows VALUES(1,NULL,'missing',NULL,NULL,0),(2,-2,'negative','a',CAST('2024-01-01'
+    AS DATE),1),(3,0,'zero','a',CAST('2024-01-02' AS DATE),NULL),(4,2,'edge','b',CAST('2024-01-03' AS DATE),0),(5,7,'above','c',CAST('2024-01-04'
+    AS DATE),0),(6,2,'duplicate','b',CAST('2024-01-03' AS DATE),2)
 - scm: (rebuild (table "memcp-tests" false "nullable_upper_range_rows" false nil) true true nil true)
-- sql: INSERT INTO nullable_upper_range_rows VALUES(7,NULL,'delta-null',NULL,NULL),(8,-1,'delta-low','a',CAST('2024-01-01'
-    AS DATE)),(9,4,'delta-high','c',CAST('2024-01-04' AS DATE))
+- sql: INSERT INTO nullable_upper_range_rows VALUES(7,NULL,'delta-null',NULL,NULL,NULL),(8,-1,'delta-low','a',CAST('2024-01-01'
+    AS DATE),1),(9,4,'delta-high','c',CAST('2024-01-04' AS DATE),1)
 - sql: CREATE TABLE nullable_range_bounds(bound_id INT PRIMARY KEY,ceiling INT)
 - sql: INSERT INTO nullable_range_bounds VALUES(1,NULL),(2,0),(3,2),(4,8)
 test_cases:
@@ -393,6 +393,30 @@ test_cases:
     - {bound_id: 4, upper_value: 8, id: 6, v: 2, label: duplicate}
     - {bound_id: 4, upper_value: 8, id: 8, v: -1, label: delta-low}
     - {bound_id: 4, upper_value: 8, id: 9, v: 4, label: delta-high}
+- name: mysql Two upper range predicates retain both NULL rejections
+  syntax: mysql
+  sql: SELECT id,v,label,secondary_key FROM nullable_upper_range_rows WHERE v<=2 AND secondary_key<=1 ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative, secondary_key: 1}
+    - {id: 4, v: 2, label: edge, secondary_key: 0}
+    - {id: 8, v: -1, label: delta-low, secondary_key: 1}
+- name: psql Two upper range predicates retain both NULL rejections
+  syntax: psql
+  sql: SELECT id,v,label,secondary_key FROM nullable_upper_range_rows WHERE v<=2 AND secondary_key<=1 ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative, secondary_key: 1}
+    - {id: 4, v: 2, label: edge, secondary_key: 0}
+    - {id: 8, v: -1, label: delta-low, secondary_key: 1}
+- name: tsql Two upper range predicates retain both NULL rejections
+  syntax: tsql
+  sql: SELECT id,v,label,secondary_key FROM nullable_upper_range_rows WHERE v<=2 AND secondary_key<=1 ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative, secondary_key: 1}
+    - {id: 4, v: 2, label: edge, secondary_key: 0}
+    - {id: 8, v: -1, label: delta-low, secondary_key: 1}
 cleanup:
 - sql: DROP TABLE IF EXISTS nullable_range_bounds
 - sql: DROP TABLE IF EXISTS nullable_upper_range_rows

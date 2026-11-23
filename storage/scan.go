@@ -704,6 +704,11 @@ func compiledScanBoundaryCovers(have, want compiledScanBoundary) bool {
 	if have.kind != want.kind || have.column != want.column || have.collation != want.collation || have.nullSafe != want.nullSafe {
 		return false
 	}
+	// An upper-only interval includes NULL-first keys. The original scalar
+	// predicate still owns NULL rejection unless a lower bound excludes them.
+	if want.kind == "range" && !want.lowerSet && !want.lowerBatch && !have.lowerSet && !have.lowerBatch {
+		return false
+	}
 	if want.lowerSet && (!have.lowerSet || have.lowerInclusive != want.lowerInclusive ||
 		!scm.Equal(have.lower.WithoutSourceInfo(), want.lower.WithoutSourceInfo())) {
 		return false
