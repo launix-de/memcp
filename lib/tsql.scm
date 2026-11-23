@@ -631,15 +631,18 @@ column, including ordinary siblings of a generated column. */
 		"UUIDV7" (lambda () (uuid_v7))
 		_ nil)))
 (define tsql_add_columns (lambda (database name columns tx session) (begin
-	(tsql_validate_row_guid_definitions columns)
+	(define marked (tsql_validate_row_guid_definitions columns))
 	/* Resolve all declaration/default profiles before any column publication. */
 	(if (find columns (lambda (column) (begin
 		(define options (nth column 4))
 		(and (options "default_deferred") (has_assoc? options "null") (not (options "null"))
 			(nil? (tsql_add_column_initializer options))))))
 		(error "ALTER ADD NOT NULL with a deferred DEFAULT requires historical initialization") true)
-	(if (find columns (lambda (column)
-		(and (tsql_row_guid_definition? column) (nil? (tsql_add_column_initializer (nth column 4))))))
+	(if (find columns (lambda (column) (begin
+		(define options (nth column 4))
+		(and (tsql_row_guid_definition? column) (nil? (tsql_add_column_initializer options))
+			(or (identical? (options "null") false) (has_assoc? options "default")
+				(has_assoc? options "default_expression"))))))
 		(error "ROWGUIDCOL in ALTER ADD requires its atomic initialized declaration") true)
 	(define publish (lambda () (begin
 		(define published_columns (map columns (lambda (column) (match column
@@ -647,7 +650,9 @@ column, including ordinary siblings of a generated column. */
 			(list column_name type dimensions (tsql_publish_alias_attributes type attributes))))))
 		(define initialized (find published_columns (lambda (column)
 			(not (nil? (tsql_add_column_initializer (nth column 3))))) nil))
-		(if initialized (begin
+		/* A nullable marker without a DEFAULT uses the same native NULL history
+		and exclusive declaration claim; ROWGUIDCOL never invents a generator. */
+		(if (or initialized marked) (begin
 			(define handle (table database false name false tx))
 			(define collation (get_assoc (show handle true) "Collation"))
 			(createcolumns handle (map published_columns (lambda (column) (match column

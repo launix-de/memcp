@@ -12,12 +12,16 @@ setup:
 - sql: DROP TABLE IF EXISTS row_guid_nullable
 - sql: DROP TABLE IF EXISTS row_guid_added
 - sql: DROP TABLE IF EXISTS row_guid_rejected
+- sql: DROP TABLE IF EXISTS row_guid_null_history
+- sql: DROP TABLE IF EXISTS row_guid_null_undo
 cleanup:
 - sql: DROP TABLE IF EXISTS initial_declaration_probe
 - sql: DROP TABLE IF EXISTS initial_numeric_probe
 - sql: DROP TABLE IF EXISTS row_guid_nullable
 - sql: DROP TABLE IF EXISTS row_guid_added
 - sql: DROP TABLE IF EXISTS row_guid_rejected
+- sql: DROP TABLE IF EXISTS row_guid_null_history
+- sql: DROP TABLE IF EXISTS row_guid_null_undo
 - sql: DROP TYPE IF EXISTS row_guid_alias
 test_cases:
 - name: Initial composite declaration preserves scalar types nullability row marker and nonclustered key
@@ -88,9 +92,9 @@ test_cases:
 - name: Complete creation owns its marker before publication
   sql: CREATE TABLE row_guid_added(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER ROWGUIDCOL NULL)
   expect: {rows: 0, result_not_contains: '"affected_rows"'}
-- name: Marked ADD remains unsupported until native atomic declaration validation
+- name: A second marker is rejected by atomic native declaration validation
   sql: ALTER TABLE row_guid_added ADD other_guid UNIQUEIDENTIFIER ROWGUIDCOL NULL
-  expect: {error: true,contains: ROWGUIDCOL in ALTER ADD is not supported}
+  expect: {error: true,contains: ROWGUIDCOL property}
 - name: Rejected ADD has no partial native column
   scm: (nil? (show (table "memcp-tests" false "row_guid_added" false nil) "column" "other_guid" false))
   expect: {result: true}
@@ -137,6 +141,48 @@ test_cases:
   session_id: row-guid-transaction
   sql: ROLLBACK TRANSACTION
   expect: {affected_rows: 0}
+- name: Nullable marked ADD preserves historical rows without generating values
+  tds:
+    statements:
+    - sql: CREATE TABLE row_guid_null_history(id INT PRIMARY KEY)
+    - sql: INSERT row_guid_null_history VALUES(1),(2)
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: UPDATE row_guid_null_history SET id=20 WHERE id=2}
+    - {connection: owner,sql: ALTER TABLE row_guid_null_history ADD guid UNIQUEIDENTIFIER ROWGUIDCOL NULL}
+    - connection: owner
+      sql: SELECT id,guid FROM row_guid_null_history ORDER BY id
+      expect: {data: [{id: 1,guid: null},{id: 20,guid: null}]}
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'row_guid_null_history',N'guid') AS width
+      expect: {data: [{width: null}]}
+    - {connection: owner,sql: COMMIT TRANSACTION}
+    - sql: INSERT row_guid_null_history(id) VALUES(3)
+    - sql: INSERT row_guid_null_history VALUES(4,'00000000-0000-0000-0000-000000000004'),(5,'00000000-0000-0000-0000-000000000004')
+    - sql: SELECT id,guid FROM row_guid_null_history ORDER BY id
+      expect:
+        data:
+        - {id: 1,guid: null}
+        - {id: 3,guid: null}
+        - {id: 4,guid: {binary_hex: '00000000000000000000000000000004'}}
+        - {id: 5,guid: {binary_hex: '00000000000000000000000000000004'}}
+        - {id: 20,guid: null}
+- name: Savepoint rollback restores nullable history and releases the marker claim
+  tds:
+    statements:
+    - sql: CREATE TABLE row_guid_null_undo(id INT PRIMARY KEY)
+    - sql: INSERT row_guid_null_undo VALUES(1)
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: SAVE TRANSACTION before_marker}
+    - {connection: owner,sql: UPDATE row_guid_null_undo SET id=2}
+    - {connection: owner,sql: ALTER TABLE row_guid_null_undo ADD guid UNIQUEIDENTIFIER ROWGUIDCOL NULL}
+    - {connection: owner,sql: ROLLBACK TRANSACTION before_marker}
+    - connection: owner
+      sql: SELECT id,COL_LENGTH(N'row_guid_null_undo',N'guid') AS removed FROM row_guid_null_undo
+      expect: {data: [{id: 1,removed: null}]}
+    - {connection: owner,sql: ALTER TABLE row_guid_null_undo ADD guid UNIQUEIDENTIFIER ROWGUIDCOL NULL}
+    - {connection: owner,sql: COMMIT TRANSACTION}
+    - sql: SELECT id,guid FROM row_guid_null_undo
+      expect: {data: [{id: 1,guid: null}]}
 - name: Native schema reload retains the optional declaration properties
   syntax: mysql
   sql: SHUTDOWN
@@ -148,6 +194,23 @@ test_cases:
       (define source (table "memcp-tests" false "row_guid_added" false nil))
       (and (((show source "column" "guid" false) "Properties") "tsql.rowguidcol")
         (equal? (((show source "column" "id" false) "Properties") "client.marker") 7)))
+  expect: {result: true}
+- name: Nullable appended marker and NULL history survive restart
+  sql: SELECT id,guid FROM row_guid_null_history ORDER BY id
+  expect:
+    data:
+    - {id: 1,guid: null}
+    - {id: 3,guid: null}
+    - {id: 4,guid: '00000000-0000-0000-0000-000000000004'}
+    - {id: 5,guid: '00000000-0000-0000-0000-000000000004'}
+    - {id: 20,guid: null}
+- name: Nullable appended marker metadata survives restart without a future default
+  scm: |
+    (begin
+      (define declaration (show (table "memcp-tests" false "row_guid_null_history" false nil) "column" "guid" false))
+      (and ((declaration "Properties") "tsql.rowguidcol")
+        (declaration "Null") (nil? (declaration "Default"))
+        (equal? (declaration "DefaultExpression") "")))
   expect: {result: true}
 - name: Dropping a marked column retires its properties with the native declaration
   sql: ALTER TABLE row_guid_added DROP COLUMN guid; ALTER TABLE row_guid_added ADD replacement UNIQUEIDENTIFIER NULL

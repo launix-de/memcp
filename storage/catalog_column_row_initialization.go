@@ -93,7 +93,9 @@ func decodeNativeColumnInitialization(definitions scm.Scmer) []nativeColumnIniti
 			panic("column initialization requires a fresh ordinary declaration")
 		}
 		if generator.IsNil() {
-			if len(exclusive) != 0 || (!c.AllowNull && !d.hasDefault) {
+			// Exclusive metadata can accompany the existing realized NULL history.
+			// Constant-default extents use a different lifetime and cannot carry it.
+			if (len(exclusive) != 0 && d.hasDefault) || (!c.AllowNull && !d.hasDefault) {
 				panic("column initialization requires a complete ordinary declaration")
 			}
 			if d.hasDefault && c.sanitizer != nil {
