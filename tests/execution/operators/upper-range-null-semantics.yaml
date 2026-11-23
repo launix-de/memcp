@@ -9,12 +9,16 @@ setup:
 - sql: DROP TABLE IF EXISTS nullable_range_bounds
 - sql: CREATE TABLE nullable_upper_range_rows(id INT PRIMARY KEY,v INT,label VARCHAR(12),text_key VARCHAR(8),day_key
     DATE,secondary_key INT)
-- sql: INSERT INTO nullable_upper_range_rows VALUES(1,NULL,'missing',NULL,NULL,0),(2,-2,'negative','a',CAST('2024-01-01'
-    AS DATE),1),(3,0,'zero','a',CAST('2024-01-02' AS DATE),NULL),(4,2,'edge','b',CAST('2024-01-03' AS DATE),0),(5,7,'above','c',CAST('2024-01-04'
-    AS DATE),0),(6,2,'duplicate','b',CAST('2024-01-03' AS DATE),2)
+- sql: INSERT INTO nullable_upper_range_rows VALUES(1,NULL,'missing',NULL,NULL,0)
+- sql: INSERT INTO nullable_upper_range_rows VALUES(2,-2,'negative','a',CAST('2024-01-01' AS DATE),1)
+- sql: INSERT INTO nullable_upper_range_rows VALUES(3,0,'zero','a',CAST('2024-01-02' AS DATE),NULL)
+- sql: INSERT INTO nullable_upper_range_rows VALUES(4,2,'edge','b',CAST('2024-01-03' AS DATE),0)
+- sql: INSERT INTO nullable_upper_range_rows VALUES(5,7,'above','c',CAST('2024-01-04' AS DATE),0)
+- sql: INSERT INTO nullable_upper_range_rows VALUES(6,2,'duplicate','b',CAST('2024-01-03' AS DATE),2)
 - scm: (rebuild (table "memcp-tests" false "nullable_upper_range_rows" false nil) true true nil true)
-- sql: INSERT INTO nullable_upper_range_rows VALUES(7,NULL,'delta-null',NULL,NULL,NULL),(8,-1,'delta-low','a',CAST('2024-01-01'
-    AS DATE),1),(9,4,'delta-high','c',CAST('2024-01-04' AS DATE),1)
+- sql: INSERT INTO nullable_upper_range_rows VALUES(7,NULL,'delta-null',NULL,NULL,NULL)
+- sql: INSERT INTO nullable_upper_range_rows VALUES(8,-1,'delta-low','a',CAST('2024-01-01' AS DATE),1)
+- sql: INSERT INTO nullable_upper_range_rows VALUES(9,4,'delta-high','c',CAST('2024-01-04' AS DATE),1)
 - sql: CREATE TABLE nullable_range_bounds(bound_id INT PRIMARY KEY,ceiling INT)
 - sql: INSERT INTO nullable_range_bounds VALUES(1,NULL),(2,0),(3,2),(4,8)
 test_cases:
