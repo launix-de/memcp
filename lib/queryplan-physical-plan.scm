@@ -5673,7 +5673,8 @@ stage requested-column. The recursive result is ordered driver -> final. */
 						probe_recipe_prepares
 						probe_recipe_bindings))
 					recipe_block
-					'()))
+					'()
+					caller_invariant_symbols))
 			(begin
 				(define stage_catalog (query_block_stage_catalog block))
 				(define scalar_order_cache
@@ -5813,7 +5814,8 @@ stage requested-column. The recursive result is ordered driver -> final. */
 									(planner_context_session (qb_facts block))) eager_stages))
 						(lower_stage_materialize_all eager_stages)))
 					core_block
-					(direct_group_join_usage_flush_exprs direct_group_join_stages)))))))
+					(direct_group_join_usage_flush_exprs direct_group_join_stages)
+					caller_invariant_symbols))))))
 
 /* A positive IN group contributes presence, never payload or multiplicity.
 After consuming its complete domain join, the ordinary membership cost search
@@ -5854,7 +5856,8 @@ chooses the producer/driver implementation from canonical stage facts. */
 		(begin
 			(define scoped (invocation_relation_prepare block))
 			(define prepared (prepare_simple_query_block_physical_core (cadr scoped)))
-			(list (merge (list (car scoped) (car prepared))) (cadr prepared) (nth prepared 2)))
+			(list (merge (list (car scoped) (car prepared))) (cadr prepared) (nth prepared 2)
+				(nth prepared 3)))
 		(prepare_simple_query_block_physical_core_chosen
 			(query_block_with_physical_membership_using
 				(query_block_stage_lookup block) (query_block_with_presence_projection_choices block))))))
@@ -5875,14 +5878,18 @@ chooses the producer/driver implementation from canonical stage facts. */
 			(define prelude (nth prepared 0))
 			(define core_block (nth prepared 1))
 			(define postlude (nth prepared 2))
-			(if (and (empty_list? prelude) (empty_list? postlude))
+			(define emitted (if (and (empty_list? prelude) (empty_list? postlude))
 				(lower_query_block_core core_block result_consumer)
 				(if (nil? result_consumer)
 					(cons (quote !begin) (merge (list prelude
 						(list (lower_query_block_core core_block nil)) postlude
 						(if (empty_list? postlude) '() (list nil)))))
 					(result_consumer_with_cleanup prelude
-						(lower_query_block_core core_block result_consumer) postlude)))))))))
+						(lower_query_block_core core_block result_consumer) postlude))))
+			/* Inline probes and named recipes share this caller's invariant prelude.
+			Bind free stage coordinates after every inline callback has been emitted;
+			the existing walker preserves quoted data and actual local lambda binders. */
+			(rewrite_query_invariant_probe_symbols (nth prepared 3) emitted)))))))
 (define lower_query_block_with_cataloged_stages (lambda (block result_consumer) (begin
 	(define retained_set_group (physical_union_group_stage_for_block block))
 	(define runtime_stage (if retained_set_group nil (runtime_union_group_stage_for_block block)))
