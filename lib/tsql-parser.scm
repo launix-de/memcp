@@ -1774,10 +1774,14 @@ or error-message text. */
 	(if (> units limit) (error "TRY_CAST input length exceeds the supported limit") true)))))
 /* Reuse the frontend's structured SQL errors. Unexpected helper failures,
 cancellation and unsupported operations are never successful NULL casts. */
-(define tsql_try_conversion_error (lambda (cause) (match cause
-	'("tsql-error" number _message _state)
-	(if (has? '(245 8114 8115 241 242) number) nil (error cause))
-	_ (error cause))))
+(define tsql_try_conversion_error (lambda (cause)
+	/* Inspect native completion authority before projecting a language value.
+	Unknown failures retain their original envelope when rethrown. */
+	(if (transaction_abort_transfer? cause) (error cause)
+		(match (failure_value cause)
+			'("tsql-error" number _message _state)
+			(if (has? '(245 8114 8115 241 242) number) nil (error cause))
+			_ (error cause)))))
 (define tsql_try_conversion_compiler (lambda (type dimensions style bounded_input) (lambda (infos) (begin
 	(define input (car infos))
 	(define source (sql_info_type input))
