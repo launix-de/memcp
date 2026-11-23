@@ -1029,7 +1029,8 @@ passes too: an already emitted marker owns the same caller dependency. */
 		(define selected_probe_sources (filter selected_probe_sources (lambda (source)
 			(not (contains? binding_aliases (source_alias source))))))
 		(define selected_probe_sources
-			(probe_sources_without_caller_bindings stages selected_probe_sources consumers))
+			(probe_sources_without_caller_bindings stages selected_probe_sources
+				(merge (list consumers (map sources source_join_expr)))))
 		(define probe_sources
 			(probe_sources_with_relational_driver sources selected_probe_sources
 				(if (and (single_source? sources)
@@ -1076,7 +1077,8 @@ from silently overriding the physical planner. */
 	(begin
 		(define sources (qb_sources block))
 		(define probe_sources (probe_sources_without_caller_bindings
-			stages probe_sources (query_block_probe_consumers block)))
+			stages probe_sources (merge (list
+				(query_block_probe_consumers block) (map sources source_join_expr)))))
 		(define selected_probe_sources
 			(probe_sources_with_relational_driver sources probe_sources
 				(if (and (single_source? sources)
