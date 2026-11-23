@@ -4849,7 +4849,8 @@ the existing aggregate-domain rewrite collects all payloads into one stage. */
 						(list (list (quote car) (quote mapped)) 0)
 						(quote acc))))
 			0
-			(list (list (quote kind) (quote ordered-window)))))
+			(list (list (quote kind) (quote ordered-window))
+				(list (quote condition) inner_where))))
 		(define rn_expr (list (quote get_column) alias false rn_col false))
 		(define offset_value (coalesceNil (qb_offset inner) 0))
 		/* Bounds remain invocation expressions. Arithmetic on their syntax
@@ -4892,7 +4893,16 @@ the existing aggregate-domain rewrite collects all payloads into one stage. */
 		_ fact)))
 
 (define requalify_stage_for_derived (lambda (old_alias new_alias stage)
-	(if (group_stage? stage)
+	(if (window_stage? stage)
+		(make_window_stage (nth stage 1)
+			(if (expression_equal? (source_alias (os_source stage)) old_alias)
+				(cons new_alias (cdr (os_source stage))) (os_source stage))
+			(os_column stage) (os_sortcols stage) (os_sortdirs stage)
+			(os_partitioncount stage) (os_mapcols stage) (os_mapfn stage)
+			(os_reducefn stage) (os_reduceinit stage)
+			(map (os_facts stage) (lambda (fact)
+				(requalify_stage_fact_for_derived old_alias new_alias fact))))
+		(group_stage? stage)
 		(make_group_stage
 			(gs_id stage)
 			(gs_input stage)
@@ -5228,6 +5238,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				(neumann_fail "untangle_query" "window offset function requires a value argument")
 				true)
 			true)
+		(define condition (coalesceNil (uctx_get ctx (quote window-row-condition) true) true))
 		(define local_sources (window_stage_sources outer_sources))
 		(if (not (single_source? local_sources))
 			(neumann_fail "untangle_query" "window offset ORC stage currently supports one base source")
@@ -5257,7 +5268,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 							(if (equal? fn "LEAD") (invert_window_order_dirs order_dirs) order_dirs))))
 						(define sortcols (merge (list partition_cols order_cols)))
 						(define col (canonical_orc_column_name (toLower fn) src
-							(list value_col sortcols sortdirs offset (count partition_exprs))))
+							(list value_col sortcols sortdirs offset (count partition_exprs) (canonical_helper_expr_using src condition))))
 						(define stage (make_window_stage
 							(concat "window-" (toLower fn) ":" col)
 							src
@@ -5271,6 +5282,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 							(if (empty_list? partition_exprs) (list (quote list)) (list (quote list) (list (quote list)) nil))
 							(list
 								(list (quote kind) (quote ordered-window))
+								(list (quote condition) condition)
 								(list (quote window_function) fn)
 								(list (quote window_offset) offset)
 								(list (quote window_value_column) value_col)
@@ -5372,6 +5384,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(if (not (empty_list? args))
 			(neumann_fail "untangle_query" "rank window function does not accept arguments")
 			true)
+		(define condition (coalesceNil (uctx_get ctx (quote window-row-condition) true) true))
 		(define local_sources (window_stage_sources outer_sources))
 		(if (not (single_source? local_sources))
 			(neumann_fail "untangle_query" "rank ORC stage currently supports one base source")
@@ -5393,7 +5406,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 							(map partition_exprs (lambda (_expr) false))
 							(window_order_dirs_for_orc order_items))))
 						(define col (canonical_orc_column_name (toLower fn) src
-							(list sortcols sortdirs (count partition_exprs))))
+							(list sortcols sortdirs (count partition_exprs) (canonical_helper_expr_using src condition))))
 						(define stage (make_window_stage
 							(concat "window-" (toLower fn) ":" col)
 							src
@@ -5407,7 +5420,8 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 							(if (empty_list? partition_exprs)
 								(window_rank_initial_state fn)
 								(list (quote list) (window_rank_initial_state fn) nil))
-							(list (list (quote kind) (quote ordered-window)))))
+							(list (list (quote kind) (quote ordered-window))
+								(list (quote condition) condition))))
 						(qp_any (list
 							(list (quote get_column) alias false col false)
 							(list stage)
@@ -5419,6 +5433,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(if (not (empty_list? args))
 			(neumann_fail "untangle_query" "ROW_NUMBER does not accept arguments")
 			true)
+		(define condition (coalesceNil (uctx_get ctx (quote window-row-condition) true) true))
 		(define local_sources (window_stage_sources outer_sources))
 		(if (not (single_source? local_sources))
 			(neumann_fail "untangle_query" "ROW_NUMBER ORC stage currently supports one base source")
@@ -5440,7 +5455,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 							(map partition_exprs (lambda (_expr) false))
 							(window_order_dirs_for_orc order_items))))
 						(define col (canonical_orc_column_name "row_number" src
-							(list sortcols sortdirs (count partition_exprs))))
+							(list sortcols sortdirs (count partition_exprs) (canonical_helper_expr_using src condition))))
 						(define stage (make_window_stage
 							(concat "window-row-number:" col)
 							src
@@ -5481,7 +5496,8 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 											(list (quote +) (quote eff_acc) 1)
 											(list (quote cons) (quote row_partition) (list (quote list)))))))
 							(if (empty_list? partition_exprs) 0 (list (quote list) 0 nil))
-							(list (list (quote kind) (quote ordered-window)))))
+							(list (list (quote kind) (quote ordered-window))
+								(list (quote condition) condition))))
 						(list
 							(list (quote get_column) alias false col false)
 							(list stage)

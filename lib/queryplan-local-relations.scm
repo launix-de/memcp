@@ -131,7 +131,8 @@ rows remain usable by their owning transaction without becoming volatile. */
 		((symbol window-stage) _id source _column sortcols sortdirs partitioncount mapcols mapfn reducefn reduceinit facts)
 		(or (qassoc_get facts 'fresh_invocation false)
 			(source_fresh walk source resolver)
-			(reduce (list sortcols sortdirs partitioncount mapcols mapfn reducefn reduceinit)
+			(reduce (list sortcols sortdirs partitioncount mapcols mapfn reducefn reduceinit
+				(qassoc_get facts 'condition true))
 				(lambda (fresh child) (or fresh (walk walk child resolver))) false))
 		((symbol orc-stage) _id source _column sortcols sortdirs partitioncount mapcols mapfn reducefn reduceinit)
 		(or (source_fresh walk source resolver)

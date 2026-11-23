@@ -2327,6 +2327,8 @@ outer joins. */
 				"mapreducefn" mapreduce_expr
 				"reduceinit" (os_reduceinit stage))))))
 
+/* A window owns its original pre-projection row domain. ORC filters only
+prewarm a subset; the generated reducer itself must skip nonmembers. */
 (define lower_window_stage_prepare (lambda (stage)
 	(match stage
 		'(_ _id source column sortcols sortdirs partitioncount mapcols mapfn reducefn reduceinit facts)
@@ -2334,13 +2336,32 @@ outer joins. */
 			(if (not (source_is_base_table? source))
 				(neumann_fail "build_queryplan" "window-stage lowering only supports base tables")
 				true)
-			(define map_params (cons (quote $set)
-				(map mapcols (lambda (col) (symbol col)))))
-			(define mapped_expr (cons mapfn map_params))
+			(define condition (qassoc_get facts (quote condition) true))
+			(if (or (not (empty_list? (query_expr_session_reads condition)))
+				(not (expr_only_refs_alias? (source_alias source) (source_alias source) condition))
+				(query_requires_fresh_invocation? condition (lambda (_id) nil) false))
+				(neumann_fail "build_queryplan"
+					"ordered window with invocation-dependent input needs a query-local carrier")
+				true)
+			(define filtercols (extract_columns_for_alias source condition))
+			(define inputcols (merge_unique (list mapcols filtercols)))
+			(define map_params (cons (quote $set) (map inputcols symbol)))
+			(define mapped_expr (cons mapfn (cons '$set (map mapcols symbol))))
+			(define member_expr (scan_order_sort_callback_symbols inputcols '()
+				(lower_column_expr_for_alias source condition)))
+			(if (not (empty_list? (expression_referenced_bindings
+				(list (quote lambda) map_params member_expr)
+				(list (symbol "tx") (symbol "session") (symbol "$tx")))))
+				(neumann_fail "build_queryplan"
+					"ordered window input requires caller context outside its row columns")
+				true)
+			(define reduce_expr (list reducefn '__orc_acc mapped_expr))
 			(define mapreduce_expr
 				(list (quote lambda)
 					(cons (quote __orc_acc) map_params)
-					(list reducefn (quote __orc_acc) mapped_expr)))
+					(if (expression_equal? condition true) reduce_expr
+						(list 'if member_expr reduce_expr
+							(list 'begin (list '$set nil) '__orc_acc)))))
 			(list (quote createcolumn)
 				(source_table_expr source)
 				column
@@ -2351,10 +2372,7 @@ outer joins. */
 					"sortcols" (quoted_runtime_list sortcols)
 					"sortdirs" (cons (quote list) sortdirs)
 					"partitioncount" partitioncount
-					"filtercols" (quoted_runtime_list
-						(qassoc_get facts (quote physical_filtercols) '()))
-					"filter" (qassoc_get facts (quote physical_filterfn) nil)
-					"mapcols" (quoted_runtime_list mapcols)
+					"mapcols" (quoted_runtime_list inputcols)
 					"mapreducefn" mapreduce_expr
 					"reduceinit" reduceinit)))
 		_ (neumann_fail "build_queryplan" "malformed window-stage"))))
@@ -2491,8 +2509,22 @@ outer joins. */
 			nil)
 		_ nil)))
 
-(define window_scan_dirs (lambda (sortdirs)
-	(map (coalesceNil sortdirs '()) (lambda (desc) (if desc (quote >) (quote <))))))
+/* Ordered scans need total ordering relations, not SQL predicates which return
+UNKNOWN for NULL. Resolve collation exactly as the ordinary ORDER BY lowerer. */
+(define window_scan_dirs (lambda (src sortcols sortdirs)
+	(map (zip sortcols sortdirs) (lambda (item)
+		(collate (source_column_order_collation src (car item)) (cadr item))))))
+
+/* Partitions are equivalence classes of their declared total ordering.
+This keeps NULL distinct from zero and text keys in their SQL collation class. */
+(define window_partition_equal_expr (lambda (src columns left right)
+	(combine_where_terms (mapIndex columns (lambda (index column)
+		(begin
+			(define left_value (if (single_source? columns) left (list 'nth left index)))
+			(define right_value (if (single_source? columns) right (list 'nth right index)))
+			(define less (collate (source_column_order_collation src column) false))
+			(list 'and (list 'not (list less left_value right_value))
+				(list 'not (list less right_value left_value)))))) true)))
 
 (define count_star_field_title (lambda (fields)
 	(match (coalesceNil fields '())
@@ -2519,7 +2551,7 @@ outer joins. */
 				(symbol (car mapcols))
 				(cons (quote list) (map mapcols (lambda (col) (symbol col)))))))))
 
-(define row_number_count_reducefn (lambda (mode limit)
+(define row_number_count_reducefn (lambda (src columns mode limit)
 	(list (quote lambda) (list (quote state) (quote partition_key))
 		(list (quote begin)
 			(list (quote define) (quote cnt) (list (quote car) (quote state)))
@@ -2527,13 +2559,19 @@ outer joins. */
 			(list (quote define) (quote prev_rownum) (list (quote car) (list (quote cdr) (list (quote cdr) (quote state)))))
 			(list (quote define) (quote same_partition) (list (quote and)
 				(list (quote not) (list (quote equal?) (quote prev_rownum) 0))
-				(list (quote equal?) (quote partition_key) (quote prev_partition))))
+				(window_partition_equal_expr src columns (quote partition_key) (quote prev_partition))))
 			(list (quote define) (quote next_rownum) (list (quote if) (quote same_partition) (list (quote +) (quote prev_rownum) 1) 1))
 			(list (quote define) (quote include_row) (row_number_count_match_expr mode (quote next_rownum) limit))
 			(list (quote list)
 				(list (quote +) (quote cnt) (list (quote if) (quote include_row) 1 0))
 				(quote partition_key)
 				(quote next_rownum))))))
+
+/* A fused scan may filter before the window only for the defining input.
+Outer consumer predicates remain above that boundary. */
+(define window_stage_input_matches? (lambda (stage condition)
+	(expression_equal? (coalesceNil condition true)
+		(qassoc_get (os_facts stage) 'condition true))))
 
 (define row_number_stage? (lambda (stage)
 	(match stage
@@ -2565,7 +2603,7 @@ outer joins. */
 		true
 		(and
 			(equal? (order_cols_for_alias src order_items) sortcols)
-			(equal? (serialize (order_dirs order_items)) (serialize (window_scan_dirs sortdirs)))))))
+			(equal? (serialize (order_relations_for_source src order_items)) (serialize (window_scan_dirs src sortcols sortdirs)))))))
 
 /* Offset windows are streamable when the result has no requested order or its
 order is exactly the semantic PARTITION BY + window ORDER BY sequence. Only an
@@ -2584,8 +2622,8 @@ physical decision: the logical window-stage remains independent of scan/ORC. */
 		(and
 			(equal? (order_cols_for_alias src order_items) (os_sortcols stage))
 			(equal?
-				(serialize (order_dirs order_items))
-				(serialize (window_scan_dirs
+				(serialize (order_relations_for_source src order_items))
+				(serialize (window_scan_dirs src (os_sortcols stage)
 					(qassoc_get (os_facts stage) (quote window_stream_sortdirs) (os_sortdirs stage)))))))))
 
 (define window_offset_column_position (lambda (columns target position)
@@ -2624,93 +2662,6 @@ physical decision: the logical window-stage remains independent of scan/ORC. */
 (define window_offset_stage_stream_dirs (lambda (stage)
 	(qassoc_get (os_facts stage) (quote window_stream_sortdirs) (os_sortdirs stage))))
 
-/* An ORC is a persistent computed column, so an incompatible consumer order
-cannot reuse the unfiltered window column when SQL WHERE narrows its input.
-Physical lowering gives that query domain its own canonical column recipe. The
-logical window-stage remains unchanged and contains no createcolumn artifact. */
-(define filtered_window_stage (lambda (stage src condition filtercols filterfn)
-	(begin
-		(define filtered_col (canonical_orc_column_name "filtered_window" src
-			(list
-				(os_column stage)
-				filtercols
-				(lower_column_expr_for_alias src condition))))
-		(define facts (qassoc_set
-			(qassoc_set (os_facts stage) (quote physical_filtercols) filtercols)
-			(quote physical_filterfn) filterfn))
-		(make_window_stage
-			(nth stage 1) src filtered_col
-			(os_sortcols stage) (os_sortdirs stage) (os_partitioncount stage)
-			(os_mapcols stage) (os_mapfn stage) (os_reducefn stage) (os_reduceinit stage)
-			facts))))
-
-(define filtered_window_stages (lambda (stages src condition filtercols filterfn)
-	(map stages (lambda (stage)
-		(if (window_offset_stage? stage)
-			(filtered_window_stage stage src condition filtercols filterfn)
-			stage)))))
-
-(define filtered_window_replacements (lambda (src old_stages new_stages)
-	(mapIndex old_stages (lambda (index stage)
-		(if (window_offset_stage? stage)
-			(list (os_column stage)
-				(list (quote get_column) (source_alias src) false
-					(os_column (nth new_stages index)) false))
-			(list (os_column stage)
-				(list (quote get_column) (source_alias src) false (os_column stage) false)))))))
-
-(define filtered_window_catalog (lambda (catalog physical_stages)
-	(begin
-		(define stage_index (reduce physical_stages (lambda (index stage)
-			(set_assoc index (logical_stage_key stage) stage)) '()))
-		(map catalog (lambda (stage)
-			(coalesceNil (get_assoc stage_index (logical_stage_key stage)) stage))))))
-
-(define query_block_with_filtered_window_orcs (lambda (block)
-	(match (qb_sources block)
-		(cons src rest) (begin
-			(define condition (combine_where (qb_where block) (source_join_expr src)))
-			(if (or (not (empty_list? rest))
-				(or (not (source_is_base_table? src))
-					(or (equal? condition true)
-						(empty_list? (filter (qb_stages block) window_offset_stage?)))))
-				block
-				(begin
-					/* A session-bound predicate cannot identify a shared computed column.
-					Fail instead of caching one session's window for another session. */
-					(if (not (empty_list? (query_expr_session_reads condition)))
-						(neumann_fail "build_queryplan"
-							"incompatible ordered window with session-dependent WHERE needs a query-local carrier")
-						true)
-					(define filtercols (extract_columns_for_alias src condition))
-					(define filterfn (list (quote lambda)
-						(map filtercols (lambda (column)
-							(scan_callback_symbol_for_alias (source_alias src) column)))
-						(lower_column_expr_for_alias src condition)))
-					(define physical_stages (filtered_window_stages
-						(qb_stages block) src condition filtercols filterfn))
-					(define replacements (filtered_window_replacements
-						src (qb_stages block) physical_stages))
-					(define rewrite (lambda (expr)
-						(replace_window_offset_expr src replacements expr)))
-					(define catalog (filtered_window_catalog
-						(query_block_stage_catalog block) physical_stages))
-					(make_query_block
-						(qb_schema block)
-						(qb_sources block)
-						(rewrite (qb_fields block))
-						(qb_where block)
-						(qb_group block)
-						(if (nil? (qb_having block)) nil (rewrite (qb_having block)))
-						(if (nil? (qb_order block)) nil (rewrite (qb_order block)))
-						(qb_limit block)
-						(qb_offset block)
-						(rewrite (qb_hidden block))
-						physical_stages
-						(qassoc_set_without (qb_facts block)
-							(quote stage_catalog) catalog (quote lowering_catalog))))))
-		_ block)))
-
 (define window_offset_stages_compatible? (lambda (stages reference)
 	(reduce stages (lambda (compatible stage)
 		(and compatible
@@ -2719,8 +2670,10 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 					(and (equal? (source_relation (os_source stage)) (source_relation (os_source reference)))
 						(and (equal? (os_sortcols stage) (os_sortcols reference))
 							(and (equal? (os_partitioncount stage) (os_partitioncount reference))
+								(and (window_stage_input_matches? stage
+									(qassoc_get (os_facts reference) 'condition true))
 								(equal? (serialize (window_offset_stage_stream_dirs stage))
-									(serialize (window_offset_stage_stream_dirs reference)))))))))) true)))
+									(serialize (window_offset_stage_stream_dirs reference))))))))))) true)))
 
 (define window_offset_max_for_function (lambda (stages fn)
 	(reduce stages (lambda (largest stage)
@@ -2741,7 +2694,10 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 						(not (equal? (source_schema (os_source stage)) (source_schema src)))
 						(not (equal? (source_relation (os_source stage)) (source_relation src))))
 						nil
-						(if (not (window_offset_order_compatible? src (coalesceNil (qb_order block) '()) stage))
+						(if (or
+							(not (window_stage_input_matches? stage
+								(combine_where (qb_where block) (source_join_expr src))))
+							(not (window_offset_order_compatible? src (coalesceNil (qb_order block) '()) stage)))
 							nil
 							(begin
 								(define stages (cons stage rest))
@@ -2806,7 +2762,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 									(list 'define 'old_window (list 'nth 'state 2))
 									(list 'define 'current_partition row_partition)
 									(list 'define 'same_partition (list 'and 'initialized
-										(list 'equal? 'previous_partition 'current_partition)))))
+										(window_partition_equal_expr src partition_cols 'previous_partition 'current_partition)))))
 								(define flush_previous (list 'if (list 'and 'initialized (> max_lead 0))
 									(list 'cadr (list 'window_flush_reduce 'old_window emit_expr max_lead
 										(result_consumer_reducer result_consumer) (list 'nth 'state 3)))
@@ -2832,7 +2788,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 									(cons (quote list) filtercols)
 									filter_expr
 									(quoted_runtime_list (os_sortcols stage))
-									(cons (quote list) (window_scan_dirs
+									(cons (quote list) (window_scan_dirs src (os_sortcols stage)
 										(window_offset_stage_stream_dirs stage)))
 									0 0 -1
 									(cons (quote list) mapcols)
@@ -2877,10 +2833,13 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 									(and (nil? row_number_filter)
 										(contains? (extract_columns_for_alias src condition) col)))
 									nil
-									(if (not (row_number_order_compatible? src (coalesceNil (qb_order block) '()) sortcols sortdirs))
+									(if (or
+										(and (or (not (nil? (qb_limit block))) (not (nil? (qb_offset block))))
+											(not (window_stage_input_matches? stage condition)))
+										(not (row_number_order_compatible? src (coalesceNil (qb_order block) '()) sortcols sortdirs)))
 										nil
 										(begin
-											(define pre_condition (if (nil? row_number_filter) condition (nth row_number_filter 2)))
+											(define pre_condition (qassoc_get (os_facts stage) 'condition true))
 											(define membership (driver_membership_for_source src pre_condition))
 											(define membership_table_expr (if (nil? membership) nil (recset_project_join_expr_for_membership src membership)))
 											(define effective_membership (if (nil? membership_table_expr) nil membership))
@@ -2897,7 +2856,8 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 												(extract_columns_for_alias src effective_pre_condition))))
 											(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
 												(extract_columns_for_alias src expr)))))
-											(define scan_mapcols (merge_unique (list (without_col fieldcols col) mapcols)))
+											(define scan_mapcols (merge_unique (list (without_col fieldcols col) mapcols
+												(without_col (extract_columns_for_alias src effective_condition) col))))
 											(define filter_expr (list (quote lambda)
 												(map filtercols (lambda (filter_col) (scan_callback_symbol_for_alias (source_alias src) filter_col)))
 												(lower_column_expr_for_alias src filter_condition)))
@@ -2923,7 +2883,8 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 													(list (quote define) (quote continuation) (list (quote cadr) (quote mapped)))
 													(list (quote define) (quote same_partition) (list (quote and)
 														(list (quote not) (list (quote equal?) (quote prev_rownum) 0))
-														(list (quote equal?) (quote row_partition) (quote prev_partition))))
+														(window_partition_equal_expr src (slice sortcols 0 partitioncount)
+														(quote row_partition) (quote prev_partition))))
 													(list (quote define) (quote next_rownum) (list (quote if) (quote same_partition) (list (quote +) (quote prev_rownum) 1) 1))
 													(if (nil? result_consumer) (list 'continuation 'next_rownum) true)
 													(if (nil? result_consumer) (list 'list 'row_partition 'next_rownum)
@@ -2938,7 +2899,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 												(cons (quote list) filtercols)
 												filter_expr
 												(quoted_runtime_list sortcols)
-												(cons (quote list) (window_scan_dirs sortdirs))
+												(cons (quote list) (window_scan_dirs src sortcols sortdirs))
 												0
 												(coalesceNil (qb_offset block) 0)
 												(coalesceNil (qb_limit block) -1)
@@ -2957,25 +2918,25 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 						_ nil))
 				_ nil))
 		_ nil)))
-(define lower_row_number_count_scan (lambda (title schema relation sortcols sortdirs mapcols filter result_consumer)
+(define lower_row_number_count_scan (lambda (title src sortcols sortdirs mapcols filter result_consumer)
 	(match filter '(mode limit)
 		(result_consumer_single result_consumer (list (quote resultrow)
 			(list (quote list) title
 				(list (quote car)
 					(compile_scan_plan (quote scan_order)
 						(physical_query_tx_symbol)
-						(list (quote table) schema false relation false (quote tx))
+						(source_table_expr src)
 						(quoted_runtime_list '())
 						(list (quote lambda) '() true)
 						(quoted_runtime_list sortcols)
-						(cons (quote list) (window_scan_dirs sortdirs))
+						(cons (quote list) (window_scan_dirs src sortcols sortdirs))
 						0
 						0
 						-1
 						(quoted_runtime_list mapcols)
 						(list (quote lambda)
 							(cons (quote __scan_acc) (map mapcols symbol))
-							(list (row_number_count_reducefn mode limit)
+							(list (row_number_count_reducefn src mapcols mode limit)
 								(quote __scan_acc)
 								(cons (row_number_count_mapfn mapcols) (map mapcols symbol))))
 						(list (quote list) 0 nil 0)
@@ -2983,7 +2944,8 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 		_ nil)))
 (define lower_row_number_top_count_block (lambda (block result_consumer)
 	(match (qb_stages block)
-		'(stage) (if (not (window_stage? stage))
+		'(stage) (if (or (not (row_number_stage? stage))
+			(not (window_stage_input_matches? stage true)))
 			nil
 			(match stage
 				'(_ _id src col sortcols sortdirs _partitioncount mapcols _mapfn _reducefn _reduceinit _facts)
@@ -2993,7 +2955,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 						(define filter (row_number_stage_filter_from_condition col (qb_where block)))
 						(if (or (nil? title) (or (nil? filter) (not (number? (cadr filter)))))
 							nil
-							(lower_row_number_count_scan title schema relation sortcols sortdirs mapcols filter result_consumer)))
+							(lower_row_number_count_scan title src sortcols sortdirs mapcols filter result_consumer)))
 					_ nil)
 				_ nil))
 		_ nil)))
@@ -3226,9 +3188,12 @@ SQL column declarations remain on the source, independently of row values. */
 	(match stage
 		'(_ _id stage_src col _sortcols _sortdirs _partitioncount _mapcols _mapfn _reducefn _reduceinit _facts)
 		(and (row_number_stage? stage)
-			(and (equal? (source_schema stage_src) (source_schema src))
-				(and (equal? (source_relation stage_src) (source_relation src))
-					(not (nil? (extract_row_number_filter src col (source_join_expr src)))))))
+			(equal? (source_schema stage_src) (source_schema src))
+			(equal? (source_relation stage_src) (source_relation src))
+			(begin
+				(define filter (extract_row_number_filter src col (source_join_expr src)))
+				(and (not (nil? filter))
+					(window_stage_input_matches? stage (nth filter 2)))))
 		_ false)))
 
 (define row_number_stage_consumed_by_join? (lambda (stage sources)
@@ -5976,7 +5941,7 @@ chooses the producer/driver implementation from canonical stage facts. */
 						(if (not (nil? fused_row_number))
 							fused_row_number
 							(lower_simple_query_block_with_cataloged_stages
-								(query_block_with_filtered_window_orcs block) result_consumer)))))))))))
+								block result_consumer)))))))))))
 
 (define lower_query_block_with_stages (lambda (block result_consumer)
 	(lower_query_block_with_cataloged_stages (query_block_with_full_stage_catalog block) result_consumer)))
@@ -8014,7 +7979,8 @@ the physical read set so a predicate never runs before that source is bound. */
 							(equal? (source_relation stage_src) (source_relation src)))))
 					(begin
 						(define filter (extract_row_number_filter src col condition))
-						(if (nil? filter)
+						(if (or (nil? filter)
+							(not (window_stage_input_matches? stage (nth filter 2))))
 							nil
 							(list stage filter)))
 					nil)
@@ -9627,7 +9593,8 @@ partition order columns as one fused physical operator. */
 						(list (quote define) (quote continuation) (list (quote cadr) (quote mapped)))
 						(list (quote define) (quote same_partition) (list (quote and)
 							(list (quote not) (list (quote equal?) (quote prev_rownum) 0))
-							(list (quote equal?) (quote row_partition) (quote prev_partition))))
+							(window_partition_equal_expr src (slice sortcols 0 partitioncount)
+								(quote row_partition) (quote prev_partition))))
 						(list (quote define) (quote next_rownum) (list (quote if) (quote same_partition) (list (quote +) (quote prev_rownum) 1) 1))
 						(list (quote if)
 							(row_number_count_match_expr mode (quote next_rownum) limit)
@@ -9647,7 +9614,8 @@ partition order columns as one fused physical operator. */
 								(list (quote define) (quote continuation) (list (quote cadr) (quote mapped)))
 								(list (quote define) (quote same_partition) (list (quote and)
 									(list (quote not) (list (quote equal?) (quote prev_rownum) 0))
-									(list (quote equal?) (quote row_partition) (quote prev_partition))))
+									(window_partition_equal_expr src (slice sortcols 0 partitioncount)
+								(quote row_partition) (quote prev_partition))))
 								(list (quote define) (quote next_rownum) (list (quote if) (quote same_partition) (list (quote +) (quote prev_rownum) 1) 1))
 								(list (quote define) (quote next_aggregate)
 									(list (quote if)
@@ -9666,7 +9634,7 @@ partition order columns as one fused physical operator. */
 					(cons (quote list) filtercols)
 					filter_expr
 					(quoted_runtime_list sortcols)
-					(cons (quote list) (window_scan_dirs sortdirs))
+					(cons (quote list) (window_scan_dirs src sortcols sortdirs))
 					0
 					0
 					-1

@@ -1,0 +1,720 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+# Shared dialect cases use a non-NULL sort key so this suite does not impose
+# one frontend's default NULL ordering on the other frontends.
+metadata:
+  version: '1.0'
+  isolated: true
+  description: Window input domains preserve WHERE placement, NULL membership and native invalidation
+    across SQL dialects
+setup:
+- sql: DROP TABLE IF EXISTS win_domain_input
+- sql: CREATE TABLE win_domain_input(id INT PRIMARY KEY,p INT,score INT,active INT,status INT,sort_key
+    INT NOT NULL)
+- sql: INSERT INTO win_domain_input VALUES(1,10,30,1,1,30),(2,10,20,1,2,20),(3,20,40,0,NULL,40),(4,NULL,15,1,1,15),(5,20,10,1,2,10),(6,10,NULL,1,1,-1),(7,20,50,NULL,1,50)
+- sql: DROP TABLE IF EXISTS win_partition_nulls
+- sql: DROP TABLE IF EXISTS win_partition_text
+- sql: CREATE TABLE win_partition_nulls(id INT PRIMARY KEY,p INT)
+- sql: INSERT INTO win_partition_nulls VALUES(1,NULL),(2,NULL),(3,0),(4,0),(5,10),(6,10)
+- sql: CREATE TABLE win_partition_text(id INT PRIMARY KEY,p VARCHAR(10) COLLATE utf8mb4_general_ci)
+- sql: INSERT INTO win_partition_text VALUES(1,'ab'),(2,'AB'),(3,'xy'),(4,'XY')
+test_cases:
+- name: 'mysql: Filtered ranking is independent of the final output order'
+  sql: SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS rn FROM win_domain_input
+    WHERE active=1 ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      p: 10
+      score: 30
+      rn: 1
+    - id: 2
+      p: 10
+      score: 20
+      rn: 2
+    - id: 4
+      p: null
+      score: 15
+      rn: 1
+    - id: 5
+      p: 20
+      score: 10
+      rn: 1
+    - id: 6
+      p: 10
+      score: null
+      rn: 3
+  syntax: mysql
+- name: 'mysql: Outer base predicate does not change the ranking input'
+  sql: SELECT q.id,q.p,q.score,q.rn FROM (SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY
+    sort_key DESC,id) AS rn FROM win_domain_input WHERE active=1) q WHERE q.id>=2 ORDER BY q.id
+  expect:
+    rows: 4
+    data:
+    - id: 2
+      p: 10
+      score: 20
+      rn: 2
+    - id: 4
+      p: null
+      score: 15
+      rn: 1
+    - id: 5
+      p: 20
+      score: 10
+      rn: 1
+    - id: 6
+      p: 10
+      score: null
+      rn: 3
+  syntax: mysql
+- name: 'mysql: Outer rank predicate reads the original filtered partitions'
+  sql: SELECT q.id,q.p,q.score,q.rn FROM (SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY
+    sort_key DESC,id) AS rn FROM win_domain_input WHERE active=1) q WHERE q.rn=1 ORDER BY q.id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      p: 10
+      score: 30
+      rn: 1
+    - id: 4
+      p: null
+      score: 15
+      rn: 1
+    - id: 5
+      p: 20
+      score: 10
+      rn: 1
+  syntax: mysql
+- name: 'mysql: Counting filtered partition leaders retains the input boundary'
+  sql: SELECT COUNT(*) AS leaders FROM (SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY sort_key
+    DESC,id) AS rn FROM win_domain_input WHERE active=1) q WHERE q.rn=1
+  expect:
+    rows: 1
+    data:
+    - leaders: 3
+  syntax: mysql
+- name: 'mysql: Offset windows use their filtered input despite another output order'
+  sql: SELECT q.id,q.previous,q.following FROM (SELECT id,p,score,LAG(score) OVER(PARTITION BY p ORDER
+    BY sort_key DESC,id) AS previous,LEAD(score) OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS following
+    FROM win_domain_input WHERE active=1) q ORDER BY q.id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      previous: null
+      following: 20
+    - id: 2
+      previous: 30
+      following: null
+    - id: 4
+      previous: null
+      following: null
+    - id: 5
+      previous: null
+      following: null
+    - id: 6
+      previous: 20
+      following: null
+  syntax: mysql
+- name: 'mysql: Outer base predicate preserves offset predecessors'
+  sql: SELECT q.id,q.previous,q.following FROM (SELECT id,p,score,LAG(score) OVER(PARTITION BY p ORDER
+    BY sort_key DESC,id) AS previous,LEAD(score) OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS following
+    FROM win_domain_input WHERE active=1) q WHERE q.id>=2 ORDER BY q.id
+  expect:
+    rows: 4
+    data:
+    - id: 2
+      previous: 30
+      following: null
+    - id: 4
+      previous: null
+      following: null
+    - id: 5
+      previous: null
+      following: null
+    - id: 6
+      previous: 20
+      following: null
+  syntax: mysql
+- name: 'mysql: Rank and dense rank use the same pre-window filter'
+  sql: SELECT q.id,q.rnk,q.dense FROM (SELECT id,p,score,RANK() OVER(PARTITION BY p ORDER BY sort_key
+    DESC) AS rnk,DENSE_RANK() OVER(PARTITION BY p ORDER BY sort_key DESC) AS dense FROM win_domain_input
+    WHERE active=1) q ORDER BY q.id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      rnk: 1
+      dense: 1
+    - id: 2
+      rnk: 2
+      dense: 2
+    - id: 4
+      rnk: 1
+      dense: 1
+    - id: 5
+      rnk: 1
+      dense: 1
+    - id: 6
+      rnk: 3
+      dense: 3
+  syntax: mysql
+- name: 'psql: Filtered ranking is independent of the final output order'
+  sql: SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS rn FROM win_domain_input
+    WHERE active=1 ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      p: 10
+      score: 30
+      rn: 1
+    - id: 2
+      p: 10
+      score: 20
+      rn: 2
+    - id: 4
+      p: null
+      score: 15
+      rn: 1
+    - id: 5
+      p: 20
+      score: 10
+      rn: 1
+    - id: 6
+      p: 10
+      score: null
+      rn: 3
+  syntax: psql
+- name: 'psql: Outer base predicate does not change the ranking input'
+  sql: SELECT q.id,q.p,q.score,q.rn FROM (SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY
+    sort_key DESC,id) AS rn FROM win_domain_input WHERE active=1) q WHERE q.id>=2 ORDER BY q.id
+  expect:
+    rows: 4
+    data:
+    - id: 2
+      p: 10
+      score: 20
+      rn: 2
+    - id: 4
+      p: null
+      score: 15
+      rn: 1
+    - id: 5
+      p: 20
+      score: 10
+      rn: 1
+    - id: 6
+      p: 10
+      score: null
+      rn: 3
+  syntax: psql
+- name: 'psql: Outer rank predicate reads the original filtered partitions'
+  sql: SELECT q.id,q.p,q.score,q.rn FROM (SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY
+    sort_key DESC,id) AS rn FROM win_domain_input WHERE active=1) q WHERE q.rn=1 ORDER BY q.id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      p: 10
+      score: 30
+      rn: 1
+    - id: 4
+      p: null
+      score: 15
+      rn: 1
+    - id: 5
+      p: 20
+      score: 10
+      rn: 1
+  syntax: psql
+- name: 'psql: Counting filtered partition leaders retains the input boundary'
+  sql: SELECT COUNT(*) AS leaders FROM (SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY sort_key
+    DESC,id) AS rn FROM win_domain_input WHERE active=1) q WHERE q.rn=1
+  expect:
+    rows: 1
+    data:
+    - leaders: 3
+  syntax: psql
+- name: 'psql: Offset windows use their filtered input despite another output order'
+  sql: SELECT q.id,q.previous,q.following FROM (SELECT id,p,score,LAG(score) OVER(PARTITION BY p ORDER
+    BY sort_key DESC,id) AS previous,LEAD(score) OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS following
+    FROM win_domain_input WHERE active=1) q ORDER BY q.id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      previous: null
+      following: 20
+    - id: 2
+      previous: 30
+      following: null
+    - id: 4
+      previous: null
+      following: null
+    - id: 5
+      previous: null
+      following: null
+    - id: 6
+      previous: 20
+      following: null
+  syntax: psql
+- name: 'psql: Outer base predicate preserves offset predecessors'
+  sql: SELECT q.id,q.previous,q.following FROM (SELECT id,p,score,LAG(score) OVER(PARTITION BY p ORDER
+    BY sort_key DESC,id) AS previous,LEAD(score) OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS following
+    FROM win_domain_input WHERE active=1) q WHERE q.id>=2 ORDER BY q.id
+  expect:
+    rows: 4
+    data:
+    - id: 2
+      previous: 30
+      following: null
+    - id: 4
+      previous: null
+      following: null
+    - id: 5
+      previous: null
+      following: null
+    - id: 6
+      previous: 20
+      following: null
+  syntax: psql
+- name: 'psql: Rank and dense rank use the same pre-window filter'
+  sql: SELECT q.id,q.rnk,q.dense FROM (SELECT id,p,score,RANK() OVER(PARTITION BY p ORDER BY sort_key
+    DESC) AS rnk,DENSE_RANK() OVER(PARTITION BY p ORDER BY sort_key DESC) AS dense FROM win_domain_input
+    WHERE active=1) q ORDER BY q.id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      rnk: 1
+      dense: 1
+    - id: 2
+      rnk: 2
+      dense: 2
+    - id: 4
+      rnk: 1
+      dense: 1
+    - id: 5
+      rnk: 1
+      dense: 1
+    - id: 6
+      rnk: 3
+      dense: 3
+  syntax: psql
+- name: 'tsql: Filtered ranking is independent of the final output order'
+  sql: SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS rn FROM win_domain_input
+    WHERE active=1 ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      p: 10
+      score: 30
+      rn: 1
+    - id: 2
+      p: 10
+      score: 20
+      rn: 2
+    - id: 4
+      p: null
+      score: 15
+      rn: 1
+    - id: 5
+      p: 20
+      score: 10
+      rn: 1
+    - id: 6
+      p: 10
+      score: null
+      rn: 3
+  syntax: tsql
+- name: 'tsql: Outer base predicate does not change the ranking input'
+  sql: SELECT q.id,q.p,q.score,q.rn FROM (SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY
+    sort_key DESC,id) AS rn FROM win_domain_input WHERE active=1) q WHERE q.id>=2 ORDER BY q.id
+  expect:
+    rows: 4
+    data:
+    - id: 2
+      p: 10
+      score: 20
+      rn: 2
+    - id: 4
+      p: null
+      score: 15
+      rn: 1
+    - id: 5
+      p: 20
+      score: 10
+      rn: 1
+    - id: 6
+      p: 10
+      score: null
+      rn: 3
+  syntax: tsql
+- name: 'tsql: Outer rank predicate reads the original filtered partitions'
+  sql: SELECT q.id,q.p,q.score,q.rn FROM (SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY
+    sort_key DESC,id) AS rn FROM win_domain_input WHERE active=1) q WHERE q.rn=1 ORDER BY q.id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      p: 10
+      score: 30
+      rn: 1
+    - id: 4
+      p: null
+      score: 15
+      rn: 1
+    - id: 5
+      p: 20
+      score: 10
+      rn: 1
+  syntax: tsql
+- name: 'tsql: Counting filtered partition leaders retains the input boundary'
+  sql: SELECT COUNT(*) AS leaders FROM (SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY sort_key
+    DESC,id) AS rn FROM win_domain_input WHERE active=1) q WHERE q.rn=1
+  expect:
+    rows: 1
+    data:
+    - leaders: 3
+  syntax: tsql
+- name: 'tsql: Offset windows use their filtered input despite another output order'
+  sql: SELECT q.id,q.previous,q.following FROM (SELECT id,p,score,LAG(score) OVER(PARTITION BY p ORDER
+    BY sort_key DESC,id) AS previous,LEAD(score) OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS following
+    FROM win_domain_input WHERE active=1) q ORDER BY q.id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      previous: null
+      following: 20
+    - id: 2
+      previous: 30
+      following: null
+    - id: 4
+      previous: null
+      following: null
+    - id: 5
+      previous: null
+      following: null
+    - id: 6
+      previous: 20
+      following: null
+  syntax: tsql
+- name: 'tsql: Outer base predicate preserves offset predecessors'
+  sql: SELECT q.id,q.previous,q.following FROM (SELECT id,p,score,LAG(score) OVER(PARTITION BY p ORDER
+    BY sort_key DESC,id) AS previous,LEAD(score) OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS following
+    FROM win_domain_input WHERE active=1) q WHERE q.id>=2 ORDER BY q.id
+  expect:
+    rows: 4
+    data:
+    - id: 2
+      previous: 30
+      following: null
+    - id: 4
+      previous: null
+      following: null
+    - id: 5
+      previous: null
+      following: null
+    - id: 6
+      previous: 20
+      following: null
+  syntax: tsql
+- name: 'tsql: Rank and dense rank use the same pre-window filter'
+  sql: SELECT q.id,q.rnk,q.dense FROM (SELECT id,p,score,RANK() OVER(PARTITION BY p ORDER BY sort_key
+    DESC) AS rnk,DENSE_RANK() OVER(PARTITION BY p ORDER BY sort_key DESC) AS dense FROM win_domain_input
+    WHERE active=1) q ORDER BY q.id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      rnk: 1
+      dense: 1
+    - id: 2
+      rnk: 2
+      dense: 2
+    - id: 4
+      rnk: 1
+      dense: 1
+    - id: 5
+      rnk: 1
+      dense: 1
+    - id: 6
+      rnk: 3
+      dense: 3
+  syntax: tsql
+- name: An ordered consumer filters after numbering without changing its input
+  sql: SELECT q.id,q.p,q.score,q.rn FROM (SELECT id,p,score,sort_key,ROW_NUMBER() OVER(PARTITION BY p
+    ORDER BY sort_key DESC,id) AS rn FROM win_domain_input WHERE active=1) q WHERE q.id>=2 ORDER BY q.p,q.sort_key
+    DESC,q.id
+  expect:
+    rows: 4
+    data:
+    - id: 4
+      p: null
+      score: 15
+      rn: 1
+    - id: 2
+      p: 10
+      score: 20
+      rn: 2
+    - id: 6
+      p: 10
+      score: null
+      rn: 3
+    - id: 5
+      p: 20
+      score: 10
+      rn: 1
+- name: A predicate-column update changes window membership
+  sql: UPDATE win_domain_input SET active=1 WHERE id=3
+  expect:
+    affected_rows: 1
+- name: A newly accepted row affects the cached ranking
+  sql: SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS rn FROM win_domain_input
+    WHERE active=1 ORDER BY id
+  expect:
+    rows: 6
+    data:
+    - id: 1
+      p: 10
+      score: 30
+      rn: 1
+    - id: 2
+      p: 10
+      score: 20
+      rn: 2
+    - id: 3
+      p: 20
+      score: 40
+      rn: 1
+    - id: 4
+      p: null
+      score: 15
+      rn: 1
+    - id: 5
+      p: 20
+      score: 10
+      rn: 2
+    - id: 6
+      p: 10
+      score: null
+      rn: 3
+- name: Restore the original window membership
+  sql: UPDATE win_domain_input SET active=0 WHERE id=3
+  expect:
+    affected_rows: 1
+- name: A removed member no longer contributes to the cached ranking
+  sql: SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS rn FROM win_domain_input
+    WHERE active=1 ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      p: 10
+      score: 30
+      rn: 1
+    - id: 2
+      p: 10
+      score: 20
+      rn: 2
+    - id: 4
+      p: null
+      score: 15
+      rn: 1
+    - id: 5
+      p: 20
+      score: 10
+      rn: 1
+    - id: 6
+      p: 10
+      score: null
+      rn: 3
+- name: Restart after computing the filtered ranking
+  action: restart
+- name: Reloaded window recipes preserve the original input domain
+  sql: SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS rn FROM win_domain_input
+    WHERE active=1 ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      p: 10
+      score: 30
+      rn: 1
+    - id: 2
+      p: 10
+      score: 20
+      rn: 2
+    - id: 4
+      p: null
+      score: 15
+      rn: 1
+    - id: 5
+      p: 20
+      score: 10
+      rn: 1
+    - id: 6
+      p: 10
+      score: null
+      rn: 3
+- name: NULL and zero remain separate ordered partitions
+  sql: SELECT id,p,ROW_NUMBER() OVER(PARTITION BY p ORDER BY id) AS rn FROM win_partition_nulls ORDER
+    BY p,id
+  expect:
+    rows: 6
+    data:
+    - &id006
+      id: 1
+      p: null
+      rn: 1
+    - &id005
+      id: 2
+      p: null
+      rn: 2
+    - &id004
+      id: 3
+      p: 0
+      rn: 1
+    - &id003
+      id: 4
+      p: 0
+      rn: 2
+    - &id002
+      id: 5
+      p: 10
+      rn: 1
+    - &id001
+      id: 6
+      p: 10
+      rn: 2
+- name: NULL and zero remain separate ordered partitions with an independent output order
+  sql: SELECT id,p,ROW_NUMBER() OVER(PARTITION BY p ORDER BY id) AS rn FROM win_partition_nulls ORDER
+    BY id DESC
+  expect:
+    rows: 6
+    data:
+    - *id001
+    - *id002
+    - *id003
+    - *id004
+    - *id005
+    - *id006
+- name: Partition equivalence uses declared text collation
+  sql: SELECT id,p,ROW_NUMBER() OVER(PARTITION BY p ORDER BY id) AS rn FROM win_partition_text ORDER BY
+    p,id
+  expect:
+    rows: 4
+    data:
+    - &id010
+      id: 1
+      p: ab
+      rn: 1
+    - &id009
+      id: 2
+      p: AB
+      rn: 2
+    - &id008
+      id: 3
+      p: xy
+      rn: 1
+    - &id007
+      id: 4
+      p: XY
+      rn: 2
+- name: Partition equivalence uses declared text collation with an independent output order
+  sql: SELECT id,p,ROW_NUMBER() OVER(PARTITION BY p ORDER BY id) AS rn FROM win_partition_text ORDER BY
+    id DESC
+  expect:
+    rows: 4
+    data:
+    - *id007
+    - *id008
+    - *id009
+    - *id010
+- name: 'win_partition_nulls: LAG retains distinct SQL partition classes'
+  sql: SELECT id,LAG(id) OVER(PARTITION BY p ORDER BY id) AS previous FROM win_partition_nulls ORDER BY
+    p,id
+  expect:
+    rows: 6
+    data:
+    - &id016
+      id: 1
+      previous: null
+    - &id015
+      id: 2
+      previous: 1
+    - &id014
+      id: 3
+      previous: null
+    - &id013
+      id: 4
+      previous: 3
+    - &id012
+      id: 5
+      previous: null
+    - &id011
+      id: 6
+      previous: 5
+- name: 'win_partition_nulls: LAG partition classes with independent output order'
+  sql: SELECT id,LAG(id) OVER(PARTITION BY p ORDER BY id) AS previous FROM win_partition_nulls ORDER BY
+    id DESC
+  expect:
+    rows: 6
+    data:
+    - *id011
+    - *id012
+    - *id013
+    - *id014
+    - *id015
+    - *id016
+- name: 'win_partition_text: LAG retains distinct SQL partition classes'
+  sql: SELECT id,LAG(id) OVER(PARTITION BY p ORDER BY id) AS previous FROM win_partition_text ORDER BY
+    p,id
+  expect:
+    rows: 4
+    data:
+    - &id020
+      id: 1
+      previous: null
+    - &id019
+      id: 2
+      previous: 1
+    - &id018
+      id: 3
+      previous: null
+    - &id017
+      id: 4
+      previous: 3
+- name: 'win_partition_text: LAG partition classes with independent output order'
+  sql: SELECT id,LAG(id) OVER(PARTITION BY p ORDER BY id) AS previous FROM win_partition_text ORDER BY
+    id DESC
+  expect:
+    rows: 4
+    data:
+    - *id017
+    - *id018
+    - *id019
+    - *id020
+cleanup:
+- sql: DROP TABLE IF EXISTS win_domain_input
+- sql: DROP TABLE IF EXISTS win_partition_nulls
+- sql: DROP TABLE IF EXISTS win_partition_text
