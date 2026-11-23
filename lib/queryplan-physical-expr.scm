@@ -2593,9 +2593,27 @@ consumer admission separately proves those same values exist in its scope. */
 			(neumann_fail "build_queryplan" "scalar first probe needs its complete caller bindings") true)
 		(define caller_lookup (qassoc_get (gs_facts stage) 'lookup-keys '()))
 		(define parameters (if bind_caller (scoped_program_parameters (gs_id stage) caller_lookup) '()))
+		(define caller_index (if bind_caller
+			(scalar_query_probe_param_index caller_lookup caller_lookup parameters) nil))
+		(define probe_catalog (qassoc_get (gs_facts stage) (quote probe_catalog) '()))
+		(define lowering_catalog (group_stage_lowering_catalog stage))
+		/* Resolve the existing dependency catalog before replacing its lookup
+		coordinates. Independently catalogued children need the same binding as
+		the parent; an indexed catalog's lookup closure is not an AST operand. */
+		(define raw_probe_stages (stage_catalog_with_nested
+			(merge_stage_catalogs (list
+				all_stages
+				probe_catalog
+				(if (lowering_catalog? lowering_catalog)
+					(lowering_catalog_stages lowering_catalog)
+					'())
+				(list stage)))))
+		(define probe_stages (if bind_caller
+			(map raw_probe_stages (lambda (dependency)
+				(rewrite_scalar_query_probe_params caller_index dependency)))
+			raw_probe_stages))
 		(define stage (if bind_caller
-			(rewrite_scalar_query_probe_params
-				(scalar_query_probe_param_index caller_lookup caller_lookup parameters) stage) stage))
+			(rewrite_scalar_query_probe_params caller_index stage) stage))
 		(define src (gs_input stage))
 		(define raw_keys (gs_keys stage))
 		(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
@@ -2621,16 +2639,6 @@ consumer admission separately proves those same values exist in its scope. */
 			(if (number? (planner_literal_value probe_work_rows))
 				probe_work_rows
 				(probe_context_row_count sources))))
-		(define probe_catalog (qassoc_get (gs_facts stage) (quote probe_catalog) '()))
-		(define lowering_catalog (group_stage_lowering_catalog stage))
-		(define probe_stages (stage_catalog_with_nested
-			(merge_stage_catalogs (list
-				all_stages
-				probe_catalog
-				(if (lowering_catalog? lowering_catalog)
-					(lowering_catalog_stages lowering_catalog)
-					'())
-				(list stage)))))
 		(define graph (stage_dependency_graph probe_stages))
 		(define lowered_lookup_keys (map lookup_keys (lambda (key)
 			(lower_column_expr_for_join sources default_alias key))))
