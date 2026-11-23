@@ -110,25 +110,25 @@ func TestProcedureCatalogDDLCheckpointReloadAndReplace(t *testing.T) {
 		source := a[0]
 		return scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return source })
 	}))
-	CreateProcedure(schema, "p", "procedure-catalog-test", "first", scm.NewSlice(nil), false)
-	if got := len(ShowProcedures(schema, "p").Slice()); got != 1 {
+	CreateProcedure(nil, schema, "p", "procedure-catalog-test", "first", scm.NewSlice(nil), false)
+	if got := len(ShowProcedures(nil, schema, "p").Slice()); got != 1 {
 		t.Fatalf("named source definition lookup returned %d rows", got)
 	}
-	if got := len(ShowProcedures(schema, "absent").Slice()); got != 0 {
+	if got := len(ShowProcedures(nil, schema, "absent").Slice()); got != 0 {
 		t.Fatalf("absent source definition lookup returned %d rows", got)
 	}
 	for name, operation := range map[string]func(){
-		"duplicate":        func() { CreateProcedure(schema, "p", "procedure-catalog-test", "duplicate", scm.NewNil(), false) },
-		"unknown-language": func() { CreateProcedure(schema, "unknown", "absent-language", "source", scm.NewNil(), false) },
-		"missing-name":     func() { CreateProcedure(schema, "", "procedure-catalog-test", "source", scm.NewNil(), false) },
-		"missing-source":   func() { CreateProcedure(schema, "empty", "procedure-catalog-test", "", scm.NewNil(), false) },
-		"missing-drop":     func() { DropProcedure(schema, "absent", false) },
+		"duplicate":        func() { CreateProcedure(nil, schema, "p", "procedure-catalog-test", "duplicate", scm.NewNil(), false) },
+		"unknown-language": func() { CreateProcedure(nil, schema, "unknown", "absent-language", "source", scm.NewNil(), false) },
+		"missing-name":     func() { CreateProcedure(nil, schema, "", "procedure-catalog-test", "source", scm.NewNil(), false) },
+		"missing-source":   func() { CreateProcedure(nil, schema, "empty", "procedure-catalog-test", "", scm.NewNil(), false) },
+		"missing-drop":     func() { DropProcedure(nil, schema, "absent", false) },
 		"nonportable-parameters": func() {
-			CreateProcedure(schema, "invalid-data", "procedure-catalog-test", "source",
+			CreateProcedure(nil, schema, "invalid-data", "procedure-catalog-test", "source",
 				scm.NewSlice([]scm.Scmer{scm.NewAny(NewTxContext(TxCursorStability))}), false)
 		},
 		"nonfinite-parameters": func() {
-			CreateProcedure(schema, "invalid-number", "procedure-catalog-test", "source",
+			CreateProcedure(nil, schema, "invalid-number", "procedure-catalog-test", "source",
 				scm.NewFloat(math.NaN()), false)
 		},
 	} {
@@ -141,10 +141,10 @@ func TestProcedureCatalogDDLCheckpointReloadAndReplace(t *testing.T) {
 			operation()
 		})
 	}
-	if got := len(ShowProcedures(schema, "").Slice()); got != 1 {
+	if got := len(ShowProcedures(nil, schema, "").Slice()); got != 1 {
 		t.Fatalf("failed DDL published %d procedures", got)
 	}
-	oldCallable := Procedure(schema, "p", false)
+	oldCallable := Procedure(nil, schema, "p", false)
 	original := GetDatabase(schema)
 	restored := newDatabase()
 	restored.Name, restored.persistence, restored.srState = schema, original.persistence, COLD
@@ -152,18 +152,18 @@ func TestProcedureCatalogDDLCheckpointReloadAndReplace(t *testing.T) {
 	if entry := restored.procedures.Get("p"); entry == nil || entry.Source != "first" || entry.compiled.Load() != nil {
 		t.Fatal("schema checkpoint lost authoritative source or retained runtime code")
 	}
-	CreateProcedure(schema, "p", "procedure-catalog-test", "replacement", scm.NewSlice(nil), true)
-	if got := scm.Apply(Procedure(schema, "p", false)).String(); got != "replacement" {
+	CreateProcedure(nil, schema, "p", "procedure-catalog-test", "replacement", scm.NewSlice(nil), true)
+	if got := scm.Apply(Procedure(nil, schema, "p", false)).String(); got != "replacement" {
 		t.Fatalf("replacement lookup = %q", got)
 	}
 	if got := scm.Apply(oldCallable).String(); got != "first" {
 		t.Fatalf("replacement mutated an already-owned invocation: %q", got)
 	}
-	DropProcedure(schema, "p", false)
-	if !ShowProcedures(schema, "").IsSlice() || len(ShowProcedures(schema, "").Slice()) != 0 {
+	DropProcedure(nil, schema, "p", false)
+	if !ShowProcedures(nil, schema, "").IsSlice() || len(ShowProcedures(nil, schema, "").Slice()) != 0 {
 		t.Fatal("dropped procedure is still listed")
 	}
-	if DropProcedure(schema, "p", true) {
+	if DropProcedure(nil, schema, "p", true) {
 		t.Fatal("DROP IF EXISTS reported a removed definition twice")
 	}
 }
@@ -188,14 +188,14 @@ func TestProcedurePublicAPIsLoadColdCatalogBeforeAccess(t *testing.T) {
 	const schema = "procedure-cold-api-test"
 	CreateDatabase(schema, false)
 	defer databases.Remove(schema)
-	CreateTable(schema, "preserved", Safe, false)
+	CreateTable(nil, schema, "preserved", Safe, false)
 	// A constant source compiler deliberately performs no catalog lookup.
 	// Public procedure APIs themselves must load a restored database.
 	registerTriggerLanguage("procedure-cold-api-test", scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		source := a[0]
 		return scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return source })
 	}))
-	CreateProcedure(schema, "existing", "procedure-cold-api-test", "existing-source", scm.NewNil(), false)
+	CreateProcedure(nil, schema, "existing", "procedure-cold-api-test", "existing-source", scm.NewNil(), false)
 	backend := GetDatabase(schema).persistence
 	cold := func() {
 		db := newDatabase()
@@ -208,12 +208,12 @@ func TestProcedurePublicAPIsLoadColdCatalogBeforeAccess(t *testing.T) {
 		}
 	}
 	cold()
-	if got := scm.Apply(Procedure(schema, "existing", false)).String(); got != "existing-source" {
+	if got := scm.Apply(Procedure(nil, schema, "existing", false)).String(); got != "existing-source" {
 		t.Fatalf("cold procedure lookup = %q", got)
 	}
 	checkTable()
 	cold()
-	if got := len(ShowProcedures(schema, "").Slice()); got != 1 {
+	if got := len(ShowProcedures(nil, schema, "").Slice()); got != 1 {
 		t.Fatalf("cold procedure listing has %d definitions", got)
 	}
 	checkTable()
@@ -224,25 +224,25 @@ func TestProcedurePublicAPIsLoadColdCatalogBeforeAccess(t *testing.T) {
 				t.Fatal("cold duplicate CREATE was accepted")
 			}
 		}()
-		CreateProcedure(schema, "existing", "procedure-cold-api-test", "wrong", scm.NewNil(), false)
+		CreateProcedure(nil, schema, "existing", "procedure-cold-api-test", "wrong", scm.NewNil(), false)
 	}()
 	checkTable()
 	cold()
-	CreateProcedure(schema, "added", "procedure-cold-api-test", "acknowledged-source", scm.NewNil(), false)
+	CreateProcedure(nil, schema, "added", "procedure-cold-api-test", "acknowledged-source", scm.NewNil(), false)
 	checkTable()
 	cold()
-	if got := scm.Apply(Procedure(schema, "added", false)).String(); got != "acknowledged-source" {
+	if got := scm.Apply(Procedure(nil, schema, "added", false)).String(); got != "acknowledged-source" {
 		t.Fatalf("acknowledged CREATE did not survive restart: %q", got)
 	}
-	if got := scm.Apply(Procedure(schema, "existing", false)).String(); got != "existing-source" {
+	if got := scm.Apply(Procedure(nil, schema, "existing", false)).String(); got != "existing-source" {
 		t.Fatalf("CREATE lost existing definition: %q", got)
 	}
 	checkTable()
 	cold()
-	DropProcedure(schema, "added", false)
+	DropProcedure(nil, schema, "added", false)
 	checkTable()
 	cold()
-	if got := len(ShowProcedures(schema, "").Slice()); got != 1 {
+	if got := len(ShowProcedures(nil, schema, "").Slice()); got != 1 {
 		t.Fatalf("cold DROP did not survive restart: %d definitions", got)
 	}
 	checkTable()
@@ -298,7 +298,7 @@ func TestProcedureCompilationDoesNotPublishIntoReplacedDatabase(t *testing.T) {
 	completed := make(chan any, 1)
 	go func() {
 		defer func() { completed <- recover() }()
-		CreateProcedure(schema, "retired", "procedure-replacement-test", "source", scm.NewNil(), false)
+		CreateProcedure(nil, schema, "retired", "procedure-replacement-test", "source", scm.NewNil(), false)
 	}()
 	<-started
 	DropDatabase(schema, false)
@@ -307,7 +307,7 @@ func TestProcedureCompilationDoesNotPublishIntoReplacedDatabase(t *testing.T) {
 	if failure := <-completed; failure == nil {
 		t.Fatal("source compilation acknowledged publication into a replaced database")
 	}
-	if len(ShowProcedures(schema, "").Slice()) != 0 {
+	if len(ShowProcedures(nil, schema, "").Slice()) != 0 {
 		t.Fatal("retired definition entered the replacement catalog")
 	}
 }
@@ -325,22 +325,22 @@ func TestProcedureDeclarationSnapshotSurvivesConcurrentReplacement(t *testing.T)
 		source := a[0]
 		return scm.NewFunc(func(...scm.Scmer) scm.Scmer { return source })
 	}))
-	CreateProcedure(schema, "p", "procedure-snapshot-test", "first",
+	CreateProcedure(nil, schema, "p", "procedure-snapshot-test", "first",
 		scm.NewSlice([]scm.Scmer{scm.NewString("first-contract")}), false)
-	snapshot := Procedure(schema, "p", true).Slice()
+	snapshot := Procedure(nil, schema, "p", true).Slice()
 	callable, declaration := snapshot[1], snapshot[3].Slice()
 	if declaration[1].String() != "p" || declaration[3].String() != "procedure-snapshot-test" ||
 		declaration[5].String() != "first" || declaration[7].Slice()[0].String() != "first-contract" {
 		t.Fatal("snapshot did not retain its complete immutable declaration")
 	}
 	declaration[7].Slice()[0] = scm.NewString("caller-mutation")
-	if got := ShowProcedures(schema, "p").Slice()[0].Slice()[7].Slice()[0].String(); got != "first-contract" {
+	if got := ShowProcedures(nil, schema, "p").Slice()[0].Slice()[7].Slice()[0].String(); got != "first-contract" {
 		t.Fatal("snapshot parameters borrowed mutable catalog data")
 	}
 	replaced := make(chan any, 1)
 	go func() {
 		defer func() { replaced <- recover() }()
-		CreateProcedure(schema, "p", "procedure-snapshot-test", "second",
+		CreateProcedure(nil, schema, "p", "procedure-snapshot-test", "second",
 			scm.NewSlice([]scm.Scmer{scm.NewString("second-contract")}), true)
 	}()
 	if failure := <-replaced; failure != nil {
@@ -349,11 +349,11 @@ func TestProcedureDeclarationSnapshotSurvivesConcurrentReplacement(t *testing.T)
 	if got := scm.Apply(callable).String(); got != "first" {
 		t.Fatalf("binding first declaration invoked a different source: %q", got)
 	}
-	latest := Procedure(schema, "p", true).Slice()
+	latest := Procedure(nil, schema, "p", true).Slice()
 	if got := scm.Apply(latest[1]).String(); got != "second" || latest[3].Slice()[7].Slice()[0].String() != "second-contract" {
 		t.Fatal("new lookup did not observe the complete replacement definition")
 	}
-	DropProcedure(schema, "p", false)
+	DropProcedure(nil, schema, "p", false)
 	if got := scm.Apply(callable).String(); got != "first" {
 		t.Fatal("dropping a catalog name invalidated its retained invocation")
 	}
@@ -362,5 +362,5 @@ func TestProcedureDeclarationSnapshotSurvivesConcurrentReplacement(t *testing.T)
 			t.Fatal("snapshot lookup acknowledged a missing procedure")
 		}
 	}()
-	Procedure(schema, "p", true)
+	Procedure(nil, schema, "p", true)
 }

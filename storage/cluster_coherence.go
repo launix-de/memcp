@@ -80,9 +80,9 @@ func (r *replicationManager) finishAcquisition(packet mosiPacket) {
 // needs these rights even when its producer delegates all shard work. If a
 // writer cannot relinquish M, the existing cache scope uses its direct producer
 // instead of publishing a shared value from an unprotected source.
-func (cluster *nodeCluster) tryRead(ctx context.Context, resource mosiResource) bool {
+func (cluster *nodeCluster) tryAcquire(ctx context.Context, resource mosiResource, wanted mosi.Phase) bool {
 	c := cluster.manager.resourceCell(resource).resolved()
-	if c.ownstate.ReadReady() {
+	if wanted == mosi.M && c.ownstate.Phase() == mosi.M || wanted == mosi.S && c.ownstate.ReadReady() {
 		return true
 	}
 	restoreCommits := !c.ownstate.Initialized()
@@ -92,9 +92,9 @@ func (cluster *nodeCluster) tryRead(ctx context.Context, resource mosiResource) 
 	}
 	c = c.resolved()
 	resource = *c.resource.Load()
-	publication, action := c.ownstate.Request(mosi.S)
+	publication, action := c.ownstate.Request(wanted)
 	if action == mosi.Ready {
-		if restoreCommits && resource.Shard != "" && !isCatalogResource(resource) {
+		if restoreCommits && resource.Shard != "" {
 			db := GetDatabase(resource.Database)
 			if db == nil {
 				panic(mosi.NetworkError)
@@ -105,10 +105,14 @@ func (cluster *nodeCluster) tryRead(ctx context.Context, resource mosiResource) 
 		}
 		return true
 	}
-	if action != mosi.Send {
+	if action != mosi.Send && action != mosi.Upgrade {
 		return false // another acquisition owns this flight; never wait for it
 	}
-	packet := mosiPacket{Kind: "read", Resource: resource, From: cluster.self.ID,
+	kind := "read"
+	if wanted == mosi.M {
+		kind = "write"
+	}
+	packet := mosiPacket{Kind: kind, Resource: resource, From: cluster.self.ID,
 		To: owner, ID: publication.Flight().ID(), Sequence: cluster.manager.requestSequence(publication.Flight()),
 		Boot: cluster.self.Boot, TryRead: true}
 	cluster.manager.issueAcquisition(c, packet)
@@ -125,14 +129,14 @@ func (cluster *nodeCluster) tryRead(ctx context.Context, resource mosiResource) 
 		err = fmt.Errorf(mosi.NetworkError)
 	}
 	if err != nil {
-		c.ownstate.Fail(packet.ID, err, mosi.S)
+		c.ownstate.Fail(packet.ID, err, wanted)
 		panic(err)
 	}
 	if !granted {
-		cluster.manager.finishAcquisition(mosiPacket{ID: packet.ID, State: "S"})
+		cluster.manager.finishAcquisition(mosiPacket{ID: packet.ID, State: wanted.String()})
 	}
-	if !granted || !c.resolved().ownstate.Phase().Readable() {
-		c.ownstate.Fail(packet.ID, errClusterReadBusy, mosi.S)
+	if !granted || (wanted == mosi.M && c.resolved().ownstate.Phase() != mosi.M || wanted == mosi.S && !c.resolved().ownstate.Phase().Readable()) {
+		c.ownstate.Fail(packet.ID, errClusterReadBusy, wanted)
 		return false
 	}
 	return true
@@ -146,7 +150,7 @@ func (cluster *nodeCluster) handleTryRead(ctx context.Context, source string, da
 	if err := unmarshalNode(data, &packet); err != nil {
 		return nil, err
 	}
-	if !packet.Resource.valid() || !cluster.databases[packet.Resource.Database] || packet.Kind != "read" ||
+	if !packet.Resource.valid() || !cluster.databases[packet.Resource.Database] || (packet.Kind != "read" && packet.Kind != "write") ||
 		!packet.TryRead || packet.ID == "" || !cluster.requestIncarnation(packet.From, packet.Boot) {
 		return nil, fmt.Errorf("invalid opportunistic cluster read")
 	}
@@ -365,10 +369,9 @@ func (cluster *nodeCluster) locate(ctx context.Context, resource mosiResource) (
 			engine := db.persistence
 			if isCatalogResource(resource) {
 				engine = catalogBackendDatabase().persistence
-			} else {
-				if err := db.importClusterCommits(r.id); err != nil {
-					return "", err
-				}
+			}
+			if err := db.importClusterCommits(r.id); err != nil {
+				return "", err
 			}
 			if err := r.finishImport(r.id, &replicaImport{header: mosiPacket{Resource: resource, Content: content}, engine: engine}); err != nil {
 				return "", err
@@ -486,7 +489,7 @@ func (cluster *nodeCluster) obtain(parent context.Context, resource mosiResource
 		}
 		publication, action := c.ownstate.Request(wanted)
 		if action == mosi.Ready {
-			if restoreCommits && resource.Shard != "" && !isCatalogResource(resource) {
+			if restoreCommits && resource.Shard != "" {
 				// Restart recovery may establish local authority without a new
 				// reference packet. Restore native WAL commit proofs here too,
 				// before any backend content can be materialized.
@@ -815,10 +818,10 @@ func (cluster *nodeCluster) installReference(source string, packet mosiPacket) e
 		if !actual.valid() || (!isCatalogResource(packet.Resource) && db.tables.Get(packet.Resource.Table) == nil) {
 			return fmt.Errorf("invalid shared shard reference")
 		}
-		if !isCatalogResource(packet.Resource) {
-			if err := db.importClusterCommits(source); err != nil {
-				return err
-			}
+		// Catalog WAL files live in system storage, but their transaction
+		// authority is the logical database, just like its data shards.
+		if err := db.importClusterCommits(source); err != nil {
+			return err
 		}
 	}
 	// Only the validated reference may publish its advertised UUID edges.

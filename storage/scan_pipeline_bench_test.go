@@ -32,8 +32,8 @@ func TestScanPipelineSpecializationsPreserveMainAndDeltaResults(t *testing.T) {
 	const dbName = "test_scan_pipeline_specializations"
 	databases.Remove(dbName)
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 	tbl.Insert([]string{"id"}, [][]scm.Scmer{
 		{scm.NewInt(1)},
 		{scm.NewInt(2)},
@@ -78,9 +78,9 @@ func BenchmarkScanPipelineOLTP(b *testing.B) {
 	dbName := "bench_scan_pipeline_oltp"
 	databases.Remove(dbName)
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("amount", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "amount", "INT", nil, nil)
 	rows := make([][]scm.Scmer, rowsN)
 	for i := range rows {
 		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i%100 + 1))}

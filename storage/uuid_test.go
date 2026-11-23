@@ -16,9 +16,9 @@ func TestUUIDBinaryDefaultSurvivesWALAndRebuild(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			tbl, persistence := createDurabilityTestTable(t, "tuuidbinary"+name, 0)
-			tbl.AlterColumn("id", "type", scm.NewString("BINARY"))
-			tbl.AlterColumn("id", "dimensions", scm.NewSlice([]scm.Scmer{scm.NewInt(16)}))
-			tbl.AlterColumn("id", "default_expression", scm.NewString("UUID_TO_BIN(UUID(),0)"))
+			tbl.AlterColumn(nil, "id", "type", scm.NewString("BINARY"))
+			tbl.AlterColumn(nil, "id", "dimensions", scm.NewSlice([]scm.Scmer{scm.NewInt(16)}))
+			tbl.AlterColumn(nil, "id", "default_expression", scm.NewString("UUID_TO_BIN(UUID(),0)"))
 			callBuiltin(t, "createkey", NewTableScmer(tbl), scm.NewString("PRIMARY"), scm.NewBool(true), scm.NewSlice([]scm.Scmer{scm.NewString("id")}))
 			c := tbl.Columns[0]
 			cols, rows := tbl.prepareInsertDefaults([]string{"payload"}, [][]scm.Scmer{{scm.NewString("one")}, {scm.NewString("two")}, {scm.NewString("three")}})

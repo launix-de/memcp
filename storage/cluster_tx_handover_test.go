@@ -136,8 +136,8 @@ func TestClusterFailedLiveCaptureReleasesMaintenanceAndTransactionAdmission(t *t
 
 func TestClusterCaptureRetainsOverlayWhenHelperBecomesPersistent(t *testing.T) {
 	fixture, _ := createDurabilityTestTable(t, "t_handover_helper_engine", 1)
-	tbl, _ := CreateTable(fixture.schema.Name, ".helper", Cache, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, fixture.schema.Name, ".helper", Cache, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 	shard := tbl.ActiveShards()[0]
 	tx := NewTxContext(TxACID)
@@ -320,8 +320,8 @@ func TestClusterCursorDecisionDoesNotPinWritersAcrossParticipants(t *testing.T) 
 
 func TestClusterOppositeCursorDecisionsFinishWithoutWriterCycle(t *testing.T) {
 	first, _ := createDurabilityTestTable(t, "t_cursor_opposite_first", 4)
-	second, _ := CreateTable(first.schema.Name, "opposite_second", Safe, false)
-	second.CreateColumn("id", "INT", nil, nil)
+	second, _ := CreateTable(nil, first.schema.Name, "opposite_second", Safe, false)
+	second.CreateColumn(nil, "id", "INT", nil, nil)
 	second.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}, {scm.NewInt(2)}}, nil, scm.NewNil(), false, nil)
 	shards := []*storageShard{first.ActiveShards()[0], second.ActiveShards()[0]}
 	roots := []*TxContext{NewTxContext(TxCursorStability), NewTxContext(TxCursorStability)}
@@ -387,7 +387,7 @@ func TestClusterOppositeCursorDecisionsFinishWithoutWriterCycle(t *testing.T) {
 
 func TestClusterLiveTransferCarriesExistingDecisionCapability(t *testing.T) {
 	fixture, _ := createDurabilityTestTable(t, "t_transfer_capability", 1)
-	tbl, _ := CreateTable(fixture.schema.Name, "empty_overlay", Memory, false)
+	tbl, _ := CreateTable(nil, fixture.schema.Name, "empty_overlay", Memory, false)
 	shard := NewShard(tbl)
 	tx := NewTxContext(TxCursorStability)
 	defer tx.Rollback()

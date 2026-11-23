@@ -122,9 +122,9 @@ func TestCleanNoOrphans(t *testing.T) {
 	defer setupGCTest(t)()
 
 	CreateDatabase("gcdb", false)
-	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 
 	insertLongRows(t, tbl, []string{
 		strings.Repeat("A", maxInlineBlobBytes+800),
@@ -153,9 +153,9 @@ func TestCleanOrphanedBlob(t *testing.T) {
 	defer setupGCTest(t)()
 
 	CreateDatabase("gcdb", false)
-	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 
 	insertLongRows(t, tbl, []string{
 		strings.Repeat("X", maxInlineBlobBytes+800),
@@ -203,9 +203,9 @@ func TestCleanBlobsBackfillsMissingLegacyManifest(t *testing.T) {
 	defer setupGCTest(t)()
 
 	CreateDatabase("gcdb", false)
-	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 	insertLongRows(t, tbl, []string{
 		strings.Repeat("m", maxInlineBlobBytes+1),
 		strings.Repeat("n", maxInlineBlobBytes+1),
@@ -251,9 +251,9 @@ func TestStartupCleanLoadsColdSchemaBeforeBlobDeletion(t *testing.T) {
 	defer setupGCTest(t)()
 
 	CreateDatabase("gcdb", false)
-	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 	insertLongRows(t, tbl, []string{
 		strings.Repeat("c", maxInlineBlobBytes+1),
 		strings.Repeat("d", maxInlineBlobBytes+1),
@@ -295,9 +295,9 @@ func TestCleanBlobsRejectsCorruptManifest(t *testing.T) {
 	defer setupGCTest(t)()
 
 	CreateDatabase("gcdb", false)
-	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 	insertLongRows(t, tbl, []string{
 		strings.Repeat("p", maxInlineBlobBytes+1),
 		strings.Repeat("q", maxInlineBlobBytes+1),
@@ -330,9 +330,9 @@ func TestRepartitionPublishesBlobManifests(t *testing.T) {
 	defer setupGCTest(t)()
 
 	CreateDatabase("gcdb", false)
-	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 	insertLongRows(t, tbl, []string{
 		strings.Repeat("s", maxInlineBlobBytes+1),
 		strings.Repeat("t", maxInlineBlobBytes+1),
@@ -370,9 +370,9 @@ func TestCleanOrphanedShardFile(t *testing.T) {
 	defer setupGCTest(t)()
 
 	CreateDatabase("gcdb", false)
-	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("val", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "val", "TEXT", nil, nil)
 
 	rows := [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString("alpha")},
@@ -405,9 +405,9 @@ func TestCleanIdempotent(t *testing.T) {
 	defer setupGCTest(t)()
 
 	CreateDatabase("gcdb", false)
-	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 
 	insertLongRows(t, tbl, []string{
 		strings.Repeat("Q", maxInlineBlobBytes+800),
@@ -442,9 +442,9 @@ func TestCleanAfterRebuildSupersedesShards(t *testing.T) {
 	defer setupGCTest(t)()
 
 	CreateDatabase("gcdb", false)
-	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("val", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "val", "TEXT", nil, nil)
 
 	// First insert + rebuild → creates shard with UUID-A.
 	tbl.Insert([]string{"id", "val"}, [][]scm.Scmer{
@@ -530,9 +530,9 @@ func TestCleanAfterRebuildSupersedesShards(t *testing.T) {
 func TestBlobManifestUpgradesIncompleteV1(t *testing.T) {
 	defer setupGCTest(t)()
 	CreateDatabase("gcdb", false)
-	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 	values := []string{blobBangPayload(), strings.Repeat("y", 5300), strings.Repeat("z", 5300)}
 	insertLongRows(t, tbl, values)
 	shard := tbl.ActiveShards()[0]
@@ -574,9 +574,9 @@ func TestBlobManifestUpgradesIncompleteV1(t *testing.T) {
 func TestBlobManifestSurvivesUnchangedColdRebuild(t *testing.T) {
 	defer setupGCTest(t)()
 	CreateDatabase("gcdb", false)
-	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 	insertLongRows(t, tbl, []string{blobBangPayload(), strings.Repeat("y", 5300), strings.Repeat("z", 5300)})
 	shardID := tbl.ActiveShards()[0].uuid.String()
 	path := filepath.Join(Basepath, "gcdb", shardID+"-"+blobManifestColumn)
@@ -610,9 +610,9 @@ func TestBlobUndercountRetainsCommittedOwners(t *testing.T) {
 			CreateDatabase("gcdb", false)
 			payloads := []string{strings.Repeat("a", maxInlineBlobBytes+1), strings.Repeat("b", maxInlineBlobBytes+1), strings.Repeat("c", maxInlineBlobBytes+1)}
 			for _, name := range []string{"first", "second"} {
-				tbl, _ := CreateTable("gcdb", name, Safe, false)
-				tbl.CreateColumn("id", "INT", nil, nil)
-				tbl.CreateColumn("content", "TEXT", nil, nil)
+				tbl, _ := CreateTable(nil, "gcdb", name, Safe, false)
+				tbl.CreateColumn(nil, "id", "INT", nil, nil)
+				tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 				insertLongRows(t, tbl, payloads)
 			}
 			db := GetDatabase("gcdb")
@@ -644,7 +644,7 @@ func TestBlobUndercountRetainsCommittedOwners(t *testing.T) {
 					t.Fatalf("missing injected failure: %s", result)
 				}
 			}
-			DropTable("gcdb", "first", false)
+			DropTable(nil, "gcdb", "first", false)
 			if got := len(blobFiles(t, "gcdb")); got != 3 {
 				t.Fatalf("decrement deleted committed blobs: got %d, want 3", got)
 			}
@@ -664,7 +664,7 @@ func TestBlobUndercountRetainsCommittedOwners(t *testing.T) {
 					t.Fatalf("surviving payload %s unreadable", hash)
 				}
 			}
-			DropTable("gcdb", "second", false)
+			DropTable(nil, "gcdb", "second", false)
 			if got := len(blobFiles(t, "gcdb")); got != 3 {
 				t.Fatalf("drop deleted blobs before ownership check: %d", got)
 			}
@@ -698,9 +698,9 @@ func (p *inventoryMetadataOnlyPersistence) WalkBlobs(fn func(string)) {
 func TestBlobInventoryListsMissingReferencesWithoutFetchingPayloads(t *testing.T) {
 	defer setupGCTest(t)()
 	CreateDatabase("gcdb", false)
-	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 	insertLongRows(t, tbl, []string{strings.Repeat("x", maxInlineBlobBytes+1), strings.Repeat("y", maxInlineBlobBytes+1), strings.Repeat("z", maxInlineBlobBytes+1)})
 	db := GetDatabase("gcdb")
 	references, complete := activeBlobReferences(db, true)
@@ -768,9 +768,9 @@ func TestBlobInventoryRejectsIncompleteSnapshotsAndReleasesLock(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			defer setupGCTest(t)()
 			CreateDatabase("gcdb", false)
-			tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-			tbl.CreateColumn("id", "INT", nil, nil)
-			tbl.CreateColumn("content", "TEXT", nil, nil)
+			tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+			tbl.CreateColumn(nil, "id", "INT", nil, nil)
+			tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 			insertLongRows(t, tbl, []string{strings.Repeat("a", maxInlineBlobBytes+1), strings.Repeat("b", maxInlineBlobBytes+1), strings.Repeat("c", maxInlineBlobBytes+1)})
 			db := GetDatabase("gcdb")
 			if failure == "manifest" {
@@ -889,9 +889,9 @@ func TestOverflowRebuildBlobSurvivesConcurrentClean(t *testing.T) {
 	pausing := newPausingBlobPersistence(db.persistence)
 	db.persistence = pausing
 
-	tbl, _ := CreateTable("gcdb", "uploads", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "uploads", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 
 	// A single distinct value would be optimized to a constant column and
 	// never touch OverlayBlob at all; use distinct values like the existing
@@ -999,9 +999,9 @@ func TestBlobCleanupSCMFunction(t *testing.T) {
 	t.Run("normal", func(t *testing.T) {
 		defer setupGCTest(t)()
 		CreateDatabase("gcdb", false)
-		tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-		tbl.CreateColumn("id", "INT", nil, nil)
-		tbl.CreateColumn("content", "TEXT", nil, nil)
+		tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+		tbl.CreateColumn(nil, "id", "INT", nil, nil)
+		tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 		insertLongRows(t, tbl, []string{
 			strings.Repeat("X", maxInlineBlobBytes+800),
 			strings.Repeat("Y", maxInlineBlobBytes+800),
@@ -1032,9 +1032,9 @@ func TestBlobCleanupSCMFunction(t *testing.T) {
 	t.Run("incomplete", func(t *testing.T) {
 		defer setupGCTest(t)()
 		CreateDatabase("gcdb", false)
-		tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-		tbl.CreateColumn("id", "INT", nil, nil)
-		tbl.CreateColumn("content", "TEXT", nil, nil)
+		tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+		tbl.CreateColumn(nil, "id", "INT", nil, nil)
+		tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 		insertLongRows(t, tbl, []string{
 			strings.Repeat("p", maxInlineBlobBytes+1),
 			strings.Repeat("q", maxInlineBlobBytes+1),

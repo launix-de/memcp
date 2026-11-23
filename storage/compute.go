@@ -196,7 +196,7 @@ func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []s
 				if c.IsTemp {
 					mode = schemaSaveBuffered
 				}
-				t.finishSchemaMutationLocked(mode, !c.RuntimeOnly)
+				t.finishSchemaMutationLocked(nil, mode, !c.RuntimeOnly)
 				metadataLocked = false
 			}
 			if !ddlLocked {
@@ -370,7 +370,7 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 	if isTemp {
 		mode = schemaSaveBuffered
 	}
-	t.finishSchemaMutationLocked(mode, !runtimeOnly)
+	t.finishSchemaMutationLocked(nil, mode, !runtimeOnly)
 
 	// Ensure every shard has an ORC proxy (lazy: no eager recompute).
 	//
@@ -2235,6 +2235,7 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 						scm.NewString(targetSchema),
 						scm.NewString(t.Name),
 						scm.NewBool(true),
+						fkTxExpr(),
 					})),
 					cacheTarget: t,
 					Acquire:     acquireTarget,
@@ -2265,6 +2266,7 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 					scm.NewString(rn.schema),
 					scm.NewString(rn.name),
 					scm.NewBool(true),
+					fkTxExpr(),
 				}))
 			}
 			t.AddTrigger(TriggerDescription{
@@ -2369,6 +2371,7 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 			scm.NewString(rn.schema),
 			scm.NewString(rn.name),
 			scm.NewBool(true),
+			fkTxExpr(),
 		}))
 	}
 	t.AddTrigger(TriggerDescription{

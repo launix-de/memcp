@@ -130,7 +130,16 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 		if packet.Epoch < epoch {
 			return nil
 		}
-		handover, err := c.ownstate.BeginHandover(ctx, c.drainWrites)
+		var handover *mosi.Handover
+		var err error
+		if packet.TryRead {
+			handover = c.ownstate.TryHandover(c.writesDrained, true)
+			if handover == nil {
+				return errClusterReadBusy
+			}
+		} else {
+			handover, err = c.ownstate.BeginHandover(ctx, c.drainWrites, true)
+		}
 		if err != nil {
 			return err
 		}
@@ -181,7 +190,15 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 			c.acquire.Unlock()
 		}
 	}()
-	handover, err := c.ownstate.BeginHandover(ctx, c.drainWrites)
+	var handover *mosi.Handover
+	if packet.TryRead {
+		handover = c.ownstate.TryHandover(c.writesDrained, packet.State == "IO")
+		if handover == nil {
+			return errClusterReadBusy
+		}
+	} else {
+		handover, err = c.ownstate.BeginHandover(ctx, c.drainWrites, packet.State == "IO")
+	}
 	if err != nil {
 		return err
 	}
@@ -419,7 +436,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			defer releasePersistence()
 			var handover *mosi.Handover
 			if packet.TryRead {
-				handover = c.ownstate.TryHandover(c.writesDrained)
+				handover = c.ownstate.TryHandover(c.writesDrained, write)
 				if handover == nil {
 					return errClusterReadBusy
 				}
@@ -432,7 +449,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 					return errClusterReadBusy
 				}
 			} else {
-				handover, err = c.ownstate.BeginHandover(ctx, c.drainWrites)
+				handover, err = c.ownstate.BeginHandover(ctx, c.drainWrites, write)
 			}
 			if err != nil {
 				return err
@@ -480,7 +497,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			if !write {
 				knownReaders[requester] = true
 			}
-			if err := r.step(ctx, record.Owner, mosiPacket{Kind: "recall", ID: uuid.NewString(), Resource: packet.Resource, Epoch: record.Epoch, State: oldState, Readers: knownReaders, Owner: requester}); err != nil {
+			if err := r.step(ctx, record.Owner, mosiPacket{Kind: "recall", ID: uuid.NewString(), Resource: packet.Resource, Epoch: record.Epoch, State: oldState, Readers: knownReaders, Owner: requester, TryRead: packet.TryRead}); err != nil {
 				return err
 			}
 			r.mu.Lock()
@@ -494,7 +511,16 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				continue
 			}
 			if reader == r.id {
-				handover, err := c.ownstate.BeginHandover(ctx, c.drainWrites)
+				var handover *mosi.Handover
+				var err error
+				if packet.TryRead {
+					handover = c.ownstate.TryHandover(c.writesDrained, true)
+					if handover == nil {
+						return errClusterReadBusy
+					}
+				} else {
+					handover, err = c.ownstate.BeginHandover(ctx, c.drainWrites, true)
+				}
 				if err != nil {
 					return err
 				}
@@ -505,7 +531,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				if packet.Resource.Shard != "" {
 					routes = r.shardRoutes(packet.Resource)
 				}
-				if err := r.step(ctx, reader, mosiPacket{Kind: "invalidate", ID: uuid.NewString(), Resource: r.canonicalResource(packet.Resource), Epoch: record.Epoch, Forwards: routes}); err != nil {
+				if err := r.step(ctx, reader, mosiPacket{Kind: "invalidate", ID: uuid.NewString(), Resource: r.canonicalResource(packet.Resource), Epoch: record.Epoch, Forwards: routes, TryRead: packet.TryRead}); err != nil {
 					return err
 				}
 			}

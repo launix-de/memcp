@@ -224,15 +224,15 @@ func TestComputeTriggersGuardRelevantSourceColumns(t *testing.T) {
 	defer databases.Remove("tcomputetrigger")
 
 	CreateDatabase("tcomputetrigger", false)
-	base, _ := CreateTable("tcomputetrigger", "base", Safe, false)
-	src, _ := CreateTable("tcomputetrigger", "src", Safe, false)
+	base, _ := CreateTable(nil, "tcomputetrigger", "base", Safe, false)
+	src, _ := CreateTable(nil, "tcomputetrigger", "src", Safe, false)
 
-	base.CreateColumn("id", "INT", nil, nil)
-	base.CreateColumn("ref_id", "INT", nil, nil)
-	base.CreateColumn("cached", "INT", nil, nil)
-	src.CreateColumn("ref_id", "INT", nil, nil)
-	src.CreateColumn("val", "INT", nil, nil)
-	src.CreateColumn("note", "TEXT", nil, nil)
+	base.CreateColumn(nil, "id", "INT", nil, nil)
+	base.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	base.CreateColumn(nil, "cached", "INT", nil, nil)
+	src.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	src.CreateColumn(nil, "val", "INT", nil, nil)
+	src.CreateColumn(nil, "note", "TEXT", nil, nil)
 
 	computor := lambdaAst([]string{"ref_id"}, nestedScanAst("tcomputetrigger", "src", "ref_id"))
 	computor.Slice()[2].Slice()[3] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{
@@ -283,13 +283,13 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 	defer databases.Remove("tlookuptrigger")
 
 	CreateDatabase("tlookuptrigger", false)
-	base, _ := CreateTable("tlookuptrigger", "base", Safe, false)
-	src, _ := CreateTable("tlookuptrigger", "src", Safe, false)
-	base.CreateColumn("id", "INT", nil, nil)
-	base.CreateColumn("ref_id", "INT", nil, nil)
-	base.CreateColumn("cached", "INT", nil, nil)
-	src.CreateColumn("ref_id", "INT", nil, nil)
-	src.CreateColumn("val", "INT", nil, nil)
+	base, _ := CreateTable(nil, "tlookuptrigger", "base", Safe, false)
+	src, _ := CreateTable(nil, "tlookuptrigger", "src", Safe, false)
+	base.CreateColumn(nil, "id", "INT", nil, nil)
+	base.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	base.CreateColumn(nil, "cached", "INT", nil, nil)
+	src.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	src.CreateColumn(nil, "val", "INT", nil, nil)
 
 	computorSource := `(lambda (ref_id)
 		(scan nil (table "tlookuptrigger" false "src" false)
@@ -329,12 +329,12 @@ func TestQualifiedLookupComputeTriggerUsesPhysicalTargetColumn(t *testing.T) {
 	const schemaName = "tqualifiedlookuptrigger"
 	defer databases.Remove(schemaName)
 	CreateDatabase(schemaName, false)
-	base, _ := CreateTable(schemaName, "base", Safe, false)
-	src, _ := CreateTable(schemaName, "src", Safe, false)
-	base.CreateColumn("ref_id", "INT", nil, nil)
-	base.CreateColumn("cached", "INT", nil, nil)
-	src.CreateColumn("ref_id", "INT", nil, nil)
-	src.CreateColumn("val", "INT", nil, nil)
+	base, _ := CreateTable(nil, schemaName, "base", Safe, false)
+	src, _ := CreateTable(nil, schemaName, "src", Safe, false)
+	base.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	base.CreateColumn(nil, "cached", "INT", nil, nil)
+	src.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	src.CreateColumn(nil, "val", "INT", nil, nil)
 	base.Insert([]string{"ref_id", "cached"}, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
 
 	computorSource := `(lambda (base.ref_id)
@@ -490,13 +490,13 @@ func TestRestoredComputeDependencyTriggersRefreshGuards(t *testing.T) {
 	const schemaName = "trestoredcomputedependency"
 	defer databases.Remove(schemaName)
 	CreateDatabase(schemaName, false)
-	base, _ := CreateTable(schemaName, "base", Safe, false)
-	src, _ := CreateTable(schemaName, "src", Safe, false)
-	base.CreateColumn("ref_id", "INT", nil, nil)
-	base.CreateColumn("cached", "INT", nil, nil)
-	src.CreateColumn("ref_id", "INT", nil, nil)
-	src.CreateColumn("val", "INT", nil, nil)
-	src.CreateColumn("allowed", "INT", nil, nil)
+	base, _ := CreateTable(nil, schemaName, "base", Safe, false)
+	src, _ := CreateTable(nil, schemaName, "src", Safe, false)
+	base.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	base.CreateColumn(nil, "cached", "INT", nil, nil)
+	src.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	src.CreateColumn(nil, "val", "INT", nil, nil)
+	src.CreateColumn(nil, "allowed", "INT", nil, nil)
 
 	for _, orc := range []bool{false, true} {
 		t.Run(fmt.Sprintf("orc=%t", orc), func(t *testing.T) {
@@ -771,16 +771,16 @@ func TestORCDependencyTriggersUseRelevantColumnsAndInvalidateSuffix(t *testing.T
 	defer databases.Remove("torctrigger")
 
 	CreateDatabase("torctrigger", false)
-	base, _ := CreateTable("torctrigger", "base", Safe, false)
-	src, _ := CreateTable("torctrigger", "src", Safe, false)
+	base, _ := CreateTable(nil, "torctrigger", "base", Safe, false)
+	src, _ := CreateTable(nil, "torctrigger", "src", Safe, false)
 
-	base.CreateColumn("id", "INT", nil, nil)
-	base.CreateColumn("sortk", "INT", nil, nil)
-	base.CreateColumn("ref_id", "INT", nil, nil)
-	base.CreateColumn("running", "INT", nil, nil)
-	src.CreateColumn("ref_id", "INT", nil, nil)
-	src.CreateColumn("val", "INT", nil, nil)
-	src.CreateColumn("note", "TEXT", nil, nil)
+	base.CreateColumn(nil, "id", "INT", nil, nil)
+	base.CreateColumn(nil, "sortk", "INT", nil, nil)
+	base.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	base.CreateColumn(nil, "running", "INT", nil, nil)
+	src.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	src.CreateColumn(nil, "val", "INT", nil, nil)
+	src.CreateColumn(nil, "note", "TEXT", nil, nil)
 
 	mapReduceFn := lambdaAst([]string{"acc", "$set", "ref_id"}, scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("begin"),

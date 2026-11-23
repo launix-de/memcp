@@ -25,7 +25,7 @@ import (
 func setupAdaptiveRecSetOrderTable(t *testing.T, database string, rows int) *table {
 	t.Helper()
 	tbl := setupScanParallelTestTable(t, database)
-	tbl.CreateColumn("rank", "INT", nil, nil)
+	tbl.CreateColumn(nil, "rank", "INT", nil, nil)
 	values := make([][]scm.Scmer, rows)
 	for i := range values {
 		// RecID zero occurs in the middle of the rank index. A sequential

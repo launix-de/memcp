@@ -50,8 +50,12 @@ type storageShard struct {
 	catalogHome *database
 	// catalogOwner is the immutable logical tenant, independently of storage.
 	catalogOwner string
+	// Version of the persisted catalog base. Only pre-v3 table shards lack
+	// runtime_identity; transaction deltas already carry the current columns.
+	catalogVersion int
 	// A private rebuild/import generation has no published MOSI resource yet.
-	catalogPrivate atomic.Bool
+	catalogPrivate        atomic.Bool
+	catalogNamespaceReady atomic.Bool
 	// catalogDurable requests synced column files from the next rebuild of a
 	// system_schema shard, matching the durability of its schema.json commit.
 	catalogDurable bool
@@ -557,7 +561,9 @@ func (u *storageShard) load() {
 			if committed, exists := decisions[txID]; exists {
 				return committed
 			}
-			committed := u.home().transactionCommitted(txID)
+			// Storage placement does not own a catalog transaction. Its WAL is
+			// on the system backend, but shares the tenant's original decision.
+			committed := u.authorityDatabase().transactionCommitted(txID)
 			decisions[txID] = committed
 			return committed
 		}
@@ -722,6 +728,12 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool, cu
 		}
 		if cs != nil {
 			cs = u.attachColumnRuntime(colName, cs)
+			u.columns[colName] = cs
+			return cs
+		}
+		if u.catalogVersion > 0 && u.catalogVersion < 3 && ((u.t == systemSchemaTables[catalogTables] && colName == "runtime_identity") || (u.t == systemSchemaTables[catalogDatabases] && colName == "revision")) {
+			u.ensureColumnLoaded("schema_name", true, nil)
+			cs = &StorageConst{count: uint64(u.main_count), value: scm.NewNil()}
 			u.columns[colName] = cs
 			return cs
 		}
@@ -969,6 +981,16 @@ func (s *storageShard) GetRead(currentTx *TxContext, mayDelegate bool) ReadAcces
 // Physical query-local IDs retain their original immutable generation. Rights
 // acquisition may install a successor, but must never reinterpret those IDs.
 func (s *storageShard) getRead(currentTx *TxContext, options shardReadOptions) ReadAccess {
+	if !s.t.RuntimeOnly {
+		currentTx.readSchema(s.authorityDatabase())
+	}
+	definitionWriter := currentTx.hasSchemaWriter(s.authorityDatabase())
+	if definitionWriter {
+		options.mayDelegate = false
+	}
+	if s.t.retired.Load() {
+		panic("table handle belongs to a rolled-back or dropped definition")
+	}
 	admissionTable := s.t
 	if options.mutation {
 		admissionTable = nil
@@ -980,7 +1002,7 @@ func (s *storageShard) getRead(currentTx *TxContext, options shardReadOptions) R
 		currentTx.ensureClusterIdentity()
 	}
 	origin := s
-	if target := s.scanTarget.Load(); target != nil {
+	if target := s.scanTarget.Load(); target != nil && !definitionWriter {
 		panic(shardReadDelegation{target})
 	}
 	if options.mayDelegate && !options.snapshot && sharedClusterSource(s.t) && s.state() == COLD {
@@ -1028,6 +1050,12 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 // loading/participant boundary. Nonblocking admission performs no acquisition
 // wait; callers must release any earlier writers before trying the blocking path.
 func (s *storageShard) getWrite(currentTx *TxContext, blocking bool) (WriteAccess, bool) {
+	if !s.t.RuntimeOnly {
+		currentTx.readSchema(s.authorityDatabase())
+	}
+	if s.t.retired.Load() {
+		panic("table handle belongs to a rolled-back or dropped definition")
+	}
 	origin := s
 	// A write retains its generation until the transaction releases it. Such
 	// pins may consume the node-wide shard budget; the per-table read reserve
@@ -1135,7 +1163,7 @@ func (s *storageShard) registerLoadedShard() {
 // Queries acquire no additional reader registration for this coordination.
 func (s *storageShard) claimEviction() (*mosi.Handover, bool) {
 	if cell := s.coherence.Load(); cell != nil && cell.current.Load() == s {
-		handover := cell.ownstate.TryHandover(cell.writesDrained)
+		handover := cell.ownstate.TryHandover(cell.writesDrained, false)
 		return handover, handover != nil
 	}
 	return nil, true
@@ -1380,7 +1408,7 @@ func NewShard(t *table) *storageShard {
 			result.columns[column.Name] = new(StorageSparse)
 		}
 	}
-	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
+	if (t.PersistencyMode == Safe || t.PersistencyMode == Logged) && !nativeCatalogRelation(t) {
 		result.logfile = result.home().persistence.OpenLog(result.uuid.String())
 	}
 	// Newly created shards are live/writable, not cold
@@ -1837,7 +1865,7 @@ func (t *storageShard) updateFunctionBatch(idx uint32, withTrigger bool, already
 						// Row was staged by this tx → remove from UndeleteMask.
 						// Keep shard.deletions[targetIdx]=true (already globally hidden).
 						// Don't add to DeleteMask (not a pre-existing row).
-						st.UndeleteMask.Set(uint(targetIdx), false)
+						currentTx.UnstageRow(t, targetIdx)
 					} else {
 						// Pre-existing committed row → undo temporary global deletion
 						t.deletions.Set(uint(targetIdx), false)
@@ -1963,7 +1991,7 @@ func (t *storageShard) updateFunctionBatch(idx uint32, withTrigger bool, already
 				if wasStaged {
 					// Row was staged by this tx → remove from UndeleteMask.
 					// Keep shard.deletions[idx]=true (already globally hidden).
-					st2.UndeleteMask.Set(uint(idx), false)
+					tx.UnstageRow(t, idx)
 				} else {
 					// Pre-existing committed row → add to delete mask
 					tx.AddToDeleteMask(t, idx)
@@ -4370,6 +4398,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	result.t = t.t
 	result.catalogHome = t.catalogHome
 	result.catalogOwner = t.catalogOwner
+	if t.catalogOwner != "" {
+		result.catalogVersion = catalogFormatVersion
+	}
 	result.catalogPrivate.Store(t.catalogOwner != "")
 	result.coherence.Store(t.coherence.Load())
 	result.localMutations.Store(t.localMutationState())
@@ -4729,13 +4760,25 @@ func (s *storageShard) registerCachedStorage() {
 }
 
 // A live shared snapshot opens an append handle only after acquiring native M.
+// Catalog constructors also defer opening until tenant authority and physical
+// storage have both been bound; their synthetic table owns no backend.
 func (s *storageShard) ensureMutationLog() {
-	if !sharedClusterSource(s.t) || s.logfile != nil || (s.t.PersistencyMode != Safe && s.t.PersistencyMode != Logged) {
+	if (s.t.PersistencyMode != Safe && s.t.PersistencyMode != Logged) || (!sharedClusterSource(s.t) && s.catalogOwner == "") {
+		return
+	}
+	if s.logfile != nil && (s.catalogOwner == "" || s.catalogNamespaceReady.Load()) {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.logfile == nil {
 		s.logfile = s.home().persistence.OpenLog(s.uuid.String())
+	}
+	if s.catalogOwner != "" && !s.catalogNamespaceReady.Load() {
+		// A catalog's WAL can first appear after its tenant root was synced.
+		// Sync its system-backend directory before accepting any mutation;
+		// syncing only the tenant's decision log cannot preserve this entry.
+		s.home().persistence.SyncNamespace()
+		s.catalogNamespaceReady.Store(true)
 	}
 }

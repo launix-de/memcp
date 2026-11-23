@@ -33,7 +33,7 @@ const systemSchemaName = "system_schema"
 
 // catalogFormatVersion is stored in the schema.json root. A reader accepts
 // every version up to its own; newer catalogs fall back to the legacy part.
-const catalogFormatVersion = 2
+const catalogFormatVersion = 3
 
 type catalogKind uint8
 
@@ -103,7 +103,7 @@ var catalogRelations = func() [catalogRelationCount]catalogRelation {
 	ordinal := func(name string) catalogField { return catalogField{column: name, kind: catalogInt} }
 	owner := []catalogField{text("table_name"), ordinal("ordinal")}
 	return [catalogRelationCount]catalogRelation{
-		catalogDatabases: {name: "databases"},
+		catalogDatabases: {name: "databases", fields: []catalogField{{key: "revision", column: "revision", kind: catalogText, omitEmpty: true}}},
 		catalogTables: {name: "tables", fields: catalogRecordFields(reflect.TypeOf(persistedTable{}),
 			map[string]catalogKind{"Shards": catalogList, "PShards": catalogList},
 			"Columns", "Unique", "Foreign", "Triggers")},

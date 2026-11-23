@@ -40,9 +40,9 @@ func TestReplicationUniqueAcquisitionAllowsCollidingConfigWrite(t *testing.T) {
 	source.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	CreateDatabase("system_unique_acquisition", false)
 	t.Cleanup(func() { databases.Remove("system_unique_acquisition") })
-	config, _ := CreateTable("system_unique_acquisition", "config", Memory, false)
+	config, _ := CreateTable(nil, "system_unique_acquisition", "config", Memory, false)
 	for _, name := range []string{"node", "key", "value"} {
-		config.CreateColumn(name, "TEXT", nil, nil)
+		config.CreateColumn(nil, name, "TEXT", nil, nil)
 	}
 	config.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"node", "key"}}}
 	r := &replicationManager{id: "replica-test", master: true, config: config, cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
@@ -242,7 +242,7 @@ func TestReplicationOrderedMutationDrainsNativeTransactionBeforeHandover(t *test
 			tbl.scan_order(tx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueCondition(),
 				[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 1,
 				[]string{"$update"}, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-					if handover := cell.ownstate.TryHandover(cell.writesDrained); handover != nil {
+					if handover := cell.ownstate.TryHandover(cell.writesDrained, false); handover != nil {
 						handover.Release()
 						t.Error("ownership handover was admitted during the mutation callback")
 					}
@@ -252,7 +252,7 @@ func TestReplicationOrderedMutationDrainsNativeTransactionBeforeHandover(t *test
 			if tx.IsVisible(shard, 0) {
 				t.Fatal("transaction did not delete the first row")
 			}
-			if handover := cell.ownstate.TryHandover(cell.writesDrained); handover != nil {
+			if handover := cell.ownstate.TryHandover(cell.writesDrained, false); handover != nil {
 				handover.Release()
 				t.Fatal("native transaction did not defer ownership handover")
 			}
@@ -261,7 +261,7 @@ func TestReplicationOrderedMutationDrainsNativeTransactionBeforeHandover(t *test
 			if shard.deletions.Count() != 0 {
 				t.Fatal("rollback did not restore the ordered deletion")
 			}
-			handover := cell.ownstate.TryHandover(cell.writesDrained)
+			handover := cell.ownstate.TryHandover(cell.writesDrained, false)
 			if handover == nil {
 				t.Fatal("completed transaction retained write admission")
 			}
@@ -318,7 +318,7 @@ func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 	if called || !strings.Contains(fmt.Sprint(failure), "generation changed; retry statement") {
 		t.Fatalf("historical mutation called = %v, failure = %v", called, failure)
 	}
-	handover := cell.ownstate.TryHandover(cell.writesDrained)
+	handover := cell.ownstate.TryHandover(cell.writesDrained, false)
 	if handover == nil {
 		t.Fatal("content mismatch leaked its write capability")
 	}
@@ -487,8 +487,8 @@ func TestReplicationWebSocketRejectsUnsupportedProtocol(t *testing.T) {
 
 func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "treplicareclaim", 3)
-	empty, _ := CreateTable(table.schema.Name, "empty", Safe, false)
-	empty.CreateColumn("id", "INT", nil, nil)
+	empty, _ := CreateTable(nil, table.schema.Name, "empty", Safe, false)
+	empty.CreateColumn(nil, "id", "INT", nil, nil)
 	r := &replicationManager{id: "slave", cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 	schema := mosiResource{Database: table.schema.Name}
 	r.resourceCell(schema).ownstate.Initialize(mosi.M)
@@ -641,7 +641,7 @@ func TestReplicationParallelReadsIgnoreControlLocks(t *testing.T) {
 		// Hold every control-plane lock, including closed writer admission.
 		// Already-authorized reads must still complete on their own snapshots.
 		r.mu.Lock()
-		handover := c.ownstate.TryHandover(c.writesDrained)
+		handover := c.ownstate.TryHandover(c.writesDrained, true)
 		if handover == nil {
 			t.Fatal("unexpected active write")
 		}
@@ -1208,7 +1208,7 @@ func TestReplicationBackupBackpressureDoesNotHoldActiveWriter(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("backup did not reach the transport")
 	}
-	writer, wait := cell.ownstate.TryWrite(nil, false)
+	writer, wait := cell.ownstate.TryWrite(nil, false, nil)
 	if writer == nil || wait != nil {
 		t.Fatal("network backpressure retained local writer admission")
 	}
@@ -1983,7 +1983,7 @@ func TestReplicationColumnTransferRejectsComputeStorage(t *testing.T) {
 
 	// An ordinary locally created schema must not make the manifest exemption
 	// usable as a computed-column upload, either.
-	table.CreateColumn(blobManifestColumn, "INT", nil, nil)
+	table.CreateColumn(nil, blobManifestColumn, "INT", nil, nil)
 	header.Kind, header.Payload, header.Object = "object", nil, blobManifestColumn
 	other := &replicaImport{header: header, engine: engine, untrusted: true}
 	defer other.abort()
@@ -2053,7 +2053,7 @@ func TestReplicationCommitRacesHandoverAdmission(t *testing.T) {
 		committed := make(chan error, 1)
 		go func() {
 			<-start
-			h, err := cell.ownstate.BeginHandover(ctx, cell.drainWrites)
+			h, err := cell.ownstate.BeginHandover(ctx, cell.drainWrites, true)
 			if err == nil {
 				h.Release()
 			}
@@ -2210,7 +2210,7 @@ func TestMosiDeclarationOwnsItsBytesBeforeTask(t *testing.T) {
 
 func TestReplicationDeclarationIgnoresMaterializedColumnAddExtents(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_replica_add_extent_identity", 3)
-	tbl.CreateColumn("counter", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(0)})
+	tbl.CreateColumn(nil, "counter", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(0)})
 	encoded, err := json.Marshal(tbl)
 	if err != nil {
 		t.Fatal(err)

@@ -192,7 +192,7 @@ func (r *replicationManager) retire(id string) error {
 	for _, resource := range resources {
 		c := r.resourceCell(resource)
 		releaseCoordination := c.coordinate(context.Background())
-		handover, err := c.ownstate.BeginHandover(context.Background(), c.drainWrites)
+		handover, err := c.ownstate.BeginHandover(context.Background(), c.drainWrites, true)
 		if err != nil {
 			releaseCoordination()
 			return err

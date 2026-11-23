@@ -159,8 +159,8 @@ func setupScanParallelTestTable(t *testing.T, dbName string) *table {
 	})
 
 	CreateDatabase(dbName, false)
-	tbl, _ := CreateTable(dbName, "items", Memory, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 	return tbl
 }
 
@@ -204,7 +204,7 @@ func TestUniqueBatchRejectsRepeatedKeys(t *testing.T) {
 
 func TestUniqueBatchRechecksRowsRejectedByAnotherKey(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tuniquebatchlaterkey")
-	tbl.CreateColumn("val", "INT", nil, nil)
+	tbl.CreateColumn(nil, "val", "INT", nil, nil)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "val", Cols: []string{"val"}}}
 	cols := []string{"id", "val"}
 	tbl.Insert(cols, [][]scm.Scmer{{scm.NewInt(10), scm.NewInt(99)}}, nil, scm.NewNil(), false, nil)
@@ -244,7 +244,7 @@ func TestUniqueBatchCoercingAndNullKeys(t *testing.T) {
 			tbl := setupScanParallelTestTable(t, "tuniquebatchcoercion")
 			// Native ANY retains coercing Scheme equality. Declared SQL text
 			// keys use their text conversion and collation contract instead.
-			tbl.CreateColumn("value", "ANY", nil, nil)
+			tbl.CreateColumn(nil, "value", "ANY", nil, nil)
 			tbl.Unique = []uniqueKey{{Id: "value", Cols: []string{"value"}, NullsNotDistinct: tc.nullsNotDistinct}}
 			cols := []string{"id", "value"}
 			rows := [][]scm.Scmer{{scm.NewInt(1), tc.first}, {scm.NewInt(2), tc.second}}
@@ -268,7 +268,7 @@ func TestGeneratedUniqueKeySkipReleasesOuterLockOnPanic(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			tbl := setupScanParallelTestTable(t, "tuniqueskiplock")
-			tbl.CreateColumn("name", "TEXT", nil, nil)
+			tbl.CreateColumn(nil, "name", "TEXT", nil, nil)
 			tbl.mu.Lock()
 			tbl.Columns[0].AutoIncrement = true
 			keys := []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
@@ -293,7 +293,7 @@ func TestGeneratedUniqueKeySkipReleasesOuterLockOnPanic(t *testing.T) {
 
 func TestMultipleUniqueKeysReleaseOuterLockOnCallbackPanic(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tmultipleuniquepanic")
-	tbl.CreateColumn("name", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "name", "TEXT", nil, nil)
 	tbl.mu.Lock()
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
 	tbl.mu.Unlock()
@@ -318,7 +318,7 @@ func TestMultipleUniqueKeysReleaseOuterLockOnCallbackPanic(t *testing.T) {
 
 func TestMultipleUniqueKeysReleaseOuterLockOnCollisionPanic(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tmultipleuniquecollisionpanic")
-	tbl.CreateColumn("name", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "name", "TEXT", nil, nil)
 	tbl.mu.Lock()
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
 	tbl.mu.Unlock()
@@ -970,7 +970,7 @@ func BenchmarkTableStatisticsPublishedRead(b *testing.B) {
 
 func TestUniqueChecksWithMorePartitionDimensionsThanKeyColumns(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tunique2dimensions")
-	tbl.CreateColumn("name", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "name", "TEXT", nil, nil)
 	tbl.mu.Lock()
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
 	tbl.ShardMode = ShardModePartition
@@ -992,7 +992,7 @@ func TestUniqueChecksWithMorePartitionDimensionsThanKeyColumns(t *testing.T) {
 
 func TestUniqueChecksRejectCollisionsOutsideInsertPartition(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tuniquecrosspartition")
-	tbl.CreateColumn("name", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "name", "TEXT", nil, nil)
 	tbl.mu.Lock()
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
 	tbl.ShardMode = ShardModePartition
@@ -1026,7 +1026,7 @@ func TestUniqueChecksRejectCollisionsOutsideInsertPartition(t *testing.T) {
 
 func TestUniqueNullPolicyConcurrentInsert(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tnullkeyconcurrent")
-	tbl.CreateColumn("value", "INT", nil, []scm.Scmer{
+	tbl.CreateColumn(nil, "value", "INT", nil, []scm.Scmer{
 		scm.NewString("unique"), scm.NewBool(true),
 		scm.NewString("nulls_not_distinct"), scm.NewBool(true),
 	})
@@ -1148,7 +1148,7 @@ func TestReserveIDsExplicitInsertAndCallback(t *testing.T) {
 
 func TestReserveIDsRestartContract(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "treserveidrestart", 0)
-	tbl.AlterColumn("id", "auto_increment", scm.NewBool(true))
+	tbl.AlterColumn(nil, "id", "auto_increment", scm.NewBool(true))
 	reserve := scm.Globalenv.Vars["reserve_ids"]
 	block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(3)).Slice()
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{block[1], scm.NewString("durable reserved ID")}}, nil, scm.NewNil(), false, nil)
@@ -1220,7 +1220,7 @@ func TestReserveIDsConcurrentWithNativeInsert(t *testing.T) {
 
 func TestReserveIDsPersistedPrefixRecovery(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "treserveidprefix", 0)
-	tbl.AlterColumn("id", "auto_increment", scm.NewBool(true))
+	tbl.AlterColumn(nil, "id", "auto_increment", scm.NewBool(true))
 	reserve := scm.Globalenv.Vars["reserve_ids"]
 	block := scm.Apply(reserve, NewTableScmer(tbl), scm.NewInt(100)).Slice()
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{block[0], scm.NewString("only first ID persisted")}}, nil, scm.NewNil(), false, nil)
@@ -1249,7 +1249,7 @@ func TestUniqueOverlappingACIDInserts(t *testing.T) {
 	for _, mode := range []string{"free", "pruned", "global"} {
 		t.Run(mode, func(t *testing.T) {
 			tbl := setupScanParallelTestTable(t, "tuniqueacidoverlap")
-			tbl.CreateColumn("route", "INT", nil, nil)
+			tbl.CreateColumn(nil, "route", "INT", nil, nil)
 			tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 			if mode != "free" {
 				dimension := "id"

@@ -16,6 +16,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
 import "context"
 
 import "sync"
@@ -87,9 +88,11 @@ type storageShardTransaction struct {
 
 	// Recids for iteration at rollback/commit time.
 	// Append-only; protected by mu.
-	InsertRecids   []uint32
-	DeletedRecids  []uint32
-	DeleteRecids   []uint32
+	InsertRecids  []uint32
+	DeletedRecids []uint32
+	DeleteRecids  []uint32
+	// Visibility toggles: insertion enables a staged row; deleting/updating
+	// that own row disables it. Savepoints reverse the suffix of this journal.
 	UndeleteRecids []uint32
 	generation     *tableShardTopology
 
@@ -108,9 +111,11 @@ type shardSavepoint struct {
 // Savepoint captures the state of a transaction at a point in time.
 // Used for nested transactions (trigger recovery, savepoints).
 type Savepoint struct {
-	shardLens map[*storageShard]shardSavepoint
-	remote    map[string]scm.Scmer
-	Depth     uint32
+	shardLens      map[*storageShard]shardSavepoint
+	remote         map[string]scm.Scmer
+	Depth          uint32
+	owner          *transactionState
+	schemaBoundary int
 }
 
 // Savepoint boundaries follow physical generation identity when a native shard
@@ -186,6 +191,7 @@ type transactionState struct {
 	participantEpoch      uint64
 	endpoints             map[uuid.UUID]*storageShardTransaction
 	touchedShards         sync.Map // map[*storageShard]bool
+	schemas               transactionSchemas
 	autoCommit            bool
 	writeHeld             map[*storageShard]uint32 // reentrant write-lock depth per shard
 	repartitionDeletes    []repartitionDeleteAction
@@ -481,6 +487,7 @@ func (tx *TxContext) endQuery(seq uint64) {
 					close(tx.remoteIdle)
 				}
 				tx.mu.Unlock()
+				tx.releaseRemoteSchemaReads()
 			}
 		}()
 		defer func() {
@@ -717,8 +724,10 @@ func (tx *TxContext) UnstageRow(shard *storageShard, recid uint32) bool {
 	if st == nil || !st.UndeleteMask.Get(uint(recid)) {
 		return false
 	}
-	// plain Set is safe: caller holds the shard write lock
+	st.mu.Lock()
 	st.UndeleteMask.Set(uint(recid), false)
+	st.UndeleteRecids = append(st.UndeleteRecids, recid)
+	st.mu.Unlock()
 	return true
 }
 
@@ -749,10 +758,11 @@ func (tx *TxContext) SyncTouchedShards() error {
 	tx.touchedShards.Range(func(key, _ any) bool {
 		shard := key.(*storageShard)
 		shards = append(shards, shard)
-		commit := databases[shard.t.schema]
-		commit.db = shard.t.schema
+		owner := shard.authorityDatabase()
+		commit := databases[owner]
+		commit.db = owner
 		commit.durable = commit.durable || shard.t.PersistencyMode == Safe
-		databases[shard.t.schema] = commit
+		databases[owner] = commit
 		return true
 	})
 	if len(shards) == 1 {
@@ -779,6 +789,22 @@ func (tx *TxContext) SyncTouchedShards() error {
 		}
 	}
 	authorityPublished := false
+	if len(databases) > 1 {
+		engine := nativeCommitDecisionBackend()
+		if engine == nil {
+			return fmt.Errorf("cross-database commit requires system storage")
+		}
+		if err := persistenceCall(func() {
+			log := engine.SwapLog(distributedDecisionLog(tx.durableID()), []any{LogEntryCommit{txID: tx.durableID()}}, true)
+			log.Close()
+		}); err != nil {
+			tx.touchedShards = sync.Map{}
+			return markCommitOutcomeUnknown(err)
+		}
+		authorityPublished = true
+	}
+	// Keep the existing per-database proof readable for older binaries. These
+	// mirrors follow the common decision and can never turn it into an abort.
 	for _, commit := range databases {
 		if err := commit.db.commitTransaction(tx.durableID(), commit.durable); err != nil {
 			tx.touchedShards = sync.Map{}
@@ -850,9 +876,10 @@ func (tx *TxContext) CreateSavepoint() Savepoint {
 }
 func (tx *TxContext) createSavepointLocked() Savepoint {
 	remote := tx.captureRemoteSavepoints()
+	schemaBoundary := tx.schemaBoundary()
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
-	sp := Savepoint{Depth: tx.Depth, remote: remote}
+	sp := Savepoint{Depth: tx.Depth, remote: remote, owner: tx.transactionState, schemaBoundary: schemaBoundary}
 	tx.Depth++
 	directory := tx.shardTransactions()
 	if len(directory) > 0 {
@@ -893,6 +920,7 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 	tx.rollbackToSavepointLocked(sp)
 }
 func (tx *TxContext) rollbackToSavepointLocked(sp Savepoint) {
+	defer tx.restoreSchemas(sp.schemaBoundary)
 	tx.rollbackRemoteSavepoints(sp)
 	for _, table := range tx.contributionMutationTables() {
 		defer table.endContributionMutation()
@@ -916,6 +944,18 @@ func (tx *TxContext) rollbackToSavepointLocked(sp Savepoint) {
 		st.mu.Lock()
 		switch tx.Mode {
 		case TxCursorStability:
+			// Undo deletes: restore global visibility
+			for i := len(st.DeletedRecids) - 1; i >= lens.DeletedLen; i-- {
+				recid := st.DeletedRecids[i]
+				st.DeletedMask.Set(uint(recid), false)
+				shard.mu.Lock()
+				shard.deletions.Set(uint(recid), false)
+				shard.logVisibilityChangeLocked(recid, false, tx.durableID())
+				shard.rollbackProtected.Set(uint(recid), false)
+				shard.syncNextVisibilityLocked(recid, trackedShards, tx, true)
+				shard.mu.Unlock()
+			}
+			st.DeletedRecids = st.DeletedRecids[:lens.DeletedLen]
 			// Undo inserts: mark as globally deleted
 			for i := len(st.InsertRecids) - 1; i >= lens.InsertLen; i-- {
 				recid := st.InsertRecids[i]
@@ -929,18 +969,6 @@ func (tx *TxContext) rollbackToSavepointLocked(sp Savepoint) {
 				shard.mu.Unlock()
 			}
 			st.InsertRecids = st.InsertRecids[:lens.InsertLen]
-			// Undo deletes: restore global visibility
-			for i := len(st.DeletedRecids) - 1; i >= lens.DeletedLen; i-- {
-				recid := st.DeletedRecids[i]
-				st.DeletedMask.Set(uint(recid), false)
-				shard.mu.Lock()
-				shard.deletions.Set(uint(recid), false)
-				shard.logVisibilityChangeLocked(recid, false, tx.durableID())
-				shard.rollbackProtected.Set(uint(recid), false)
-				shard.syncNextVisibilityLocked(recid, trackedShards, tx, true)
-				shard.mu.Unlock()
-			}
-			st.DeletedRecids = st.DeletedRecids[:lens.DeletedLen]
 
 		case TxACID:
 			// Rollback DeleteMask additions
@@ -948,16 +976,18 @@ func (tx *TxContext) rollbackToSavepointLocked(sp Savepoint) {
 				st.DeleteMask.Set(uint(st.DeleteRecids[i]), false)
 			}
 			st.DeleteRecids = st.DeleteRecids[:lens.DeleteLen]
-			// Rollback UndeleteMask additions (re-hide the staged rows)
+			// Reverse staged visibility toggles. An own row inserted before
+			// the savepoint and replaced afterwards must become visible again.
 			for i := len(st.UndeleteRecids) - 1; i >= lens.UndeleteLen; i-- {
 				recid := st.UndeleteRecids[i]
-				st.UndeleteMask.Set(uint(recid), false)
+				visible := !st.UndeleteMask.Get(uint(recid))
+				st.UndeleteMask.Set(uint(recid), visible)
 				ownsShardWrite := tx.writeHeld[shard] > 0
 				if !ownsShardWrite {
 					shard.mu.Lock()
 				}
 				shard.deletions.Set(uint(recid), true)
-				shard.rollbackProtected.Set(uint(recid), false)
+				shard.rollbackProtected.Set(uint(recid), visible)
 				shard.syncNextVisibilityLocked(recid, trackedShards, tx, true)
 				if !ownsShardWrite {
 					shard.mu.Unlock()
@@ -985,10 +1015,41 @@ func (tx *TxContext) Commit() error {
 	defer release()
 	return tx.commitLocked()
 }
-func (tx *TxContext) commitLocked() error {
+func (tx *TxContext) commitLocked() (err error) {
 	if tx.State == TxCommitted {
 		return nil
 	}
+	defer func() {
+		if tx.State == TxCommitted {
+			defer tx.releaseSchemas()
+			for _, db := range tx.schemaWriters() {
+				db.schemaExportPending.Store(true)
+				if commitOutcomeUnknown(err) {
+					db.schemaRecoveryRequired.Store(true)
+				}
+			}
+			tx.retireSchemaDrops()
+			if err == nil {
+				err = tx.exportCommittedSchemas()
+				if err == nil {
+					tx.finishSchemaDrops()
+					tx.finishSchemaEngineChanges()
+				}
+			}
+		}
+	}()
+	func() {
+		prepared := false
+		defer func() {
+			if !prepared && tx.State == TxActive && !tx.decisionStarted {
+				tx.rollbackLocked()
+			}
+		}()
+		if !tx.decisionStarted {
+			tx.prepareSchemaCommit()
+		}
+		prepared = true
+	}()
 	tables := tx.contributionMutationTables()
 	for _, table := range tables {
 		defer table.endContributionMutation()
@@ -1258,21 +1319,12 @@ func (tx *TxContext) rollbackLocked() {
 
 // rollbackCursorStability replays undo masks in reverse to restore global state.
 func (tx *TxContext) rollbackCursorStability(persist bool) {
+	defer tx.releaseSchemas()
+	defer tx.restoreSchemas(0)
 	tx.mu.Lock()
 	trackedShards := tx.trackedShardSetLocked()
 	for shard, st := range tx.shardTransactions() {
 		st.mu.Lock()
-		// Undo inserts (reverse order): mark as globally deleted
-		for i := len(st.InsertRecids) - 1; i >= 0; i-- {
-			recid := st.InsertRecids[i]
-			shard.mu.Lock()
-			shard.deletions.Set(uint(recid), true)
-			if persist && shard.logfile != nil {
-				shard.logfile.Write(LogEntryDelete{idx: recid, txID: tx.durableID()})
-			}
-			shard.syncNextVisibilityLocked(recid, trackedShards, tx, persist)
-			shard.mu.Unlock()
-		}
 		// Undo deletes (reverse order): restore global visibility
 		for i := len(st.DeletedRecids) - 1; i >= 0; i-- {
 			recid := st.DeletedRecids[i]
@@ -1282,6 +1334,17 @@ func (tx *TxContext) rollbackCursorStability(persist bool) {
 				shard.logVisibilityChangeLocked(recid, false, tx.durableID())
 			}
 			shard.rollbackProtected.Set(uint(recid), false)
+			shard.syncNextVisibilityLocked(recid, trackedShards, tx, persist)
+			shard.mu.Unlock()
+		}
+		// Undo inserts (reverse order): mark as globally deleted
+		for i := len(st.InsertRecids) - 1; i >= 0; i-- {
+			recid := st.InsertRecids[i]
+			shard.mu.Lock()
+			shard.deletions.Set(uint(recid), true)
+			if persist && shard.logfile != nil {
+				shard.logfile.Write(LogEntryDelete{idx: recid, txID: tx.durableID()})
+			}
 			shard.syncNextVisibilityLocked(recid, trackedShards, tx, persist)
 			shard.mu.Unlock()
 		}
@@ -1301,6 +1364,8 @@ func (tx *TxContext) rollbackCursorStability(persist bool) {
 // rollbackACID discards overlay masks. Staged rows that were globally hidden
 // remain as garbage (collected by the next GC/compaction pass).
 func (tx *TxContext) rollbackACID() {
+	defer tx.releaseSchemas()
+	defer tx.restoreSchemas(0)
 	tx.mu.Lock()
 	trackedShards := tx.trackedShardSetLocked()
 	for shard, st := range tx.shardTransactions() {
@@ -1488,6 +1553,32 @@ func txRequiresQueryLocalCache(tx *TxContext) bool {
 
 func initTransaction(en scm.Env) {
 	scm.DeclareTitle("Transactions")
+	scm.Declare(&en, &scm.Declaration{
+		Name: "tx_savepoint",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			tx := scmerToTxContext(a[0])
+			if tx == nil || tx.State != TxActive {
+				panic("savepoint requires an active transaction")
+			}
+			return scm.NewAny(tx.CreateSavepoint())
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "captures an opaque savepoint of the actual native transaction", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "tx_rollback_to_savepoint",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			tx := scmerToTxContext(a[0])
+			sp, ok := a[1].Any().(Savepoint)
+			if !ok || tx == nil || tx.State != TxActive || sp.owner != tx.transactionState {
+				panic("savepoint does not belong to the active transaction")
+			}
+			tx.RollbackToSavepoint(sp)
+			return scm.NewBool(true)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "restores a savepoint owned by this exact native transaction", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}, {Kind: "any", Label: "savepoint"}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "tx_query",
 		Fn: func(a ...scm.Scmer) scm.Scmer {

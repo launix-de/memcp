@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2025, 2026  Carl-Philip Hänsch
+Copyright (C) 2025-2026, 2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -546,7 +546,13 @@ func (t *table) RemoveTrigger(name string) bool {
 // dropTrigger follows the same table-DDL-before-schema lock order as trigger
 // creation. Tables may disappear between the catalog snapshot and locking, so
 // each candidate is revalidated under schemalock before it is modified.
-func (db *database) dropTrigger(name string) bool {
+func (db *database) dropTrigger(tx *TxContext, name string) bool {
+	if tx == nil {
+		var result bool
+		schemaAutocommit(func(current *TxContext) { result = db.dropTrigger(current, name) })
+		return result
+	}
+	tx.writeSchema(db)
 	db.schemalock.RLock()
 	tables := db.tables.GetAll()
 	db.schemalock.RUnlock()
@@ -569,6 +575,7 @@ func (db *database) dropTrigger(name string) bool {
 		if !ownsTrigger {
 			continue
 		}
+		tx.recordSchema(t, false)
 		t.ddlMu.Lock()
 		db.schemalock.Lock()
 		if db.tables.Get(t.Name) != t {
@@ -593,7 +600,7 @@ func (db *database) dropTrigger(name string) bool {
 			}
 		}
 		if t.RemoveTrigger(name) {
-			db.saveLockedAndUnlock(t.schemaSaveMode(), t)
+			db.saveLockedAndUnlock(tx, t.schemaSaveMode(), t)
 			t.ddlMu.Unlock()
 			return true
 		}
@@ -923,6 +930,7 @@ func (t *table) ExecuteTableLifecycleTriggers(timing TriggerTiming, tx *TxContex
 			defer func() {
 				if r := recover(); r != nil {
 					// lifecycle triggers are best-effort; log but don't propagate
+					scm.PrintError(r)
 				}
 			}()
 			scm.Apply(tr.Func, scm.NewNil(), scm.NewNil(), session, txContextScmer(tx))

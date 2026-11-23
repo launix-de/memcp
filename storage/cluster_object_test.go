@@ -732,9 +732,9 @@ func prepareRegisteredDiskGeneration(t *testing.T, owner *nodeScanService, peer 
 func TestClusterObjectRegisteredGenerationProtectsFilesAndBlobs(t *testing.T) {
 	defer setupGCTest(t)()
 	CreateDatabase("gcdb", false)
-	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 	insertLongRows(t, tbl, []string{
 		strings.Repeat("A", maxInlineBlobBytes+800),
 		strings.Repeat("B", maxInlineBlobBytes+800),

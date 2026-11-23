@@ -13,9 +13,9 @@ func setupDeltaPrefixSeek(tb testing.TB) *storageShard {
 	databases.Remove(name)
 	tb.Cleanup(func() { databases.Remove(name) })
 	CreateDatabase(name, true)
-	tbl, _ := CreateTable(name, "history", Memory, true)
-	tbl.CreateColumn("parent", "INT", nil, nil)
-	tbl.CreateColumn("version", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, name, "history", Memory, true)
+	tbl.CreateColumn(nil, "parent", "INT", nil, nil)
+	tbl.CreateColumn(nil, "version", "INT", nil, nil)
 	rows := make([][]scm.Scmer, 0, 16384)
 	for parent := 0; parent < 4096; parent++ {
 		for version := 0; version < 4; version++ {

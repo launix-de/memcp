@@ -174,10 +174,10 @@ func TestReplicationGrantedReadsIgnoreDirectoryLocks(t *testing.T) {
 
 func TestReplicationConfigUsesNativePersistenceWithoutRights(t *testing.T) {
 	source, engine := createDurabilityTestTable(t, "treplication_native_config", 0)
-	config, _ := CreateTable(source.schema.Name, "config", Safe, false)
-	config.CreateColumn("node", "text", nil, nil)
-	config.CreateColumn("key", "text", nil, nil)
-	config.CreateColumn("value", "text", nil, nil)
+	config, _ := CreateTable(nil, source.schema.Name, "config", Safe, false)
+	config.CreateColumn(nil, "node", "text", nil, nil)
+	config.CreateColumn(nil, "key", "text", nil, nil)
+	config.CreateColumn(nil, "value", "text", nil, nil)
 	createTableKey(config, uniqueKey{Id: "PRIMARY", Cols: []string{"node", "key"}}, nil)
 	r := replicaRecoveryFixture()
 	r.config = config
@@ -233,9 +233,9 @@ func TestReplicationConfigUsesNativePersistenceWithoutRights(t *testing.T) {
 // mapper. Update-only tombstones must survive an actual native WAL reload.
 func TestReplicationConfigPromotionSurvivesRestart(t *testing.T) {
 	source, engine := createDurabilityTestTable(t, "treplication_placement_restart", 0)
-	config, _ := CreateTable(source.schema.Name, "config", Safe, false)
+	config, _ := CreateTable(nil, source.schema.Name, "config", Safe, false)
 	for _, col := range []string{"node", "key", "value"} {
-		config.CreateColumn(col, "text", nil, nil)
+		config.CreateColumn(nil, col, "text", nil, nil)
 	}
 	createTableKey(config, uniqueKey{Id: "PRIMARY", Cols: []string{"node", "key"}}, nil)
 	r := replicaRecoveryFixture()
@@ -437,9 +437,9 @@ func TestReplicationRecoveredDataDoesNotAcquireColdCatalogPermissions(t *testing
 
 func TestReplicationPreparedSuccessorKeepsLaterWALAcrossRestart(t *testing.T) {
 	tbl, engine := createDurabilityTestTable(t, "prepared_successor_wal", 3)
-	config, _ := CreateTable(tbl.schema.Name, "config", Safe, false)
+	config, _ := CreateTable(nil, tbl.schema.Name, "config", Safe, false)
 	for _, name := range []string{"node", "key", "value"} {
-		config.CreateColumn(name, "text", nil, nil)
+		config.CreateColumn(nil, name, "text", nil, nil)
 	}
 	createTableKey(config, uniqueKey{Id: "PRIMARY", Cols: []string{"node", "key"}}, nil)
 	tbl.schema.rebuild(true, false, false, tbl)
@@ -1169,7 +1169,7 @@ func TestReplicationOwnReadsIgnoreOutwardHandover(t *testing.T) {
 	c := r.resourceCell(resource)
 	c.clusterstate.Initialize(mosi.M)
 	c.ownstate.Initialize(mosi.S)
-	handover := c.clusterstate.TryHandover(func() bool { return true })
+	handover := c.clusterstate.TryHandover(func() bool { return true }, true)
 	if handover == nil {
 		t.Fatal("missing outward handover")
 	}
@@ -1426,9 +1426,9 @@ func TestReplicationRetirementCheckpointsPromotedDataBeforeClearingPlacement(t *
 
 func TestReplicationRetirementClearsAlreadyExclusiveSchemaBackup(t *testing.T) {
 	source, engine := createDurabilityTestTable(t, "treplicationretiredschemabackup", 0)
-	config, _ := CreateTable(source.schema.Name, "config", Safe, false)
+	config, _ := CreateTable(nil, source.schema.Name, "config", Safe, false)
 	for _, name := range []string{"node", "key", "value"} {
-		config.CreateColumn(name, "text", nil, nil)
+		config.CreateColumn(nil, name, "text", nil, nil)
 	}
 	createTableKey(config, uniqueKey{Id: "PRIMARY", Cols: []string{"node", "key"}}, nil)
 	r := replicaRecoveryFixture()
@@ -1484,9 +1484,9 @@ func TestReplicationRetirementClearsAlreadyExclusiveSchemaBackup(t *testing.T) {
 
 func TestReplicationPromotionClearsAllNativePlacementAliases(t *testing.T) {
 	source, engine := createDurabilityTestTable(t, "treplicationclearplacementaliases", 0)
-	config, _ := CreateTable(source.schema.Name, "config", Safe, false)
+	config, _ := CreateTable(nil, source.schema.Name, "config", Safe, false)
 	for _, name := range []string{"node", "key", "value"} {
-		config.CreateColumn(name, "text", nil, nil)
+		config.CreateColumn(nil, name, "text", nil, nil)
 	}
 	createTableKey(config, uniqueKey{Id: "PRIMARY", Cols: []string{"node", "key"}}, nil)
 	r := replicaRecoveryFixture()
@@ -1544,9 +1544,9 @@ func TestReplicationPromotionClearsAllNativePlacementAliases(t *testing.T) {
 
 func TestReplicationRetirementJoinsLateSchemaPlacement(t *testing.T) {
 	source, _ := createDurabilityTestTable(t, "t_retire_late_schema", 0)
-	config, _ := CreateTable(source.schema.Name, "config", Safe, false)
+	config, _ := CreateTable(nil, source.schema.Name, "config", Safe, false)
 	for _, name := range []string{"node", "key", "value"} {
-		config.CreateColumn(name, "text", nil, nil)
+		config.CreateColumn(nil, name, "text", nil, nil)
 	}
 	createTableKey(config, uniqueKey{Id: "PRIMARY", Cols: []string{"node", "key"}}, nil)
 	r := replicaRecoveryFixture()

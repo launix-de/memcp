@@ -1080,7 +1080,7 @@ func TestClusterInsertSelectsUniqueDomainOwnerWithoutClaiming(t *testing.T) {
 
 func TestClusterMutationScanBorrowsAcquiredWriter(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tmutationacquiredwriter")
-	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl.CreateColumn(nil, "value", "INT", nil, nil)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	tbl.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
 	shard := tbl.ActiveShards()[0]
@@ -1133,7 +1133,7 @@ func TestClusterMutationScanBorrowsAcquiredWriter(t *testing.T) {
 
 func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "t_unique_channel_collision")
-	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl.CreateColumn(nil, "value", "INT", nil, nil)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	tbl.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
 	cluster := globalTestCluster(t, tbl.schema.Name)
@@ -1194,7 +1194,7 @@ func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 
 func TestClusterNativeUniqueUpdateReleasesBorrowedReservation(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "t_unique_update_borrowed")
-	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl.CreateColumn(nil, "value", "INT", nil, nil)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "value", Cols: []string{"value"}}}
 	tbl.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 	cluster := globalTestCluster(t, tbl.schema.Name)
@@ -1485,7 +1485,7 @@ func TestClusterInsertPlacementLearnsRepeatAccess(t *testing.T) {
 
 func TestClusterLocalUniqueUpdaterCannotEscapeReservation(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "t_unique_local_escaped_updater")
-	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl.CreateColumn(nil, "value", "INT", nil, nil)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	columns := []string{"id", "value"}
 	rows := [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}
@@ -1561,7 +1561,7 @@ func TestClusterUniqueKeyChangeChecksAppendedLane(t *testing.T) {
 	for _, collision := range []bool{false, true} {
 		t.Run(fmt.Sprint(collision), func(t *testing.T) {
 			tbl := setupScanParallelTestTable(t, "t_unique_key_change_new_lane")
-			tbl.CreateColumn("value", "INT", nil, nil)
+			tbl.CreateColumn(nil, "value", "INT", nil, nil)
 			tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "value", Cols: []string{"value"}}}
 			tbl.Shards = []*storageShard{NewShard(tbl), NewShard(tbl)}
 			tbl.publishTopologyLocked()
@@ -1676,7 +1676,7 @@ func TestClusterUniqueContentionDoesNotMoveOwnership(t *testing.T) {
 				guard.lock()
 				defer guard.unlock()
 			} else {
-				writer, _ := cell.ownstate.TryWrite(nil, false)
+				writer, _ := cell.ownstate.TryWrite(nil, false, nil)
 				if writer == nil {
 					t.Fatal("fixture writer not admitted")
 				}

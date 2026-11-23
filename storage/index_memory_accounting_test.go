@@ -48,8 +48,8 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 	CreateDatabase(dbname, true)
 	defer databases.Remove(dbname)
 
-	tbl, _ := CreateTable(dbname, "items", Memory, true)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, dbname, "items", Memory, true)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 	rows := make([][]scm.Scmer, 0, 16)
 	for i := 0; i < 16; i++ {
 		rows = append(rows, []scm.Scmer{scm.NewInt(int64(i))})

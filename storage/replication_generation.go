@@ -909,7 +909,7 @@ func (r *replicationManager) finishImport(source string, transfer *replicaImport
 		shard.catalogPrivate.Store(true)
 		relation, _ := catalogResourceRelation(resource)
 		if transfer.untrusted || relation == catalogTables {
-			_, nativeRows = catalogShardRecords(shard, catalogRelationColumns(relation), nil)
+			_, nativeRows = catalogShardRecords(nil, shard, catalogRelationColumns(relation), nil)
 		}
 		if transfer.untrusted {
 			if err := validateReplicaCatalogRows(db.Name, relation, nativeRows); err != nil {
@@ -1095,7 +1095,7 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 		if backup {
 			admittedRows = catalogRowsFromDocument(admittedDocument)
 		} else {
-			admittedRows = replacement.catalogRowsLocked()
+			admittedRows = replacement.catalogRowsLocked(nil)
 			admittedDocument = catalogDocumentFromRows(name, &admittedRows)
 		}
 		admittedRoot = readCatalogRoot(data)
@@ -1137,12 +1137,13 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 			db.catalog.committed = replacement.catalog.committed
 			db.catalog.committedFP = replacement.catalog.committedFP
 			db.catalog.forwards = replacement.catalog.forwards
+			db.catalog.revision.Store(replacement.catalog.revision.Load())
 			db.catalog.liveVersion.Add(1)
 			publishCatalogShards(db.Name, &db.catalog.live)
 			db.catalogMu.Unlock()
 		} else {
-			rows := replacement.catalogRowsLocked()
-			db.editCatalogLocked(&rows, catalogAllRelations, nil)
+			rows := replacement.catalogRowsLocked(nil)
+			db.editCatalogLocked(nil, &rows, catalogAllRelations, nil)
 			publishCatalogShards(db.Name, &db.catalog.live)
 		}
 		for _, table := range db.tables.GetAll() {

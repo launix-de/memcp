@@ -230,6 +230,9 @@ func (t *table) insertPeer(columns []string, rows [][]scm.Scmer) (*storageShard,
 }
 
 func (t *table) placeInsert(columns []string, rows [][]scm.Scmer, collisionCols []string, collision scm.Scmer, mergeNull bool, firstID func(int64), tx *TxContext) (int, bool) {
+	if tx.hasSchemaWriter(t.schema) {
+		return 0, false
+	}
 	shard, peer := t.insertPeer(columns, rows)
 	if peer == nil {
 		// Cold admission is decided by the native access boundary. A warm

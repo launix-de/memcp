@@ -20,6 +20,7 @@ import "time"
 import "strings"
 import "context"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage/mosi"
 
 // Shared cache admission owns its source coherence proof. Delegating a producer
 // grants no local shard rights, and therefore cannot alone certify later hits.
@@ -39,7 +40,7 @@ func (t *table) acquireCacheSourceRights(tx *TxContext) bool {
 	done := runFanoutTasks(tx, len(shards), func(i int, _ bool) {
 		defer func() { failures[i] = recover() }()
 		shard := shards[i]
-		granted[i] = shard == nil || cluster.tryRead(ctx, *cluster.manager.shardCell(shard).resource.Load())
+		granted[i] = shard == nil || cluster.tryAcquire(ctx, *cluster.manager.shardCell(shard).resource.Load(), mosi.S)
 	})
 	if done != nil {
 		<-done

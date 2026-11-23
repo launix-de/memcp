@@ -69,8 +69,8 @@ func (db *database) ensureBlobTable() *table {
 	if t = db.tables.Get(".blobs"); t != nil {
 		// Repair schemas created by older versions that published the table
 		// before both columns had been added.
-		t.CreateColumn("hash", "TEXT", nil, nil)
-		t.CreateColumn("refcount", "INT", nil, nil)
+		t.CreateColumn(nil, "hash", "TEXT", nil, nil)
+		t.CreateColumn(nil, "refcount", "INT", nil, nil)
 		state.table.Store(t)
 		return t
 	}
@@ -79,20 +79,20 @@ func (db *database) ensureBlobTable() *table {
 	db.schemalock.Lock()
 	if t = db.tables.Get(".blobs"); t != nil {
 		db.schemalock.Unlock()
-		t.CreateColumn("hash", "TEXT", nil, nil)
-		t.CreateColumn("refcount", "INT", nil, nil)
+		t.CreateColumn(nil, "hash", "TEXT", nil, nil)
+		t.CreateColumn(nil, "refcount", "INT", nil, nil)
 		state.table.Store(t)
 		return t
 	}
 	t = db.newTable(".blobs", Safe)
-	t.createColumnLocked("hash", "TEXT", nil, nil, false)
-	t.createColumnLocked("refcount", "INT", nil, nil, false)
+	t.createColumnLocked("hash", "TEXT", nil, nil, false, nil)
+	t.createColumnLocked("refcount", "INT", nil, nil, false, nil)
 	// The private constructor starts with an empty declaration snapshot. Publish
 	// the complete column directory under its existing schema owner before the
 	// table becomes visible to INSERT and UPDATE batches.
 	t.publishShowColumnsSnapshot(true)
 	db.tables.Set(t.Name, t)
-	db.saveLockedAndUnlock(schemaSaveFsync, t)
+	db.saveLockedAndUnlock(nil, schemaSaveFsync, t)
 	state.table.Store(t)
 	registerCreatedTable(t)
 	return t

@@ -114,7 +114,10 @@ func (c *replicaCell) forwardingDone() <-chan struct{} {
 	return c.forwardDone
 }
 
-func (table *table) schemaWrite() (*table, WriteAccess) {
+func (table *table) schemaWrite(tx *TxContext) (*table, WriteAccess) {
+	if table.retired.Load() {
+		panic("table handle belongs to a rolled-back or dropped definition")
+	}
 	if nativeCatalogRelation(table) {
 		panic("schema catalog declarations are read-only; use native DDL")
 	}
@@ -129,11 +132,11 @@ func (table *table) schemaWrite() (*table, WriteAccess) {
 			// waits for a source which itself waits for our schema writer.
 			for _, shard := range table.ActiveShards() {
 				if shard != nil {
-					r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", nil)
+					r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", tx)
 				}
 			}
 		}
-		access := table.schema.GetWrite(nil)
+		access := table.schema.GetWrite(tx)
 		complete, retry := false, false
 		func() {
 			defer func() {
@@ -160,7 +163,7 @@ func (table *table) schemaWrite() (*table, WriteAccess) {
 							return
 						}
 					} else {
-						r.obtain(*cell.resource.Load(), mosi.M, "", nil)
+						r.obtain(*cell.resource.Load(), mosi.M, "", tx)
 					}
 				}
 			}
@@ -506,24 +509,40 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext,
 		}
 	}
 	var owner any
+	var readProof *mosi.ReadLease
 	if tx != nil {
 		owner = tx.transactionState
+		if resource.Shard == "" {
+			if lease := tx.schemaLease(databases.Get(resource.Database)); lease != nil {
+				readProof = lease.reader
+			}
+		}
 	}
 	for {
 		c = c.resolved()
 		resource = *c.resource.Load()
 		if blocking {
-			c = r.obtain(resource, mosi.M, replicationUser(tx), tx)
+			if readProof != nil && r.cluster != nil {
+				if !r.cluster.tryAcquire(scanQueryContext(tx, r.cluster.ctx), resource, mosi.M) {
+					panic("schema upgrade conflicts with another transaction; retry transaction")
+				}
+				c = c.resolved()
+			} else {
+				c = r.obtain(resource, mosi.M, replicationUser(tx), tx)
+			}
 		}
-		writer, wait := c.ownstate.TryWrite(owner, false)
+		writer, wait := c.ownstate.TryWrite(owner, false, readProof)
 		if writer == nil && c.ownstate.ClosingWrites() && c.transactionContinues(tx) {
 			// Handover may begin between a preflight check and TryWrite. Prove
 			// continuation after admission refuses us, before waiting on the
 			// handover which itself waits for this transaction to finish.
-			writer, wait = c.ownstate.TryWrite(owner, true)
+			writer, wait = c.ownstate.TryWrite(owner, true, readProof)
 		}
 		if writer != nil {
 			return c, writer.Release, true
+		}
+		if readProof != nil {
+			panic("schema upgrade cannot wait while retaining an earlier definition; retry transaction")
 		}
 		if !blocking {
 			return c, nil, false
@@ -564,7 +583,7 @@ func (r *replicationManager) backupDatabase(name, user string) {
 		// Freeze the native roots before enumerating their resources. Catalog
 		// files must reach the backup before its schema can decode those roots;
 		// backup admission must not acquire S and remove our offline M rights.
-		handover := guard.ownstate.TryHandover(guard.writesDrained)
+		handover := guard.ownstate.TryHandover(guard.writesDrained, false)
 		if handover == nil {
 			return false
 		}
@@ -638,7 +657,7 @@ func (r *replicationManager) backupDatabase(name, user string) {
 				return false
 			}
 			defer releasePersistence()
-			handover := cell.ownstate.TryHandover(cell.writesDrained)
+			handover := cell.ownstate.TryHandover(cell.writesDrained, false)
 			if handover == nil {
 				return false
 			}

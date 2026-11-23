@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -277,12 +278,12 @@ func TestCatalogPersistsAndTakesPrecedenceOverLegacySchema(t *testing.T) {
 	const schema = "catalog-persistence-test"
 	CreateDatabase(schema, false)
 	defer DropDatabase(schema, true)
-	parent, _ := CreateTable(schema, "parent", Safe, false)
-	parent.CreateColumn("id", "int", nil, []scm.Scmer{scm.NewString("primary"), scm.NewBool(true)})
-	parent.CreateColumn("label", "varchar", []int{20}, []scm.Scmer{scm.NewString("comment"), scm.NewString("shown name")})
-	child, _ := CreateTable(schema, "child", Safe, false)
-	child.CreateColumn("id", "int", nil, nil)
-	child.CreateColumn("parent_id", "int", nil, nil)
+	parent, _ := CreateTable(nil, schema, "parent", Safe, false)
+	parent.CreateColumn(nil, "id", "int", nil, []scm.Scmer{scm.NewString("primary"), scm.NewBool(true)})
+	parent.CreateColumn(nil, "label", "varchar", []int{20}, []scm.Scmer{scm.NewString("comment"), scm.NewString("shown name")})
+	child, _ := CreateTable(nil, schema, "child", Safe, false)
+	child.CreateColumn(nil, "id", "int", nil, nil)
+	child.CreateColumn(nil, "parent_id", "int", nil, nil)
 	scm.Eval(scm.Read("catalog test", `(createforeignkey (table "`+schema+`" false "child" false) "fk_child_parent" '("parent_id") (table "`+schema+`" false "parent" false) '("id") "cascade" "restrict")`, true), &scm.Globalenv)
 
 	db := GetDatabase(schema)
@@ -514,7 +515,7 @@ func TestCatalogDefinitionProposalsKeepRuntimeCachesLocal(t *testing.T) {
 			previous := replication.Swap(r)
 			defer replication.Store(previous)
 			db.schemalock.Lock()
-			before := db.catalogRowsLocked()
+			before := db.catalogRowsLocked(nil)
 			db.schemalock.Unlock()
 			cache := db.newTable(".grp:local", Cache)
 			cache.RuntimeOnly = true
@@ -522,8 +523,8 @@ func TestCatalogDefinitionProposalsKeepRuntimeCachesLocal(t *testing.T) {
 			compute := &column{Name: "local_compute", Typ: "INT", IsTemp: true, RuntimeOnly: true, Computor: scm.NewSymbol("local_runtime_helper")}
 			tbl.Columns = append(tbl.Columns, compute)
 			db.schemalock.Lock()
-			db.proposeCatalogTablesLocked(tbl, cache)
-			rows := db.catalogRowsLocked()
+			db.proposeCatalogTablesLocked(nil, tbl, cache)
+			rows := db.catalogRowsLocked(nil)
 			db.schemalock.Unlock()
 			for _, row := range rows[catalogTables] {
 				if catalogTableName(row) == cache.Name {
@@ -590,7 +591,7 @@ func TestCatalogRuntimeCacheRebuildDoesNotPublishLegacyMigration(t *testing.T) {
 	if result := RebuildTable(cache, true, false); strings.Contains(result, "errors:") {
 		t.Fatal(result)
 	}
-	DropTable(db.Name, cache.Name, false)
+	DropTable(nil, db.Name, cache.Name, false)
 	if counting.calls.Load() != 0 || string(engine.ReadSchema()) != string(legacy) {
 		t.Fatal("physical query cache published a durable legacy catalog migration")
 	}
@@ -674,7 +675,7 @@ func TestCatalogReplicaTablesIntroduceDataAuthority(t *testing.T) {
 	r := replicaRecoveryFixture()
 	r.schemaShards(db, r.id, true)
 	introduced := db.newTable("introduced", Safe)
-	rows := db.catalogRowsLocked()
+	rows := db.catalogRowsLocked(nil)
 	proposal := catalogRowsFromTable(introduced)
 	rows[catalogTables] = append(rows[catalogTables], proposal[catalogTables]...)
 	incoming := buildDiskShard(db, catalogTables, rows[catalogTables], true)
@@ -708,7 +709,7 @@ func TestCatalogReplicaTablesIntroduceDataAuthority(t *testing.T) {
 	if r.lookupCell(backupOnly.Shards[0].replicationResource()) != nil {
 		t.Fatal("backup fixture already registered data authority")
 	}
-	rows = db.catalogRowsLocked()
+	rows = db.catalogRowsLocked(nil)
 	proposal = catalogRowsFromTable(backupOnly)
 	rows[catalogTables] = append(rows[catalogTables], proposal[catalogTables]...)
 	incoming = buildDiskShard(db, catalogTables, rows[catalogTables], true)
@@ -779,7 +780,7 @@ func TestCatalogReplicaExportRetainsSystemFilesAcrossCheckpoint(t *testing.T) {
 	if !r.hasTransfers(db.Name) || !r.hasTransfers(source.home().Name) {
 		t.Fatal("catalog export did not retain both logical and physical storage owners")
 	}
-	tbl.CreateColumn("new_definition", "INT", nil, nil)
+	tbl.CreateColumn(nil, "new_definition", "INT", nil, nil)
 	if db.catalog.live[catalogColumns].uuid == source.uuid {
 		t.Fatal("fixture did not checkpoint a new catalog generation")
 	}
@@ -804,8 +805,8 @@ func TestCatalogMaterializationRetainsOnlyMatchingInitializer(t *testing.T) {
 	proposal := catalogRowsFromTable(tbl)
 	db.schemalock.Lock()
 	defer db.schemalock.Unlock()
-	db.editCatalogLocked(&proposal, 1<<catalogTables, []string{tbl.Name})
-	rows := db.catalogRowsLocked()
+	db.editCatalogLocked(nil, &proposal, 1<<catalogTables, []string{tbl.Name})
+	rows := db.catalogRowsLocked(nil)
 	before := catalogDocumentFromRows(db.Name, &rows)
 	db.materializeCatalogTableLocked(tbl, &rows)
 	if tbl.OnInit.Load() != &initializer {
@@ -827,8 +828,8 @@ func TestCatalogMaterializationRetainsOnlyMatchingInitializer(t *testing.T) {
 			}
 		}
 	}
-	db.editCatalogLocked(&rows, 1<<catalogTables, nil)
-	accepted := db.catalogRowsLocked()
+	db.editCatalogLocked(nil, &rows, 1<<catalogTables, nil)
+	accepted := db.catalogRowsLocked(nil)
 	db.materializeCatalogTableLocked(tbl, &accepted)
 	if tbl.OnInit.Load() != nil {
 		t.Fatal("removed catalog initializer remained in the runtime view")
@@ -838,8 +839,8 @@ func TestCatalogMaterializationRetainsOnlyMatchingInitializer(t *testing.T) {
 func TestCatalogCacheRebuildDoesNotCreateBlobCatalog(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "catalog-cache-checkpoint", 1)
 	db := tbl.schema
-	cache, _ := CreateTable(db.Name, ".projection_cache", Cache, false)
-	cache.CreateColumn("value", "INT", nil, nil)
+	cache, _ := CreateTable(nil, db.Name, ".projection_cache", Cache, false)
+	cache.CreateColumn(nil, "value", "INT", nil, nil)
 	cache.Insert([]string{"value"}, [][]scm.Scmer{{scm.NewInt(42)}}, nil, scm.NewNil(), false, nil)
 	if result := RebuildTable(cache, true, false); strings.Contains(result, "errors:") {
 		t.Fatal(result)
@@ -879,7 +880,7 @@ func TestCatalogCheckpointCannotOverwriteDefinitionsFromRuntime(t *testing.T) {
 	}
 	// Reconstructing a runtime projection repairs it from the tables as well.
 	db.schemalock.Lock()
-	rows := db.catalogRowsLocked()
+	rows := db.catalogRowsLocked(nil)
 	db.materializeCatalogTableLocked(tbl, &rows)
 	db.schemalock.Unlock()
 	if tbl.Comment != "" || tbl.Columns[1].Comment != "" {
@@ -890,7 +891,7 @@ func TestCatalogCheckpointCannotOverwriteDefinitionsFromRuntime(t *testing.T) {
 func TestCatalogRejectsRetainedMutationCallback(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "catalog-callback-authority", 0)
 	shard := tbl.schema.catalog.live[catalogColumns]
-	_, before := catalogShardRecords(shard, catalogRelationColumns(catalogColumns), nil)
+	_, before := catalogShardRecords(nil, shard, catalogRelationColumns(catalogColumns), nil)
 	callback := shard.UpdateFunction(0, true, false, nil, nil)
 	func() {
 		defer func() {
@@ -900,7 +901,7 @@ func TestCatalogRejectsRetainedMutationCallback(t *testing.T) {
 		}()
 		callback()
 	}()
-	_, after := catalogShardRecords(shard, catalogRelationColumns(catalogColumns), nil)
+	_, after := catalogShardRecords(nil, shard, catalogRelationColumns(catalogColumns), nil)
 	if !reflect.DeepEqual(before, after) {
 		t.Fatal("rejected callback changed catalog definitions")
 	}
@@ -927,7 +928,7 @@ func TestCatalogScanLeavesRuntimeDefinitionsCold(t *testing.T) {
 	cold := newDatabase()
 	cold.Name, cold.persistence, cold.srState = db.Name, db.persistence, COLD
 	cold.bootstrapCatalog(nil)
-	_, rows := catalogShardRecords(cold.catalog.live[catalogColumns], catalogRelationColumns(catalogColumns), nil)
+	_, rows := catalogShardRecords(nil, cold.catalog.live[catalogColumns], catalogRelationColumns(catalogColumns), nil)
 	if len(rows) != 2 {
 		t.Fatalf("catalog contains %d columns, want 2", len(rows))
 	}
@@ -1015,7 +1016,7 @@ func TestCatalogCleanupRetainsPinnedGeneration(t *testing.T) {
 	}()
 	CreateDatabase("catalog-generation-other", false)
 	defer DropDatabase("catalog-generation-other", true)
-	tbl.CreateColumn("later", "INT", nil, nil)
+	tbl.CreateColumn(nil, "later", "INT", nil, nil)
 	if db.catalog.live[catalogColumns].uuid == old.uuid {
 		t.Fatal("DDL did not publish a new queryable catalog generation")
 	}
@@ -1064,7 +1065,7 @@ func TestCatalogCleanupAndCheckpointMakeProgress(t *testing.T) {
 	for range 256 {
 		runtime.Gosched()
 	}
-	db.commitSchemaLocked(true, db.schemalock.Unlock)
+	db.commitSchemaLocked(nil, true, db.schemalock.Unlock)
 	<-done
 }
 
@@ -1125,7 +1126,7 @@ func TestCatalogSlowCleanupDoesNotBlockUnrelatedDDL(t *testing.T) {
 				t.Fatal("cleanup did not reach delayed backend operation")
 			}
 			done := make(chan struct{})
-			go func() { defer close(done); tbl.CreateColumn("added", "INT", nil, nil) }()
+			go func() { defer close(done); tbl.CreateColumn(nil, "added", "INT", nil, nil) }()
 			defer func() { release(); <-done }()
 			select {
 			case <-done:
@@ -1159,15 +1160,15 @@ func TestCatalogRenameUsesOneNativeDecision(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "catalog-rename-decision", 0)
 	db := tbl.schema
 	oldname := tbl.Name
-	before := db.catalog.liveVersion.Load()
-	RenameTable(db.Name, oldname, "renamed")
-	if got := db.catalog.liveVersion.Load(); got != before+1 {
+	before := atomic.LoadUint64(&GlobalCommitEpoch)
+	RenameTable(nil, db.Name, oldname, "renamed")
+	if got := atomic.LoadUint64(&GlobalCommitEpoch); got != before+1 {
 		t.Fatalf("rename published %d native decisions, want one", got-before)
 	}
 	if db.GetTable(oldname) != nil || db.GetTable("renamed") != tbl {
 		t.Fatal("RAM directory does not match rename")
 	}
-	rows := db.catalogRowsLocked()
+	rows := db.catalogRowsLocked(nil)
 	for i := catalogTables; i < catalogProcedures; i++ {
 		for _, row := range rows[i] {
 			if i == catalogTables {
@@ -1224,6 +1225,592 @@ func TestCatalogSizeEstimateDoesNotAcquireDataLocks(t *testing.T) {
 	}
 }
 
+func TestCatalogEditsFollowOriginalTransaction(t *testing.T) {
+	for _, mode := range []TxMode{TxACID, TxCursorStability} {
+		for _, commit := range []bool{false, true} {
+			for _, indexed := range []bool{false, true} {
+				t.Run(fmt.Sprintf("mode-%d-commit-%t-indexed-%t", mode, commit, indexed), func(t *testing.T) {
+					tbl, _ := createDurabilityTestTable(t, "catalog-original-transaction", 1)
+					db := tbl.schema
+					before := db.catalogRowsLocked(nil)
+					tx := NewTxContext(mode)
+					defer func() {
+						if tx.State == TxActive {
+							tx.Rollback()
+						}
+					}()
+					id, epoch := tx.ID, tx.SnapshotEpoch
+					// Catalog admission must join prior native work without resetting
+					// its identity, snapshot, overlays or undo journal.
+					tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("before-ddl")}}, nil, scm.NewNil(), false, nil, tx)
+					comment, name := -1, -1
+					for i, field := range catalogRelations[catalogColumns].columns() {
+						if field.key == "Comment" {
+							comment = i
+						}
+						if field.key == "Name" {
+							name = i
+						}
+					}
+					if comment < 0 || name < 0 {
+						t.Fatal("column comment is missing from native relation")
+					}
+					idColumn := func(rows catalogRows) []scm.Scmer {
+						for _, row := range rows[catalogColumns] {
+							if row[name].String() == "id" {
+								return row
+							}
+						}
+						var definitions []string
+						for _, row := range rows[catalogColumns] {
+							definitions = append(definitions, fmt.Sprintf("%v:%v", row[name], row[comment]))
+						}
+						t.Fatalf("id column disappeared: %v", definitions)
+						return nil
+					}
+					edit := func(value string) {
+						db.schemalock.Lock()
+						defer db.schemalock.Unlock()
+						rows := db.catalogRowsLocked(tx)
+						idColumn(rows)[comment] = scm.NewString(value)
+						var owners []string
+						if indexed {
+							owners = []string{tbl.Name}
+						}
+						if !db.editCatalogLocked(tx, &rows, 1<<catalogColumns, owners) {
+							t.Fatal("catalog mutation was not staged")
+						}
+						if tx.State != TxActive || tx.ID != id || tx.SnapshotEpoch != epoch {
+							t.Fatal("catalog editor finalized or replaced the original transaction")
+						}
+					}
+					edit("first")
+					sp := tx.CreateSavepoint()
+					edit("second")
+					edit("third")
+					tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(3), scm.NewString("after-savepoint")}}, nil, scm.NewNil(), false, nil, tx)
+					tx.RollbackToSavepoint(sp)
+					own := db.catalogRowsLocked(tx)
+					if got := idColumn(own)[comment].String(); got != "first" || len(own[catalogColumns]) != len(before[catalogColumns]) {
+						t.Fatalf("savepoint restored wrong definitions: %q, %d rows", got, len(own[catalogColumns]))
+					}
+					_, ownData := catalogShardRecords(tx, tbl.ActiveShards()[0], []string{"id", "payload"}, nil)
+					wantData := [][]scm.Scmer{{scm.NewInt(1), scm.NewString("row-00000001")}, {scm.NewInt(2), scm.NewString("before-ddl")}}
+					if !reflect.DeepEqual(ownData, wantData) {
+						t.Fatalf("savepoint lost original data journal: %v", ownData)
+					}
+					if commit {
+						if err := tx.Commit(); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						tx.Rollback()
+						wantData = wantData[:1]
+					}
+					accepted := db.catalogRowsLocked(nil)
+					want := before
+					if commit {
+						want = own
+					}
+					for i := range catalogRelations {
+						if catalogFingerprint(catalogRelationID(i), accepted[i]) != catalogFingerprint(catalogRelationID(i), want[i]) {
+							t.Fatalf("relation %s did not follow original decision", catalogRelations[i].name)
+						}
+					}
+					_, acceptedData := catalogShardRecords(nil, tbl.ActiveShards()[0], []string{"id", "payload"}, nil)
+					if !reflect.DeepEqual(acceptedData, wantData) {
+						t.Fatalf("data and catalog followed different decisions: %v", acceptedData)
+					}
+					// No compatibility export or catalog checkpoint has run since
+					// these edits. Both definitions and data must recover through
+					// their existing WALs and the same tenant commit authority.
+					cold := newDatabase()
+					cold.Name, cold.persistence, cold.srState = db.Name, db.persistence, COLD
+					previous := databases.Set(db.Name, cold)
+					defer func() {
+						databases.Set(db.Name, previous)
+						publishCatalogShards(db.Name, &db.catalog.live)
+						cold.closeTransactionLog()
+					}()
+					cold.ensureLoaded()
+					recovered := cold.catalogRowsLocked(nil)
+					for i := range catalogRelations {
+						if catalogFingerprint(catalogRelationID(i), recovered[i]) != catalogFingerprint(catalogRelationID(i), want[i]) {
+							t.Fatalf("relation %s recovered a different transaction decision", catalogRelations[i].name)
+						}
+					}
+					restored := cold.GetTable(tbl.Name)
+					_, recoveredData := catalogShardRecords(nil, restored.ActiveShards()[0], []string{"id", "payload"}, nil)
+					if !reflect.DeepEqual(recoveredData, wantData) {
+						t.Fatalf("data and catalog recovered different decisions: %v", recoveredData)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSchemaDefinitionScopeExcludesConflictingDDL(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "schema-definition-scope", 1)
+	reader, writer := NewTxContext(TxACID), NewTxContext(TxACID)
+	defer func() {
+		if reader.State == TxActive {
+			reader.Rollback()
+		}
+		if writer.State == TxActive {
+			writer.Rollback()
+		}
+	}()
+	_, before := catalogShardRecords(reader, tbl.ActiveShards()[0], []string{"id", "payload"}, nil)
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		tbl.CreateColumn(writer, "added", "INT", nil, nil)
+	}()
+	if failure == nil {
+		t.Fatal("DDL changed a definition retained by another transaction")
+	}
+	writer.Rollback()
+	_, after := catalogShardRecords(reader, tbl.ActiveShards()[0], []string{"id", "payload"}, nil)
+	if !reflect.DeepEqual(before, after) || len(tbl.Columns) != 2 {
+		t.Fatal("rejected DDL changed the reader's data or definition")
+	}
+	reader.Rollback()
+	accepted := NewTxContext(TxACID)
+	defer func() {
+		if accepted.State == TxActive {
+			accepted.Rollback()
+		}
+	}()
+	if !tbl.CreateColumn(accepted, "added", "INT", nil, nil) {
+		t.Fatal("released reader continued to exclude DDL")
+	}
+	if err := accepted.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if len(tbl.Columns) != 3 {
+		t.Fatal("accepted DDL did not publish its definition")
+	}
+}
+
+func TestSchemaProjectionFollowsOriginalTransaction(t *testing.T) {
+	for _, mode := range []TxMode{TxACID, TxCursorStability} {
+		for _, commit := range []bool{false, true} {
+			for _, savepoint := range []bool{false, true} {
+				t.Run(fmt.Sprintf("mode-%d-commit-%t-savepoint-%t", mode, commit, savepoint), func(t *testing.T) {
+					tbl, _ := createDurabilityTestTable(t, "schema-original-projection", 1)
+					db := tbl.schema
+					tx := NewTxContext(mode)
+					defer func() {
+						if tx.State == TxActive {
+							tx.Rollback()
+						}
+					}()
+					tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("prior-dml")}}, nil, scm.NewNil(), false, nil, tx)
+					sp := tx.CreateSavepoint()
+					if !tbl.CreateColumn(tx, "added", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(7)}) {
+						t.Fatal("ADD did not create the original transaction's definition")
+					}
+					_, own := catalogShardRecords(tx, tbl.ActiveShards()[0], []string{"id", "payload", "added"}, nil)
+					wantOwn := [][]scm.Scmer{{scm.NewInt(1), scm.NewString("row-00000001"), scm.NewInt(7)}, {scm.NewInt(2), scm.NewString("prior-dml"), scm.NewInt(7)}}
+					if !reflect.DeepEqual(own, wantOwn) {
+						t.Fatalf("data did not use its effective definition: %v", own)
+					}
+					if savepoint {
+						tx.RollbackToSavepoint(sp)
+						if len(tbl.Columns) != 2 {
+							t.Fatal("savepoint retained the added RAM declaration")
+						}
+					}
+					if commit {
+						if err := tx.Commit(); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						tx.Rollback()
+					}
+					width, count := 2, 1
+					if commit {
+						count = 2
+						if !savepoint {
+							width = 3
+						}
+					}
+					if len(tbl.Columns) != width {
+						t.Fatalf("RAM has %d columns, want %d", len(tbl.Columns), width)
+					}
+					cold := newDatabase()
+					cold.Name, cold.persistence, cold.srState = db.Name, db.persistence, COLD
+					previous := databases.Set(db.Name, cold)
+					defer func() {
+						databases.Set(db.Name, previous)
+						publishCatalogShards(db.Name, &db.catalog.live)
+						cold.closeTransactionLog()
+					}()
+					cold.ensureLoaded()
+					restored := cold.GetTable(tbl.Name)
+					if len(restored.Columns) != width {
+						t.Fatal("restarted definitions disagree with the completed transaction")
+					}
+					columns := []string{"id", "payload"}
+					if width == 3 {
+						columns = append(columns, "added")
+					}
+					_, recovered := catalogShardRecords(nil, restored.ActiveShards()[0], columns, nil)
+					want := make([][]scm.Scmer, count)
+					for i := range want {
+						want[i] = wantOwn[i][:width]
+					}
+					if !reflect.DeepEqual(recovered, want) {
+						t.Fatalf("restart recovered mismatched data/schema: %v", recovered)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSchemaNamespaceFollowsOriginalTransaction(t *testing.T) {
+	for _, mode := range []TxMode{TxACID, TxCursorStability} {
+		for _, commit := range []bool{false, true} {
+			for _, savepoint := range []bool{false, true} {
+				for _, drop := range []bool{false, true} {
+					t.Run(fmt.Sprintf("mode-%d-commit-%t-savepoint-%t-drop-%t", mode, commit, savepoint, drop), func(t *testing.T) {
+						tbl, _ := createDurabilityTestTable(t, "schema-namespace-transaction", 1)
+						db, original := tbl.schema, tbl.Name
+						tx := NewTxContext(mode)
+						defer func() {
+							if tx.State == TxActive {
+								tx.Rollback()
+							}
+						}()
+						tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("before-ddl")}}, nil, scm.NewNil(), false, nil, tx)
+						sp := tx.CreateSavepoint()
+						if drop {
+							DropTable(tx, db.Name, original, false)
+						} else {
+							RenameTable(tx, db.Name, original, "renamed")
+						}
+						if db.GetTable(original) != nil {
+							t.Fatal("original name still resolves inside the schema transaction")
+						}
+						if savepoint {
+							tx.RollbackToSavepoint(sp)
+						}
+						if commit {
+							if err := tx.Commit(); err != nil {
+								t.Fatal(err)
+							}
+						} else {
+							tx.Rollback()
+						}
+						wantName := original
+						if commit && !savepoint {
+							wantName = "renamed"
+							if drop {
+								wantName = ""
+							}
+						}
+						cold := newDatabase()
+						cold.Name, cold.persistence, cold.srState = db.Name, db.persistence, COLD
+						previous := databases.Set(db.Name, cold)
+						defer func() {
+							databases.Set(db.Name, previous)
+							publishCatalogShards(db.Name, &db.catalog.live)
+							cold.closeTransactionLog()
+						}()
+						cold.ensureLoaded()
+						for _, current := range []*database{db, cold} {
+							for _, name := range []string{original, "renamed"} {
+								relation := current.GetTable(name)
+								if name != wantName {
+									if relation != nil {
+										t.Fatalf("unexpected relation %s after transaction/restart", name)
+									}
+									continue
+								}
+								if relation == nil {
+									t.Fatalf("missing admitted relation %s after transaction/restart", name)
+								}
+								_, rows := catalogShardRecords(nil, relation.ActiveShards()[0], []string{"id", "payload"}, nil)
+								want := [][]scm.Scmer{{scm.NewInt(1), scm.NewString("row-00000001")}}
+								if commit {
+									want = append(want, []scm.Scmer{scm.NewInt(2), scm.NewString("before-ddl")})
+								}
+								if !reflect.DeepEqual(rows, want) {
+									t.Fatalf("data/schema decision mismatch: %v", rows)
+								}
+							}
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestSchemaEngineFollowsOriginalTransaction(t *testing.T) {
+	equalRows := func(a, b [][]scm.Scmer) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if !scm.Equal(scm.NewSlice(a[i]), scm.NewSlice(b[i])) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, change := range [][2]PersistencyMode{{Safe, Memory}, {Memory, Safe}, {Sloppy, Safe}, {Safe, Logged}} {
+		for _, mode := range []TxMode{TxACID, TxCursorStability} {
+			for _, commit := range []bool{false, true} {
+				t.Run(fmt.Sprintf("engine-%d-%d-tx-%d-commit-%t", change[0], change[1], mode, commit), func(t *testing.T) {
+					tbl, _ := createDurabilityTestTable(t, "schema-engine-original-transaction", 1)
+					tbl.ChangeEngine(nil, change[0])
+					tx := NewTxContext(mode)
+					defer func() {
+						if tx.State == TxActive {
+							tx.Rollback()
+						}
+					}()
+					tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("prior-dml")}}, nil, scm.NewNil(), false, nil, tx)
+					tbl.ChangeEngine(tx, change[1])
+					if commit {
+						if err := tx.Commit(); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						tx.Rollback()
+					}
+					wantMode, count := change[0], 1
+					if commit {
+						wantMode, count = change[1], 2
+					}
+					_, live := catalogShardRecords(nil, tbl.ActiveShards()[0], []string{"id", "payload"}, nil)
+					want := [][]scm.Scmer{{scm.NewInt(1), scm.NewString("row-00000001")}}
+					if commit {
+						want = append(want, []scm.Scmer{scm.NewInt(2), scm.NewString("prior-dml")})
+					}
+					if tbl.PersistencyMode != wantMode || !equalRows(live, want) {
+						t.Fatalf("engine/data rollback disagreement: %v/%v, want %v/%v", tbl.PersistencyMode, live, wantMode, want)
+					}
+					db := tbl.schema
+					cold := newDatabase()
+					cold.Name, cold.persistence, cold.srState = db.Name, db.persistence, COLD
+					previous := databases.Set(db.Name, cold)
+					defer func() {
+						databases.Set(db.Name, previous)
+						publishCatalogShards(db.Name, &db.catalog.live)
+						cold.closeTransactionLog()
+					}()
+					cold.ensureLoaded()
+					restored := cold.GetTable(tbl.Name)
+					_, rows := catalogShardRecords(nil, restored.ActiveShards()[0], []string{"id", "payload"}, nil)
+					if wantMode != Safe && wantMode != Logged {
+						count, want = 0, nil
+					}
+					if restored.PersistencyMode != wantMode || len(rows) != count || count != 0 && !equalRows(rows, want) {
+						t.Fatalf("restarted engine/data disagreement: %v/%v, want %v/%v", restored.PersistencyMode, rows, wantMode, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+type catalogDecisionFailureLog struct {
+	PersistenceLogfile
+	flush bool
+}
+
+func (log *catalogDecisionFailureLog) Write(entry any) {
+	if !log.flush {
+		panic(&PersistenceFailure{Backend: "test", Operation: "decision.write", Err: fmt.Errorf("injected decision failure")})
+	}
+	log.PersistenceLogfile.Write(entry)
+}
+
+func (log *catalogDecisionFailureLog) Flush(durable bool) {
+	if log.flush {
+		panic(&PersistenceFailure{Backend: "test", Operation: "wal.flush", Err: fmt.Errorf("injected WAL failure")})
+	}
+	log.PersistenceLogfile.Flush(durable)
+}
+
+func TestSchemaAndDataUseOneCrossDatabaseDecision(t *testing.T) {
+	for _, mode := range []TxMode{TxACID, TxCursorStability} {
+		for _, failure := range []string{"none", "before-decision", "after-decision"} {
+			t.Run(fmt.Sprintf("mode-%d-%s", mode, failure), func(t *testing.T) {
+				first, _ := createDurabilityTestTable(t, "schema-decision-first", 1)
+				CreateDatabase("schema-decision-second", false)
+				second, _ := CreateTable(nil, "schema-decision-second", "items", Safe, false)
+				second.CreateColumn(nil, "id", "INT", nil, nil)
+				secondDB := second.schema
+				defer func() {
+					secondDB.closeTransactionLog()
+					databases.Remove(secondDB.Name)
+					publishCatalogShards(secondDB.Name, nil)
+				}()
+				tx := NewTxContext(mode)
+				defer func() {
+					if tx.State == TxActive {
+						tx.Rollback()
+					}
+				}()
+				first.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("prior-dml")}}, nil, scm.NewNil(), false, nil, tx)
+				second.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}}, nil, scm.NewNil(), false, nil, tx)
+				first.CreateColumn(tx, "added", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(9)})
+				if failure == "before-decision" {
+					shard := second.ActiveShards()[0]
+					original := shard.logfile
+					shard.logfile = &catalogDecisionFailureLog{PersistenceLogfile: original, flush: true}
+					defer func() { shard.logfile = original }()
+				}
+				if failure == "after-decision" {
+					secondDB.initializeTransactionLog()
+					original := secondDB.transactionLog
+					secondDB.transactionLog = &catalogDecisionFailureLog{PersistenceLogfile: original}
+					defer func() { secondDB.transactionLog = original }()
+				}
+				err := tx.Commit()
+				accepted := failure != "before-decision"
+				if failure == "none" && err != nil || failure != "none" && err == nil {
+					t.Fatalf("commit result for %s: %v", failure, err)
+				}
+				if commitOutcomeUnknown(err) != (failure == "after-decision") {
+					t.Fatalf("incorrect native decision certainty: %v", err)
+				}
+				for _, original := range []*database{first.schema, secondDB} {
+					cold := newDatabase()
+					cold.Name, cold.persistence, cold.srState = original.Name, original.persistence, COLD
+					databases.Set(original.Name, cold)
+					func() {
+						defer func() {
+							databases.Set(original.Name, original)
+							publishCatalogShards(original.Name, &original.catalog.live)
+							cold.closeTransactionLog()
+						}()
+						cold.ensureLoaded()
+						relation := cold.GetTable("items")
+						columns, count := []string{"id"}, 0
+						if original == first.schema {
+							columns, count = []string{"id", "payload"}, 1
+							if accepted {
+								columns = append(columns, "added")
+							}
+						}
+						if accepted {
+							count++
+						}
+						_, rows := catalogShardRecords(nil, relation.ActiveShards()[0], columns, nil)
+						if len(rows) != count || len(relation.Columns) != len(columns) {
+							t.Fatalf("%s recovered rows/columns %v/%d; want %d/%d", original.Name, rows, len(relation.Columns), count, len(columns))
+						}
+						if accepted && original == first.schema && (rows[1][0].Int() != 2 || rows[1][1].String() != "prior-dml" || rows[0][2].Int() != 9 || rows[1][2].Int() != 9) {
+							t.Fatalf("native data and column recovery disagreed: %v", rows)
+						}
+						if accepted && original == secondDB && rows[0][0].Int() != 7 {
+							t.Fatalf("other participant lost the shared decision: %v", rows)
+						}
+					}()
+				}
+			})
+		}
+	}
+}
+
+func TestCatalogStableNativeIdentity(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-native-identity", 1)
+	db := tbl.schema
+	identity := tbl.NativeIdentity(nil)
+	if identity.IsNil() {
+		t.Fatal("new relation lacks its durable incarnation")
+	}
+	if _, err := uuid.Parse(identity.String()); err != nil {
+		t.Fatal(err)
+	}
+	tx := NewTxContext(TxACID)
+	RenameTable(tx, db.Name, tbl.Name, "renamed")
+	if !scm.Equal(tbl.NativeIdentity(tx), identity) {
+		t.Fatal("transactional rename changed the native incarnation")
+	}
+	tx.Rollback()
+	if !scm.Equal(tbl.NativeIdentity(nil), identity) {
+		t.Fatal("rollback changed the native incarnation")
+	}
+	RebuildTable(tbl, true, false)
+	if !scm.Equal(tbl.NativeIdentity(nil), identity) {
+		t.Fatal("physical shard rebuild changed the native incarnation")
+	}
+	cold := newDatabase()
+	cold.Name, cold.persistence, cold.srState = db.Name, db.persistence, COLD
+	databases.Set(db.Name, cold)
+	defer func() {
+		databases.Set(db.Name, db)
+		publishCatalogShards(db.Name, &db.catalog.live)
+		cold.closeTransactionLog()
+	}()
+	cold.ensureLoaded()
+	loaded := cold.GetTable(tbl.Name)
+	if !scm.Equal(loaded.NativeIdentity(nil), identity) {
+		t.Fatal("restart changed the native incarnation")
+	}
+	DropTable(nil, cold.Name, loaded.Name, false)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("dropped handle supplied an authoritative identity")
+			}
+		}()
+		loaded.NativeIdentity(nil)
+	}()
+	replacement, _ := CreateTable(nil, cold.Name, loaded.Name, Safe, false)
+	if value := replacement.NativeIdentity(nil); value.IsNil() || scm.Equal(value, identity) {
+		t.Fatal("replacement reused its predecessor's incarnation")
+	}
+}
+
+func TestCatalogVersionTwoUpgradesMissingNativeIdentity(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-v2-native-identity", 1)
+	db := tbl.schema
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(db.persistence.ReadSchema(), &document); err != nil {
+		t.Fatal(err)
+	}
+	root := readCatalogRoot(db.persistence.ReadSchema())
+	previous := root.Shards["tables"]
+	root.Version = 2
+	document["catalog"], _ = json.Marshal(root)
+	legacy, _ := json.Marshal(document)
+	db.persistence.WriteSchema(legacy)
+	catalogBackendDatabase().persistence.RemoveColumn(previous, "runtime_identity")
+	cold := newDatabase()
+	cold.Name, cold.persistence, cold.srState = db.Name, db.persistence, COLD
+	databases.Set(db.Name, cold)
+	defer func() {
+		databases.Set(db.Name, db)
+		publishCatalogShards(db.Name, &db.catalog.live)
+		cold.closeTransactionLog()
+	}()
+	cold.ensureLoaded()
+	if !cold.GetTable(tbl.Name).NativeIdentity(nil).IsNil() {
+		t.Fatal("legacy catalog fabricated an incarnation or used the legacy JSON identity")
+	}
+	cold.save(nil)
+	upgraded := readCatalogRoot(cold.persistence.ReadSchema())
+	if upgraded.Version != 3 || upgraded.Shards["tables"] == previous {
+		t.Fatal("v3 root reused a base without the introduced native column")
+	}
+	restored := newDatabase()
+	restored.Name, restored.persistence, restored.srState = cold.Name, cold.persistence, COLD
+	databases.Set(db.Name, restored)
+	defer restored.closeTransactionLog()
+	restored.ensureLoaded()
+	if !restored.GetTable(tbl.Name).NativeIdentity(nil).IsNil() {
+		t.Fatal("rewriting a legacy declaration assigned an invented identity")
+	}
+}
+
 func TestCatalogDoesNotFallbackToLegacyAfterMissingShardColumn(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "catalog-missing-column", 0)
 	db := tbl.schema
@@ -1259,11 +1846,14 @@ func TestCatalogReadsTenantBackendRoot(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "catalog-v1-root", 1)
 	db := tbl.schema
 	db.schemalock.Lock()
-	rows := db.catalogRowsLocked()
+	rows := db.catalogRowsLocked(nil)
 	db.schemalock.Unlock()
 	root := &catalogRoot{Version: 1, Shards: make(map[string]string)}
 	for i := range catalogRelations {
 		shard := newCatalogShard(db, catalogRelationID(i), rows[i])
+		// The legacy writer used the tenant backend. Modern constructors bind
+		// system storage, so the historical fixture must choose its placement.
+		shard.catalogHome = db
 		persisted := shard.rebuild(true)
 		root.Shards[catalogRelations[i].name] = persisted.uuid.String()
 	}
@@ -1289,7 +1879,7 @@ func TestCatalogMaterializationPreservesTriggerBeforeTargetBinding(t *testing.T)
 		Func: scm.NewFunc(func(...scm.Scmer) scm.Scmer { called = true; return scm.NewNil() })}
 	tbl.AddTrigger(trigger)
 	tbl.schema.schemalock.Lock()
-	tbl.schema.saveLockedAndUnlock(schemaSaveFsync, tbl)
+	tbl.schema.saveLockedAndUnlock(nil, schemaSaveFsync, tbl)
 	tbl.mu.Lock()
 	restored := tbl.Triggers[0]
 	tbl.mu.Unlock()
@@ -1325,7 +1915,7 @@ func TestCatalogPeerPublicationInitializesColdForeignAnchor(t *testing.T) {
 		t.Fatal("accepted peer schema did not initialize the cold database")
 	}
 	cold.schemalock.Lock()
-	rows := cold.catalogRowsLocked()
+	rows := cold.catalogRowsLocked(nil)
 	cold.schemalock.Unlock()
 	if len(rows[catalogTables]) == 0 {
 		t.Fatal("peer publication did not establish canonical catalog rows")
@@ -1336,7 +1926,7 @@ func TestCatalogMosiReadUsesPublishedNativeGeneration(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "catalog-native-mosi", 0)
 	db := tbl.schema
 	db.schemalock.Lock()
-	rows := db.catalogRowsLocked()
+	rows := db.catalogRowsLocked(nil)
 	db.schemalock.Unlock()
 	source := db.catalog.live[catalogColumns]
 	nameIndex := -1
@@ -1368,7 +1958,7 @@ func TestCatalogMosiReadUsesPublishedNativeGeneration(t *testing.T) {
 	cell.current.Store(received)
 	old := replication.Swap(r)
 	defer replication.Store(old)
-	_, visible := catalogShardRecords(source, catalogRelationColumns(catalogColumns), nil)
+	_, visible := catalogShardRecords(nil, source, catalogRelationColumns(catalogColumns), nil)
 	if len(visible) == 0 || visible[0][nameIndex].String() != "from-peer" {
 		t.Fatalf("native catalog scan ignored MOSI generation: private=%v owner=%q manager=%v current=%p wanted=%p visible=%v", source.catalogPrivate.Load(), source.catalogOwner, source.replicationManager() != nil, cell.current.Load(), received, visible)
 	}
@@ -1385,7 +1975,7 @@ func TestCatalogCheckpointPreservesNativeAuthority(t *testing.T) {
 	cell := r.shardCell(previous)
 	resource := previous.replicationResource()
 	historical := append([]byte(nil), db.persistence.ReadSchema()...)
-	tbl.CreateColumn("added", "INT", nil, nil)
+	tbl.CreateColumn(nil, "added", "INT", nil, nil)
 	current := db.catalog.live[catalogColumns]
 	if previous.uuid == current.uuid {
 		t.Fatal("checkpoint did not create a new catalog generation")
@@ -1400,7 +1990,7 @@ func TestCatalogCheckpointPreservesNativeAuthority(t *testing.T) {
 	if root.Forwards[previous.uuid.String()] != current.uuid.String() {
 		t.Fatal("checkpoint did not persist the native UUID forwarding edge")
 	}
-	_, visible := catalogShardRecords(previous, catalogRelationColumns(catalogColumns), nil)
+	_, visible := catalogShardRecords(nil, previous, catalogRelationColumns(catalogColumns), nil)
 	if len(visible) != len(tbl.Columns) {
 		t.Fatal("old catalog stub did not read the new definition")
 	}
@@ -1448,7 +2038,7 @@ func TestCatalogNamespaceDurabilityPrecedesTenantRoot(t *testing.T) {
 				t.Errorf("namespace barrier failure was not propagated: %v", got)
 			}
 		}()
-		tbl.CreateColumn("after_barrier", "INT", nil, nil)
+		tbl.CreateColumn(nil, "after_barrier", "INT", nil, nil)
 	}()
 	if barrier.calls != 1 || counting.calls.Load() != 0 || string(engine.ReadSchema()) != string(previous) {
 		t.Fatal("failed system namespace sync replaced the recoverable tenant root")
@@ -1479,7 +2069,7 @@ func TestCatalogPublicationPreservesConcurrentCheckpointIdentity(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "catalog-publication-identity", 0)
 	db := tbl.schema
 	r := replicaRecoveryFixture()
-	rows := db.catalogRowsLocked()
+	rows := db.catalogRowsLocked(nil)
 	shard := buildDiskShard(db, catalogColumns, rows[catalogColumns], true)
 	resource, home := shard.replicationResource(), shard.home()
 	started, done := make(chan struct{}), make(chan bool, 1)
@@ -1511,7 +2101,7 @@ func TestCatalogCheckpointDoesNotReactivateHistoricalUUID(t *testing.T) {
 	r.resourceCell(mosiResource{Database: db.Name}).ownstate.Initialize(mosi.M)
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
-	rows := db.catalogRowsLocked()
+	rows := db.catalogRowsLocked(nil)
 	initial := db.catalog.live[catalogColumns]
 	cell := r.shardCell(initial)
 	// A handover can advance immutable storage while retaining exactly the
@@ -1530,7 +2120,7 @@ func TestCatalogCheckpointDoesNotReactivateHistoricalUUID(t *testing.T) {
 	if root.Shards[catalogRelations[catalogColumns].name] != current.uuid.String() {
 		t.Fatal("durable root and native current publication disagree")
 	}
-	_, visible := catalogShardRecords(current, catalogRelationColumns(catalogColumns), nil)
+	_, visible := catalogShardRecords(nil, current, catalogRelationColumns(catalogColumns), nil)
 	if catalogFingerprint(catalogColumns, visible) != catalogFingerprint(catalogColumns, rows[catalogColumns]) {
 		t.Fatal("checkpoint changed equal declarations while advancing immutable identity")
 	}
@@ -1547,7 +2137,7 @@ func TestCatalogCheckpointCannotReplaceReceivedGenerationDuringIO(t *testing.T) 
 	blocking := &blockingSchemaWritePersistence{PersistenceEngine: engine, entered: make(chan struct{}), release: make(chan struct{})}
 	db.persistence = blocking
 	defer func() { db.persistence = engine }()
-	rows := db.catalogRowsLocked()
+	rows := db.catalogRowsLocked(nil)
 	var nameIndex int
 	for index, field := range catalogRelations[catalogColumns].columns() {
 		if field.key == "Name" {
@@ -1556,11 +2146,11 @@ func TestCatalogCheckpointCannotReplaceReceivedGenerationDuringIO(t *testing.T) 
 	}
 	rows[catalogColumns][0][nameIndex] = scm.NewString("checkpoint_definition")
 	db.schemalock.Lock()
-	db.editCatalogLocked(&rows, 1<<catalogColumns, nil)
+	db.editCatalogLocked(nil, &rows, 1<<catalogColumns, nil)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		db.commitSchemaLocked(true, db.schemalock.Unlock)
+		db.commitSchemaLocked(nil, true, db.schemalock.Unlock)
 	}()
 	defer func() {
 		select {
@@ -1599,23 +2189,23 @@ func TestCatalogCheckpointDoesNotPublishDuringNativeHandover(t *testing.T) {
 	r.resourceCell(mosiResource{Database: db.Name}).ownstate.Initialize(mosi.M)
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
-	rows := db.catalogRowsLocked()
+	rows := db.catalogRowsLocked(nil)
 	for index, field := range catalogRelations[catalogColumns].columns() {
 		if field.key == "Name" {
 			rows[catalogColumns][0][index] = scm.NewString("checkpoint_definition")
 		}
 	}
 	db.schemalock.Lock()
-	db.editCatalogLocked(&rows, 1<<catalogColumns, nil)
+	db.editCatalogLocked(nil, &rows, 1<<catalogColumns, nil)
 	live := db.catalog.live[catalogColumns]
 	cell := r.shardCell(live)
-	handover, err := cell.ownstate.BeginHandover(context.Background(), cell.drainWrites)
+	handover, err := cell.ownstate.BeginHandover(context.Background(), cell.drainWrites, true)
 	if err != nil {
 		db.schemalock.Unlock()
 		t.Fatal(err)
 	}
 	defer handover.Release()
-	db.commitSchemaLocked(true, db.schemalock.Unlock)
+	db.commitSchemaLocked(nil, true, db.schemalock.Unlock)
 	if cell.resolved().current.Load() != live {
 		t.Fatal("checkpoint changed the UUID/payload binding of an active native handover")
 	}
@@ -1638,12 +2228,12 @@ func TestCatalogCheckpointDoesNotPublishDuringNativeHandover(t *testing.T) {
 func TestCatalogScopedEditsPreserveUnrelatedDefinitions(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "catalog-scoped-edits", 0)
 	db := tbl.schema
-	other, _ := CreateTable(db.Name, "unrelated", Safe, false)
-	other.CreateColumn("kept", "TEXT", nil, []scm.Scmer{scm.NewString("default"), scm.NewString("unchanged <&> Gröẞe")})
+	other, _ := CreateTable(nil, db.Name, "unrelated", Safe, false)
+	other.CreateColumn(nil, "kept", "TEXT", nil, []scm.Scmer{scm.NewString("default"), scm.NewString("unchanged <&> Gröẞe")})
 	read := func() []string {
 		var keys []string
 		for i := catalogTables; i < catalogProcedures; i++ {
-			_, rows := catalogShardRecords(db.catalog.live[i], catalogRelationColumns(i), []string{other.Name})
+			_, rows := catalogShardRecords(nil, db.catalog.live[i], catalogRelationColumns(i), []string{other.Name})
 			for _, row := range rows {
 				keys = append(keys, catalogRowKey(catalogRelations[i].columns(), row))
 			}
@@ -1652,13 +2242,13 @@ func TestCatalogScopedEditsPreserveUnrelatedDefinitions(t *testing.T) {
 		return keys
 	}
 	before := read()
-	tbl.AlterColumn("payload", "comment", scm.NewString("changed"))
-	tbl.CreateColumn("temporary", "INT", nil, nil)
-	tbl.DropColumn("temporary")
+	tbl.AlterColumn(nil, "payload", "comment", scm.NewString("changed"))
+	tbl.CreateColumn(nil, "temporary", "INT", nil, nil)
+	tbl.DropColumn(nil, "temporary")
 	if after := read(); len(before) == 0 || !reflect.DeepEqual(before, after) {
 		t.Fatal("scoped catalog edits changed another table's authoritative rows")
 	}
-	_, rows := catalogShardRecords(db.catalog.live[catalogColumns], catalogRelationColumns(catalogColumns), []string{tbl.Name})
+	_, rows := catalogShardRecords(nil, db.catalog.live[catalogColumns], catalogRelationColumns(catalogColumns), []string{tbl.Name})
 	if len(rows) != 2 {
 		t.Fatalf("scoped add/drop left %d columns, want 2", len(rows))
 	}

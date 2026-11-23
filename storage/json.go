@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -52,7 +52,7 @@ func LoadJSON(schema string, f io.Reader) {
 			// ignore
 		} else if s[0:7] == "#table " {
 			// new table (or find the existing one)
-			t, _ = CreateTable(schema, s[7:], Safe, true)
+			t, _ = CreateTable(nil, schema, s[7:], Safe, true)
 		} else if s[0] == '#' {
 			// comment
 		} else {
@@ -65,7 +65,7 @@ func LoadJSON(schema string, f io.Reader) {
 					json.Unmarshal([]byte(s), &x) // parse JSON
 					for c := range x {
 						// create column with dummy storage for next rebuild
-						t.CreateColumn(c, "ANY", []int{}, []scm.Scmer{scm.NewString("comment"), scm.NewString("json import")})
+						t.CreateColumn(nil, c, "ANY", []int{}, []scm.Scmer{scm.NewString("comment"), scm.NewString("json import")})
 					}
 				}
 				func(t *table, s string) {

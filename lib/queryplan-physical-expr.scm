@@ -6690,6 +6690,13 @@ large local recursive callback makes serial map setup walk its body per node. */
 		(define source_identity (lambda (src)
 			(list (source_schema src)
 				(rewrite (source_relation src))
+				/* A replacement logical table cannot reuse the predecessor's
+				cached aggregates. This catalog identity survives rename/rebuild;
+				physical helper generations remain identified by their recipes. */
+				(if (and (source_is_base_table? src) (not (strlike (source_relation src) ".%")))
+					(begin
+						(define relation (table (source_schema src) false (source_relation src) false))
+						(if relation (show relation "identity") nil)) nil)
 				(source_outer? src)
 				(rewrite (source_join_expr src)))))
 		(if (query_block? input)

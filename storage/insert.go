@@ -598,7 +598,7 @@ func (s *storageShard) mutationGuard(tx *TxContext) *uniqueWriteGuard {
 		owner = tx.transactionState
 	}
 	for {
-		writer, done := state.TryWrite(owner, false)
+		writer, done := state.TryWrite(owner, false, nil)
 		if writer != nil {
 			guard.mutation = writer
 			return guard

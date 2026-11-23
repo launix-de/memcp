@@ -73,9 +73,9 @@ func setupScanLookupTable(tb testing.TB, database string, rows [][]scm.Scmer) *t
 	databases.Remove(database)
 	tb.Cleanup(func() { databases.Remove(database) })
 	CreateDatabase(database, true)
-	tbl, _ := CreateTable(database, "items", Memory, true)
-	tbl.CreateColumn("key", "INT", nil, nil)
-	tbl.CreateColumn("value", "VARCHAR", nil, nil)
+	tbl, _ := CreateTable(nil, database, "items", Memory, true)
+	tbl.CreateColumn(nil, "key", "INT", nil, nil)
+	tbl.CreateColumn(nil, "value", "VARCHAR", nil, nil)
 	tbl.Insert([]string{"key", "value"}, rows, nil, scm.NewNil(), false, nil)
 	return tbl
 }
@@ -194,10 +194,10 @@ func TestCompiledScanLookupCompositeAllocationLimits(t *testing.T) {
 	databases.Remove(database)
 	t.Cleanup(func() { databases.Remove(database) })
 	CreateDatabase(database, true)
-	tbl, _ := CreateTable(database, "items", Memory, true)
-	tbl.CreateColumn("tenant", "INT", nil, nil)
-	tbl.CreateColumn("key", "INT", nil, nil)
-	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, database, "items", Memory, true)
+	tbl.CreateColumn(nil, "tenant", "INT", nil, nil)
+	tbl.CreateColumn(nil, "key", "INT", nil, nil)
+	tbl.CreateColumn(nil, "value", "INT", nil, nil)
 	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "lookup_key", Cols: []string{"key", "tenant"}})
 	tbl.Insert([]string{"tenant", "key", "value"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewInt(7), scm.NewInt(17)},
@@ -248,10 +248,10 @@ func TestScanLookupCompositeValueAndExists(t *testing.T) {
 	databases.Remove(database)
 	t.Cleanup(func() { databases.Remove(database) })
 	CreateDatabase(database, true)
-	tbl, _ := CreateTable(database, "items", Memory, true)
-	tbl.CreateColumn("tenant", "INT", nil, nil)
-	tbl.CreateColumn("key", "INT", nil, nil)
-	tbl.CreateColumn("value", "VARCHAR", nil, nil)
+	tbl, _ := CreateTable(nil, database, "items", Memory, true)
+	tbl.CreateColumn(nil, "tenant", "INT", nil, nil)
+	tbl.CreateColumn(nil, "key", "INT", nil, nil)
+	tbl.CreateColumn(nil, "value", "VARCHAR", nil, nil)
 	tbl.Insert([]string{"tenant", "key", "value"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewInt(7), scm.NewString("one-seven")},
 		{scm.NewInt(2), scm.NewInt(7), scm.NewString("two-seven")},
@@ -279,11 +279,11 @@ func TestScanLookupMapReturnsComputedValueAfterCardinalityCheck(t *testing.T) {
 	databases.Remove(database)
 	t.Cleanup(func() { databases.Remove(database) })
 	CreateDatabase(database, true)
-	tbl, _ := CreateTable(database, "items", Memory, true)
-	tbl.CreateColumn("tenant", "INT", nil, nil)
-	tbl.CreateColumn("key", "INT", nil, nil)
-	tbl.CreateColumn("left_value", "INT", nil, nil)
-	tbl.CreateColumn("right_value", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, database, "items", Memory, true)
+	tbl.CreateColumn(nil, "tenant", "INT", nil, nil)
+	tbl.CreateColumn(nil, "key", "INT", nil, nil)
+	tbl.CreateColumn(nil, "left_value", "INT", nil, nil)
+	tbl.CreateColumn(nil, "right_value", "INT", nil, nil)
 	tbl.Insert([]string{"tenant", "key", "left_value", "right_value"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewInt(7), scm.NewInt(10), scm.NewInt(20)},
 		{scm.NewInt(1), scm.NewInt(8), scm.NewInt(30), scm.NewInt(40)},
@@ -418,10 +418,10 @@ func BenchmarkCompiledScanLookupDimensions(b *testing.B) {
 	databases.Remove(database)
 	b.Cleanup(func() { databases.Remove(database) })
 	CreateDatabase(database, true)
-	tbl, _ := CreateTable(database, "items", Memory, true)
-	tbl.CreateColumn("tenant", "INT", nil, nil)
-	tbl.CreateColumn("key", "INT", nil, nil)
-	tbl.CreateColumn("value", "VARCHAR", nil, nil)
+	tbl, _ := CreateTable(nil, database, "items", Memory, true)
+	tbl.CreateColumn(nil, "tenant", "INT", nil, nil)
+	tbl.CreateColumn(nil, "key", "INT", nil, nil)
+	tbl.CreateColumn(nil, "value", "VARCHAR", nil, nil)
 	// Deliberately reverse the planner boundary order to cover unordered
 	// composite unique-key detection in the measured hot path.
 	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "lookup_key", Cols: []string{"key", "tenant"}})
@@ -462,10 +462,10 @@ func BenchmarkScanLookupDimensions(b *testing.B) {
 	databases.Remove(database)
 	b.Cleanup(func() { databases.Remove(database) })
 	CreateDatabase(database, true)
-	tbl, _ := CreateTable(database, "items", Memory, true)
-	tbl.CreateColumn("tenant", "INT", nil, nil)
-	tbl.CreateColumn("key", "INT", nil, nil)
-	tbl.CreateColumn("value", "VARCHAR", nil, nil)
+	tbl, _ := CreateTable(nil, database, "items", Memory, true)
+	tbl.CreateColumn(nil, "tenant", "INT", nil, nil)
+	tbl.CreateColumn(nil, "key", "INT", nil, nil)
+	tbl.CreateColumn(nil, "value", "VARCHAR", nil, nil)
 	rows := make([][]scm.Scmer, 1024)
 	for i := range rows {
 		rows[i] = []scm.Scmer{scm.NewInt(int64(i % 16)), scm.NewInt(int64(i)), scm.NewString("value")}
@@ -507,10 +507,10 @@ func BenchmarkScanLookupMap(b *testing.B) {
 	databases.Remove(database)
 	b.Cleanup(func() { databases.Remove(database) })
 	CreateDatabase(database, true)
-	tbl, _ := CreateTable(database, "items", Memory, true)
-	tbl.CreateColumn("key", "INT", nil, nil)
-	tbl.CreateColumn("left_value", "INT", nil, nil)
-	tbl.CreateColumn("right_value", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, database, "items", Memory, true)
+	tbl.CreateColumn(nil, "key", "INT", nil, nil)
+	tbl.CreateColumn(nil, "left_value", "INT", nil, nil)
+	tbl.CreateColumn(nil, "right_value", "INT", nil, nil)
 	rows := make([][]scm.Scmer, 1024)
 	for i := range rows {
 		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i + 1)), scm.NewInt(int64(i + 2))}
@@ -538,10 +538,10 @@ func BenchmarkCompiledScanLookupMap(b *testing.B) {
 	databases.Remove(database)
 	b.Cleanup(func() { databases.Remove(database) })
 	CreateDatabase(database, true)
-	tbl, _ := CreateTable(database, "items", Memory, true)
-	tbl.CreateColumn("key", "INT", nil, nil)
-	tbl.CreateColumn("left_value", "INT", nil, nil)
-	tbl.CreateColumn("right_value", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, database, "items", Memory, true)
+	tbl.CreateColumn(nil, "key", "INT", nil, nil)
+	tbl.CreateColumn(nil, "left_value", "INT", nil, nil)
+	tbl.CreateColumn(nil, "right_value", "INT", nil, nil)
 	rows := make([][]scm.Scmer, 1024)
 	for i := range rows {
 		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i + 1)), scm.NewInt(int64(i + 2))}

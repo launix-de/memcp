@@ -17,6 +17,7 @@ import "runtime"
 import "hash/fnv"
 import "sync/atomic"
 import "github.com/google/uuid"
+import "github.com/launix-de/memcp/storage/mosi"
 
 type clusterCapacityRejection struct{}
 
@@ -53,6 +54,9 @@ func clusterScanSupported(tx *TxContext) bool {
 	return tx.Mode == TxCursorStability || tx.Mode == TxACID
 }
 func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext, mutation bool, origins ...*storageShard) {
+	if tx.hasSchemaWriter(shard.authorityDatabase()) {
+		return
+	}
 	// Existing local snapshots retain all native transaction modes. Only a
 	// genuinely remote task needs a supported remote visibility contract.
 	if shard.state() != COLD || !clusterScanSupported(tx) {
@@ -71,7 +75,7 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 		origin = origins[0]
 	}
 	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.uuid.String()}}
-	if GlobalCache.canLoadClusterShard(tbl) && (mutation || cluster.tryRead(scanQueryContext(tx, cluster.ctx), expected.Resource)) {
+	if GlobalCache.canLoadClusterShard(tbl) && (mutation || cluster.tryAcquire(scanQueryContext(tx, cluster.ctx), expected.Resource, mosi.S)) {
 		return
 	}
 	// Placement can delegate to an authorized owner without acquiring a local

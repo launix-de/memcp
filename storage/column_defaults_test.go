@@ -51,7 +51,7 @@ func TestAddedDefaultOverlappingInsertAndRebuild(t *testing.T) {
 		}
 	}()
 	<-started
-	tbl.CreateColumn("flag", "INT", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false), scm.NewString("default"), scm.NewInt(7)})
+	tbl.CreateColumn(nil, "flag", "INT", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false), scm.NewString("default"), scm.NewInt(7)})
 	if failure := <-done; failure != nil {
 		t.Fatalf("overlapping INSERT failed: %v", failure)
 	}
@@ -76,7 +76,7 @@ func TestAddedDefaultOverlappingGeneratedIDInsert(t *testing.T) {
 		}
 	}()
 	<-started
-	tbl.CreateColumn("flag", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(2)})
+	tbl.CreateColumn(nil, "flag", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(2)})
 	select {
 	case failure := <-done:
 		if failure != nil {
@@ -100,7 +100,7 @@ func TestAddedDefaultOverlappingOverflowAppend(t *testing.T) {
 			tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(i), scm.NewString("overflow")}}, nil, scm.NewNil(), false, nil)
 		}
 	}()
-	tbl.CreateColumn("flag", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(9)})
+	tbl.CreateColumn(nil, "flag", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(9)})
 	select {
 	case failure := <-done:
 		if failure != nil {
@@ -135,7 +135,7 @@ func TestAddedRequiredColumnRechecksInFlightInsert(t *testing.T) {
 		tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("old-schema")}}, nil, scm.NewNil(), false, nil)
 	}()
 	<-entered
-	tbl.CreateColumn("required", "INT", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false)})
+	tbl.CreateColumn(nil, "required", "INT", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false)})
 	close(resume)
 	select {
 	case failure := <-done:
@@ -161,7 +161,7 @@ func TestAddedDefaultPreservesTransactionCommitAndRollback(t *testing.T) {
 			tx.Session = scm.NewSession()
 			scm.Apply(tx.Session, scm.NewString("__memcp_tx"), scm.NewAny(tx))
 			tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("pending")}}, nil, scm.NewNil(), false, nil, tx)
-			tbl.CreateColumn("flag", "INT", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false), scm.NewString("default"), scm.NewInt(3)})
+			tbl.CreateColumn(nil, "flag", "INT", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false), scm.NewString("default"), scm.NewInt(3)})
 			want := 1
 			if commit {
 				if err := tx.Commit(); err != nil {
@@ -179,7 +179,7 @@ func TestAddedDefaultPreservesTransactionCommitAndRollback(t *testing.T) {
 
 func TestAddedDefaultNullableAdapterPolicy(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "taddeddefaultpolicy", 1)
-	tbl.CreateColumn("optional", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(4), scm.NewString("fill_existing"), scm.NewBool(false)})
+	tbl.CreateColumn(nil, "optional", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(4), scm.NewString("fill_existing"), scm.NewBool(false)})
 	assertInitializedColumn(t, tbl, "optional", scm.NewNil(), 1)
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("new")}}, nil, scm.NewNil(), false, nil)
 	reloaded := reloadTableFromPersistence(t, "taddeddefaultpolicy", persistence)
@@ -206,7 +206,7 @@ func TestAddedDefaultWaitsForExistingRebuildPublication(t *testing.T) {
 	added := make(chan any, 1)
 	go func() {
 		defer func() { added <- recover() }()
-		tbl.CreateColumn("flag", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(8)})
+		tbl.CreateColumn(nil, "flag", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(8)})
 	}()
 	select {
 	case failure := <-added:
@@ -277,7 +277,7 @@ func TestSchemaQueueRetainsCaptureOwnershipAndPublishesNewerDDL(t *testing.T) {
 	<-blocking.entered
 	go func() {
 		defer func() { added <- recover() }()
-		tbl.CreateColumn("flag", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(8)})
+		tbl.CreateColumn(nil, "flag", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(8)})
 	}()
 	// The newer DDL must register and release schema ownership while the
 	// older backend write is blocked. Its publication still waits for I/O.
@@ -325,13 +325,13 @@ func TestRejectedAddedDefaultLeavesSchemaAndRowsUnchanged(t *testing.T) {
 					t.Error("invalid ADD succeeded")
 				}
 			}()
-			tbl.CreateColumn("rejected", "INT", nil, options)
+			tbl.CreateColumn(nil, "rejected", "INT", nil, options)
 		}()
 		if len(tbl.Columns) != 2 || len(tbl.Unique) != 0 {
 			t.Fatal("rejected ADD changed columns or constraints")
 		}
 	}
-	tbl.CreateColumn("flag", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(2)})
+	tbl.CreateColumn(nil, "flag", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(2)})
 	assertInitializedColumn(t, reloadTableFromPersistence(t, "taddeddefaultreject", persistence), "flag", scm.NewInt(2), 2)
 }
 
@@ -380,7 +380,7 @@ func TestAddedDefaultSchemaDropsRetiredRecoveryExtents(t *testing.T) {
 	tbl.mu.Unlock()
 	tbl.schema.save(nil)
 	value := strings.Repeat("captured-default-payload", 100)
-	tbl.CreateColumn("captured", "VARCHAR", nil, []scm.Scmer{scm.NewString("default"), scm.NewString(value)})
+	tbl.CreateColumn(nil, "captured", "VARCHAR", nil, []scm.Scmer{scm.NewString("default"), scm.NewString(value)})
 	encoded, err := json.Marshal(tbl)
 	if err != nil {
 		t.Fatal(err)
@@ -418,7 +418,7 @@ func TestAddedNullableFreshColumnKeepsSparseColdShard(t *testing.T) {
 	if shard.state() != COLD {
 		t.Fatal("fixture is not cold")
 	}
-	reloaded.CreateColumn("fresh", "INT", nil, nil)
+	reloaded.CreateColumn(nil, "fresh", "INT", nil, nil)
 	if shard.state() != COLD || shard.plannerMainRows.Load() != 0 || shard.plannerDeltaRows.Load() != 0 {
 		t.Fatal("fresh nullable ADD loaded old rows")
 	}
@@ -439,7 +439,7 @@ func TestAddedNullableFreshColumnKeepsExistingDeltaRows(t *testing.T) {
 		defer shard.mu.RUnlock()
 		return &shard.deltaRows()[0][0]
 	}()
-	tbl.CreateColumn("fresh", "INT", nil, nil)
+	tbl.CreateColumn(nil, "fresh", "INT", nil, nil)
 	func() {
 		release := shard.GetRead(nil, false)
 		defer release.Release()
@@ -457,13 +457,13 @@ func TestAddedNullableFreshColumnKeepsExistingDeltaRows(t *testing.T) {
 
 func TestAddedNullableRetiredNameDoesNotRestoreOldValues(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "taddednullablereused", 2)
-	tbl.CreateColumn("reused", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(8)})
+	tbl.CreateColumn(nil, "reused", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(8)})
 	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
 		t.Fatal(result)
 	}
-	tbl.DropColumn("reused")
+	tbl.DropColumn(nil, "reused")
 	reloaded := reloadTableFromPersistence(t, "taddednullablereused", persistence)
-	reloaded.CreateColumn("reused", "INT", nil, nil)
+	reloaded.CreateColumn(nil, "reused", "INT", nil, nil)
 	assertInitializedColumn(t, reloaded, "reused", scm.NewNil(), 2)
 	assertInitializedColumn(t, reloadTableFromPersistence(t, "taddednullablereused", persistence), "reused", scm.NewNil(), 2)
 }
@@ -472,7 +472,7 @@ func TestAddedNullableUntrackedSchemaKeepsRecoveryExtents(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "taddednullableuntracked", 2)
 	// Older schema files contain no complete dropped-name history.
 	tbl.DroppedColumns = nil
-	tbl.CreateColumn("fresh", "INT", nil, nil)
+	tbl.CreateColumn(nil, "fresh", "INT", nil, nil)
 	if len(tbl.Columns[len(tbl.Columns)-1].InitialValues) == 0 {
 		t.Fatal("untracked schema skipped conservative ADD recovery")
 	}
@@ -480,7 +480,7 @@ func TestAddedNullableUntrackedSchemaKeepsRecoveryExtents(t *testing.T) {
 
 func TestAddedDefaultExpressionSurvivesNilConstantOption(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "taddeddefaultmixedoptions", 2)
-	tbl.CreateColumn("created", "DATETIME", nil, []scm.Scmer{
+	tbl.CreateColumn(nil, "created", "DATETIME", nil, []scm.Scmer{
 		scm.NewString("default_expression"), scm.NewString("CURRENT_TIMESTAMP"),
 		scm.NewString("default"), scm.NewNil(),
 	})
@@ -501,7 +501,7 @@ func TestAddedDefaultExpressionSurvivesNilConstantOption(t *testing.T) {
 
 func TestNamedDefaultUsesPublishedColumnDeclaration(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "tnameddefault", 0)
-	tbl.CreateColumn("flag", "INT", nil, []scm.Scmer{
+	tbl.CreateColumn(nil, "flag", "INT", nil, []scm.Scmer{
 		scm.NewString("default"), scm.NewInt(7),
 		scm.NewString("default_name"), scm.NewString("DF_flag"),
 	})
@@ -509,10 +509,10 @@ func TestNamedDefaultUsesPublishedColumnDeclaration(t *testing.T) {
 	if tbl.Columns[2].DefaultName != "DF_flag" {
 		t.Fatal("CREATE did not retain the native default name")
 	}
-	if !scm.ToBool(tbl.AlterColumn("df_FLAG", "drop_default", scm.NewNil())) {
+	if !scm.ToBool(tbl.AlterColumn(nil, "df_FLAG", "drop_default", scm.NewNil())) {
 		t.Fatal("DROP did not resolve the named default")
 	}
-	if scm.ToBool(tbl.AlterColumn("DF_flag", "drop_default", scm.NewNil())) {
+	if scm.ToBool(tbl.AlterColumn(nil, "DF_flag", "drop_default", scm.NewNil())) {
 		t.Fatal("DROP reported a removed default as present")
 	}
 	if tbl.Columns[2].hasDefault() || tbl.Columns[2].DefaultName != "" {
@@ -525,10 +525,10 @@ func TestNamedDefaultUsesPublishedColumnDeclaration(t *testing.T) {
 		t.Fatal("DROP mutated a retained default snapshot")
 	}
 	declaration := scm.NewSlice([]scm.Scmer{scm.NewInt(0), scm.NewString(""), scm.NewString("DF_zero")})
-	tbl.AlterColumn("flag", "add_default", declaration)
-	requirePanic(t, func() { tbl.AlterColumn("flag", "add_default", declaration) })
+	tbl.AlterColumn(nil, "flag", "add_default", declaration)
+	requirePanic(t, func() { tbl.AlterColumn(nil, "flag", "add_default", declaration) })
 	requirePanic(t, func() {
-		tbl.CreateColumn("duplicate", "INT", nil, []scm.Scmer{
+		tbl.CreateColumn(nil, "duplicate", "INT", nil, []scm.Scmer{
 			scm.NewString("default"), scm.NewInt(4),
 			scm.NewString("default_name"), scm.NewString("DF_zero"),
 		})

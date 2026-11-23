@@ -1261,3 +1261,91 @@ test_cases:
 
     session_id: "acid_compile_scope"
     sql: "ROLLBACK"
+
+  - name: ACID savepoint restores an own row replaced repeatedly afterwards
+    steps:
+      - session_id: tx_own_row_acid
+        sql: START ACID TRANSACTION
+      - session_id: tx_own_row_acid
+        sql: INSERT INTO tx_test VALUES (9601, 1, 'before-savepoint')
+      - session_id: tx_own_row_acid
+        sql: SAVEPOINT own_row
+      - session_id: tx_own_row_acid
+        sql: UPDATE tx_test SET val = 2, name = 'second' WHERE id = 9601
+      - session_id: tx_own_row_acid
+        sql: UPDATE tx_test SET val = 3, name = 'third' WHERE id = 9601
+      - session_id: tx_own_row_acid
+        sql: DELETE FROM tx_test WHERE id = 9601
+      - session_id: tx_own_row_acid
+        sql: ROLLBACK TO SAVEPOINT own_row
+      - session_id: tx_own_row_acid
+        sql: SELECT id, val, name FROM tx_test WHERE id = 9601
+        expect:
+          rows: 1
+          data: [{id: 9601, val: 1, name: before-savepoint}]
+      - session_id: tx_own_row_acid
+        sql: ROLLBACK
+  - name: ACID full rollback removes the restored own row
+    sql: SELECT id, val, name FROM tx_test WHERE id = 9601
+    expect: {rows: 0, data: []}
+
+  - name: Cursor stability savepoint keeps only the earlier own row
+    steps:
+      - session_id: tx_own_row_cursor
+        sql: BEGIN
+      - session_id: tx_own_row_cursor
+        sql: INSERT INTO tx_test VALUES (9602, 1, 'before-savepoint')
+      - session_id: tx_own_row_cursor
+        sql: SAVEPOINT own_row
+      - session_id: tx_own_row_cursor
+        sql: UPDATE tx_test SET val = 2, name = 'second' WHERE id = 9602
+      - session_id: tx_own_row_cursor
+        sql: UPDATE tx_test SET val = 3, name = 'third' WHERE id = 9602
+      - session_id: tx_own_row_cursor
+        sql: DELETE FROM tx_test WHERE id = 9602
+      - session_id: tx_own_row_cursor
+        sql: ROLLBACK TO SAVEPOINT own_row
+      - session_id: tx_own_row_cursor
+        sql: SELECT id, val, name FROM tx_test WHERE id = 9602
+        expect:
+          rows: 1
+          data: [{id: 9602, val: 1, name: before-savepoint}]
+      - session_id: tx_own_row_cursor
+        sql: UPDATE tx_test SET val = 4, name = 'after-savepoint-rollback' WHERE id = 9602
+      - session_id: tx_own_row_cursor
+        sql: ROLLBACK
+  - name: Cursor stability full rollback leaves no own replacement version
+    sql: SELECT id, val, name FROM tx_test WHERE id = 9602
+    expect: {rows: 0, data: []}
+
+  - name: Released savepoints cannot be restored
+    steps:
+      - session_id: tx_released_savepoint
+        sql: BEGIN
+      - session_id: tx_released_savepoint
+        sql: SAVEPOINT released
+      - session_id: tx_released_savepoint
+        sql: RELEASE SAVEPOINT released
+      - session_id: tx_released_savepoint
+        sql: ROLLBACK TO SAVEPOINT released
+        expect: {error: true}
+      - session_id: tx_released_savepoint
+        sql: ROLLBACK
+  - name: Unknown savepoints cannot be released
+    sql: RELEASE SAVEPOINT no_such_savepoint
+    expect: {error: true}
+  - name: A committed transaction cannot lend its savepoint to the next one
+    steps:
+      - session_id: tx_savepoint_lifetime
+        sql: BEGIN
+      - session_id: tx_savepoint_lifetime
+        sql: SAVEPOINT previous_transaction
+      - session_id: tx_savepoint_lifetime
+        sql: COMMIT
+      - session_id: tx_savepoint_lifetime
+        sql: BEGIN
+      - session_id: tx_savepoint_lifetime
+        sql: ROLLBACK TO SAVEPOINT previous_transaction
+        expect: {error: true}
+      - session_id: tx_savepoint_lifetime
+        sql: ROLLBACK

@@ -43,6 +43,13 @@ candidate writes and restarts.
 
 ## What each matrix job proves
 
+The `upgrade-release-before-catalog-identities-2026-11-23` pin identifies
+`cece8f501cfb407b371358a9d37a5b87238df241`, the published version 2 native
+catalog writer. Version 3 adds logical table identities and the transactional
+definition revision. Readers retain support for versions 1 and 2; saving
+rewrites their missing introduced columns before publishing a version 3 root.
+The existing legacy declarations remain in `schema.json` for older readers.
+
 The predecessor binary creates the complete fixture and supplies two oracles:
 
 - an exact snapshot of every public table's stable schema metadata and every

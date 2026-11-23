@@ -201,7 +201,7 @@ the common binder consumes the temporary callback before planning. */
 			(list column_name type dimensions (tsql_publish_alias_attributes type attributes))))))
 		(reduce published_columns (lambda (_ column) (match column '(column_name type dimensions attributes)
 			(if (sql_create_column (table database false name false) column_name type dimensions
-				(merge (sql_add_column_attributes attributes) '("name_ignorecase" true))) true
+				(merge (sql_add_column_attributes attributes) '("name_ignorecase" true)) tx) true
 				(error "column already exists: " column_name)))) true))))
 	(if (find columns (lambda (column) (has_assoc? (nth column 4) "__tsql_alias_id")))
 		(tsql_type_ddl database tx publish) (publish)))))
@@ -480,7 +480,7 @@ and all row execution stay in the existing shared SQL compiler and planner. */
 	_ true)))
 (define tsql_scalar_formula (lambda (schema text contracts mode target tx) (begin
 	(define key (json_encode (list schema text contracts mode target)))
-	(tsql_scalar_cache key tx (lambda (tx) (begin
+	(tsql_scalar_cache key tx (lambda () (begin
 		(define planning (newsession))
 		(planning "__tsql_parameter_declarations" contracts)
 		(planning "__tsql_expression_only" true)
@@ -713,17 +713,15 @@ ordinary expression compiler owns each substitution's declared SQL contract. */
 			procedure creation still uses its existing source compiler. */
 			(if (session "tsql_import_target")
 				(error "retargeted procedure definitions are not supported") true)
-			(if (session "transaction") (error "procedure DDL inside explicit transactions is not supported") true)
 			(define owner (tsql_qualifier_database owner schema session))
 			((sql_policy (session "username")) owner name true)
-			(createprocedure owner (toLower name) "tsql-procedure" source parameters replace)
+			(createprocedure owner (toLower name) "tsql-procedure" source parameters replace tx)
 			0)))
-		'("drop-procedure" owner name ignore) (statement "procedure deletion" false (lambda (_tx) (begin
-			(if (session "transaction") (error "procedure DDL inside explicit transactions is not supported") true)
+		'("drop-procedure" owner name ignore) (statement "procedure deletion" false (lambda (tx) (begin
 			(define owner (tsql_qualifier_database owner schema session))
 			((sql_policy (session "username")) owner name true)
-			(define definition (find (showprocedures owner (toLower name)) (lambda (_definition) true) nil))
-			(dropprocedure owner (if definition (definition "name") name) ignore)
+			(define definition (find (showprocedures owner (toLower name) tx) (lambda (_definition) true) nil))
+			(dropprocedure owner (if definition (definition "name") name) ignore tx)
 			0)))
 		'("execute" owner name arguments) (tsql_invoke_procedure owner name arguments statement session resultrow resultfields)
 		'("execute-status" owner name arguments target) (begin
@@ -929,8 +927,8 @@ Only parameter-sized scalar tuples are collected; relational SQL stays native. *
 		(begin
 			((sql_policy (caller "username")) schema name false)
 			/* Retain one immutable definition and callable across argument binding. */
-			(define snapshot (statement "procedure lookup" false (lambda (_tx)
-				(procedure schema (toLower name) true))))
+			(define snapshot (statement "procedure lookup" false (lambda (tx)
+				(procedure schema (toLower name) true tx))))
 			(define definition (snapshot "declaration"))
 			(if (equal? (definition "language") "tsql-procedure") true
 				(error "procedure language cannot execute in this frontend"))
@@ -1013,12 +1011,11 @@ joins object names only; native key procedures keep enumerating native tables. *
 (define tsql_metadata_relations (lambda (schema pattern patterns policy) (begin
 	(define native (map (tsql_metadata_table_names schema pattern patterns policy)
 		(lambda (name) (list name "TABLE"))))
-	(define views (if (> (sql_view_catalog_state "count") 0)
-		(scan nil (table "system" false "views" false)
+	(define views (scan nil (table "system" false "views" false)
 			(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false))
 			(list schema) '("name") (lambda (name) (tsql_metadata_match name pattern patterns))
 			'("name") (lambda (acc name) (cons (list name "VIEW") acc))
-			'() (lambda (a b) (merge (list a b)))) '()))
+			'() (lambda (a b) (merge (list a b)))))
 	(sort (merge (list native views)) (lambda (left right)
 		(if (equal? (cadr left) (cadr right)) (< (car left) (car right)) (< (cadr left) (cadr right))))))))
 /* Describe a logical view projection, never its rows. Native declarations can

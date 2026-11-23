@@ -49,8 +49,8 @@ func TestRebuildMemoryTransferPrecedesCommitForwarding(t *testing.T) {
 	LoadDatabases()
 	CreateDatabase("trampublication", false)
 	defer databases.Remove("trampublication")
-	tbl, _ := CreateTable("trampublication", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "trampublication", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 	shard := tbl.Shards[0]
 	col := &column{}

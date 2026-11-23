@@ -1239,7 +1239,7 @@ func TestClusterCacheTryReadLeavesExistingAcquisitionAlone(t *testing.T) {
 	})
 	cell := cluster.manager.resourceCell(resource)
 	request, _ := cell.ownstate.Request(mosi.S)
-	if cluster.tryRead(context.Background(), resource) {
+	if cluster.tryAcquire(context.Background(), resource, mosi.S) {
 		t.Fatal("a pending acquisition certified cache reuse")
 	}
 	if cell.ownstate.Phase() != mosi.SR || request.Flight().Err() != nil || peer.outgoing.len() != 0 {
@@ -1256,7 +1256,7 @@ func TestClusterCacheTryReadUsesGrantedBackendWithoutOwnerLookup(t *testing.T) {
 	cell.ownstate.BackendOnly()
 	// There is no network, roster or contact peer. Eviction retained a valid
 	// S grant; authorizing another read must consume that existing proof.
-	if !cluster.tryRead(context.Background(), resource) || cell.ownstate.Phase() != mosi.S {
+	if !cluster.tryAcquire(context.Background(), resource, mosi.S) || cell.ownstate.Phase() != mosi.S {
 		t.Fatal("an existing backend read permission required owner discovery")
 	}
 }

@@ -58,6 +58,11 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int, complete bool
 		return 0, 0, false
 	}
 	db.ensureLoaded()
+	db.definitionMu.RLock()
+	defer db.definitionMu.RUnlock()
+	if db.schemaExportPending.Load() {
+		return 0, 0, false
+	}
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
 	if r := replication.Load(); r != nil && (validReplicaDatabase(db.Name) || db.Name == "system") {
@@ -91,6 +96,9 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int, complete bool
 // safe. Missing legacy manifests are reconstructed from committed column files;
 // corrupt manifests and all ambiguous I/O failures remain a fail-closed no-op.
 func cleanBlobs(db *database) (deleted int, complete bool) {
+	if db.schemaExportPending.Load() {
+		return 0, false
+	}
 	references, complete := activeBlobReferences(db, true)
 	if !complete {
 		fmt.Printf("blob cleanup %s: ownership check incomplete; retaining all blobs\n", db.Name)
@@ -371,6 +379,9 @@ func writeBlobManifestReferences(shard *storageShard, references map[string]stru
 // Reads the active UUID set from in-memory table structures (always current),
 // under schemalock.RLock to prevent concurrent DDL from modifying the table map.
 func cleanShards(db *database) int {
+	if db.schemaExportPending.Load() {
+		return 0
+	}
 	epoch := catalogPublicationEpoch.Load()
 	if catalogPublications.Load() != 0 {
 		return 0
