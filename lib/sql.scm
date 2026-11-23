@@ -580,23 +580,23 @@ otherwise side-effect-free guard. */
 				(list (quote sql_parameter_execute) (list (quote quote) (nth variant 3))
 					(cadr variant) (quote session) (quote tx) (quote resultrow) (quote resultfields))
 				(list (cadr variant) (quote session) (quote tx) (quote resultrow) (quote resultfields))))
-			(define dispatch (if (expression_equal? (car variant) true)
-				bound_plan
-				(list (quote if)
-					/* APPLY keeps this published guard at its own compiled boundary;
-					the dispatcher must not specialize or inline its metadata body. */
-					(list (quote apply) (car variant)
-						(list (quote list) (quote session) (quote tx) (quote resultrow) (quote resultfields)))
-					bound_plan tail_expr)))
-			(define prepared_dispatch (if (empty_list? new_preparations)
-				dispatch
+			/* APPLY keeps this published guard at its own compiled boundary;
+			the dispatcher must not specialize or inline its metadata body. */
+			(define full_guard (if (expression_equal? (car variant) true) true
+				(list 'apply (car variant)
+					(list 'list 'session 'tx 'resultrow 'resultfields))))
+			(define prepared_guard (if (empty_list? new_preparations)
+				full_guard
 				(cons (quote !begin)
 					(merge (list (map new_preparations sql_queryplan_preparation_expr)
-						(list dispatch))))))
-			(if (expression_equal? source_eligibility true) prepared_dispatch
-				(list 'if (list 'apply source_eligibility
-					(list 'list 'session 'tx 'resultrow 'resultfields))
-					prepared_dispatch tail_expr)))
+						(list full_guard))))))
+			/* Declaration matchers return booleans, so false skips the entire
+			preparation sequence. !begin returns the unchanged full guard value. */
+			(define eligible_guard (if (expression_equal? source_eligibility true) prepared_guard
+				(list 'and (list 'apply source_eligibility
+					(list 'list 'session 'tx 'resultrow 'resultfields)) prepared_guard)))
+			(if (expression_equal? eligible_guard true) bound_plan
+				(list 'if eligible_guard bound_plan tail_expr)))
 		_ miss_expr)))
 
 (define sql_queryplan_miss_expr (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy)
@@ -640,7 +640,7 @@ otherwise side-effect-free guard. */
 	(match variants
 		(cons variant rest) (begin
 			(define source_eligibility (qassoc_get (nth variant 3) 'source_eligibility true))
-			(if (if (expression_equal? source_eligibility true) true
+			(if (and (if (expression_equal? source_eligibility true) true
 				(apply source_eligibility (list session tx resultrow resultfields)))
 				(begin
 					/* This request may hold an older formula while another request prepends a
@@ -652,10 +652,9 @@ otherwise side-effect-free guard. */
 							session tx resultrow resultfields)))
 					/* The guard already owns its compiled lexical frame. Forward this
 					request explicitly after preparations, without recompilation or eval. */
-					(if (if (expression_equal? (car variant) true) true
-						(apply (car variant) (list session tx resultrow resultfields)))
-						variant
-						(sql_queryplan_matching_variant rest session tx resultrow resultfields)))
+					(if (expression_equal? (car variant) true) true
+						(apply (car variant) (list session tx resultrow resultfields)))))
+				variant
 				(sql_queryplan_matching_variant rest session tx resultrow resultfields)))
 		_ nil)))
 
