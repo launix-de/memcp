@@ -202,7 +202,7 @@ func orderRelationMeta(order func(...scm.Scmer) scm.Scmer) string {
 	return fmt.Sprintf("callback:%x", scm.FunctionIdentity(order))
 }
 
-func canonicalColumnOrder(t *table, col string) (func(scm.Scmer, scm.Scmer) bool, string) {
+func canonicalColumnOrder(t *table, col string, reverse bool) (func(...scm.Scmer) scm.Scmer, string) {
 	collation := "bin"
 	for _, definition := range t.Columns {
 		if definition.Name == col {
@@ -212,9 +212,9 @@ func canonicalColumnOrder(t *table, col string) (func(scm.Scmer, scm.Scmer) bool
 			break
 		}
 	}
-	value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(collation), scm.NewBool(false))
+	value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(collation), scm.NewBool(reverse))
 	order := value.Func() // collate returns a native relation with registered metadata
-	return scm.OrderRelationLess(order), orderRelationMeta(order)
+	return order, orderRelationMeta(order)
 }
 
 func boundaryOrder(t *table, boundary analyzedBoundary) (func(scm.Scmer, scm.Scmer) bool, string) {
@@ -235,7 +235,8 @@ func boundaryOrder(t *table, boundary analyzedBoundary) (func(scm.Scmer, scm.Scm
 		order := value.Func()
 		return scm.OrderRelationLess(order), orderRelationMeta(order)
 	}
-	return canonicalColumnOrder(t, boundary.col)
+	order, meta := canonicalColumnOrder(t, boundary.col, false)
+	return scm.OrderRelationLess(order), meta
 }
 
 func scanAccessBoundaryOrder(t *table, access scanAccess, column int) (func(scm.Scmer, scm.Scmer) bool, string) {
@@ -253,7 +254,8 @@ func scanAccessBoundaryOrder(t *table, access scanAccess, column int) (func(scm.
 		order = value.Func()
 		return scm.OrderRelationLess(order), orderRelationMeta(order)
 	}
-	return canonicalColumnOrder(t, access.boundaryColumn(column))
+	order, meta = canonicalColumnOrder(t, access.boundaryColumn(column), false)
+	return scm.OrderRelationLess(order), meta
 }
 
 func ascendingOrderMetaMatches(meta, collation string) bool {

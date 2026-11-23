@@ -467,15 +467,10 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	sortdirsFns := make([]func(...scm.Scmer) scm.Scmer, len(col.OrcSortCols))
 	for i, sc := range col.OrcSortCols {
 		sortcolsScmer[i] = scm.NewString(sc)
-		less, _ := canonicalColumnOrder(t, sc)
-		sortLess[i] = less
 		desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
-		sortdirsFns[i] = func(values ...scm.Scmer) scm.Scmer {
-			if desc {
-				return scm.NewBool(less(values[1], values[0]))
-			}
-			return scm.NewBool(less(values[0], values[1]))
-		}
+		order, _ := canonicalColumnOrder(t, sc, desc)
+		sortdirsFns[i] = order
+		sortLess[i] = scm.OrderRelationLess(order)
 	}
 
 	// Determine if the reducer has the identity property (stored value == accumulator).
@@ -707,7 +702,8 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	// including collation-equivalent partition keys and NULL coordinates.
 	sortLess := make([]func(scm.Scmer, scm.Scmer) bool, nCols)
 	for i := range sortLess {
-		sortLess[i], _ = canonicalColumnOrder(t, col.OrcSortCols[i])
+		order, _ := canonicalColumnOrder(t, col.OrcSortCols[i], false)
+		sortLess[i] = scm.OrderRelationLess(order)
 	}
 
 	// Build analyzer results for index-accelerated lookup.
