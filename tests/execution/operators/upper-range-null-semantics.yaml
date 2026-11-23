@@ -10,15 +10,15 @@ setup:
 - sql: CREATE TABLE nullable_upper_range_rows(id INT PRIMARY KEY,v INT,label VARCHAR(12),text_key VARCHAR(8),day_key
     DATE,secondary_key INT)
 - sql: INSERT INTO nullable_upper_range_rows VALUES(1,NULL,'missing',NULL,NULL,0)
-- sql: INSERT INTO nullable_upper_range_rows SELECT 2,-2,'negative','a',CAST('2024-01-01' AS DATE),1
-- sql: INSERT INTO nullable_upper_range_rows SELECT 3,0,'zero','a',CAST('2024-01-02' AS DATE),NULL
-- sql: INSERT INTO nullable_upper_range_rows SELECT 4,2,'edge','b',CAST('2024-01-03' AS DATE),0
-- sql: INSERT INTO nullable_upper_range_rows SELECT 5,7,'above','c',CAST('2024-01-04' AS DATE),0
-- sql: INSERT INTO nullable_upper_range_rows SELECT 6,2,'duplicate','b',CAST('2024-01-03' AS DATE),2
+- sql: INSERT INTO nullable_upper_range_rows SELECT 2,-2,'negative','a',DATE '2024-01-01',1
+- sql: INSERT INTO nullable_upper_range_rows SELECT 3,0,'zero','a',DATE '2024-01-02',NULL
+- sql: INSERT INTO nullable_upper_range_rows SELECT 4,2,'edge','b',DATE '2024-01-03',0
+- sql: INSERT INTO nullable_upper_range_rows SELECT 5,7,'above','c',DATE '2024-01-04',0
+- sql: INSERT INTO nullable_upper_range_rows SELECT 6,2,'duplicate','b',DATE '2024-01-03',2
 - scm: (rebuild (table "memcp-tests" false "nullable_upper_range_rows" false nil) true true nil true)
 - sql: INSERT INTO nullable_upper_range_rows VALUES(7,NULL,'delta-null',NULL,NULL,NULL)
-- sql: INSERT INTO nullable_upper_range_rows SELECT 8,-1,'delta-low','a',CAST('2024-01-01' AS DATE),1
-- sql: INSERT INTO nullable_upper_range_rows SELECT 9,4,'delta-high','c',CAST('2024-01-04' AS DATE),1
+- sql: INSERT INTO nullable_upper_range_rows SELECT 8,-1,'delta-low','a',DATE '2024-01-01',1
+- sql: INSERT INTO nullable_upper_range_rows SELECT 9,4,'delta-high','c',DATE '2024-01-04',1
 - sql: CREATE TABLE nullable_range_bounds(bound_id INT PRIMARY KEY,ceiling INT)
 - sql: INSERT INTO nullable_range_bounds VALUES(1,NULL),(2,0),(3,2),(4,8)
 test_cases:
@@ -100,7 +100,7 @@ test_cases:
     - {id: 8, v: -1, label: delta-low}
 - name: mysql Date upper range rejects NULL
   syntax: mysql
-  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE day_key<CAST('2024-01-03' AS DATE) ORDER BY id
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE day_key<DATE '2024-01-03' ORDER BY id
   expect:
     data:
     - {id: 2, v: -2, label: negative}
