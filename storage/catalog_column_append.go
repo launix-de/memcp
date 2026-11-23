@@ -228,7 +228,7 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 		initializer.column = c
 	}
 	if c.DefaultName != "" {
-		if changes.db.hasDeclarationNameLocked(c.DefaultName, nil) || tx.pendingUniqueDeclarationName(c.DefaultName) {
+		if changes.db.hasDeclarationNameLocked(c.DefaultName, nil, nil) || tx.pendingUniqueDeclarationName(c.DefaultName) {
 			panic("declaration name already exists: " + c.DefaultName)
 		}
 		for _, view := range changes.views.Load().tables {

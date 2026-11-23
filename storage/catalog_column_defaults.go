@@ -264,7 +264,7 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 		if db.tables.Get(t.Name) != t || t.showColumnsSnapshot.Load().metadata.declarations != observed.metadata.declarations {
 			panic("public declaration conflict: default input changed during preparation")
 		}
-		if replacement.DefaultName != "" && replacement.DefaultName != previous.DefaultName && (db.hasDeclarationNameLocked(replacement.DefaultName, observed.metadata.columnNames.declarations[index]) || tx.pendingUniqueDeclarationName(replacement.DefaultName)) {
+		if replacement.DefaultName != "" && replacement.DefaultName != previous.DefaultName && (db.hasDeclarationNameLocked(replacement.DefaultName, observed.metadata.columnNames.declarations[index], nil) || tx.pendingUniqueDeclarationName(replacement.DefaultName)) {
 			panic("declaration name already exists: " + replacement.DefaultName)
 		}
 		for _, entry := range tx.publicForeignAmendments() {
@@ -657,7 +657,7 @@ func (db *database) recoverColumnDefaultDeclarations(declarations []catalogColum
 			if previous.Name != declaration.Column {
 				continue
 			}
-			if declaration.Name != "" && db.hasDeclarationNameLocked(declaration.Name, previous) {
+			if declaration.Name != "" && db.hasDeclarationNameLocked(declaration.Name, previous, nil) {
 				panic("default recovery declaration name already exists: " + declaration.Name)
 			}
 			replacement := cloneStoredColumnDeclaration(previous)
@@ -687,7 +687,7 @@ func (changes *publicCatalogChanges) validateColumnDefaultsLocked() error {
 	for _, amendment := range latest {
 		declaration := amendment.defaultDeclaration
 		for _, column := range amendment.table.columnDeclarations() {
-			if column.Name == declaration.Column && declaration.Name != "" && (changes.db.hasDeclarationNameLocked(declaration.Name, column) || (&TxContext{transactionState: changes.owner}).pendingUniqueDeclarationName(declaration.Name)) {
+			if column.Name == declaration.Column && declaration.Name != "" && (changes.db.hasDeclarationNameLocked(declaration.Name, column, nil) || (&TxContext{transactionState: changes.owner}).pendingUniqueDeclarationName(declaration.Name)) {
 				return fmt.Errorf("public declaration conflict: declaration name already exists: %s", declaration.Name)
 			}
 		}

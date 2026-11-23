@@ -140,7 +140,7 @@ func (changes *publicCatalogChanges) validateCheckStageLocked(tx *TxContext, t *
 	changes.validateConstraintStateEndpointsLocked(tx)
 	validateCatalogCheck(changes.db, declaration)
 	requireTableMaintenance(changes.db.Name, declaration.Table, maintenanceAlter)
-	if changes.db.hasDeclarationNameLocked(declaration.Check.Id, nil) || tx.pendingUniqueDeclarationName(declaration.Check.Id) {
+	if changes.db.hasDeclarationNameLocked(declaration.Check.Id, nil, nil) || tx.pendingUniqueDeclarationName(declaration.Check.Id) {
 		panic("declaration name already exists: " + declaration.Check.Id)
 	}
 	for _, entry := range tx.publicForeignAmendments() {
@@ -188,7 +188,7 @@ func (tx *TxContext) publicCheckDeclarations() []catalogCheckDeclaration {
 func (db *database) recoverPublicCheckDeclarations(declarations []catalogCheckDeclaration) {
 	for _, declaration := range declarations {
 		validateCatalogCheck(db, declaration)
-		if db.hasDeclarationNameLocked(declaration.Check.Id, nil) {
+		if db.hasDeclarationNameLocked(declaration.Check.Id, nil, nil) {
 			panic("check recovery declaration name already exists")
 		}
 		t := db.tables.Get(declaration.Table)
@@ -240,7 +240,7 @@ func (tx *TxContext) validatePublicChecks(db *database) error {
 			continue
 		}
 		validateCatalogCheck(db, entry.check.declaration)
-		if db.hasDeclarationNameLocked(entry.check.declaration.Check.Id, nil) || tx.pendingUniqueDeclarationName(entry.check.declaration.Check.Id) {
+		if db.hasDeclarationNameLocked(entry.check.declaration.Check.Id, nil, nil) || tx.pendingUniqueDeclarationName(entry.check.declaration.Check.Id) {
 			return fmt.Errorf("public declaration conflict: check name already exists")
 		}
 		for _, program := range entry.check.programs {

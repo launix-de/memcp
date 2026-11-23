@@ -206,8 +206,44 @@ func (t *table) hasDeclarationName(name string, excluded *column, includeKeyIDs 
 	return false
 }
 
-func (db *database) hasDeclarationNameLocked(name string, excluded *column) bool {
+func (db *database) hasDeclarationNameLocked(name string, excluded *column, views *publicCatalogViews) bool {
 	for _, t := range db.tables.GetAll() {
+		if views != nil {
+			if _, dropped := views.dropped[t]; dropped {
+				continue
+			}
+			if snapshot := views.tables[t]; snapshot != nil {
+				// Only this original owner's immutable amendment cut replaces a
+				// registered header. Other pending constructors still reserve
+				// their names, even though SQL cannot see their generations.
+				for _, c := range snapshot.metadata.columnNames.declarations {
+					if c != excluded && c.DefaultName != "" && strings.EqualFold(c.DefaultName, name) {
+						return true
+					}
+				}
+				constraints := snapshot.nativeConstraints().Slice()
+				for i := 0; i+1 < len(constraints); i += 2 {
+					for _, declaration := range constraints[i+1].Slice() {
+						var declared string
+						switch constraints[i].String() {
+						case "Unique":
+							// Native index IDs remain table-local.
+							declared = foreignMetadataValue(declaration, "constraint_name").String()
+						case "Checks":
+							declared = foreignMetadataValue(declaration, "Id").String()
+						case "ForeignKeys":
+							if foreignMetadataValue(declaration, "Role").String() == "referencing" {
+								declared = foreignMetadataValue(declaration, "Id").String()
+							}
+						}
+						if declared != "" && strings.EqualFold(declared, name) {
+							return true
+						}
+					}
+				}
+				continue
+			}
+		}
 		if t.hasDeclarationName(name, excluded, false) {
 			return true
 		}
@@ -3655,7 +3691,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		// An unpublished CREATE definition is checked against other tables at
 		// its atomic namespace publication. ADD already owns schema membership.
 		if t.schema.tables.Get(t.Name) == t {
-			conflict = conflict || t.schema.hasDeclarationNameLocked(c.DefaultName, nil)
+			conflict = conflict || t.schema.hasDeclarationNameLocked(c.DefaultName, nil, nil)
 		}
 		if conflict {
 			panic("declaration name already exists: " + c.DefaultName)
@@ -4001,7 +4037,7 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 				}
 				result = scm.NewBool(scm.ToBool(replacement.Alter(operation, value)))
 				if replacement.DefaultName != "" && replacement.DefaultName != current.DefaultName &&
-					t.schema.hasDeclarationNameLocked(replacement.DefaultName, current) {
+					t.schema.hasDeclarationNameLocked(replacement.DefaultName, current, nil) {
 					panic("declaration name already exists: " + replacement.DefaultName)
 				}
 				if operation == "add_default" || operation == "default_declaration" {

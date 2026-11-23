@@ -48,7 +48,7 @@ func (tx *TxContext) alterCatalogColumn(t *table, name, operation string, value 
 				result = replacement.Alter(operation, value)
 			}
 			if replacement.DefaultName != "" && replacement.DefaultName != previous.DefaultName &&
-				current.schema.hasDeclarationNameLocked(replacement.DefaultName, previous) {
+				current.schema.hasDeclarationNameLocked(replacement.DefaultName, previous, nil) {
 				panic("declaration name already exists: " + replacement.DefaultName)
 			}
 			if operation == "add_default" || operation == "default_declaration" {

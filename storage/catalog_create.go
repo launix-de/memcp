@@ -442,13 +442,17 @@ func nativeCreateTable(a ...scm.Scmer) scm.Scmer {
 	// Publication owns the actual directory, including reserved pending sibling
 	// generations. Reject folded collisions before publishing a child or its
 	// generated programs; exact trigger spelling is not a namespace proof.
+	var declarationView *publicCatalogViews
+	if changes := tx.publicCatalogChanges(); changes != nil {
+		declarationView = changes.views.Load()
+	}
 	seenDeclarations := make(map[string]bool, len(declarationNames))
 	for _, name := range declarationNames {
 		if name == "" {
 			continue
 		}
 		folded := scm.CaseFoldKey(name)
-		if seenDeclarations[folded] || db.hasDeclarationNameLocked(name, nil) {
+		if seenDeclarations[folded] || db.hasDeclarationNameLocked(name, nil, declarationView) {
 			db.schemalock.Unlock()
 			panic("declaration name already exists: " + name)
 		}

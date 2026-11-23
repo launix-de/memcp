@@ -145,7 +145,7 @@ func declareUnpublishedKey(current *table, key uniqueKey) bool {
 			return false
 		}
 	}
-	if (key.ConstraintName != "" && current.schema.hasDeclarationNameLocked(key.ConstraintName, nil)) || current.hasDeclarationName(key.Id, nil, true) {
+	if (key.ConstraintName != "" && current.schema.hasDeclarationNameLocked(key.ConstraintName, nil, nil)) || current.hasDeclarationName(key.Id, nil, true) {
 		panic("declaration name already exists: " + key.Id)
 	}
 	key.Cols = append([]string(nil), key.Cols...)

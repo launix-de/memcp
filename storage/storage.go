@@ -6238,7 +6238,7 @@ func createTableKey(t *table, key uniqueKey, currentTx *TxContext) bool {
 			return false
 		}
 	}
-	if (key.ConstraintName != "" && t.schema.hasDeclarationNameLocked(key.ConstraintName, nil)) ||
+	if (key.ConstraintName != "" && t.schema.hasDeclarationNameLocked(key.ConstraintName, nil, nil)) ||
 		(t.hasDeclarationName(key.Id, nil, true)) {
 		t.schema.schemalock.Unlock()
 		panic("declaration name already exists: " + key.Id)
