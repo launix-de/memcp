@@ -719,9 +719,13 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			upper: sortKeys[i], upperInclusive: true,
 		})
 	}
-	// Order columns: range from mutation key onwards.
-	// For ASC: [sortKey, ∞); for DESC: (∞, sortKey].
-	for i := partCount; i < nCols; i++ {
+	// A range on the first order coordinate is a superset of the
+	// lexicographic suffix. Later-coordinate ranges cannot be intersected:
+	// an earlier greater coordinate already admits every later value.
+	// For ASC: [sortKey, ∞); for DESC: (∞, sortKey]. NULL sentinels may
+	// widen this candidate set; the exact callback below still owns admission.
+	if partCount < nCols {
+		i := partCount
 		desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
 		if desc {
 			bounds = append(bounds, analyzedBoundary{
