@@ -532,6 +532,30 @@ no SQL type wrapper survives into execution or storage. */
 /* Stored logical expressions carry global compiler names or factory syntax.
 Only the consuming compilation creates callbacks; SQL operands stay separate. */
 (define tsql_comparison_compiler (lambda (op) (lambda (infos) (begin
+	/* Temporal precedence applies to comparisons as well as result branches.
+	The existing conversion owner retains declared precision and invocation
+	language/dateformat; native comparisons and scan bounds consume its values.
+	Variant and XML operands retain their dedicated comparison/error contracts.
+	https://learn.microsoft.com/sql/t-sql/data-types/data-type-precedence-transact-sql */
+	(define operand_types (map infos sql_info_type))
+	(define infos (if (and (find operand_types tsql_temporal_type? nil)
+		(not (find operand_types (lambda (type)
+			(has? '("SQL_VARIANT" "XML" "XML_NODE") type)) nil)))
+		(begin
+			(define contract (tsql_common_value_contract infos nil))
+			/* Comparison conversion must not round an operand to the other
+			column's stored scale. In particular DATETIME retains its 1/300s
+			ticks when converted to DATETIME2 under compatibility level >=130.
+			CASE/COALESCE result declarations keep their independent contract. */
+			(define datatype (if (has? '("DATETIME2" "TIME") (sql_info_type contract))
+				(list (sql_info_type contract) '(7)) (sql_info_datatype contract)))
+			(map infos (lambda (info)
+				/* Widening an already validated modern temporal declaration
+				changes no stored value. Keep a direct column available to scans. */
+				(if (and (has? '("DATETIME2" "TIME") (sql_info_type contract))
+					(equal? (sql_info_type info) (sql_info_type contract)))
+					(sql_info (sql_info_formula info) datatype nil)
+					(tsql_convert_value_info info datatype nil))))) infos))
 	(define left_info (car infos))
 	(define right_info (cadr infos))
 	(define left_type (sql_info_type left_info))

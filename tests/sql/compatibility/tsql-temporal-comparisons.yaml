@@ -1,0 +1,75 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Temporal comparisons convert lower precedence operands using the invocation calendar profile
+setup:
+- sql: CREATE TABLE temporal_comparison_inputs(id INT PRIMARY KEY,at DATETIME NULL,day_value DATE NULL,minute_value SMALLDATETIME NULL,precise DATETIME2(7) NULL)
+- sql: |
+    INSERT temporal_comparison_inputs VALUES
+      (1,CONVERT(DATETIME,'99991231',112),NULL,NULL,NULL),
+      (2,CONVERT(DATETIME,'20240102',112),CONVERT(DATE,'20240102',112),CONVERT(SMALLDATETIME,'20240102',112),CAST('2024-01-02T12:34:56.1234567' AS DATETIME2(7))),
+      (3,NULL,NULL,NULL,NULL),
+      (4,CONVERT(DATETIME,'20241201',112),CONVERT(DATE,'20241201',112),CONVERT(SMALLDATETIME,'20241201',112),CAST('2024-12-01T00:00:00' AS DATETIME2(7))),
+      (5,CONVERT(DATETIME,'20240201',112),CONVERT(DATE,'20240201',112),NULL,NULL)
+cleanup:
+- sql: DROP TABLE IF EXISTS temporal_comparison_inputs
+test_cases:
+- name: Select the German calendar profile
+  session_id: temporal-comparison-dmy
+  sql: SET LANGUAGE German; SET DATEFORMAT dmy
+- name: A datetime column equals a converted character operand
+  session_id: temporal-comparison-dmy
+  sql: SELECT id FROM temporal_comparison_inputs WHERE at='31.12.9999' ORDER BY id
+  expect: {data: [{id: 1}]}
+- name: A character operand on the left uses the same datetime conversion
+  session_id: temporal-comparison-dmy
+  sql: SELECT id FROM temporal_comparison_inputs WHERE '31.12.9999'=at ORDER BY id
+  expect: {data: [{id: 1}]}
+- name: A range bound converts to the datetime domain
+  session_id: temporal-comparison-dmy
+  sql: SELECT id FROM temporal_comparison_inputs WHERE at<'01.12.2024' ORDER BY id
+  expect: {data: [{id: 2},{id: 5}]}
+- name: Date columns retain their own temporal domain
+  session_id: temporal-comparison-dmy
+  sql: SELECT id FROM temporal_comparison_inputs WHERE day_value='01.12.2024' ORDER BY id
+  expect: {data: [{id: 4}]}
+- name: Smalldatetime range comparisons convert character bounds
+  session_id: temporal-comparison-dmy
+  sql: SELECT id FROM temporal_comparison_inputs WHERE minute_value>='01.12.2024' ORDER BY id
+  expect: {data: [{id: 4}]}
+- name: Datetime2 comparison preserves seven fractional digits
+  sql: SELECT id FROM temporal_comparison_inputs WHERE precise>'2024-01-02T12:34:56.1234566' ORDER BY id
+  expect: {data: [{id: 2},{id: 4}]}
+- name: Temporal comparisons preserve SQL UNKNOWN for NULL operands
+  sql: SELECT id,CASE WHEN at=NULL THEN 1 WHEN at<>NULL THEN 2 ELSE 3 END AS null_comparison FROM temporal_comparison_inputs WHERE id IN(1,3) ORDER BY id
+  expect: {data: [{id: 1,null_comparison: 3},{id: 3,null_comparison: 3}]}
+- name: Implicit datetime2 conversion retains the legacy datetime tick
+  sql: DECLARE @legacy DATETIME=CAST('1900-01-01T00:00:00.003' AS DATETIME),@modern DATETIME2(3)=@legacy; SELECT CASE WHEN @legacy=@modern THEN 1 ELSE 0 END AS equal_value,CASE WHEN @legacy>@modern THEN 1 ELSE 0 END AS greater_value
+  expect: {data: [{equal_value: 0,greater_value: 1}]}
+- name: A low scale datetime2 column does not round its character comparison operand
+  sql: DECLARE @stored DATETIME2(3)=CAST('2024-01-02T12:34:56.123' AS DATETIME2(3)); SELECT CASE WHEN @stored='2024-01-02T12:34:56.1234567' THEN 1 ELSE 0 END AS equal_value,CASE WHEN @stored<'2024-01-02T12:34:56.1234567' THEN 1 ELSE 0 END AS less_value
+  expect: {data: [{equal_value: 0,less_value: 1}]}
+- name: An invalid character operand raises its conversion error
+  session_id: temporal-comparison-dmy
+  sql: SELECT id FROM temporal_comparison_inputs WHERE at='not a date'
+  expect: {error: true}
+- name: Start a reusable query with day first
+  session_id: temporal-comparison-switch
+  sql: SET DATEFORMAT dmy
+- name: The first invocation converts its bound with day first
+  session_id: temporal-comparison-switch
+  sql: SELECT id FROM temporal_comparison_inputs WHERE day_value='01.02.2024' ORDER BY id
+  expect: {data: [{id: 5}]}
+- name: Change the calendar profile without changing the query
+  session_id: temporal-comparison-switch
+  sql: SET DATEFORMAT mdy
+- name: The cached invocation converts its bound with month first
+  session_id: temporal-comparison-switch
+  sql: SELECT id FROM temporal_comparison_inputs WHERE day_value='01.02.2024' ORDER BY id
+  expect: {data: [{id: 2}]}
+- name: Cleanup changes only the rows matching the temporal value
+  session_id: temporal-comparison-dmy
+  sql: UPDATE temporal_comparison_inputs SET at=NULL WHERE at='31.12.9999'; SELECT id,CONVERT(VARCHAR(10),at,23) AS at_value FROM temporal_comparison_inputs ORDER BY id
+  expect: {data: [{id: 1,at_value: null},{id: 2,at_value: '2024-01-02'},{id: 3,at_value: null},{id: 4,at_value: '2024-12-01'},{id: 5,at_value: '2024-02-01'}]}
