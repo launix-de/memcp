@@ -2538,7 +2538,11 @@ consumer admission separately proves those same values exist in its scope. */
 (define scalar_first_probe_supported? (lambda (stage)
 	(if (scalar_first_physical_probe_stage? stage) true
 		(and (scalar_first_probe_contract? stage)
-			(source_is_base_table? (gs_input stage))
+			/* A query input uses the existing bounded query probe too. Its
+			complete caller tuple must close the input before that lowerer
+			binds the same values through its nested stage dependencies. */
+			(or (source_is_base_table? (gs_input stage))
+				(query_block? (gs_input stage)))
 			(scalar_probe_bindings_supported? stage)))))
 (define scalar_first_probe_bindings_complete? (lambda (stage sources)
 	(if (scalar_first_physical_probe_stage? stage) true
