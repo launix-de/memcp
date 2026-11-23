@@ -2355,7 +2355,11 @@ prewarm a subset; the generated reducer itself must skip nonmembers. */
 				(neumann_fail "build_queryplan"
 					"ordered window input requires caller context outside its row columns")
 				true)
-			(define reduce_expr (list reducefn '__orc_acc mapped_expr))
+			/* Window reducers accept declared key equivalence explicitly. The
+			physical owner binds row-only callbacks; no source snapshot is captured. */
+			(define partition_equivalent (window_key_equivalence_callback source (slice sortcols 0 partitioncount)))
+			(define order_equivalent (window_key_equivalence_callback source (slice sortcols partitioncount (count sortcols))))
+			(define reduce_expr (list reducefn '__orc_acc mapped_expr partition_equivalent order_equivalent))
 			(define mapreduce_expr
 				(list (quote lambda)
 					(cons (quote __orc_acc) map_params)
@@ -2525,6 +2529,10 @@ This keeps NULL distinct from zero and text keys in their SQL collation class. *
 			(define less (collate (source_column_order_collation src column) false))
 			(list 'and (list 'not (list less left_value right_value))
 				(list 'not (list less right_value left_value)))))) true)))
+
+(define window_key_equivalence_callback (lambda (src columns)
+	(list 'lambda (list 'left_key 'right_key)
+		(window_partition_equal_expr src columns 'left_key 'right_key))))
 
 (define count_star_field_title (lambda (fields)
 	(match (coalesceNil fields '())

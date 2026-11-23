@@ -31,6 +31,9 @@ setup:
 - sql: INSERT INTO win_partition_nulls VALUES(1,NULL),(2,NULL),(3,0),(4,0),(5,10),(6,10)
 - sql: CREATE TABLE win_partition_text(id INT PRIMARY KEY,p VARCHAR(10) COLLATE utf8mb4_general_ci)
 - sql: INSERT INTO win_partition_text VALUES(1,'ab'),(2,'AB'),(3,'xy'),(4,'XY')
+- sql: DROP TABLE IF EXISTS win_partition_composite
+- sql: CREATE TABLE win_partition_composite(id INT PRIMARY KEY,p INT,q VARCHAR(10) COLLATE utf8mb4_general_ci,v VARCHAR(10) COLLATE utf8mb4_general_ci)
+- sql: INSERT INTO win_partition_composite VALUES(1,NULL,'a',NULL),(2,NULL,'A',NULL),(3,0,'a','ab'),(4,0,'A','AB'),(5,0,'a','xy'),(6,0,'A','XY')
 test_cases:
 - name: 'mysql: Filtered ranking is independent of the final output order'
   sql: SELECT id,p,score,ROW_NUMBER() OVER(PARTITION BY p ORDER BY sort_key DESC,id) AS rn FROM win_domain_input
@@ -714,7 +717,41 @@ test_cases:
     - *id018
     - *id019
     - *id020
+- name: Composite partitions retain NULL and declared text equivalence in an independent order
+  sql: SELECT id,p,q,ROW_NUMBER() OVER(PARTITION BY p,q ORDER BY id) AS rn FROM win_partition_composite ORDER BY id DESC
+  expect:
+    rows: 6
+    data:
+    - {id: 6, p: 0, q: A, rn: 4}
+    - {id: 5, p: 0, q: a, rn: 3}
+    - {id: 4, p: 0, q: A, rn: 2}
+    - {id: 3, p: 0, q: a, rn: 1}
+    - {id: 2, p: null, q: A, rn: 2}
+    - {id: 1, p: null, q: a, rn: 1}
+- name: Composite LAG partitions reset only at a declared partition boundary
+  sql: SELECT id,LAG(id) OVER(PARTITION BY p,q ORDER BY id) AS previous FROM win_partition_composite ORDER BY id DESC
+  expect:
+    rows: 6
+    data:
+    - {id: 6, previous: 5}
+    - {id: 5, previous: 4}
+    - {id: 4, previous: 3}
+    - {id: 3, previous: null}
+    - {id: 2, previous: 1}
+    - {id: 1, previous: null}
+- name: Rank ties preserve NULL keys and declared text order equivalence
+  sql: SELECT id,v,RANK() OVER(PARTITION BY p,q ORDER BY v) AS r,DENSE_RANK() OVER(PARTITION BY p,q ORDER BY v) AS d FROM win_partition_composite ORDER BY id DESC
+  expect:
+    rows: 6
+    data:
+    - {id: 6, v: XY, r: 3, d: 2}
+    - {id: 5, v: xy, r: 3, d: 2}
+    - {id: 4, v: AB, r: 1, d: 1}
+    - {id: 3, v: ab, r: 1, d: 1}
+    - {id: 2, v: null, r: 1, d: 1}
+    - {id: 1, v: null, r: 1, d: 1}
 cleanup:
+- sql: DROP TABLE IF EXISTS win_partition_composite
 - sql: DROP TABLE IF EXISTS win_domain_input
 - sql: DROP TABLE IF EXISTS win_partition_nulls
 - sql: DROP TABLE IF EXISTS win_partition_text
