@@ -1,0 +1,166 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Declaration names use the original transaction projection across default
+    retirement and replacement
+setup:
+- sql: DROP TABLE IF EXISTS declaration_replacement
+- sql: DROP TABLE IF EXISTS declaration_source
+- sql: DROP TABLE IF EXISTS declaration_collision
+- sql: CREATE TABLE declaration_source(id INT PRIMARY KEY,value INT CONSTRAINT DF_reused_value
+    DEFAULT 7)
+- sql: INSERT declaration_source(id) VALUES(1)
+test_cases:
+- name: Guarded retirement makes a name available only in the original transaction
+    and rollback restores it
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: IF EXISTS(SELECT 1 FROM sys.columns WHERE name=N'value' AND object_id=OBJECT_ID(N'declaration_source',N'U')
+        AND default_object_id=OBJECT_ID(N'DF_reused_value',N'D')) ALTER TABLE declaration_source
+        DROP CONSTRAINT DF_reused_value
+    - connection: owner
+      sql: SELECT name FROM sys.default_constraints WHERE name=N'DF_reused_value'
+      expect:
+        data: []
+    - connection: observer
+      sql: SELECT name FROM sys.default_constraints WHERE name=N'DF_reused_value'
+      expect:
+        data:
+        - name: DF_reused_value
+    - connection: owner
+      sql: CREATE TABLE declaration_replacement(id INT PRIMARY KEY,value INT CONSTRAINT
+        DF_reused_value DEFAULT 0)
+    - connection: owner
+      sql: INSERT declaration_replacement(id) VALUES(8)
+    - connection: owner
+      sql: SELECT id,value FROM declaration_replacement
+      expect:
+        data:
+        - id: 8
+          value: 0
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT id,value FROM declaration_source
+      expect:
+        data:
+        - id: 1
+          value: 7
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'declaration_replacement',N'U') AS removed
+      expect:
+        data:
+        - removed: null
+- name: Savepoint restores declaration ownership and allows a later retirement and
+    replacement
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: SAVE TRANSACTION original_names
+    - connection: owner
+      sql: IF EXISTS(SELECT 1 FROM sys.columns WHERE name=N'value' AND object_id=OBJECT_ID(N'declaration_source',N'U')
+        AND default_object_id=OBJECT_ID(N'DF_reused_value',N'D')) ALTER TABLE declaration_source
+        DROP CONSTRAINT DF_reused_value
+    - connection: owner
+      sql: CREATE TABLE declaration_replacement(id INT PRIMARY KEY,value INT CONSTRAINT
+        DF_reused_value DEFAULT 0)
+    - connection: owner
+      sql: ROLLBACK TRANSACTION original_names
+    - connection: owner
+      sql: SELECT name FROM sys.default_constraints WHERE name=N'DF_reused_value'
+      expect:
+        data:
+        - name: DF_reused_value
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'declaration_replacement',N'U') AS removed
+      expect:
+        data:
+        - removed: null
+    - connection: owner
+      sql: IF EXISTS(SELECT 1 FROM sys.columns WHERE name=N'value' AND object_id=OBJECT_ID(N'declaration_source',N'U')
+        AND default_object_id=OBJECT_ID(N'DF_reused_value',N'D')) ALTER TABLE declaration_source
+        DROP CONSTRAINT DF_reused_value
+    - connection: owner
+      sql: CREATE TABLE declaration_replacement(id INT PRIMARY KEY,value INT CONSTRAINT
+        DF_reused_value DEFAULT 0)
+    - connection: owner
+      sql: INSERT declaration_replacement(id,value) SELECT id,value FROM declaration_source
+    - connection: owner
+      sql: INSERT declaration_replacement(id) VALUES(2)
+    - connection: owner
+      sql: DROP TABLE declaration_source
+    - connection: owner
+      sql: EXEC sp_rename N'declaration_replacement',N'declaration_source',N'OBJECT'
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM declaration_source ORDER BY id
+      expect:
+        data:
+        - id: 1
+          value: 7
+        - id: 2
+          value: 0
+    - connection: observer
+      sql: SELECT t.name AS table_name FROM sys.default_constraints d JOIN sys.objects
+        t ON d.parent_object_id=t.object_id WHERE d.name=N'DF_reused_value'
+      expect:
+        data:
+        - table_name: declaration_source
+- name: An existing committed default name still rejects a second declaration
+  sql: CREATE TABLE declaration_collision(id INT,value INT CONSTRAINT DF_reused_value
+    DEFAULT 9)
+  expect:
+    error: true
+    contains: declaration name already exists
+- name: Schema-scoped names remain shared across default and check declarations
+  tds:
+    statements:
+    - sql: CREATE TABLE declaration_collision(id INT)
+      connection: owner
+    - sql: ALTER TABLE declaration_collision ADD CONSTRAINT DF_reused_value CHECK(id>0)
+      expect:
+        error: true
+        contains:
+        - declaration name already exists
+      connection: owner
+    - connection: owner
+      sql: SELECT name FROM sys.check_constraints WHERE parent_object_id=OBJECT_ID(N'declaration_collision',N'U')
+      expect:
+        data: []
+    - sql: DROP TABLE declaration_collision
+      connection: owner
+- name: Failed name admissions leave no partial table
+  sql: SELECT OBJECT_ID(N'declaration_collision',N'U') AS absent
+  expect:
+    data:
+    - absent: null
+- name: Restart retains the final declaration namespace and values
+  action: restart
+- name: Reloaded replacement keeps the reused source name and all values
+  sql: SELECT id,value FROM declaration_source ORDER BY id
+  expect:
+    data:
+    - id: 1
+      value: 7
+    - id: 2
+      value: 0
+- name: Reloaded name ownership matches the final table declarations
+  sql: SELECT d.name,t.name AS table_name FROM sys.default_constraints d JOIN sys.objects
+    t ON d.parent_object_id=t.object_id WHERE d.name=N'DF_reused_value'
+  expect:
+    data:
+    - name: DF_reused_value
+      table_name: declaration_source
+cleanup:
+- sql: DROP TABLE IF EXISTS declaration_collision
+- sql: DROP TABLE IF EXISTS declaration_replacement
+- sql: DROP TABLE IF EXISTS declaration_source
