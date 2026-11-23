@@ -7673,7 +7673,9 @@ scalar comparison work rather than an uncalibrated multiplier. */
 					(if (or membership_filter scalar_membership_filter)
 						(list "$recset_contains") '())
 					(extract_columns_for_alias src filter_condition))))
-				(define fieldcols (merge_unique (extract_assoc bundled_fields (lambda (_title expr)
+				/* Bundling replaces probe markers by result slots, but their caller
+				coordinates still belong to the scan's ordinary read set. */
+				(define fieldcols (merge_unique (extract_assoc effective_fields (lambda (_title expr)
 					(extract_columns_for_alias src expr)))))
 				(define ordercols (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
 				(define batch_tiebreaker_cols (if (empty_list? order_items)
@@ -12343,7 +12345,7 @@ physical decision and preserve its runtime recompile gate. */
 				(planner_context_session facts))))
 		(define effective_condition (rewrite_physical_scalar_truth_plan scalar_plan final_condition))
 		(define effective_fields (rewrite_physical_scalar_truth_plan scalar_plan fields))
-		(define effective_needed_exprs (rewrite_physical_scalar_truth_plan scalar_plan needed_exprs))
+		(define unbundled_needed_exprs (rewrite_physical_scalar_truth_plan scalar_plan needed_exprs))
 		(define projection_probe_work_rows (if (query_limit_active? offset_value limit_value)
 			(coalesceNil (probe_limit_work_rows limit_value
 				(planner_context_session facts)) 0)
@@ -12352,6 +12354,11 @@ physical decision and preserve its runtime recompile gate. */
 				filter_probe_work_rows)))
 		(define projection_bundle (physical_scalar_projection_bundle
 			sources default_alias effective_fields))
+		/* The selected bundle executes inside this row callback. Preserve its
+		original probe dependencies before the join recipe binds scan columns. */
+		(define effective_needed_exprs (if (nil? projection_bundle) unbundled_needed_exprs
+			(merge_unique (list unbundled_needed_exprs
+				(extract_assoc effective_fields (lambda (_title expr) expr))))))
 		(define bundled_fields (if (nil? projection_bundle)
 			effective_fields
 			(nth projection_bundle 1)))

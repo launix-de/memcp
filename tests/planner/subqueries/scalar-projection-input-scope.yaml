@@ -848,3 +848,120 @@ test_cases:
       found: null
     - seq: 8
       found: null
+- name: sql Bundled ordered scalar payloads retain caller bindings in joined row callbacks
+  syntax: sql
+  sql: |-
+    SELECT q.seq,l.token AS caller_token,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS found,(SELECT CASE WHEN c.value IS NULL THEN q.id ELSE c.value+c.id+q.id END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS bound_value FROM projection_payload_inputs q JOIN projection_payload_inputs l ON l.seq=q.seq ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+      bound_value: 102
+      caller_token: 10
+    - seq: 2
+      found: 111
+      bound_value: 102
+      caller_token: 10
+    - seq: 3
+      found: 141
+      bound_value: 102
+      caller_token: 40
+    - seq: 4
+      found: null
+      bound_value: 102
+      caller_token: null
+    - seq: 5
+      found: 222
+      bound_value: 204
+      caller_token: 20
+    - seq: 6
+      found: 30
+      bound_value: 3
+      caller_token: 30
+    - seq: 7
+      found: 60
+      bound_value: 4
+      caller_token: 60
+    - seq: 8
+      found: null
+      bound_value: null
+      caller_token: 50
+- name: psql Bundled ordered scalar payloads retain caller bindings in joined row callbacks
+  syntax: psql
+  sql: |-
+    SELECT q.seq,l.token AS caller_token,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS found,(SELECT CASE WHEN c.value IS NULL THEN q.id ELSE c.value+c.id+q.id END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS bound_value FROM projection_payload_inputs q JOIN projection_payload_inputs l ON l.seq=q.seq ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+      bound_value: 102
+      caller_token: 10
+    - seq: 2
+      found: 111
+      bound_value: 102
+      caller_token: 10
+    - seq: 3
+      found: 141
+      bound_value: 102
+      caller_token: 40
+    - seq: 4
+      found: null
+      bound_value: 102
+      caller_token: null
+    - seq: 5
+      found: 222
+      bound_value: 204
+      caller_token: 20
+    - seq: 6
+      found: 30
+      bound_value: 3
+      caller_token: 30
+    - seq: 7
+      found: 60
+      bound_value: 4
+      caller_token: 60
+    - seq: 8
+      found: null
+      bound_value: null
+      caller_token: 50
+- name: tsql Bundled ordered scalar payloads retain caller bindings in joined row callbacks
+  syntax: tsql
+  sql: |-
+    SELECT q.seq,l.token AS caller_token,(SELECT TOP(1) CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC) AS found,(SELECT TOP(1) CASE WHEN c.value IS NULL THEN q.id ELSE c.value+c.id+q.id END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC) AS bound_value FROM projection_payload_inputs q JOIN projection_payload_inputs l ON l.seq=q.seq ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+      bound_value: 102
+      caller_token: 10
+    - seq: 2
+      found: 111
+      bound_value: 102
+      caller_token: 10
+    - seq: 3
+      found: 141
+      bound_value: 102
+      caller_token: 40
+    - seq: 4
+      found: null
+      bound_value: 102
+      caller_token: null
+    - seq: 5
+      found: 222
+      bound_value: 204
+      caller_token: 20
+    - seq: 6
+      found: 30
+      bound_value: 3
+      caller_token: 30
+    - seq: 7
+      found: 60
+      bound_value: 4
+      caller_token: 60
+    - seq: 8
+      found: null
+      bound_value: null
+      caller_token: 50
