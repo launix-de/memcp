@@ -445,9 +445,16 @@ test_cases:
       found: null
 - name: tsql LIMIT 1 sibling presence output remains an explicit payload coordinate
   syntax: tsql
-  sql: SELECT q.seq,(SELECT TOP(1) CASE WHEN q.present THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE
-    z.id=c.id AND z.value=q.token) END FROM projection_values c WHERE c.id=q.id) AS found FROM (SELECT i.seq,i.id,i.token,EXISTS(SELECT
-    1 FROM projection_values a WHERE a.id=1) AS present FROM projection_payload_inputs i) q ORDER BY q.seq
+  sql: |
+    SELECT q.seq,(SELECT TOP(1)
+      CASE WHEN q.present=CAST(1 AS bit) THEN CAST(1 AS bit)
+        ELSE CASE WHEN EXISTS(SELECT 1 FROM projection_values z WHERE z.id=c.id AND z.value=q.token)
+          THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END END
+      FROM projection_values c WHERE c.id=q.id) AS found
+    FROM (SELECT i.seq,i.id,i.token,
+      CASE WHEN EXISTS(SELECT 1 FROM projection_values a WHERE a.id=1)
+        THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS present
+      FROM projection_payload_inputs i) q ORDER BY q.seq
   expect:
     rows: 8
     data:
@@ -812,10 +819,16 @@ test_cases:
       found: null
 - name: tsql A row-dependent sibling presence output follows the exact caller row
   syntax: tsql
-  sql: SELECT q.seq,(SELECT TOP(1) CASE WHEN q.present THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE
-    z.id=c.id AND z.value=q.token) END FROM projection_values c WHERE c.id=q.id) AS found FROM (SELECT i.seq,i.id,i.token,EXISTS(SELECT
-    1 FROM projection_values a WHERE a.id=i.id AND a.value>i.token) AS present FROM projection_payload_inputs i)
-    q ORDER BY q.seq
+  sql: |
+    SELECT q.seq,(SELECT TOP(1)
+      CASE WHEN q.present=CAST(1 AS bit) THEN CAST(1 AS bit)
+        ELSE CASE WHEN EXISTS(SELECT 1 FROM projection_values z WHERE z.id=c.id AND z.value=q.token)
+          THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END END
+      FROM projection_values c WHERE c.id=q.id) AS found
+    FROM (SELECT i.seq,i.id,i.token,
+      CASE WHEN EXISTS(SELECT 1 FROM projection_values a WHERE a.id=i.id AND a.value>i.token)
+        THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS present
+      FROM projection_payload_inputs i) q ORDER BY q.seq
   expect:
     rows: 8
     data:
