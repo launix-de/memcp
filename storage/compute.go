@@ -460,19 +460,21 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		panic("incrementalRecomputeORC: column '" + name + "' is not an ORC column on table " + t.Name)
 	}
 
-	// Build sort infrastructure.
+	// Bind each declared physical column's total order once. The same
+	// relation owns NULL placement, collation and partition equivalence.
 	sortcolsScmer := make([]scm.Scmer, len(col.OrcSortCols))
+	sortLess := make([]func(scm.Scmer, scm.Scmer) bool, len(col.OrcSortCols))
+	sortdirsFns := make([]func(...scm.Scmer) scm.Scmer, len(col.OrcSortCols))
 	for i, sc := range col.OrcSortCols {
 		sortcolsScmer[i] = scm.NewString(sc)
-	}
-	ltFn := scm.Globalenv.Vars[scm.Symbol("<")].Func()
-	gtFn := scm.Globalenv.Vars[scm.Symbol(">")].Func()
-	sortdirsFns := make([]func(...scm.Scmer) scm.Scmer, len(col.OrcSortDirs))
-	for i, desc := range col.OrcSortDirs {
-		if desc {
-			sortdirsFns[i] = gtFn
-		} else {
-			sortdirsFns[i] = ltFn
+		less, _ := canonicalColumnOrder(t, sc)
+		sortLess[i] = less
+		desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
+		sortdirsFns[i] = func(values ...scm.Scmer) scm.Scmer {
+			if desc {
+				return scm.NewBool(less(values[1], values[0]))
+			}
+			return scm.NewBool(less(values[0], values[1]))
 		}
 	}
 
@@ -515,7 +517,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	filterFn := scm.PrepareSerialProc(col.OrcFilterFn)
 	condFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		for i := 0; i < partCount; i++ {
-			if scm.Less(a[i], partKeys[i]) || scm.Less(partKeys[i], a[i]) {
+			if sortLess[i](a[i], partKeys[i]) || sortLess[i](partKeys[i], a[i]) {
 				return scm.NewBool(false)
 			}
 		}
@@ -701,6 +703,13 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	}
 	partCount := analyzeOrcPartition(col)
 
+	// Invalidation must use the same declared orders as recomputation,
+	// including collation-equivalent partition keys and NULL coordinates.
+	sortLess := make([]func(scm.Scmer, scm.Scmer) bool, nCols)
+	for i := range sortLess {
+		sortLess[i], _ = canonicalColumnOrder(t, col.OrcSortCols[i])
+	}
+
 	// Build analyzer results for index-accelerated lookup.
 	// Partition columns → equality points; order columns → range from mutation key.
 	var bounds analyzedBoundaries
@@ -730,20 +739,20 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	// Build condition function for post-index filtering (index may return superset).
 	condFn := func(rowVals []scm.Scmer) bool {
 		for i := 0; i < partCount && i < len(rowVals); i++ {
-			if scm.Less(rowVals[i], sortKeys[i]) || scm.Less(sortKeys[i], rowVals[i]) {
+			if sortLess[i](rowVals[i], sortKeys[i]) || sortLess[i](sortKeys[i], rowVals[i]) {
 				return false
 			}
 		}
 		cmp := 0
 		for i := partCount; i < nCols && i < len(rowVals) && cmp == 0; i++ {
 			desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
-			if scm.Less(rowVals[i], sortKeys[i]) {
+			if sortLess[i](rowVals[i], sortKeys[i]) {
 				if desc {
 					cmp = 1
 				} else {
 					cmp = -1
 				}
-			} else if scm.Less(sortKeys[i], rowVals[i]) {
+			} else if sortLess[i](sortKeys[i], rowVals[i]) {
 				if desc {
 					cmp = -1
 				} else {
