@@ -2702,10 +2702,7 @@ physical decision: the logical window-stage remains independent of scan/ORC. */
 						(not (equal? (source_schema (os_source stage)) (source_schema src)))
 						(not (equal? (source_relation (os_source stage)) (source_relation src))))
 						nil
-						(if (or
-							(not (window_stage_input_matches? stage
-								(combine_where (qb_where block) (source_join_expr src))))
-							(not (window_offset_order_compatible? src (coalesceNil (qb_order block) '()) stage)))
+						(if (not (window_offset_order_compatible? src (coalesceNil (qb_order block) '()) stage))
 							nil
 							(begin
 								(define stages (cons stage rest))
@@ -2714,11 +2711,15 @@ physical decision: the logical window-stage remains independent of scan/ORC. */
 								(define max_lead (window_offset_max_for_function stages "LEAD"))
 								(define fields (expand_query_block_fields (list src) (qb_fields block)))
 								(define condition (combine_where (qb_where block) (source_join_expr src)))
-								(define filtercols (merge_unique (list (extract_columns_for_alias src condition))))
+								(define pre_condition (qassoc_get facts 'condition true))
+								(define post_filter (not (window_stage_input_matches? stage condition)))
+								(define filtercols (merge_unique (list (extract_columns_for_alias src pre_condition))))
 								(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
 									(extract_columns_for_alias src expr)))))
+								(define outputcols (if post_filter
+									(merge_unique (list fieldcols (extract_columns_for_alias src condition))) fieldcols))
 								(define mapcols (merge_unique (list
-									(filter fieldcols (lambda (column) (not (contains? (map stages os_column) column))))
+									(filter outputcols (lambda (column) (not (contains? (map stages os_column) column))))
 									(merge (map stages os_mapcols)))))
 								(define stride (count mapcols))
 								(define window_size (+ max_lag max_lead 1))
@@ -2739,15 +2740,29 @@ physical decision: the logical window-stage remains independent of scan/ORC. */
 								/* The selected row receives its ordinary alias.column parameter
 								names. Only the logical window column is replaced, so the standard
 								expression lowerer still owns SQL value semantics. */
+								(define row_expr (list (quote resultrow) (cons (quote list)
+									(map_assoc fields (lambda (_title expr)
+										(lower_column_expr_for_alias src
+											(replace_window_offset_expr src replacements expr)))))))
+								/* Post-window predicates see the selected row and its completed
+								LAG/LEAD slots. A reducing consumer receives an explicit admission
+								bit so a rejected row cannot contribute even a NULL value. */
 								(define emit_expr (list (quote lambda) emit_params
-									(list (quote resultrow) (cons (quote list)
-										(map_assoc fields (lambda (_title expr)
-											(lower_column_expr_for_alias src
-												(replace_window_offset_expr src replacements expr))))))))
+									(if post_filter
+										(list 'if (lower_column_expr_for_alias src
+											(replace_window_offset_expr src replacements condition))
+											(if (nil? result_consumer) row_expr (list 'list true row_expr))
+											(if (nil? result_consumer) nil (list 'list false nil)))
+										row_expr)))
+								(define emit_reducer (if (and post_filter (not (nil? result_consumer)))
+									(list 'lambda (list 'acc 'packet)
+										(list 'if (list 'car 'packet)
+											(result_consumer_fold result_consumer 'acc (list 'cadr 'packet)) 'acc))
+									(result_consumer_reducer result_consumer)))
 								(define filter_expr (list (quote lambda)
 									(map filtercols (lambda (column)
 										(scan_callback_symbol_for_alias (source_alias src) column)))
-									(lower_column_expr_for_alias src condition)))
+									(lower_column_expr_for_alias src pre_condition)))
 								(define map_params (map mapcols (lambda (column) (symbol (concat (source_alias src) "." column)))))
 								(define mapped_expr (cons (quote list) map_params))
 								(define fresh_window (window_offset_fresh_state_expr
@@ -2773,7 +2788,7 @@ physical decision: the logical window-stage remains independent of scan/ORC. */
 										(window_partition_equal_expr src partition_cols 'previous_partition 'current_partition)))))
 								(define flush_previous (list 'if (list 'and 'initialized (> max_lead 0))
 									(list 'cadr (list 'window_flush_reduce 'old_window emit_expr max_lead
-										(result_consumer_reducer result_consumer) (list 'nth 'state 3)))
+										emit_reducer (list 'nth 'state 3)))
 									(list 'nth 'state 3)))
 								(define active_window (list 'if 'same_partition 'old_window fresh_window))
 								/* State transitions consume functional window results. Only the
@@ -2784,7 +2799,7 @@ physical decision: the logical window-stage remains independent of scan/ORC. */
 										(list 'define consumer_value (list 'if 'same_partition (list 'nth 'state 3) flush_previous))
 										(list 'define 'active_window active_window)
 										(list 'define window_packet (list 'window_reduce 'active_window emit_expr 'mapped
-											(result_consumer_reducer result_consumer) consumer_value))
+											emit_reducer consumer_value))
 										(list 'list true 'current_partition (list 'car window_packet) (list 'cadr window_packet))))))))
 
 								(define mapreduce_expr (list (quote lambda)
@@ -2804,7 +2819,7 @@ physical decision: the logical window-stage remains independent of scan/ORC. */
 									(list 'list false nil fresh_window (result_consumer_initialize result_consumer))
 									(source_outer? src)))
 								(define final_flush (list 'window_flush_reduce (list 'nth 'final_state 2) emit_expr max_lead
-									(result_consumer_reducer result_consumer) (list 'nth 'final_state 3)))
+									emit_reducer (list 'nth 'final_state 3)))
 								/* An effect-only consumer needs the flush operation itself, not
 								a dead binding of its result. Reducing consumers retain the
 								returned accumulator as their actual completion value. */
