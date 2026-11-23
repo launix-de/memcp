@@ -711,7 +711,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	var bounds analyzedBoundaries
 	for i := 0; i < partCount && i < nCols; i++ {
 		bounds = append(bounds, analyzedBoundary{
-			col: col.OrcSortCols[i], matcher: EqualMatcher, lower: sortKeys[i], lowerInclusive: true,
+			col: col.OrcSortCols[i], matcher: EqualMatcher, nullSafe: true, lower: sortKeys[i], lowerInclusive: true,
 			upper: sortKeys[i], upperInclusive: true,
 		})
 	}
