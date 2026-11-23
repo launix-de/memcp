@@ -350,12 +350,11 @@ missing references still remain conservatively invocation-owned. */
 	(if (invocation_group_stage? (nested_stage_catalog stage) stage)
 		(invocation_group_table_expr stage)
 		(list 'table (group_stage_cache_schema stage) false (group_stage_cache_relation stage) false (physical_query_tx_symbol)))))
-(define invocation_group_source_declarations (lambda (stage) (begin
+(define group_carrier_source_declarations (lambda (stage collations) (begin
 	(define keys (group_key_cols (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage))))
 	(define names (merge (list keys (group_stage_aggregate_columns stage))))
 	(define expressions (merge (list (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage))
 		(map (gs_aggregates stage) car))))
-	(define collations (qassoc_get (gs_facts stage) 'group-value-collations '()))
 	/* These are internal reducer states, not frontend result descriptors.
 	The original SQL output contracts remain on their logical consumers. */
 	(list "columns" (mapIndex names (lambda (index name) (begin
@@ -364,7 +363,12 @@ missing references still remain conservatively invocation-owned. */
 			"Collation" (if (string? collation) collation nil)
 			"Dimensions" '() "Key" (if (contains? keys name) "PRI" "")))))
 		"constraints" (list "Unique" (list (list "Name" "group" "Cols" keys)) "ForeignKeys" '())
-		"references" '() "lifetime" "invocation"))))
+		"references" '()))))
+(define invocation_group_source_declarations (lambda (stage)
+	(merge (list
+		(group_carrier_source_declarations stage
+			(qassoc_get (gs_facts stage) 'group-value-collations '()))
+		(list "lifetime" "invocation")))))
 (define lower_runtime_group_carrier (lambda (stage) (begin
 	(define value (lower_runtime_group_relation (group_stage_schema stage) stage
 		(lambda (table scope) (list 'list scope table)) true))

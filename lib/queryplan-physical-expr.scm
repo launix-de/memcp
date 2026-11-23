@@ -9713,8 +9713,12 @@ nested aggregate facts: those can participate in structural identities. */
 					(if (invocation_group_stage? stages stage)
 						(source_with_declarations (source_with_relation src (list 'scoped-stage-table id))
 							(invocation_group_source_declarations stage))
-					(source_with_schema_relation src
-							(group_stage_cache_schema stage) (group_stage_cache_relation stage)))
+					/* The physical carrier owns these exact key/value exports even
+					before native creation. Its names need no catalog fallback. */
+					(source_with_declarations
+						(source_with_schema_relation src
+							(group_stage_cache_schema stage) (group_stage_cache_relation stage))
+						(group_carrier_source_declarations stage '())))
 					(combine_where (source_join_expr src)
 						(group_stage_session_filter_expr stage (source_alias src) keys (group_key_cols keys)))))))))
 
