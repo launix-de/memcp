@@ -315,6 +315,10 @@ candidate range, and the complete original predicate remains authoritative. */
 (define scan_plan_boundary_covers (lambda (have want)
 	(and (reduce '("kind" "column" "collation" "null_safe")
 		(lambda (same key) (and same (equal? (have key) (want key)))) true)
+		/* An upper-only native interval also contains NULL-first keys.
+		A SQL range needs a matching lower bound to cover its NULL rejection;
+		otherwise the original scalar predicate remains authoritative. */
+		(or (not (equal? (want "kind") "range")) (want "lower_set") (have "lower_set"))
 		(or (not (want "lower_set"))
 			(and (have "lower_set") (expression_equal? (have "lower") (want "lower"))
 				(equal? (have "lower_inclusive") (want "lower_inclusive"))))
