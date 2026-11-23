@@ -942,7 +942,7 @@ replacing both sources with independent expressions would lose the binding. */
 explicit domain coordinates. Preserve that source across successive rewrite
 passes too: an already emitted marker owns the same caller dependency. */
 (define probe_sources_without_caller_bindings (lambda (stages candidates consumers) (begin
-	(define emitted (expr_probe_stages consumers))
+	(define emitted (merge_unique (map consumers expr_probe_stages)))
 	(filter candidates (lambda (source)
 		(not (or (scalar_probe_source_has_dependent? stages source candidates)
 			(reduce emitted (lambda (needed stage)
