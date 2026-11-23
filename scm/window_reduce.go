@@ -49,10 +49,8 @@ func windowMutReduce(a ...Scmer) Scmer {
 	win := asSlice(a[0], "window_mut_reduce")
 	vals := asSlice(a[2], "window_mut_reduce vals")
 	slots, stride := ownedWindowSlots(win, "window_mut_reduce", ": window must have at least 3 elements")
-	skip := int(win[0].Int())
 	shiftOwnedWindow(win, slots, stride, vals)
-	if skip > 0 {
-		win[0] = NewInt(int64(skip - 1))
+	if skipOwnedWindowEmission(win) {
 		return windowReductionResult(a[0], a[4])
 	}
 	return windowReductionResult(a[0], windowEmissionResult(a[1], a[3], a[4], slots))
@@ -70,6 +68,9 @@ func windowFlushMutReduce(a ...Scmer) Scmer {
 	}
 	if count == 1 {
 		shiftOwnedWindow(win, slots, stride, nil)
+		if skipOwnedWindowEmission(win) {
+			return windowReductionResult(a[0], a[4])
+		}
 		return windowReductionResult(a[0], windowEmissionResult(a[1], a[3], a[4], slots))
 	}
 	emitter := PrepareSerialProc(a[1])
@@ -77,6 +78,9 @@ func windowFlushMutReduce(a ...Scmer) Scmer {
 	if a[3].IsNil() {
 		for n := 0; n < count; n++ {
 			shiftOwnedWindow(win, slots, stride, nil)
+			if skipOwnedWindowEmission(win) {
+				continue
+			}
 			emitter.Call(slots)
 		}
 		return windowReductionResult(a[0], result)
@@ -85,6 +89,9 @@ func windowFlushMutReduce(a ...Scmer) Scmer {
 	var args [2]Scmer
 	for n := 0; n < count; n++ {
 		shiftOwnedWindow(win, slots, stride, nil)
+		if skipOwnedWindowEmission(win) {
+			continue
+		}
 		args[0], args[1] = result, emitter.Call(slots)
 		result = reducer.Call(args[:])
 	}

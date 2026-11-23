@@ -126,7 +126,7 @@ func streamWindowTopK(a []Scmer, offset, limit int) Scmer {
  and either decrements skip or calls emit_fn with all slot values
  ordered oldest-to-newest.
 
- window_flush shifts in count positions of nils, emitting each time.
+ window_flush shifts in count positions of nils, honoring any remaining leading skip.
 */
 
 // ownedWindowSlots validates only the caller-owned serial accumulator. Its
@@ -158,14 +158,23 @@ func shiftOwnedWindow(win, slots []Scmer, stride int, vals []Scmer) {
 	win[1] = NewInt(win[1].Int() + 1)
 }
 
+// The leading skip belongs to the window, including shifts performed while
+// flushing its tail. Padding advances the window but is not an emitted row.
+func skipOwnedWindowEmission(win []Scmer) bool {
+	skip := win[0].Int()
+	if skip <= 0 {
+		return false
+	}
+	win[0] = NewInt(skip - 1)
+	return true
+}
+
 func windowMut(a ...Scmer) Scmer {
 	win := asSlice(a[0], "window_mut")
 	vals := asSlice(a[2], "window_mut vals")
 	slots, stride := ownedWindowSlots(win, "window_mut", ": window must have at least 3 elements (skip, counter, stride)")
-	skip := int(win[0].Int())
 	shiftOwnedWindow(win, slots, stride, vals)
-	if skip > 0 {
-		win[0] = NewInt(int64(skip - 1))
+	if skipOwnedWindowEmission(win) {
 		return a[0]
 	}
 	Apply(a[1], slots...)
@@ -178,6 +187,9 @@ func windowFlush(a ...Scmer) Scmer {
 	slots, stride := ownedWindowSlots(win, "window_flush", ": window must have at least 3 elements")
 	for n := 0; n < count; n++ {
 		shiftOwnedWindow(win, slots, stride, nil)
+		if skipOwnedWindowEmission(win) {
+			continue
+		}
 		Apply(a[1], slots...)
 	}
 	return NewNil()
