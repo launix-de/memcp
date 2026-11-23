@@ -184,7 +184,7 @@ test_cases:
     - {id: 8, v: -1, label: delta-low}
 - name: psql Date upper range rejects NULL
   syntax: psql
-  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE day_key<CAST('2024-01-03' AS DATE) ORDER BY id
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE day_key<DATE '2024-01-03' ORDER BY id
   expect:
     data:
     - {id: 2, v: -2, label: negative}
