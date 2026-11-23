@@ -937,6 +937,19 @@ replacing both sources with independent expressions would lose the binding. */
 				(and (group_stage? stage)
 					(reduce (scalar_aggregate_probe_outer_exprs stage) (lambda (found expression)
 						(or found (expr_refs_one_of_aliases? expression (list (source_alias source))))) false))))) nil)))))
+
+/* Probe consumers still need the real relational row that supplies their
+explicit domain coordinates. Preserve that source across successive rewrite
+passes too: an already emitted marker owns the same caller dependency. */
+(define probe_sources_without_caller_bindings (lambda (stages candidates consumers) (begin
+	(define emitted (expr_probe_stages consumers))
+	(filter candidates (lambda (source)
+		(not (or (scalar_probe_source_has_dependent? stages source candidates)
+			(reduce emitted (lambda (needed stage)
+				(or needed (and (group_stage? stage)
+					(reduce (scalar_aggregate_probe_outer_exprs stage) (lambda (found expression)
+						(or found (expr_refs_one_of_aliases? expression (list (source_alias source))))) false)))) false))))))))
+
 (define scalar_probe_binding_row_source (lambda (stages sources default_alias source) (begin
 	(define stage (source_stage_output_stage stages source))
 	(define lookup (qassoc_get (gs_facts stage) 'lookup-keys '()))
@@ -1015,6 +1028,8 @@ replacing both sources with independent expressions would lose the binding. */
 		(define binding_aliases (source_aliases binding_sources))
 		(define selected_probe_sources (filter selected_probe_sources (lambda (source)
 			(not (contains? binding_aliases (source_alias source))))))
+		(define selected_probe_sources
+			(probe_sources_without_caller_bindings stages selected_probe_sources consumers))
 		(define probe_sources
 			(probe_sources_with_relational_driver sources selected_probe_sources
 				(if (and (single_source? sources)
@@ -1060,6 +1075,8 @@ from silently overriding the physical planner. */
 (define query_block_with_selected_probe_sources_using (lambda (stages probe_sources block)
 	(begin
 		(define sources (qb_sources block))
+		(define probe_sources (probe_sources_without_caller_bindings
+			stages probe_sources (query_block_probe_consumers block)))
 		(define selected_probe_sources
 			(probe_sources_with_relational_driver sources probe_sources
 				(if (and (single_source? sources)
@@ -1216,6 +1233,8 @@ consumed only when its actual alias also disappeared from this block. */
 			stage_lookup sources default_alias allow_unbounded_presence))
 		(define rewritten (query_block_with_presence_probes_using
 			stage_lookup membership_rewritten allow_unbounded_presence))
+		(define consumed_presence_sources
+			(consumed_probe_sources_for_block rewritten presence_probe_sources))
 		(make_query_block
 			(qb_schema rewritten)
 			(qb_sources rewritten)
@@ -1228,7 +1247,7 @@ consumed only when its actual alias also disappeared from this block. */
 			(qb_offset rewritten)
 			(qb_hidden rewritten)
 			(stages_without_probe_sources_using_graph
-				dependency_graph stage_lookup (qb_stages rewritten) presence_probe_sources)
+				dependency_graph stage_lookup (qb_stages rewritten) consumed_presence_sources)
 			(query_block_facts_with_stage_catalog rewritten available_stages)))))
 
 (define query_block_with_prepared_sources_using_graph (lambda (stages dependency_graph block)
