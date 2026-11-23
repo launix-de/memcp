@@ -941,18 +941,35 @@ replacing both sources with independent expressions would lose the binding. */
 /* A selected presence probe contributes one nullable scalar binding to its
 LEFT-joined caller. Residual coordinates belong to that actual driver row;
 they cannot be enumerated while preparing an independent group carrier. */
-(define scalar_probe_caller_presence_source? (lambda (stages sources default_alias source) (begin
+(define scalar_probe_caller_presence_source? (lambda (stages sources selected consumers default_alias source) (begin
 	(define stage (source_stage_output_stage stages source))
-	(define drivers (filter sources (lambda (candidate)
-		(not (equal? (source_alias source) (source_alias candidate))))))
-	(and (presence_probe_stage? stage) (source_outer? source)
+	(if (not (and (presence_probe_stage? stage) (source_outer? source)
 		(stage_has_residual_outer_refs? stage) (source_is_base_table? (gs_input stage))
 		(equal? (gs_aggregates stage) (list aggregate_count_descriptor))
 		(equal? (stage_result_max_rows_per_partition stage) 1)
-		(equal? (count (gs_keys stage)) (count (qassoc_get (gs_facts stage) 'lookup-keys '())))
-		(scalar_probe_bindings_supported? stage)
-		(scalar_probe_bindings_complete? stage drivers)
-		(stage_lookup_keys_resolve_in_sources? stage drivers default_alias)))))
+		(equal? (count (gs_keys stage)) (count (qassoc_get (gs_facts stage) 'lookup-keys '()))))) false
+	(begin
+		(define selected_aliases (source_aliases selected))
+		(define drivers (filter sources (lambda (candidate)
+			(not (contains? selected_aliases (source_alias candidate))))))
+		/* Key labels on an absent LEFT row are not scalar payloads. This binding
+		profile is valid only when actual consumers observe the presence count. */
+		(define others (filter sources (lambda (candidate)
+			(not (equal? (source_alias source) (source_alias candidate))))))
+		(define observed (collect_alias_col_refs_from_exprs (source_alias source)
+			(merge (list consumers (map others source_join_expr)
+				(merge (map selected (lambda (candidate) (begin
+					(define consumer_stage (source_stage_output_stage stages candidate))
+					(if (or (equal? (source_alias source) (source_alias candidate))
+						(not (group_stage? consumer_stage))) '()
+						(scalar_aggregate_probe_outer_exprs consumer_stage))))))))))
+		(define count_col (group_stage_aggregate_column stage aggregate_count_descriptor))
+		(and (scalar_probe_bindings_supported? stage)
+			(scalar_probe_bindings_complete? stage drivers)
+			(stage_lookup_keys_resolve_in_sources? stage drivers default_alias)
+			(has_assoc? observed count_col)
+			(reduce (extract_assoc observed (lambda (column _used) column))
+				(lambda (valid column) (and valid (equal? column count_col))) true)))))))
 
 /* Probe consumers still need the real relational row that supplies their
 explicit domain coordinates. Preserve that source across successive rewrite
@@ -1040,7 +1057,8 @@ passes too: an already emitted marker owns the same caller dependency. */
 			(merge_unique (list probe_candidates (list (nth order_lookup 0))))))
 		(define binding_sources (filter selected_probe_sources (lambda (source)
 			(and (or (scalar_probe_binding_row_stage? (source_stage_output_stage stages source))
-					(scalar_probe_caller_presence_source? stages sources default_alias source))
+					(scalar_probe_caller_presence_source? stages sources selected_probe_sources
+						consumers default_alias source))
 				(scalar_probe_source_has_dependent? stages source selected_probe_sources)))))
 		/* Lowered binding expressions no longer carry their logical stage leaf.
 		Preserve its invocation effect on the resulting executable query. */
