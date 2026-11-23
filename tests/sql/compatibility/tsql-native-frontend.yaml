@@ -6553,7 +6553,7 @@ test_cases:
        (nil? (tsql_try_conversion_error '("tsql-error" 241 "bad calendar" 1)))
        (nil? (tsql_try_conversion_error '("tsql-error" 242 "calendar range" 1)))
        (try (lambda () (begin (tsql_try_conversion_error '("tsql-error" 8134 "not a conversion" 1)) false))
-        (lambda (cause) (expression_equal? cause '("tsql-error" 8134 "not a conversion" 1)))))
+        (lambda (cause) (expression_equal? (failure_value cause) '("tsql-error" 8134 "not a conversion" 1)))))
     expect:
       result: true
   - name: TRY target dimensions remain exact on empty output

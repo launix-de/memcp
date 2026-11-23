@@ -6,6 +6,32 @@ metadata:
   isolated: true
   requires_tds: true
   description: Scalar source IF branches retain lexical values and declared temporal return contracts
+setup:
+- sql: DROP FUNCTION IF EXISTS dbo.branch_initializer
+- sql: DROP FUNCTION IF EXISTS dbo.branch_label
+- sql: DROP FUNCTION IF EXISTS dbo.branch_local
+- sql: DROP FUNCTION IF EXISTS dbo.branch_return
+- sql: DROP FUNCTION IF EXISTS dbo.caller_calendar_branch
+- sql: DROP FUNCTION IF EXISTS dbo.choose_instant
+- sql: DROP FUNCTION IF EXISTS dbo.date_component
+- sql: DROP FUNCTION IF EXISTS dbo.duplicate_branch
+- sql: DROP FUNCTION IF EXISTS dbo.invalid_branch
+- sql: DROP FUNCTION IF EXISTS dbo.merge_values
+- sql: DROP FUNCTION IF EXISTS dbo.minute_component
+- sql: DROP FUNCTION IF EXISTS dbo.round_instant
+cleanup:
+- sql: DROP FUNCTION IF EXISTS dbo.branch_initializer
+- sql: DROP FUNCTION IF EXISTS dbo.branch_label
+- sql: DROP FUNCTION IF EXISTS dbo.branch_local
+- sql: DROP FUNCTION IF EXISTS dbo.branch_return
+- sql: DROP FUNCTION IF EXISTS dbo.caller_calendar_branch
+- sql: DROP FUNCTION IF EXISTS dbo.choose_instant
+- sql: DROP FUNCTION IF EXISTS dbo.date_component
+- sql: DROP FUNCTION IF EXISTS dbo.duplicate_branch
+- sql: DROP FUNCTION IF EXISTS dbo.invalid_branch
+- sql: DROP FUNCTION IF EXISTS dbo.merge_values
+- sql: DROP FUNCTION IF EXISTS dbo.minute_component
+- sql: DROP FUNCTION IF EXISTS dbo.round_instant
 test_cases:
 - name: Both temporal IF outcomes and NULL predicates retain declared DATETIME values
   tds:
