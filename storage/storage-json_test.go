@@ -48,11 +48,15 @@ func TestExactScalarStorageKeepsHistoricalNativeValues(t *testing.T) {
 
 func TestLegacyScalarMagicRemainsReadable(t *testing.T) {
 	var frame bytes.Buffer
-	binary.Write(&frame, binary.LittleEndian, uint64(2))
-	frame.WriteString("7\n\"legacy\"\n")
+	binary.Write(&frame, binary.LittleEndian, uint64(3))
+	frame.WriteString("7\n\"legacy\"\n{\"$memcp.scmer\":\"bson-v1\",\"type\":16,\"payload\":\"KgAAAA\"}\n")
 	legacy := new(storageSCMERLegacy)
-	if got := legacy.Deserialize(&frame); got != 2 || legacy.GetValue(0).Int() != 7 || legacy.GetValue(1).String() != "legacy" {
+	if got := legacy.Deserialize(&frame); got != 3 || legacy.GetValue(0).Int() != 7 || legacy.GetValue(1).String() != "legacy" {
 		t.Fatal("legacy magic-1 scalar column did not restore its full values")
+	}
+	kind, payload := legacy.GetValue(2).BSONRaw()
+	if !legacy.GetValue(2).IsBSON() || kind != 0x10 || !bytes.Equal(payload, []byte{42, 0, 0, 0}) {
+		t.Fatal("legacy magic-1 BSON envelope changed its native value")
 	}
 	var next bytes.Buffer
 	legacy.Serialize(&next)

@@ -18,6 +18,7 @@ package storage
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -896,22 +897,24 @@ func TestConstishZerosAndNulls(t *testing.T) {
 	verifyStorage(t, col2, n, gen)
 }
 
-func TestStorageSCMERBufferedSerializationKeepsLegacyBytes(t *testing.T) {
+func TestStorageSCMERBufferedSerializationKeepsExactFraming(t *testing.T) {
 	text := strings.Repeat("<catalog>&\"\nGröße", 1000)
 	storage := &StorageSCMER{values: []scm.Scmer{scm.NewString(text), scm.NewInt(42), scm.NewNil()}}
 	var serialized bytes.Buffer
 	storage.Serialize(&serialized)
-	// Legacy magic, little-endian count, then one JSON value per line. Include
+	// Current magic/version, little-endian count and exact value lengths. Include
 	// a value larger than the buffer to cover both streamed and final writes.
-	want := []byte{1, 3, 0, 0, 0, 0, 0, 0, 0}
+	want := []byte{3, 1, 3, 0, 0, 0, 0, 0, 0, 0}
 	encoded, err := json.Marshal(text)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = append(want, encoded...)
-	want = append(want, []byte("\n42\nnull\n")...)
+	for _, value := range [][]byte{encoded, []byte("42"), []byte("null")} {
+		want = binary.LittleEndian.AppendUint64(want, uint64(len(value)))
+		want = append(want, value...)
+	}
 	if !bytes.Equal(serialized.Bytes(), want) {
-		t.Fatal("buffering changed legacy SCMER framing or JSON escaping")
+		t.Fatal("buffering changed exact SCMER framing or JSON escaping")
 	}
 }
 
