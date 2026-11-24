@@ -13,6 +13,9 @@ setup:
 - sql: DROP FUNCTION IF EXISTS dbo.local_values_sum
 - sql: DROP FUNCTION IF EXISTS dbo.local_delete_all
 - sql: DROP FUNCTION IF EXISTS dbo.local_limited_delete
+- sql: DROP FUNCTION IF EXISTS dbo.local_values_defaults
+- sql: DROP FUNCTION IF EXISTS dbo.local_null_delete
+- sql: DROP FUNCTION IF EXISTS dbo.local_invalid_values
 - sql: DROP FUNCTION IF EXISTS dbo.local_invalid_delete
 - sql: DROP FUNCTION IF EXISTS dbo.local_invalid_alias_delete
 - sql: DROP FUNCTION IF EXISTS dbo.local_invalid_temp_delete
@@ -100,6 +103,26 @@ setup:
       SELECT @result=COUNT(*) FROM @t;
       RETURN @result;
     END
+- sql: |
+    CREATE FUNCTION dbo.local_values_defaults() RETURNS INT AS BEGIN
+      DECLARE @t TABLE(id INT,value INT NULL DEFAULT(7),other INT NULL);
+      INSERT @t(id) VALUES(1);
+      INSERT @t(id,value) VALUES(2,DEFAULT);
+      DECLARE @result INT;
+      SELECT @result=SUM(value)+COUNT(other) FROM @t;
+      RETURN @result;
+    END
+- sql: |
+    CREATE FUNCTION dbo.local_null_delete(@cut INT) RETURNS INT AS BEGIN
+      DECLARE @t TABLE(amount INT NULL);
+      INSERT @t SELECT CONVERT(INT,NULL);
+      INSERT @t SELECT CONVERT(INT,NULL);
+      INSERT @t SELECT 1;
+      DELETE @t WHERE amount>@cut;
+      DECLARE @result INT;
+      SELECT @result=COUNT(*) FROM @t;
+      RETURN @result;
+    END
 cleanup:
 - sql: DROP TABLE IF EXISTS #local_external
   session_id: local_mutation_temp_guard
@@ -109,6 +132,9 @@ cleanup:
 - sql: DROP FUNCTION IF EXISTS dbo.local_values_sum
 - sql: DROP FUNCTION IF EXISTS dbo.local_delete_all
 - sql: DROP FUNCTION IF EXISTS dbo.local_limited_delete
+- sql: DROP FUNCTION IF EXISTS dbo.local_values_defaults
+- sql: DROP FUNCTION IF EXISTS dbo.local_null_delete
+- sql: DROP FUNCTION IF EXISTS dbo.local_invalid_values
 - sql: DROP FUNCTION IF EXISTS dbo.local_invalid_delete
 - sql: DROP FUNCTION IF EXISTS dbo.local_invalid_alias_delete
 - sql: DROP FUNCTION IF EXISTS dbo.local_invalid_temp_delete
@@ -122,6 +148,9 @@ test_cases:
 - name: UNKNOWN delete predicate preserves rows while all NULL survivors retain SUM NULL
   sql: SELECT dbo.local_changed_sum(NULL) AS unknown_predicate,dbo.local_changed_sum(0) AS nullable_survivors
   expect: {rows: 1,data: [{unknown_predicate: 10,nullable_survivors: null}]}
+- name: UNKNOWN row predicates preserve each actual NULL target row
+  sql: SELECT dbo.local_null_delete(0) AS null_rows,dbo.local_null_delete(NULL) AS all_rows
+  expect: {rows: 1,data: [{null_rows: 2,all_rows: 3}]}
 - name: Caller duplicate and NULL bindings retain independent mutated row bags
   sql: SELECT id,dbo.local_changed_sum(cut) AS total FROM local_mutation_callers ORDER BY id
   expect:
@@ -136,6 +165,12 @@ test_cases:
 - name: VALUES expressions retain target column order duplicates and NULL rows
   sql: SELECT dbo.local_values_sum(2) AS total,dbo.local_values_sum(NULL) AS null_total
   expect: {rows: 1,data: [{total: 8,null_total: 9}]}
+- name: VALUES DEFAULT omitted literal defaults and nullable columns use ordinary insertion
+  sql: SELECT dbo.local_values_defaults() AS total
+  expect: {rows: 1,data: [{total: 14}]}
+- name: Duplicate explicit VALUES targets are invalid before invocation
+  sql: CREATE FUNCTION dbo.local_invalid_values() RETURNS INT AS BEGIN DECLARE @t TABLE(id INT); INSERT @t(id,ID) VALUES(1,2); RETURN 1; END
+  expect: {error: true}
 - name: Unconditional DELETE produces an empty local relation
   sql: SELECT dbo.local_delete_all() AS remaining
   expect: {rows: 1,data: [{remaining: 0}]}

@@ -6771,14 +6771,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(define relation (source_relation source))
 		(if (local_relation_reference? relation) true
 			(error "scalar function INSERT requires a declared local table"))
-		(define columns (coalesceNil columns (map (local_relation_columns relation)
-			(lambda (column) (column "Field")))))
+		(define columns (coalesceNil columns (tsql_insert_target_columns (source_schema source) relation tx)))
 		(if (reduce rows (lambda (valid row) (and valid (equal? (count row) (count columns)))) true)
 			true (error "INSERT column count does not match value count"))
-		(define declarations (map columns (lambda (name) (begin
-			(define declaration (find (local_relation_columns relation)
-				(lambda (column) (equal?? name (column "Field"))) nil))
-			(if declaration declaration (error "local INSERT column does not exist: " name))))))
+		(define declarations (tsql_insert_declarations (source_schema source) relation columns planning_session tx))
+		(define columns (map declarations (lambda (column) (column "Field"))))
 		(define rows (map rows (lambda (row) (mapIndex row (lambda (index value)
 			(tsql_assignment_value (tsql_finalize_sources value "query" cte_bindings '())
 				(nth declarations index) (source_schema source) policy planning_session tx))))))
