@@ -307,6 +307,9 @@ func (tx *TxContext) enterPublicCatalogPhase() {
 	scope := tx.resourceScope()
 	scope.mu.Lock()
 	defer scope.mu.Unlock()
+	if scope.publicDeclarationPendingLocked() {
+		panic(newNativeMutationBusyError(tx.transactionState, "public declaration construction"))
+	}
 	if tx.publicCatalogEntered.Load() {
 		return
 	}

@@ -437,6 +437,113 @@ test_cases:
       (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +) 0)))
   expect:
     result: true
+- name: A recursive DEFAULT fails busy before waiting while the original first declaration completes
+  scm: |-
+    (begin
+     true
+     (define owner (newsession)) (owner "username" "root")
+     (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "projection_loss" false tx))
+     (define marker (table "memcp-tests" false "projection_marker" false tx))
+     (insert target '("value") (list (list "ok")) '() nil false nil tx)
+     (define previous (show target "column" "value" true tx))
+     (define collation (coalesceNil (previous "Collation") ""))
+     (define caught (newsession)) (caught "busy" false)
+     (define projection (lambda (value) (begin
+      (define busy (try (lambda () (begin (altercolumn marker "value" "default" 42 tx) false))
+       (lambda (cause) (if (strlike (string (failure_value cause)) "%native mutation is still active; retry public declaration construction%") true (error cause)))))
+      (caught "busy" busy)
+      value)))
+     (define accepted (try (lambda () (begin
+      (altercolumn target "value" "validated_declaration"
+       (list (list "NVARCHAR" '(2) true collation) (list "VARCHAR" '(2) true collation) projection) tx)
+      true)) (lambda (cause) (if (strlike (string (failure_value cause)) "%native mutation is still active; retry public declaration construction%") false (error cause)))))
+     (define current (show target "column" "value" true tx))
+     (define default_unchanged (nil? ((show marker "column" "value" true tx) "Default")))
+     (define own_value (scan tx target '() '() '() (lambda () true) '("value") (lambda (_ value) value) nil (lambda (left right) (coalesceNil left right))))
+     (define outside_count (scan nil target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +))
+     (define active (and (equal? (tx_state tx) "active") (identical? tx (owner "__memcp_tx"))))
+     (define source_absent (empty_list? (showprocedures "memcp-tests" "projection_reentrant_source" tx)))
+     (tx_rollback owner)
+     (and (and accepted (caught "busy")) active default_unchanged source_absent
+      (equal? (current "RawType") "NVARCHAR") (equal? own_value "ok") (equal? outside_count 0)
+      (equal? ((show target "column" "value" true) "RawType") "VARCHAR")
+      (nil? ((show marker "column" "value" true) "Default"))
+      (empty_list? (showprocedures "memcp-tests" "projection_reentrant_source" nil))
+      (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +) 0)))
+  expect:
+    result: true
+- name: A recursive source declaration fails busy without retiring the original first factory
+  scm: |-
+    (begin
+     (registerprocedurelanguage "column-projection-reentry" (lambda (source context) (lambda () 1)))
+     (define owner (newsession)) (owner "username" "root")
+     (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "projection_loss" false tx))
+     (define marker (table "memcp-tests" false "projection_marker" false tx))
+     (insert target '("value") (list (list "ok")) '() nil false nil tx)
+     (define previous (show target "column" "value" true tx))
+     (define collation (coalesceNil (previous "Collation") ""))
+     (define caught (newsession)) (caught "busy" false)
+     (define projection (lambda (value) (begin
+      (define busy (try (lambda () (begin (createprocedure "memcp-tests" "projection_reentrant_source" "column-projection-reentry" "1" nil false tx) false))
+       (lambda (cause) (if (strlike (string (failure_value cause)) "%native mutation is still active; retry public declaration construction%") true (error cause)))))
+      (caught "busy" busy)
+      value)))
+     (define accepted (try (lambda () (begin
+      (altercolumn target "value" "validated_declaration"
+       (list (list "NVARCHAR" '(2) true collation) (list "VARCHAR" '(2) true collation) projection) tx)
+      true)) (lambda (cause) (if (strlike (string (failure_value cause)) "%native mutation is still active; retry public declaration construction%") false (error cause)))))
+     (define current (show target "column" "value" true tx))
+     (define default_unchanged (nil? ((show marker "column" "value" true tx) "Default")))
+     (define own_value (scan tx target '() '() '() (lambda () true) '("value") (lambda (_ value) value) nil (lambda (left right) (coalesceNil left right))))
+     (define outside_count (scan nil target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +))
+     (define active (and (equal? (tx_state tx) "active") (identical? tx (owner "__memcp_tx"))))
+     (define source_absent (empty_list? (showprocedures "memcp-tests" "projection_reentrant_source" tx)))
+     (tx_rollback owner)
+     (and (and accepted (caught "busy")) active default_unchanged source_absent
+      (equal? (current "RawType") "NVARCHAR") (equal? own_value "ok") (equal? outside_count 0)
+      (equal? ((show target "column" "value" true) "RawType") "VARCHAR")
+      (nil? ((show marker "column" "value" true) "Default"))
+      (empty_list? (showprocedures "memcp-tests" "projection_reentrant_source" nil))
+      (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +) 0)))
+  expect:
+    result: true
+- name: A propagated recursive declaration failure preserves original rows headers and transaction after factory
+    cleanup
+  scm: |-
+    (begin
+     true
+     (define owner (newsession)) (owner "username" "root")
+     (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "projection_loss" false tx))
+     (define marker (table "memcp-tests" false "projection_marker" false tx))
+     (insert target '("value") (list (list "ok")) '() nil false nil tx)
+     (define previous (show target "column" "value" true tx))
+     (define collation (coalesceNil (previous "Collation") ""))
+     (define caught (newsession)) (caught "busy" false)
+     (define projection (lambda (value) (begin
+      (altercolumn marker "value" "default" 42 tx)
+      value)))
+     (define accepted (try (lambda () (begin
+      (altercolumn target "value" "validated_declaration"
+       (list (list "NVARCHAR" '(2) true collation) (list "VARCHAR" '(2) true collation) projection) tx)
+      true)) (lambda (cause) (if (strlike (string (failure_value cause)) "%native mutation is still active; retry public declaration construction%") false (error cause)))))
+     (define current (show target "column" "value" true tx))
+     (define default_unchanged (nil? ((show marker "column" "value" true tx) "Default")))
+     (define own_value (scan tx target '() '() '() (lambda () true) '("value") (lambda (_ value) value) nil (lambda (left right) (coalesceNil left right))))
+     (define outside_count (scan nil target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +))
+     (define active (and (equal? (tx_state tx) "active") (identical? tx (owner "__memcp_tx"))))
+     (define source_absent (empty_list? (showprocedures "memcp-tests" "projection_reentrant_source" tx)))
+     (tx_rollback owner)
+     (and (not accepted) active default_unchanged source_absent
+      (equal? (current "RawType") "VARCHAR") (equal? own_value "ok") (equal? outside_count 0)
+      (equal? ((show target "column" "value" true) "RawType") "VARCHAR")
+      (nil? ((show marker "column" "value" true) "Default"))
+      (empty_list? (showprocedures "memcp-tests" "projection_reentrant_source" nil))
+      (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +) 0)))
+  expect:
+    result: true
 - name: Cross-type ALTER without COLLATE selects the database default comparison policy
   noncritical: true
   tds:

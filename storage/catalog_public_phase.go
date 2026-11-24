@@ -7,6 +7,20 @@ import "errors"
 
 const publicDeclarationResourceKey = "native-public-declarations"
 
+// Caller holds the existing resource-scope mutex. The first public factory
+// owns its unfinished entry until complete stage acceptance or cleanup; a
+// recursive declaration may neither wait on it nor retire that outer owner.
+func (scope *transactionResources) publicDeclarationPendingLocked() bool {
+	if entry := scope.entries[publicDeclarationResourceKey]; entry != nil {
+		select {
+		case <-entry.done:
+		default:
+			return true
+		}
+	}
+	return false
+}
+
 // Non-enforcing public deltas join an existing local ACID owner. Earlier WAL still
 // names that owner's original T; catalog prepare binds T to the final decision.
 // No prepared/remote authority, isolation conversion or database migration can
@@ -141,6 +155,13 @@ func (tx *TxContext) retireUnacceptedPublicCatalogPhase() {
 	identity := tx.catalogIdentity.Load()
 	if identity == nil || identity.lateCreates || !tx.publicCatalogEntered.Load() || tx.hasCatalogIntents() {
 		return
+	}
+	scope := tx.resourceScope()
+	scope.mu.Lock()
+	pending := scope.publicDeclarationPendingLocked()
+	scope.mu.Unlock()
+	if pending {
+		return // The original unfinished factory owns cleanup, including failure.
 	}
 	tx.beginResourceDecision()
 	defer tx.finishResourceDecision()
