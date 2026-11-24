@@ -792,11 +792,11 @@ user table merely to discard a newly constructed policy closure. */
 							The existing variant path collapses source-free constant
 							queries with no dependencies to a direct compiled procedure. */
 							select_query
-							/* INSERT and REPLACE consume storage coordinates and SELECT
-							source generations too. Preserve their emitted dependencies in
-							the same exact-variant owner as UPDATE and DELETE. */
+							/* DML and ALTER can bind physical storage coordinates. Retain
+							their emitted declaration guards when a visible name is reused;
+							guard-free declarations still collapse to a direct procedure. */
 							(if (< first_token (count tokens))
-								(contains? (list "INSERT" "REPLACE" "UPDATE" "DELETE")
+								(contains? (list "INSERT" "REPLACE" "UPDATE" "DELETE" "ALTER")
 									(toUpper (nth tokens first_token))) false))
 							(begin
 								(define exact_compile (lambda () (begin
