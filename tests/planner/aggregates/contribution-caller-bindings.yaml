@@ -145,23 +145,23 @@ test_cases:
       category: null
       total: 21
     - x: 5
-      category: 0
-      total: 18
-    - x: 5
-      category: 1
-      total: 3
-    - x: 5
-      category: 2
-      total: 0
-    - x: 5
       category: null
       total: 21
     - x: 5
       category: 0
       total: 18
     - x: 5
+      category: 0
+      total: 18
+    - x: 5
       category: 1
       total: 3
+    - x: 5
+      category: 1
+      total: 3
+    - x: 5
+      category: 2
+      total: 0
     - x: 5
       category: 2
       total: 0
@@ -276,23 +276,23 @@ test_cases:
       category: null
       total: 16
     - x: 5
-      category: 0
-      total: 13
-    - x: 5
-      category: 1
-      total: 3
-    - x: 5
-      category: 2
-      total: 0
-    - x: 5
       category: null
       total: 16
     - x: 5
       category: 0
       total: 13
     - x: 5
+      category: 0
+      total: 13
+    - x: 5
       category: 1
       total: 3
+    - x: 5
+      category: 1
+      total: 3
+    - x: 5
+      category: 2
+      total: 0
     - x: 5
       category: 2
       total: 0
