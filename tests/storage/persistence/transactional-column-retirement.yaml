@@ -451,6 +451,15 @@ test_cases:
     - true
     - true
     - 31
+- name: Native intrinsic default retirement accepts its ordered program with original rows
+  scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner\
+    \ \"__memcp_tx\"))\n (define target (table \"memcp-tests\" false \"retire_guard\" false tx))\n (altertable target\
+    \ \"drop\" \"retired\" tx)\n (tx_commit owner)\n (list (scan nil target '() '() '() (lambda () true) '(\"id\"\
+    ) + 0 +)\n   (nil? (show target \"column\" \"retired\" false nil))))"
+  expect:
+    result:
+    - 1
+    - true
 - name: Crash before acceptance retains the predecessor schema and packed values
   steps:
   - sql: BEGIN TRANSACTION
@@ -466,6 +475,15 @@ test_cases:
       interrupted_ok: true
 - name: Restart and replay accepted V28 decisions
   action: restart
+- name: Accepted intrinsic clear and DROP replay together without a default declaration
+  sql: SELECT id,COL_LENGTH(N'retire_guard',N'retired') AS retired_length,OBJECT_ID(N'DF_retire_guard',N'D') AS
+    default_object FROM retire_guard ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      retired_length: null
+      default_object: null
 - name: Accepted retirement and original data effects recover together
   sql: SELECT id,payload,COL_LENGTH(N'retire_commit',N'retired') AS absent,COL_LENGTH(N'retire_commit',N'payload')
     AS width FROM retire_commit
