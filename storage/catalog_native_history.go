@@ -20,11 +20,13 @@ type catalogNativeDeclaration struct {
 	Property    *catalogColumnPropertyChange `json:"column_property,omitempty"`
 	Rename      *catalogColumnRename         `json:"column_rename,omitempty"`
 	TableRename *catalogTableRename          `json:"table_rename,omitempty"`
+	Declaration *catalogColumnDeclaration    `json:"column_declaration,omitempty"`
 }
 
 func (tx *TxContext) publicNativeDeclarations(history []catalogDeclarationAmendment) []catalogNativeDeclaration {
 	var result []catalogNativeDeclaration
 	properties := tx.hasColumnPropertyClaims(history)
+	orderedColumns := tx.validatedDeclarationTables(history)
 	// Pending state transitions belong to this same amendment history. Freeze
 	// each addition's accepted validation fact once, including its matching DROP;
 	// recovery never publishes a transient pending state or a second projection.
@@ -42,6 +44,9 @@ func (tx *TxContext) publicNativeDeclarations(history []catalogDeclarationAmendm
 		}
 	}
 	for _, entry := range history {
+		if a := entry.column; a != nil && a.declaration != nil && orderedColumns[a.table] && !tx.ownsTableDrop(a.table) {
+			result = append(result, catalogNativeDeclaration{Operation: "column_declaration", Declaration: a.declaration})
+		}
 		if a := entry.tableRename; a != nil && !tx.ownsTableDrop(a.table) {
 			result = append(result, catalogNativeDeclaration{Operation: "table_rename", TableRename: a.declaration})
 		}
@@ -152,7 +157,17 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 		if action.Rename != nil && action.Operation != "column_rename" {
 			panic("column rename payload on a different native action")
 		}
+		if action.Declaration != nil && action.Operation != "column_declaration" {
+			panic("stored declaration payload on a different native action")
+		}
 		switch action.Operation {
+		case "column_declaration":
+			if domain != catalogNativeCurrent || action.Declaration == nil || action.Rename != nil || action.TableRename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
+				panic("invalid native stored declaration action")
+			}
+			t := db.tables.Get(action.Declaration.Table)
+			_, columns := db.projectStoredDeclaration(action.Declaration, p.propertyColumns[t], p)
+			p.propertyColumns[t] = columns
 		case "table_rename":
 			if domain != catalogNativeCurrent || action.TableRename == nil || action.Rename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
 				panic("invalid native table rename action")
@@ -313,6 +328,23 @@ func (db *database) recoverNativeDeclarations(actions []catalogNativeDeclaration
 	db.projectNativeDeclarations(actions, nil, domain, scope)
 	for _, action := range actions {
 		switch action.Operation {
+		case "column_declaration":
+			// Whole-decision projection above has already checked ordered native
+			// dependencies; replay only installs its attested immutable header.
+			t := db.tables.Get(action.Declaration.Table)
+			for index, previous := range t.Columns {
+				if previous.Name == action.Declaration.Column {
+					columns := append([]*column(nil), t.Columns...)
+					if action.Declaration.After.compatibleWith(action.Declaration.Before) {
+						columns[index] = action.Declaration.After.replace(previous)
+					} else {
+						columns[index] = action.Declaration.After.replaceValidated(previous)
+					}
+					t.Columns = columns
+					db.initializeRecoveryColumnMetadata(t)
+					break
+				}
+			}
 		case "table_rename":
 			t := db.tables.Get(action.TableRename.Storage)
 			name := action.TableRename.After
@@ -370,6 +402,25 @@ func validateNativeDeclarationShape(actions []catalogNativeDeclaration) error {
 	propertyCurrent := make(map[[3]string]propertyState)
 	renameCurrent := make(map[[2]string]*catalogColumnRename)
 	tableCurrent := make(map[string]*catalogTableRename)
+	orderedTypes := false
+	for _, action := range actions {
+		orderedTypes = orderedTypes || action.Declaration != nil
+	}
+	var columnTypes map[[2]string]storedColumnType
+	if orderedTypes {
+		columnTypes = make(map[[2]string]storedColumnType)
+	}
+	attestColumn := func(identity, column string, expected storedColumnType) bool {
+		if !orderedTypes {
+			return true // retain the historical property/name shape domains
+		}
+		key := [2]string{identity, column}
+		if before, found := columnTypes[key]; found && !before.equal(expected) {
+			return false
+		}
+		columnTypes[key] = expected
+		return true
+	}
 	for _, action := range actions {
 		if action.TableRename != nil && action.Operation != "table_rename" {
 			return fmt.Errorf("table rename payload on a different native action")
@@ -377,7 +428,22 @@ func validateNativeDeclarationShape(actions []catalogNativeDeclaration) error {
 		if action.Rename != nil && action.Operation != "column_rename" {
 			return fmt.Errorf("column rename payload on a different native action")
 		}
+		if action.Declaration != nil && action.Operation != "column_declaration" {
+			return fmt.Errorf("stored declaration payload on a different native action")
+		}
 		switch action.Operation {
+		case "column_declaration":
+			if action.Declaration == nil || action.Rename != nil || action.TableRename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
+				return fmt.Errorf("invalid native stored declaration action")
+			}
+			d := action.Declaration
+			if err := validateStoredDeclarationShape(d); err != nil {
+				return err
+			}
+			if !attestColumn(d.Identity, d.Column, d.Before) {
+				return fmt.Errorf("native stored declaration lost its ordered predecessor")
+			}
+			columnTypes[[2]string{d.Identity, d.Column}] = d.After
 		case "table_rename":
 			if action.TableRename == nil || action.Rename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
 				return fmt.Errorf("invalid native table rename action")
@@ -399,7 +465,10 @@ func validateNativeDeclarationShape(actions []catalogNativeDeclaration) error {
 			}
 			d := action.Rename
 			key := [2]string{d.Identity, d.Storage}
-			if before := renameCurrent[key]; before != nil && (before.Table != d.Table || before.After != d.Before || !before.Expected.equal(d.Expected)) {
+			if !attestColumn(d.Identity, d.Storage, d.Expected) {
+				return fmt.Errorf("native column rename lost its ordered type predecessor")
+			}
+			if before := renameCurrent[key]; before != nil && (before.Table != d.Table || before.After != d.Before || !orderedTypes && !before.Expected.equal(d.Expected)) {
 				return fmt.Errorf("native column rename lost its ordered predecessor")
 			}
 			renameCurrent[key] = d
@@ -411,6 +480,9 @@ func validateNativeDeclarationShape(actions []catalogNativeDeclaration) error {
 				return err
 			}
 			d := action.Property
+			if !attestColumn(d.Identity, d.Column, d.Expected) {
+				return fmt.Errorf("native column property lost its ordered type predecessor")
+			}
 			value, _ := columnPropertyValue(d.ValueKind, d.Value)
 			before, _ := columnPropertyValue(d.BeforeKind, d.Before)
 			if action.Operation == "column_property_drop" && (!d.BeforePresent || !sameColumnProperty(value, before)) {
@@ -418,7 +490,7 @@ func validateNativeDeclarationShape(actions []catalogNativeDeclaration) error {
 			}
 			name := [3]string{d.Identity, d.Column, d.Key}
 			if previous, seen := propertyCurrent[name]; seen {
-				if previous.declaration.Table != d.Table || !previous.declaration.Expected.equal(d.Expected) ||
+				if previous.declaration.Table != d.Table || !orderedTypes && !previous.declaration.Expected.equal(d.Expected) ||
 					previous.present != d.BeforePresent || previous.present && !sameColumnProperty(previous.value, before) {
 					return fmt.Errorf("native column property action lost its ordered predecessor")
 				}

@@ -524,7 +524,7 @@ func (tx *TxContext) prepareCatalogDecision() error {
 		commit.publicPublication = db.preparePublicConstraintPublication(record.Checks, record.ColumnDefaults, record.ColumnDeclarations, record.ColumnAppends, record.ColumnPropertyRemovals, record.CheckDrops, record.NativeDeclarations, record.Version, tx.publicConstraintPrograms(), tx.publicCatalogChanges())
 	}
 
-	if record.Format == 23 || record.Format == 24 {
+	if record.Format == 23 || record.Format == 24 || record.hasValidatedDeclarations() {
 		var names map[*table]string
 		if views := tx.namespaceView(db); views != nil {
 			names = views.names
@@ -535,6 +535,9 @@ func (tx *TxContext) prepareCatalogDecision() error {
 	record.AllocatorResets = tx.allocatorResetDeclarations()
 	if len(record.AllocatorResets) != 0 {
 		record.Format = 25
+	}
+	if record.hasValidatedDeclarations() {
+		record.Format = 26
 	}
 	encoded := encodeCatalogDecision(record)
 	db.schemalock.Unlock()

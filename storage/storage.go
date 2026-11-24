@@ -3362,6 +3362,12 @@ func Init(en scm.Env) {
 			if !t.committedAt(t.schema.catalogView().version) {
 				return currentTx.alterCatalogColumn(t, scm.String(a[1]), scm.String(a[2]), a[3])
 			}
+			if scm.String(a[2]) == "validated_declaration" {
+				if currentTx == nil || currentTx.Mode != TxACID {
+					panic("validated declaration requires its original native ACID transaction")
+				}
+				return currentTx.alterPublicStoredColumn(t, scm.String(a[1]), scm.String(a[2]), a[3])
+			}
 			if currentTx != nil && !currentTx.autoCommit {
 				if columnDefaultOperation(scm.String(a[2])) || scm.String(a[2]) == "declaration" || scm.String(a[2]) == "drop_property" || scm.String(a[2]) == "claim_property" {
 					return currentTx.alterPublicStoredColumn(t, scm.String(a[1]), scm.String(a[2]), a[3])
@@ -3381,7 +3387,7 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
 				{Kind: "string", Label: "column", Description: "name of the column"},
-				{Kind: "string", Label: "operation", Description: "one of drop|type|dimensions|null|default|default_expression|default_declaration|add_default|drop_default|collation|auto_increment|comment|properties|drop_property|claim_property|temp|declaration"},
+				{Kind: "string", Label: "operation", Description: "one of drop|type|dimensions|null|default|default_expression|default_declaration|add_default|drop_default|collation|auto_increment|comment|properties|drop_property|claim_property|temp|declaration|validated_declaration"},
 				{Kind: "any", Label: "parameter", Description: "name of the column to drop or value of the parameter"},
 				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
 			},

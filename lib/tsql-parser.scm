@@ -830,6 +830,14 @@ https://learn.microsoft.com/sql/t-sql/data-types/float-and-real-transact-sql */
 			(and (equal? (cadr dimensions) (cadr previous_dimensions))
 				(>= (car dimensions) (car previous_dimensions)))
 			false)))))
+/* SQL conversion rules stay in this frontend. The native declaration owner
+independently proves unchanged values, storage carriers and comparison policy.
+https://learn.microsoft.com/sql/t-sql/data-types/smalldatetime-transact-sql */
+(define tsql_value_preserving_column_transition? (lambda (previous type dimensions collation)
+	(and (equal? (toUpper (previous "RawType")) "SMALLDATETIME")
+		(equal? type "DATETIME") (empty_list? dimensions)
+		(empty_list? (coalesceNil (previous "Dimensions") '()))
+		(tsql_compatible_column_collation? type (coalesceNil (previous "Collation") "") collation))))
 (define tds_bind_declarations (lambda (_schema text)
 	(if (equal? (strtrim text) "") (list)
 		((parser (define declarations (+ (parser '(
@@ -7151,10 +7159,13 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(define type (tsql_storage_type type))
 					(define dimensions (tsql_native_column_dimensions previous type dimensions))
 					(define collation (coalesceNil (tsql_resolve_collation collation) (coalesceNil (previous "Collation") "")))
-					(if (tsql_compatible_column_declaration? previous type dimensions nullable collation) true
-						(error "ALTER COLUMN requires native validation or conversion"))
+					(define operation (if (tsql_compatible_column_declaration? previous type dimensions nullable collation)
+						"declaration"
+						(tsql_value_preserving_column_transition? previous type dimensions collation)
+						"validated_declaration"
+						(error "ALTER COLUMN requires native validation or conversion")))
 					(list (quote !begin) (list (quote altercolumn) (list (quote table) database false name false (quote tx))
-						(sql_column_storage_name previous) "declaration"
+						(sql_column_storage_name previous) operation
 						(list (quote quote) (list (list type dimensions nullable collation)
 							(tsql_column_declaration_tuple previous))) (quote tx)) true)))))
 

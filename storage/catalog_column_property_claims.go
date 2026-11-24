@@ -388,7 +388,7 @@ func (record *catalogDecisionRecord) hasColumnPropertyClaimActions() bool {
 }
 
 func (record *catalogDecisionRecord) validateColumnPropertyProfile() error {
-	if record.Format != 20 && record.Format != 21 && record.Format != 22 && record.Format != 23 && record.Format != 24 && record.Format != 25 {
+	if record.Format != 20 && record.Format != 21 && record.Format != 22 && record.Format != 23 && record.Format != 24 && record.Format != 25 && record.Format != 26 {
 		return nil
 	}
 	claimed := make(map[string]bool)
@@ -399,6 +399,11 @@ func (record *catalogDecisionRecord) validateColumnPropertyProfile() error {
 	}
 	for _, declaration := range record.ColumnDeclarations {
 		if claimed[declaration.Table] {
+			return fmt.Errorf("column property claims require an unchanged endpoint column layout")
+		}
+	}
+	for _, action := range record.NativeDeclarations {
+		if action.Declaration != nil && claimed[action.Declaration.Table] {
 			return fmt.Errorf("column property claims require an unchanged endpoint column layout")
 		}
 	}

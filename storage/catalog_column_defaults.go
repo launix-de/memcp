@@ -25,18 +25,19 @@ type catalogColumnDefaultDeclaration struct {
 }
 
 type catalogStoredColumnAmendment struct {
-	defaultDeclaration catalogColumnDefaultDeclaration
-	declaration        *catalogColumnDeclaration
-	propertyRemoval    *catalogColumnPropertyRemoval
-	propertyChange     *catalogColumnPropertyChange
-	appendDeclaration  *catalogColumnAppend
-	rename             *catalogColumnRename
-	nameMetadataOnly   bool
-	table              *table
-	columns            []*column
-	previous           *tableShowColumnsSnapshot
-	columnBytes        uint
-	retainedBytes      uint
+	defaultDeclaration   catalogColumnDefaultDeclaration
+	declaration          *catalogColumnDeclaration
+	validatedDeclaration bool
+	propertyRemoval      *catalogColumnPropertyRemoval
+	propertyChange       *catalogColumnPropertyChange
+	appendDeclaration    *catalogColumnAppend
+	rename               *catalogColumnRename
+	nameMetadataOnly     bool
+	table                *table
+	columns              []*column
+	previous             *tableShowColumnsSnapshot
+	columnBytes          uint
+	retainedBytes        uint
 }
 
 func columnDefaultOperation(operation string) bool {
@@ -62,7 +63,7 @@ func (tx *TxContext) alterPublicStoredColumn(t *table, name, operation string, v
 		}
 	}
 	profile := catalogDeclarationConstruction
-	if operation == "declaration" || operation == "claim_property" {
+	if columnDeclarationOperation(operation) || operation == "claim_property" {
 		profile = catalogValidationConstruction
 	}
 	finish := tx.beginCatalogConstruction(profile, nil, t)
@@ -77,13 +78,13 @@ func (tx *TxContext) alterPublicStoredColumn(t *table, name, operation string, v
 	if tx.State != TxActive || tx.decisionStarted || tx.coordinator != nil || tx.catalogIntents.Load() != nil || activeReplication(t.schema) != nil {
 		panic("default declaration requires a local public catalog transaction")
 	}
-	if (!columnDefaultOperation(operation) && operation != "declaration" && operation != "drop_property" && operation != "claim_property") || t.Ephemeral || t.isEphemeralQueryTable() {
+	if (!columnDefaultOperation(operation) && !columnDeclarationOperation(operation) && operation != "drop_property" && operation != "claim_property") || t.Ephemeral || t.isEphemeralQueryTable() {
 		panic("default declaration requires an ordinary public table")
 	}
 	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
 	result := scm.NewBool(false)
 	kind := catalogDefaultKind
-	if operation == "declaration" {
+	if columnDeclarationOperation(operation) {
 		kind = catalogColumnKind
 	}
 	tx.stagePublicCatalogDeclaration(t.schema, kind, nil, func(changes *publicCatalogChanges) bool {
@@ -150,10 +151,10 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 	}
 	if operation == "claim_property" {
 		tx.requireColumnPropertyRetirementProfile()
-	} else if operation == "declaration" {
+	} else if columnDeclarationOperation(operation) {
 		tx.requireColumnPropertyLayout(t)
 	}
-	finishLease := changes.acquireStoredColumnLease(tx, t, operation == "declaration")
+	finishLease := changes.acquireStoredColumnLease(tx, t, columnDeclarationOperation(operation))
 	defer func() { finishLease(accepted) }()
 	db := changes.db
 	var columns []*column
@@ -181,6 +182,13 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 		} else if previous.Name != name {
 			continue
 		}
+		// DEFAULTs retain their existing independent recovery stream. A later
+		// change cannot cross this new ordered header barrier until that stream
+		// has an ordered admission contract of its own. Check before effects,
+		// under the same amendment owner, including concurrent constructors.
+		if columnDefaultOperation(operation) && tx.hasValidatedColumnDeclaration(t, previous.Name) {
+			panic("default changes after a validated declaration require ordered default admission")
+		}
 		t.requireDeclaredColumnAlter(previous, operation, value)
 		if previous.IsTemp || isRuntimeComputedColumn(previous) || atomic.LoadInt64(&previous.cacheUsers) != 0 {
 			panic("default declaration requires an ordinary stored column")
@@ -190,7 +198,7 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 		var propertyRemoval *catalogColumnPropertyRemoval
 		var propertyChange *catalogColumnPropertyChange
 		result := scm.NewBool(true)
-		if operation == "declaration" {
+		if columnDeclarationOperation(operation) {
 			if !value.IsSlice() || len(value.Slice()) != 2 {
 				panic("declaration ALTER requires new and expected declarations")
 			}
@@ -202,7 +210,17 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 			if !actual.equal(before) {
 				panic("column declaration changed before ALTER publication")
 			}
-			after.requireCompatible(before)
+			if operation == "validated_declaration" {
+				if err := validateStoredDeclarationShape(&catalogColumnDeclaration{t.Name, t.RuntimeIdentity, previous.Name, before, after}); err != nil {
+					panic(err)
+				}
+				if t.checkColumnDependency(previous.Name) != nil {
+					panic("validated declaration requires an unchanged native check directory")
+				}
+			}
+			if operation == "declaration" {
+				after.requireCompatible(before)
+			}
 			requireStoredColumnDependencies(t, tx, previous.Name)
 			// The validated declaration and raw callback setup share the native
 			// writer capability owner. The retained guard survives success until
@@ -213,10 +231,24 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 					restore()
 				}
 			}()
-			if before.Nullable && !after.Nullable {
-				validateColumnNotNull(tx, t, previous.Name)
+			if operation == "validated_declaration" {
+				replacement = after.replaceValidated(previous)
+				// Default amendments keep their established independent stream.
+				// Both the current descriptor and the replay predecessor must
+				// therefore carry constants losslessly in this bounded profile.
+				for _, baseline := range t.columnDeclarations() {
+					if baseline.Name == previous.Name {
+						requireStoredDeclarationConstants(baseline, replacement)
+						break
+					}
+				}
+				validateStoredColumnValues(tx, t, previous, replacement)
+			} else {
+				if before.Nullable && !after.Nullable {
+					validateColumnNotNull(tx, t, previous.Name)
+				}
+				replacement = after.replace(previous)
 			}
-			replacement = after.replace(previous)
 			declaration = &catalogColumnDeclaration{t.Name, t.RuntimeIdentity, previous.Name, before, after}
 		} else if operation == "claim_property" {
 			request := decodeColumnPropertyClaim(value)
@@ -250,6 +282,7 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 		}
 		view, bytes := replaceStoredColumnMetadata(t, base, updated, t.columnNamesSnapshot.Load())
 		amendment := &catalogStoredColumnAmendment{defaultDeclaration: catalogColumnDefaultDeclaration{t.Name, t.RuntimeIdentity, previous.Name, replacement.Default, replacement.DefaultExpression, replacement.DefaultName, replacement.DefaultDeferred}, declaration: declaration, table: t, columns: updated, previous: before}
+		amendment.validatedDeclaration = operation == "validated_declaration"
 		amendment.propertyRemoval = propertyRemoval
 		amendment.propertyChange = propertyChange
 		amendment.columnBytes = storedColumnBytes(replacement)
@@ -283,7 +316,7 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 		changes.viewsHighWater = max(changes.viewsHighWater, len(views))
 		changes.amendmentBytes += amendment.retainedBytes
 		changes.historyBytes = uint(unsafe.Sizeof(history)) + uint(cap(history))*uint(unsafe.Sizeof(catalogDeclarationAmendment{}))
-		if operation == "declaration" || operation == "claim_property" {
+		if columnDeclarationOperation(operation) || operation == "claim_property" {
 			tx.noteStatementMutation(t)
 		}
 		tx.catalogAmendments.Store(&history)

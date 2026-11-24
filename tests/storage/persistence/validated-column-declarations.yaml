@@ -1,0 +1,291 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/en-us/sql/t-sql/data-types/smalldatetime-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Native value-preserving declarations retain original transactions and ordered key rename and recovery
+    contracts
+setup:
+- sql: DROP TABLE IF EXISTS validated_widen_child
+- sql: DROP TABLE IF EXISTS validated_widen_parent
+- sql: DROP TABLE IF EXISTS validated_widen_marker
+- sql: DROP TABLE IF EXISTS validated_widen_counter
+- sql: DROP TABLE IF EXISTS validated_widen_loss
+- sql: DROP TABLE IF EXISTS validated_widen_constants
+- sql: CREATE TABLE validated_widen_parent(id INT NOT NULL,stamp SMALLDATETIME NOT NULL,value INT,CONSTRAINT PK_validated_widen_parent
+    PRIMARY KEY(id,stamp))
+- sql: CREATE TABLE validated_widen_child(id INT NOT NULL,stamp SMALLDATETIME NOT NULL,part INT NOT NULL,value INT,CONSTRAINT
+    PK_validated_widen_child PRIMARY KEY(id,stamp,part),CONSTRAINT FK_validated_widen FOREIGN KEY(id,stamp) REFERENCES
+    validated_widen_parent(id,stamp) ON UPDATE CASCADE ON DELETE CASCADE)
+- sql: CREATE TABLE validated_widen_marker(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE validated_widen_counter(id BIGINT IDENTITY(7,1),value INT)
+- sql: CREATE TABLE validated_widen_loss(id INT PRIMARY KEY,value INT NOT NULL)
+- sql: CREATE TABLE validated_widen_constants(value SMALLDATETIME NOT NULL)
+- sql: INSERT validated_widen_parent VALUES(1,'2024-01-02T03:04:00',10),(2,'2024-02-03T04:05:00',20)
+- sql: INSERT validated_widen_child VALUES(1,'2024-01-02T03:04:00',1,100),(2,'2024-02-03T04:05:00',1,200)
+- sql: INSERT validated_widen_marker VALUES(1,0)
+- sql: INSERT validated_widen_counter(value) VALUES(1)
+- sql: INSERT validated_widen_loss VALUES(1,7)
+test_cases:
+- name: Original writes and temporal widening remain private and rewind with the same savepoint
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE validated_widen_marker SET value=99 WHERE id=1
+    - connection: owner
+      sql: SAVE TRAN before_widen
+    - connection: owner
+      sql: DELETE FROM validated_widen_child WHERE id=2
+    - connection: owner
+      sql: DELETE FROM validated_widen_parent WHERE id=2
+    - connection: owner
+      sql: ALTER TABLE validated_widen_child DROP CONSTRAINT FK_validated_widen
+    - connection: owner
+      sql: ALTER TABLE validated_widen_child DROP CONSTRAINT PK_validated_widen_child
+    - connection: owner
+      sql: ALTER TABLE validated_widen_parent DROP CONSTRAINT PK_validated_widen_parent
+    - connection: owner
+      sql: ALTER TABLE validated_widen_parent ALTER COLUMN stamp DATETIME NOT NULL
+    - connection: owner
+      sql: ALTER TABLE validated_widen_child ALTER COLUMN stamp DATETIME NOT NULL
+    - connection: owner
+      sql: ALTER TABLE validated_widen_parent ADD CONSTRAINT PK_validated_widen_parent PRIMARY KEY(id,stamp)
+    - connection: owner
+      sql: ALTER TABLE validated_widen_child ADD CONSTRAINT PK_validated_widen_child PRIMARY KEY(id,stamp,part)
+    - connection: owner
+      sql: ALTER TABLE validated_widen_child ADD CONSTRAINT FK_validated_widen FOREIGN KEY(id,stamp) REFERENCES validated_widen_parent(id,stamp)
+        ON UPDATE CASCADE ON DELETE CASCADE
+    - connection: owner
+      sql: SELECT TYPE_NAME(system_type_id) AS declared_type,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent')
+        AND name=N'stamp'
+      expect: &id004
+        rows: 1
+        data:
+        - declared_type: datetime
+          max_length: 8
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(19),stamp,120) AS stamp,value FROM validated_widen_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - &id001
+          id: 1
+          stamp: '2024-01-02 03:04:00'
+          value: 10
+    - connection: observer
+      sql: SELECT TYPE_NAME(system_type_id) AS declared_type,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent')
+        AND name=N'stamp'
+      expect: &id002
+        rows: 1
+        data:
+        - declared_type: smalldatetime
+          max_length: 4
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(19),stamp,120) AS stamp,value FROM validated_widen_parent ORDER BY id
+      expect: &id003
+        rows: 2
+        data:
+        - *id001
+        - id: 2
+          stamp: '2024-02-03 04:05:00'
+          value: 20
+    - connection: owner
+      sql: ROLLBACK TRAN before_widen
+    - connection: owner
+      sql: SELECT TYPE_NAME(system_type_id) AS declared_type,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent')
+        AND name=N'stamp'
+      expect: *id002
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(19),stamp,120) AS stamp,value FROM validated_widen_parent ORDER BY id
+      expect: *id003
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM validated_widen_marker WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 99
+          depth: 1
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: observer
+      sql: SELECT value FROM validated_widen_marker WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 0
+- name: Ordered widening composes both rename orders keys cascades and allocator decisions
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE validated_widen_marker SET value=7 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE validated_widen_child DROP CONSTRAINT FK_validated_widen
+    - connection: owner
+      sql: ALTER TABLE validated_widen_child DROP CONSTRAINT PK_validated_widen_child
+    - connection: owner
+      sql: ALTER TABLE validated_widen_parent DROP CONSTRAINT PK_validated_widen_parent
+    - connection: owner
+      sql: ALTER TABLE validated_widen_parent ALTER COLUMN stamp SMALLDATETIME NULL
+    - connection: owner
+      sql: ALTER TABLE validated_widen_parent ALTER COLUMN stamp DATETIME NOT NULL
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.validated_widen_parent.stamp',N'recorded',N'COLUMN'
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.validated_widen_child.stamp',N'recorded',N'COLUMN'
+    - connection: owner
+      sql: ALTER TABLE validated_widen_child ALTER COLUMN recorded DATETIME NOT NULL
+    - connection: owner
+      sql: ALTER TABLE validated_widen_parent ADD CONSTRAINT PK_validated_widen_parent PRIMARY KEY(id,recorded)
+    - connection: owner
+      sql: ALTER TABLE validated_widen_child ADD CONSTRAINT PK_validated_widen_child PRIMARY KEY(id,recorded,part)
+    - connection: owner
+      sql: ALTER TABLE validated_widen_child ADD CONSTRAINT FK_validated_widen FOREIGN KEY(id,recorded) REFERENCES
+        validated_widen_parent(id,recorded) ON UPDATE CASCADE ON DELETE CASCADE
+    - connection: owner
+      sql: DBCC CHECKIDENT(validated_widen_counter,RESEED,20) WITH NO_INFOMSGS
+    - connection: owner
+      sql: UPDATE validated_widen_parent SET recorded='2024-01-02T03:04:05.007' WHERE id=1
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(30),recorded,121) AS stamp,value FROM validated_widen_parent ORDER BY id
+      expect: &id005
+        rows: 2
+        data:
+        - id: 1
+          stamp: '2024-01-02 03:04:05.007'
+          value: 10
+        - id: 2
+          stamp: '2024-02-03 04:05:00.000'
+          value: 20
+    - connection: observer
+      sql: SELECT TYPE_NAME(system_type_id) AS declared_type,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent')
+        AND name=N'stamp'
+      expect: *id002
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(19),stamp,120) AS stamp,value FROM validated_widen_parent ORDER BY id
+      expect: *id003
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT TYPE_NAME(system_type_id) AS declared_type,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent')
+        AND name=N'recorded'
+      expect: *id004
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(30),recorded,121) AS stamp,value FROM validated_widen_parent ORDER BY id
+      expect: *id005
+    - connection: owner
+      sql: INSERT validated_widen_counter(value) VALUES(2); SELECT id,value FROM validated_widen_counter ORDER BY
+        value
+      expect:
+        rows: 2
+        data:
+        - id: 7
+          value: 1
+        - id: 21
+          value: 2
+- name: Crash after acknowledged typed declaration and row decision
+  scm: '(crash)
+
+
+    '
+  expect:
+    interrupted_ok: true
+- name: Restart with ordered native typed declarations
+  action: restart
+- name: Recovery preserves descriptor type and fractional parent values
+  sql: SELECT id,CONVERT(VARCHAR(30),recorded,121) AS stamp,value FROM validated_widen_parent ORDER BY id
+  expect: *id005
+- name: Recovery preserves matching child values and reconstructed foreign columns
+  sql: SELECT id,CONVERT(VARCHAR(30),recorded,121) AS stamp,part,value FROM validated_widen_child ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      stamp: '2024-01-02 03:04:05.007'
+      part: 1
+      value: 100
+    - id: 2
+      stamp: '2024-02-03 04:05:00.000'
+      part: 1
+      value: 200
+- name: Recovery retains native type and width instead of the predecessor alias
+  sql: SELECT TYPE_NAME(system_type_id) AS declared_type,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent')
+    AND name=N'recorded'
+  expect: *id004
+- name: Recovery retains the composed allocator epoch and subsequent reservations
+  sql: INSERT validated_widen_counter(value) VALUES(3); SELECT id,value FROM validated_widen_counter ORDER BY value
+  expect:
+    rows: 3
+    data:
+    - id: 7
+      value: 1
+    - id: 21
+      value: 2
+    - id: 22
+      value: 3
+- name: Restored composite keys reject duplicate values without altering the table
+  sql: INSERT validated_widen_parent VALUES(1,'2024-01-02T03:04:05.007',999)
+  expect:
+    error: true
+- name: Failed duplicate insertion retains every acknowledged value
+  sql: SELECT id,CONVERT(VARCHAR(30),recorded,121) AS stamp,value FROM validated_widen_parent ORDER BY id
+  expect: *id005
+- name: A native value-changing declaration fails before effects and preserves the caller transaction
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(tx_begin_acid owner) (define tx (owner\
+    \ \"__memcp_tx\"))\n\t(define marker (table \"memcp-tests\" false \"validated_widen_marker\" false tx))\n\t(insert\
+    \ marker '(\"id\" \"value\") (list (list 99 123)) '() nil false nil tx)\n\t(define target (table \"memcp-tests\"\
+    \ false \"validated_widen_loss\" false tx))\n\t(define previous (show target \"column\" \"value\" true tx))\n\t\
+    (define collation (coalesceNil (previous \"Collation\") \"\"))\n\t(define before (list (previous \"RawType\")\
+    \ (coalesceNil (previous \"Dimensions\") '()) (previous \"Null\") collation))\n\t(define rejected (try (lambda\
+    \ () (begin\n\t\t(altercolumn target \"value\" \"validated_declaration\" (list (list \"VARCHAR\" '(10) false collation)\
+    \ before) tx)\n\t\tfalse))\n\t\t(lambda (cause) (strlike (string (failure_value cause)) \"%would convert an existing\
+    \ native value%\"))))\n\t(define current (show target \"column\" \"value\" true tx))\n\t(define local_sum (scan\
+    \ tx marker '() '() '() (lambda () true) '(\"value\") (lambda (sum value) (+ sum value)) 0 +))\n\t(define foreign_sum\
+    \ (scan nil marker '() '() '() (lambda () true) '(\"value\") (lambda (sum value) (+ sum value)) 0 +))\n\t(define\
+    \ active (equal? (tx_state tx) \"active\"))\n\t(tx_rollback owner)\n\t(and rejected active (equal? (current \"\
+    RawType\") \"INT\") (equal? local_sum 130) (equal? foreign_sum 7)))\n\n"
+  expect:
+    result: true
+- name: A native ordered header barrier rejects a later independent default before effects
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(tx_begin_acid owner) (define tx (owner\
+    \ \"__memcp_tx\"))\n\t(define target (table \"memcp-tests\" false \"validated_widen_constants\" false tx))\n\t\
+    (define previous (show target \"column\" \"value\" true tx))\n\t(define collation (coalesceNil (previous \"Collation\"\
+    ) \"\"))\n\t(define before (list (previous \"RawType\") (coalesceNil (previous \"Dimensions\") '()) (previous\
+    \ \"Null\") collation))\n\t(altercolumn target \"value\" \"validated_declaration\" (list (list \"DATETIME\" '()\
+    \ false collation) before) tx)\n\t(define other (table \"memcp-tests\" false \"validated_widen_loss\" false tx))\n\
+    \t(define other_before (show other \"column\" \"value\" true tx))\n\t(define other_collation (coalesceNil (other_before\
+    \ \"Collation\") \"\"))\n\t(define other_shape (list (other_before \"RawType\") (coalesceNil (other_before \"\
+    Dimensions\") '()) (other_before \"Null\") other_collation))\n\t(altercolumn other \"value\" \"declaration\" (list\
+    \ (list \"INT\" '() true other_collation) other_shape) tx)\n\t(define rejected (try (lambda () (begin\n\t\t(altercolumn\
+    \ target \"value\" \"default\" (parse_date \"2024-01-02 03:04:00\") tx)\n\t\tfalse))\n\t\t(lambda (cause) (strlike\
+    \ (string (failure_value cause)) \"%require ordered default admission%\"))))\n\t(define current (show target \"\
+    column\" \"value\" true tx))\n\t(define active (equal? (tx_state tx) \"active\"))\n\t(tx_rollback owner)\n\t(define\
+    \ restored (show target \"column\" \"value\" true nil))\n\t(and rejected active (equal? (current \"RawType\")\
+    \ \"DATETIME\") (nil? (current \"Default\"))\n\t\t(equal? (restored \"RawType\") \"SMALLDATETIME\")))\n"
+  expect:
+    result: true
+- name: Native schema constants require a lossless carrier before descriptor replacement
+  scm: "(begin\n\t(define target (table \"memcp-tests\" false \"validated_widen_constants\" false nil))\n\t(altercolumn\
+    \ target \"value\" \"default\" (parse_date \"2024-01-02 03:04:00\"))\n\t(define owner (newsession)) (owner \"\
+    username\" \"root\")\n\t(tx_begin_acid owner) (define tx (owner \"__memcp_tx\"))\n\t(define previous (show target\
+    \ \"column\" \"value\" true tx))\n\t(define collation (coalesceNil (previous \"Collation\") \"\"))\n\t(define\
+    \ before (list (previous \"RawType\") (coalesceNil (previous \"Dimensions\") '()) (previous \"Null\") collation))\n\
+    \t(define rejected (try (lambda () (begin\n\t\t(altercolumn target \"value\" \"validated_declaration\" (list (list\
+    \ \"DATETIME\" '() false collation) before) tx)\n\t\tfalse))\n\t\t(lambda (cause) (strlike (string (failure_value\
+    \ cause)) \"%lossless native schema constant%\"))))\n\t(define current (show target \"column\" \"value\" true\
+    \ tx))\n\t(define active (equal? (tx_state tx) \"active\"))\n\t(tx_rollback owner)\n\t(and rejected active (equal?\
+    \ (current \"RawType\") \"SMALLDATETIME\")))\n\n"
+  expect:
+    result: true
+cleanup:
+- sql: DROP TABLE IF EXISTS validated_widen_child
+- sql: DROP TABLE IF EXISTS validated_widen_parent
+- sql: DROP TABLE IF EXISTS validated_widen_marker
+- sql: DROP TABLE IF EXISTS validated_widen_counter
+- sql: DROP TABLE IF EXISTS validated_widen_loss
+- sql: DROP TABLE IF EXISTS validated_widen_constants

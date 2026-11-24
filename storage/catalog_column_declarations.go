@@ -8,6 +8,9 @@ import "sort"
 import "slices"
 import "unsafe"
 import "strings"
+import "encoding/json"
+import "unicode/utf8"
+import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
 // A declaration changes the value contract of an existing native column, not
@@ -158,6 +161,231 @@ func (declaration storedColumnType) replace(previous *column) *column {
 	return replacement
 }
 
+func columnDeclarationOperation(operation string) bool {
+	return operation == "declaration" || operation == "validated_declaration"
+}
+
+// This profile changes an ordinary stored descriptor, never its physical slot
+// or values. The frontend decides which declaration transitions its language
+// permits. Native admission separately proves exact scalar/carrier identity.
+func (declaration storedColumnType) replaceValidated(previous *column) *column {
+	if declaration.Type == "" || declaration.Collation != previous.Collation {
+		panic("validated declaration requires a type and unchanged comparison policy")
+	}
+	for _, dimension := range declaration.Dimensions {
+		if dimension < -1 {
+			panic("invalid validated declaration dimension")
+		}
+	}
+	replacement := cloneStoredColumnDeclaration(previous)
+	replacement.Typ = declaration.Type
+	replacement.Typdimensions = append([]int(nil), declaration.Dimensions...)
+	replacement.AllowNull = declaration.Nullable
+	replacement.sanitizer = nil
+	// UpdateSanitizer also resets the previous declaration's recovery hook.
+	replacement.UpdateSanitizer()
+	return replacement
+}
+
+func sameStoredScalar(before, after scm.Scmer) bool {
+	if before.GetTag() != after.GetTag() {
+		return false
+	}
+	if before.IsString() || before.IsBufferString() {
+		return scm.String(before) == scm.String(after)
+	}
+	if before.IsDate() {
+		return before.Int() == after.Int() && before.DateNanosecond() == after.DateNanosecond() && before.DateZone() == after.DateZone()
+	}
+	beforePointer, beforeBits := before.RawWords()
+	afterPointer, afterBits := after.RawWords()
+	return beforePointer == afterPointer && beforeBits == afterBits
+}
+
+func requireStoredScalarIdentity(target *column, value scm.Scmer) {
+	converted := value
+	if target.sanitizer != nil {
+		converted = target.sanitizer(value)
+	}
+	if !sameStoredScalar(value, converted) {
+		panic(declarationValidationViolation("value-preserving-declaration", target.Name, "column declaration would convert an existing native value"))
+	}
+	// Modern persistent scalar frames preserve the exact native value. A new
+	// descriptor's legacy recovery adapter must retain that same value too.
+	if target.recoverPersisted != nil && !value.IsNil() && !sameStoredScalar(value, target.recoverPersisted(value)) {
+		panic("column declaration changes its native recovery carrier")
+	}
+}
+
+// Constant descriptor payloads still use the established schema JSON boundary.
+// Prove its target reader, rather than assuming a runtime sanitizer proves the
+// persisted representation. Opaque deferred recipes remain frontend-owned.
+func requireStoredDeclarationConstants(previous, target *column) {
+	check := func(value scm.Scmer) {
+		if value.IsNil() {
+			return
+		}
+		requireStoredScalarIdentity(target, value)
+		encoded, err := json.Marshal(value)
+		var recovered scm.Scmer
+		if err != nil || json.Unmarshal(encoded, &recovered) != nil {
+			panic("column declaration has an unsupported persisted constant")
+		}
+		if !sameStoredScalar(value, recovered) {
+			panic("validated declaration requires a lossless native schema constant")
+		}
+		if target.recoverPersisted != nil && !sameStoredScalar(value, target.recoverPersisted(recovered)) {
+			panic("column declaration would change a persisted constant carrier")
+		}
+	}
+	if !previous.DefaultDeferred && previous.DefaultExpression == "" {
+		check(previous.Default)
+	}
+	if len(previous.InitialValues) != 0 {
+		check(previous.InitialValue)
+	}
+}
+
+func validateStoredColumnValues(tx *TxContext, t *table, previous, target *column) {
+	requireStoredDeclarationConstants(previous, target)
+	validate := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		requireStoredScalarIdentity(target, values[1])
+		return scm.NewBool(true)
+	})
+	t.scan(tx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil,
+		scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }), []string{previous.Name}, validate, scm.NewBool(true),
+		scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }), false)
+}
+
+// A validated endpoint's descriptors form one ordered native program. Keep
+// every intermediate declaration so recovery proves A->B->C, never a weaker
+// collapsed A->C claim, and sees the surrounding key/FK/name actions in order.
+func (tx *TxContext) validatedDeclarationTables(history []catalogDeclarationAmendment) map[*table]bool {
+	var result map[*table]bool
+	for _, entry := range history {
+		if a := entry.column; a != nil && a.validatedDeclaration && !tx.ownsTableDrop(a.table) {
+			if result == nil {
+				result = make(map[*table]bool)
+			}
+			result[a.table] = true
+		}
+	}
+	return result
+}
+
+func (tx *TxContext) hasValidatedColumnDeclaration(target *table, name string) bool {
+	for _, entry := range tx.publicForeignAmendments() {
+		if a := entry.column; a != nil && a.validatedDeclaration && a.table == target && a.declaration.Column == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (record *catalogDecisionRecord) hasValidatedDeclarations() bool {
+	for _, action := range record.NativeDeclarations {
+		if action.Declaration != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (record *catalogDecisionRecord) validateValidatedDeclarationProfile() error {
+	endpoints := make(map[string]bool)
+	for _, action := range record.NativeDeclarations {
+		if action.Declaration != nil {
+			endpoints[action.Declaration.Table] = true
+		}
+	}
+	for _, declaration := range record.ColumnDeclarations {
+		if endpoints[declaration.Table] {
+			return fmt.Errorf("ordered column declarations cannot also use collapsed endpoint contracts")
+		}
+	}
+	return nil
+}
+
+func validateStoredDeclarationShape(declaration *catalogColumnDeclaration) error {
+	if declaration == nil || declaration.Table == "" || declaration.Column == "" ||
+		!utf8.ValidString(declaration.Table) || !utf8.ValidString(declaration.Column) {
+		return fmt.Errorf("invalid native stored declaration action")
+	}
+	if identity, err := uuid.Parse(declaration.Identity); err != nil || identity == uuid.Nil {
+		return fmt.Errorf("invalid native stored declaration identity")
+	}
+	for _, shape := range []storedColumnType{declaration.Before, declaration.After} {
+		if shape.Type == "" || !utf8.ValidString(shape.Type) || !utf8.ValidString(shape.Collation) {
+			return fmt.Errorf("invalid native stored declaration contract")
+		}
+		for _, dimension := range shape.Dimensions {
+			if dimension < -1 {
+				return fmt.Errorf("invalid native stored declaration dimension")
+			}
+		}
+	}
+	if declaration.Before.Collation != declaration.After.Collation {
+		return fmt.Errorf("validated stored declaration changes native comparison policy")
+	}
+	return nil
+}
+
+// This is the same ordered descriptor projection used by native names and
+// properties. Value proof belongs to preparation; replay validates the complete
+// accepted descriptor chain before changing any header.
+func (db *database) projectStoredDeclaration(d *catalogColumnDeclaration, columns []*column, projection *catalogNativeProjection) (*table, []*column) {
+	if err := validateStoredDeclarationShape(d); err != nil {
+		panic(err)
+	}
+	t := db.tables.Get(d.Table)
+	if t == nil || t.RuntimeIdentity != d.Identity || !t.committedAt(db.catalogView().version) {
+		panic("stored declaration endpoint generation was replaced")
+	}
+	if columns == nil {
+		columns = t.columnDeclarations()
+	}
+	for index, previous := range columns {
+		if previous.Name != d.Column {
+			continue
+		}
+		if !storedColumnTypeOf(previous).equal(d.Before) || previous.IsTemp || previous.ComputorDefinition != nil || isRuntimeComputedColumn(previous) {
+			panic("stored declaration lost its exact predecessor")
+		}
+		for _, c := range columns {
+			if c.ComputorDefinition != nil && slices.Contains(c.ComputorInputCols, d.Column) {
+				panic("stored declaration is required by a native computation")
+			}
+		}
+		for _, key := range uniqueKeysInView(t, projection.keys) {
+			if slices.Contains(key.Cols, d.Column) {
+				panic("stored declaration is required by a native key")
+			}
+		}
+		for _, group := range projection.foreign {
+			for _, foreign := range group {
+				if foreign.Foreign.Tbl1 == t.Name && slices.Contains(foreign.Foreign.Cols1, d.Column) ||
+					foreign.Foreign.Tbl2 == t.Name && slices.Contains(foreign.Foreign.Cols2, d.Column) {
+					panic("stored declaration is required by a native foreign key")
+				}
+			}
+		}
+		if t.checkColumnDependency(d.Column) != nil {
+			panic("validated declaration requires an unchanged native check directory")
+		}
+		var replacement *column
+		if d.After.compatibleWith(d.Before) {
+			replacement = d.After.replace(previous)
+		} else {
+			replacement = d.After.replaceValidated(previous)
+			requireStoredDeclarationConstants(previous, replacement)
+		}
+		updated := append([]*column(nil), columns...)
+		updated[index] = replacement
+		return t, updated
+	}
+	panic("stored declaration physical column was removed")
+}
+
 // Dependency rows and columns are from the same effective native publication,
 // including this transaction's pending constraints. A committed-only lookup
 // would miss a dependency staged earlier in the same original transaction.
@@ -218,8 +446,13 @@ func validateColumnNotNull(tx *TxContext, t *table, name string) {
 
 func (tx *TxContext) publicColumnDeclarations() []catalogColumnDeclaration {
 	latest := make(map[string]catalogColumnDeclaration)
-	for _, entry := range tx.publicForeignAmendments() {
+	history := tx.publicForeignAmendments()
+	ordered := tx.validatedDeclarationTables(history)
+	for _, entry := range history {
 		if amendment := entry.column; amendment != nil && amendment.declaration != nil && !tx.ownsTableDrop(amendment.table) {
+			if ordered[amendment.table] {
+				continue
+			}
 			declaration := *amendment.declaration
 			key := declaration.Table + "\x00" + declaration.Column
 			if previous, found := latest[key]; found {
