@@ -1,0 +1,94 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Physical name dependencies preserve query values across selected and absent admission bindings
+setup:
+- sql: DROP TABLE IF EXISTS resolution_first
+- sql: DROP TABLE IF EXISTS resolution_second
+- sql: DROP TABLE IF EXISTS resolution_fallback
+- sql: CREATE TABLE resolution_first(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE resolution_second(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE resolution_fallback(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO resolution_first VALUES(1,11)
+- sql: INSERT INTO resolution_second VALUES(1,22)
+- sql: INSERT INTO resolution_fallback VALUES(1,33)
+test_cases:
+- name: Retained queries follow selected and absent physical name bindings
+  scm: |
+    (begin
+      (define probe (lambda (transition) (begin
+        (define cache (newcachemap))
+        (define name (if transition "inserted" "#selected"))
+        (define parser (lambda (database _text policy planning tx) (begin
+          (planning "__tsql_temporary_planning" true)
+          (planning "__tsql_typed_namespace" true)
+          (define binding (if transition
+            (tsql_transition_binding database name planning)
+            (tsql_temporary_binding name planning)))
+          (define physical (if binding (nth binding 2) "resolution_fallback"))
+          (parse_sql database (concat "SELECT value FROM " physical " WHERE id=1") policy planning tx))))
+        (define request (newsession)) (request "username" "root")
+        (define output (newsession))
+        (define run (lambda (physical) (begin
+          (request "__tsql_temporary_bindings" (if physical
+            (list (list name "memcp-tests" physical (if transition "transition" "trigger_temporary"))) '()))
+          (output "rows" 0)
+          (define text "SELECT value FROM resolution_input")
+          (define formula (cached_parse cache "sql" (list parser) "memcp-tests" text nil "root" request false nil))
+          (with_autocommit request nil nil text (lambda (tx)
+            (sql_execute_formula request tx formula (lambda (row) (begin
+              (output "rows" (+ 1 (output "rows"))) (output "value" (row "value"))))
+              (lambda fields true))))
+          (list (output "rows") (output "value")))))
+        (list (run nil) (run "resolution_first") (run "resolution_second") (run nil)))))
+      (list (probe false) (probe true)))
+  expect:
+    result:
+    - - [1,33]
+      - [1,11]
+      - [1,22]
+      - [1,33]
+    - - [1,33]
+      - [1,11]
+      - [1,22]
+      - [1,33]
+- name: An opaque namespace consumer retains its complete admitted metadata dependency
+  scm: |
+    (begin
+      (define cache (newcachemap))
+      (define parser (lambda (database _text policy planning tx) (begin
+        (planning "__tsql_temporary_planning" true)
+        (planning "__tsql_typed_namespace" true)
+        (tsql_record_full_temporary_guard planning)
+        (define metadata (nth (car (planning "__tsql_temporary_bindings")) 2))
+        (parse_sql database (concat "SELECT value,'" metadata
+          "' AS namespace_name FROM resolution_fallback WHERE id=1") policy planning tx))))
+      (define request (newsession)) (request "username" "root")
+      (define run (lambda (metadata) (begin
+        (request "__tsql_temporary_bindings" (list (list "#metadata" "memcp-tests" metadata "trigger_temporary")))
+        (define output (newsession)) (output "rows" 0)
+        (define text "SELECT value,namespace_name FROM resolution_input")
+        (define formula (cached_parse cache "sql" (list parser) "memcp-tests" text nil "root" request false nil))
+        (with_autocommit request nil nil text (lambda (tx)
+          (sql_execute_formula request tx formula (lambda (row) (begin
+            (output "rows" (+ 1 (output "rows")))
+            (output "value" (row "value")) (output "namespace" (row "namespace_name"))))
+            (lambda fields true))))
+        (list (output "rows") (output "value") (output "namespace")))))
+      (list (run "resolution_first") (run "resolution_second")))
+  expect:
+    result: [[1,33,resolution_first],[1,33,resolution_second]]
+- name: Absent optional planning inputs permit pure recovery compilation
+  scm: |
+    (begin
+      /* Recovery syntax is compiled without a planning callback. Do not
+      constrain its returned plan shape or execute its transaction control. */
+      (parse_tsql "memcp-tests" "ROLLBACK TRANSACTION" nil nil nil)
+      (list (tsql_record_full_temporary_guard nil)
+        (tsql_record_temporary_lookup_guard nil nil nil)))
+  expect: {result: [true,true]}
+cleanup:
+- sql: DROP TABLE IF EXISTS resolution_first
+- sql: DROP TABLE IF EXISTS resolution_second
+- sql: DROP TABLE IF EXISTS resolution_fallback

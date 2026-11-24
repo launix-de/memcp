@@ -408,6 +408,7 @@ binder resolves every argument column before invoking this compiler. */
 callable. A warm plan never resolves a different body or argument contract
 inside a scan callback. The authorization guard is owned by the SQL planner. */
 (define tsql_scalar_function_snapshot (lambda (database name policy planning tx) (begin
+	(tsql_record_full_temporary_guard planning)
 	(define name (toLower name))
 	(policy database name false)
 	(define snapshot (procedure database name true tx))

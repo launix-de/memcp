@@ -132,6 +132,7 @@ source alias cannot capture an argument owned by the caller's APPLY scope. */
 	(list "identity" (list database (context "name")) "database" database
 		"parameters" parameters "ansi_nulls" ansi "contracts" contracts "quoted" quoted "source" source))))
 (define tsql_inline_table_function_expand (lambda (recipe arguments alias policy planning tx) (begin
+	(tsql_record_full_temporary_guard planning)
 	(define planning (tsql_ansi_planning_scope planning (recipe "ansi_nulls")))
 	(define planning (tsql_scalar_function_binding_scope planning (recipe "identity")))
 	(define parameters (recipe "parameters"))
@@ -196,6 +197,7 @@ It never asks procedure() to instantiate an executable source snapshot. */
 		0)))))
 
 (define tsql_table_function_call (lambda (database name arguments alias policy planning tx) (begin
+	(tsql_record_full_temporary_guard planning)
 	(if policy (policy database name false) (error "table function requires an authorized SQL plan"))
 	(define name (toLower name))
 	(define snapshot (procedure database name true tx))

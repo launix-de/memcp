@@ -749,6 +749,7 @@ native binding entries retain the real source aliases used by the query. */
 	((symbol quote) _datum) node
 	((symbol tsql_relational_scalar_call) factory arguments)
 	(begin
+		(tsql_record_full_temporary_guard planning)
 		/* Arguments belong to the caller, including nested relational calls.
 		Complete those calls before a factory introduces its own source aliases;
 		otherwise their markers would survive inside its returned predicate. */

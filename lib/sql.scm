@@ -494,7 +494,8 @@ identical programs once outside row closures, including parameterized plans. */
 		(if statistics_diagnostic
 			(planning_session "__memcp_queryplan_diagnostic_guards" (newsession)) nil)
 		(define access (newsession))
-		(define compile_policy (sql_compile_table_policy policy tx access statistics_diagnostic))
+		(define compile_policy (sql_compile_table_policy
+			(sql_policy_spec_resolve policy source_session tx) tx access statistics_diagnostic))
 		(define raw_plan (with_session planning_session (lambda ()
 			(sql_invoke_parse_fn parse_fn schema parse_query compile_policy planning_session tx))))
 		/* Parsing includes logical and physical planning. Never spend optimizer
@@ -608,7 +609,8 @@ otherwise side-effect-free guard. */
 		(cons (quote list) (list
 			queryplan_cache cache_key entry
 			(if (list? parse_fn) (list (quote quote) parse_fn) parse_fn)
-			schema parse_query policy
+			schema parse_query
+			(if (list? policy) (list (quote quote) policy) policy)
 			(quote session) (quote tx) (quote resultrow) (quote resultfields))))))
 
 (define sql_queryplan_formula (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy variants)
@@ -705,11 +707,17 @@ On parse error the result is not cached. */
 /* Frontends defer the system.user lookup until a cache producer actually
 runs. A warm plan already owns its compiled policy and must not rescan the
 user table merely to discard a newly constructed policy closure. */
-(define sql_policy_spec_resolve (lambda (policy_spec)
+/* Deferred policies are compile inputs, not cached account/session decisions.
+Resolve them from the executing facts only at an actual compile, before the
+existing access collector. Entries retain the unresolved immutable producer. */
+(define sql_policy_spec_resolve (lambda (policy_spec source_session tx)
 	(if (and (list? policy_spec)
 		(equal? (car policy_spec) (quote sql-policy-for)))
 		(sql_policy (if (equal? (count policy_spec) 3)
 			(list (cadr policy_spec) (nth policy_spec 2)) (cadr policy_spec)))
+		(and (list? policy_spec)
+			(equal? (car policy_spec) (quote sql-compile-policy)))
+		((cadr policy_spec) source_session tx)
 		policy_spec)))
 
 (define sql_queryplan_cache_key (lambda (username schema query shape_hash)
@@ -800,11 +808,10 @@ user table merely to discard a newly constructed policy closure. */
 									(toUpper (nth tokens first_token))) false))
 							(begin
 								(define exact_compile (lambda () (begin
-									(define resolved_policy (sql_policy_spec_resolve policy))
-									(define variant (sql_compile_queryplan_variant parse_fn schema parse_query resolved_policy session compile_tx "specialized"))
+									(define variant (sql_compile_queryplan_variant parse_fn schema parse_query policy session compile_tx "specialized"))
 									(if (and (expression_equal? (car variant) true) (empty_list? (nth variant 2)))
 										(cadr variant)
-										(sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query resolved_policy session compile_tx variant)))))
+										(sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query policy session compile_tx variant)))))
 								(define compiled (if compile_diagnostic (exact_compile)
 									(queryplan_cache cache_key tx exact_compile)))
 								(if (list? compiled) (cadr compiled) compiled))
@@ -813,7 +820,7 @@ user table merely to discard a newly constructed policy closure. */
 								cache hits must not repeatedly optimize an unused closure. */
 								(define exact_compile (lambda ()
 									(begin
-										(define resolved_policy (sql_policy_spec_resolve policy))
+										(define resolved_policy (sql_policy_spec_resolve policy session compile_tx))
 										(define access (newsession))
 										(define compile_policy (sql_compile_table_policy resolved_policy compile_tx access compile_diagnostic))
 										(define raw_plan (sql_queryplan_bind_tx_calls
@@ -827,7 +834,7 @@ user table merely to discard a newly constructed policy closure. */
 						(begin
 							(define cached_entry (queryplan_cache cache_key tx
 								(lambda () (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query
-									(sql_policy_spec_resolve policy) session compile_tx nil))))
+									policy session compile_tx nil))))
 							(cadr cached_entry))))))
 			formula)))))
 

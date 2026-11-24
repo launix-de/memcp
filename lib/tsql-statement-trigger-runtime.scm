@@ -48,6 +48,53 @@ scope/cache. Transition data and lifetime remain native, never Scheme row bags. 
 		'(key value) (if (has? keys key) (error "statement trigger invocation facts are immutable") (parent key value))
 		_ (apply parent args))))))
 
+/* Transition inputs use the existing local-relation handle boundary. Only
+immutable declarations enter compiled code; the native OLD/NEW capabilities
+remain in this invocation's hidden immutable callback. The common SQL column
+declaration owner retains type/storage semantics while excluding cost statistics.
+Physical name lookups and opaque metadata keep their own namespace guards;
+this typed source retains its semantic declaration and native read authority. */
+(define tsql_transition_input_session (lambda (parent database OLD NEW) (begin
+	(define declarations (list
+		(list "deleted" '__tsql_transition_old database (map (show OLD) sql_column_declaration))
+		(list "inserted" '__tsql_transition_new database (map (show NEW) sql_column_declaration))))
+	(define input (lambda (name) (match name "deleted" OLD "inserted" NEW
+		_ (error "unknown native transition input"))))
+	(lambda args (match args
+		'() (merge_unique (list (list "__tsql_transition_declarations")
+			(filter (parent) (lambda (key) (not (has? '("__tsql_transition_declarations" "__tsql_transition_input") key))))))
+		'(key) (if (equal? key "__tsql_transition_declarations") declarations
+			(equal? key "__tsql_transition_input") input (parent key))
+		'(key value) (if (has? '("__tsql_transition_declarations" "__tsql_transition_input") key)
+			(error "native transition inputs are immutable") (parent key value))
+		_ (apply parent args))))))
+(define tsql_transition_input_source (lambda (alias database name planning policy) (begin
+	(define declaration (find (coalesceNil (planning "__tsql_transition_declarations") '())
+		(lambda (declaration) (and (equal? database (nth declaration 2))
+			(equal?? name (car declaration)))) nil))
+	(if declaration (begin
+		(if policy (policy database true false) true)
+		(list alias database (make_local_relation_reference (cadr declaration) (nth declaration 3))
+			false nil (list "lifetime" "invocation" "read_only" true
+				"columns" (nth declaration 3) "constraints" '("Unique" () "ForeignKeys" ())))) nil))))
+(define tsql_transition_input_handle (lambda (session name columns tx) (begin
+	(tx_check tx)
+	(define input (session "__tsql_transition_input"))
+	(if input true (error "native transition input requires its invocation"))
+	(define handle (input name))
+	(if (equal? columns (map (show handle) sql_column_declaration)) handle
+		(error "native transition declaration changed")))))
+(define tsql_bind_transition_inputs (lambda (formula declarations)
+	(if (empty_list? declarations) formula (begin
+		(define referenced (expression_referenced_bindings formula (map declarations cadr)))
+		(define declarations (filter declarations (lambda (declaration)
+			(has? referenced (cadr declaration)))))
+		(if (empty_list? declarations) formula
+			(cons (list 'lambda (map declarations cadr) formula)
+				(map declarations (lambda (declaration)
+					(list 'tsql_transition_input_handle 'session (car declaration)
+						(list 'quote (nth declaration 3)) 'tx)))))))))
+
 (define tsql_run_trigger_recipe (lambda (commands contracts schema name event timing quoted ansi OLD NEW caller tx) (begin
 	/* The supported default disables direct AFTER recursion. A different
 	intervening statement-trigger module remains an indirect nested invocation.
@@ -82,7 +129,8 @@ scope/cache. Transition data and lifetime remain native, never Scheme row bags. 
 		(scoped "__tsql_quoted_identifier" quoted)
 		(scoped "__tsql_ansi_nulls" ansi)
 		(scoped "__tsql_ansi_nulls_locked" true)
-		(define session (tsql_trigger_session scoped event timing columns declared depth schema name))
+		(define session (tsql_transition_input_session
+			(tsql_trigger_session scoped event timing columns declared depth schema name) schema OLD NEW))
 		(define temporary (tsql_temporary_scope session))
 		/* Borrowed lexical #temp names are readable, but their schema/write Undo
 		is not part of this first mutation profile. Shadow only those real bindings;

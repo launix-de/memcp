@@ -4700,9 +4700,17 @@ that context explicitly; stored views refuse this scalar before publication. */
 	(if (and planning_session (not compile_only)) (begin
 		(planning_session "__tsql_temporary_planning" true)
 		(define temporary_bindings (coalesceNil (planning_session "__tsql_temporary_bindings") '()))
-		(planner_record_guard_condition
-			(list (quote equal?) (list (quote session) "__tsql_temporary_bindings")
-				(list (quote quote) temporary_bindings)) planning_session)) true)
+		(define typed (not (equal? temporary_bindings
+			(tsql_temporary_plan_bindings temporary_bindings
+				(coalesceNil (planning_session "__tsql_transition_declarations") '())))))
+		(planning_session "__tsql_typed_namespace" typed)
+		/* Only the ordinary root SELECT command can discharge this default.
+		Opaque/special compilation paths retain their complete physical snapshot. */
+		(if (or (not typed) (reduce
+			'("__tsql_describe" "__tsql_parameter_analysis" "__tsql_expression_only"
+				"__tsql_script_syntax" "__tsql_logical_insert" "__tsql_logical_mutation" "__tsql_logical_query")
+			(lambda (required key) (or required (planning_session key))) false))
+			(tsql_record_full_temporary_guard planning_session) true)) true)
 	(define parse_started_ns (nanotime))
 	/* Import bindings are compile-time name contracts. Keep the authenticated
 	policy and confine every published dependency, including expanded views. */
@@ -4725,6 +4733,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(write_targets (json_encode (list database name)) true)
 		true) true)))
 	(define policy (if (nil? access_policy) nil (lambda (database name write) (begin
+		(if (or write (sql_private_relation? name))
+			(tsql_record_full_temporary_guard planning_session) true)
 		(if (equal?? database "information_schema") true
 			(and (equal? database "system") (expression_equal? name true) write)
 			(tsql_record_permission frontend_options database "NATIVE ADMIN")
@@ -5403,6 +5413,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 	metadata relation remains shared with other frontends; only this logical
 	projection maps its database namespace to TABLE_CATALOG / dbo. */
 	(define tsql_information_schema_source (lambda (alias qualifier name) (begin
+		(tsql_record_full_temporary_guard planning_session)
 		(define kind (toLower name))
 		(if (not (has? '("tables" "columns" "key_column_usage" "referential_constraints") kind))
 			(error "unsupported T-SQL information schema relation: " name)
@@ -5462,7 +5473,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 					condition nil nil nil nil nil '() '() '()) false nil nil))))))
 
 	(define tsql_read_source (lambda (alias database name) (begin
-		(define declared (if compile_only (tsql_compile_declared_source alias database name frontend_options) nil))
+		(define declared (if compile_only (tsql_compile_declared_source alias database name frontend_options)
+			(tsql_transition_input_source alias database name frontend_options policy)))
 		(if declared declared (begin
 			(define invocation_source (tsql_transition_binding database name frontend_options))
 			(define resolved (tsql_resolve_relation database name frontend_options tx))
@@ -5473,6 +5485,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(list (quote equal?) (list (quote tsql_relation_name) database name (quote tx)) canonical)
 				planning_session)
 			(if policy (policy database canonical false) true)
+			(if (equal?? database "information_schema")
+				(tsql_record_full_temporary_guard planning_session) true)
 			(if (and (equal?? database "information_schema") (has? '("tables" "columns" "key_column_usage" "referential_constraints") (toLower canonical)))
 				(tsql_information_schema_source alias nil canonical)
 				(equal?? database "information_schema") (begin
@@ -5533,6 +5547,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 	/* System relations are ordinary derived logical queries over the shared
 	metadata source. No SQL text matching or independent catalog executor. */
 	(define tsql_catalog_source (lambda (alias qualifier name) (begin
+		(tsql_record_full_temporary_guard planning_session)
 		(define owner (if (nil? qualifier) schema (tsql_qualifier_database qualifier schema frontend_options)))
 		(define owner (database_name owner true))
 		(if (nil? owner) (error "catalog database does not exist") true)
@@ -7453,7 +7468,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(if compile_only (tsql_command_binding 'checkident command '())
 				(list 'tsql_checkident (list 'quote command) 'session 'tx))))
 		tsql_cte_mutation
-		(parser (define query tsql_root_select) (lambda () (tsql_build_select_plan query)))
+		(parser (define query tsql_root_select)
+			(list "tsql-query-command" query))
 		(parser '(tsql_keyword_explain tsql_keyword_ir (define query tsql_root_select)) (lambda () (if compile_only (tsql_compile_query_binding (tsql_finalize_sources query "query" '() '()) policy planning_session tx) (explain_queryplan_ir (tsql_expand_select_query (tsql_finalize_sources query "query" '() '()))))))
 		(parser '(tsql_keyword_explain tsql_keyword_reorder (define query tsql_root_select)) (lambda () (if compile_only (tsql_compile_query_binding (tsql_finalize_sources query "query" '() '()) policy planning_session tx) (explain_queryplan_reorder (tsql_expand_select_query (tsql_finalize_sources query "query" '() '())) planning_session))))
 		(parser '(tsql_keyword_explain tsql_keyword_compile (define query tsql_root_select)) (lambda () (if compile_only (tsql_compile_query_binding (tsql_finalize_sources query "query" '() '()) policy planning_session tx) (explain_queryplan_compile (tsql_expand_select_query (tsql_finalize_sources query "query" '() '())) parse_started_ns (strlen s) planning_session))))
@@ -7978,7 +7994,12 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(define command ((parser '((* ";") (define command admitted_commands) (* ";")) command "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\\x{0009}-\\x{000D}\\x{0085}\\p{Z}]+)+") s))
 			(if compile_only (map (frontend_options "__tsql_compile_missing_parameters") (lambda (spelling)
 				(tsql_raise_error 137 (concat "Must declare the scalar variable @" spelling) 2))) true)
-			(if (string? command) command (command))))
+			(if (and (list? command) (equal? (count command) 2)
+				(equal? (car command) "tsql-query-command"))
+				(tsql_build_select_plan (cadr command))
+				(begin
+					(tsql_record_full_temporary_guard planning_session)
+					(if (string? command) command (command))))))
 )))
 
 (define tsql_validate_script_control (lambda (commands loop_depth)

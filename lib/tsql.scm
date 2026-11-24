@@ -1099,6 +1099,7 @@ admit another statement through the aborted-transaction recovery capability. */
 	(define username (coalesce (session "username") "root"))
 	(define declarations (coalesceNil (session "__tsql_parameter_declarations") (list)))
 	(define local_relations (coalesceNil (session "__tsql_local_relations") '()))
+	(define transition_declarations (coalesceNil (session "__tsql_transition_declarations") '()))
 	/* Cache identity includes the complete immutable declaration contract. Values
 	remain invocation inputs; differently typed calls cannot reuse wrong metadata. */
 	(define import_target (session "tsql_import_target"))
@@ -1113,13 +1114,14 @@ admit another statement through the aborted-transaction recovery capability. */
 	(define temporary_scope (tsql_temporary_scope session))
 	(define temporary_bindings (tsql_temporary_visible temporary_scope tx))
 	(session "__tsql_temporary_bindings" temporary_bindings)
-	(define cache_scope (json_encode (list username (session "__tsql_principal_id") declarations local_relations import_target import_source temporary_bindings quoted ansi warnings arithabort concat_null rowcount_active insert_exec)))
-	/* The cached dispatcher retains this parser for future misses. Close its
-	declaration/import/name and lexical snapshots here, before embedding it as a literal;
-	its creation frame also owns the current session, transaction and outputs. */
+	(define cache_scope (json_encode (list username (session "__tsql_principal_id") declarations local_relations transition_declarations import_target import_source (tsql_temporary_plan_bindings temporary_bindings transition_declarations) quoted ansi warnings arithabort concat_null rowcount_active insert_exec)))
+	/* Retain immutable declaration/import and lexical contracts only. Each miss
+	already receives the executing namespace from sql_queryplan_compile_session;
+	never replace it with the first request's physical binding snapshot. */
 	(define parser (close_procedure (lambda (database text policy planning tx) (begin
 		(planning "__tsql_parameter_declarations" declarations)
 		(planning "__tsql_local_relations" local_relations)
+		(planning "__tsql_transition_declarations" transition_declarations)
 		(planning "tsql_import_target" import_target)
 		(planning "tsql_import_source" import_source)
 		(planning "__tsql_quoted_identifier" quoted)
@@ -1129,11 +1131,11 @@ admit another statement through the aborted-transaction recovery capability. */
 		(planning "__tsql_concat_null_yields_null" concat_null)
 		(planning "__tsql_rowcount_active" rowcount_active)
 		(planning "__tsql_insert_exec" insert_exec)
-		(planning "__tsql_temporary_bindings" temporary_bindings)
 		(planning "__tsql_database_access_requirements" '())
 		(define formula (parse_tsql database text policy planning tx))
-		(tsql_bind_table_variable_inputs
-			(tsql_bind_parameter_inputs (tsql_permission_formula formula planning) declarations) local_relations)))))
+		(tsql_bind_transition_inputs (tsql_bind_table_variable_inputs
+			(tsql_bind_parameter_inputs (tsql_permission_formula formula planning) declarations) local_relations)
+			transition_declarations)))))
 	(define setting (tsql_set_options_probe input))
 	(if (if setting (has? (cadr setting) "FMTONLY") false)
 		(tsql_set_options session (cadr setting) (nth setting 2))
@@ -1147,7 +1149,10 @@ admit another statement through the aborted-transaction recovery capability. */
 		(begin
 			(define formula (tsql_compile_phase session (lambda ()
 				(cached_parse (temporary_scope "cache") "tsql" (list parser (list "exact_guards" true)) schema input
-					(tsql_temporary_policy username temporary_bindings) cache_scope session false tx))))
+					(tsql_compile_temporary_policy (list username
+						(if (nil? (session "__tsql_principal_id"))
+							(tsql_account_id username) (session "__tsql_principal_id"))))
+					cache_scope session false tx))))
 			(sql_execute_formula session tx formula resultrow resultfields))))))
 
 /* Syntax recipes retain only source and declaration data. Query compilation

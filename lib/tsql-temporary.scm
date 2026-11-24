@@ -53,21 +53,54 @@ DROP/recreate chain. The frontend never keeps an undo journal or table values. *
 	(if (session "__tsql_temporary_planning")
 		(coalesceNil (session "__tsql_temporary_bindings") '())
 		(tsql_temporary_visible (tsql_temporary_scope session) (session "__memcp_tx")))))
+/* Admission snapshots remain ordinary values. Guard projections inspect only
+that same executing snapshot; they do not create a scope or read native rows. */
+(define tsql_temporary_binding_value (lambda (bindings name)
+	(find bindings (lambda (entry) (equal?? (car entry) name)) nil)))
+(define tsql_transition_binding_value (lambda (bindings database name)
+	(find bindings (lambda (entry)
+		(and (> (count entry) 3) (equal? (nth entry 3) "transition")
+			(equal? (cadr entry) database) (equal?? (car entry) name))) nil)))
+/* Only attested transition entries become lexical coordinates in this cache
+projection. Borrowed/user #tables and every other physical field stay intact. */
+(define tsql_temporary_plan_bindings (lambda (bindings declarations)
+	(map bindings (lambda (entry) (begin
+		(define declaration (if (and (> (count entry) 3)
+			(equal? (nth entry 3) "transition"))
+			(find declarations (lambda (decl)
+				(and (equal?? (car entry) (car decl)) (equal? (cadr entry) (nth decl 2)))) nil) nil))
+		(if declaration
+			(mapIndex entry (lambda (index value) (if (equal? index 2)
+				(list "invocation-input" (string (cadr declaration))) value))) entry))))))
+(define tsql_record_full_temporary_guard (lambda (planning)
+	(if (nil? planning) true
+		(and (planning "__tsql_temporary_planning") (not (planning "__tsql_compile_only")))
+		(planner_record_guard_condition
+			(list 'equal? (list 'session "__tsql_temporary_bindings")
+				(list 'quote (coalesceNil (planning "__tsql_temporary_bindings") '()))) planning) true)))
+(define tsql_record_temporary_lookup_guard (lambda (planning lookup selected)
+	(if (nil? planning) true
+		(and (planning "__tsql_typed_namespace") (not (planning "__tsql_compile_only")))
+		(planner_record_guard_condition
+			(list 'equal? lookup (list 'quote selected)) planning) true)))
 (define tsql_temporary_binding (lambda (name session) (begin
 	(tsql_temporary_check_name name)
-	(find (tsql_temporary_bindings session) (lambda (entry) (equal?? (car entry) name)) nil))))
+	(define binding (tsql_temporary_binding_value (tsql_temporary_bindings session) name))
+	(tsql_record_temporary_lookup_guard session
+		(list 'tsql_temporary_binding_value (list 'session "__tsql_temporary_bindings") name) binding)
+	binding)))
 (define tsql_transition_binding (lambda (database name session)
 	(if (and (string? name) (has? '("inserted" "deleted") (toLower name))) (begin
-		/* Ordinary relation lookup must not create a temporary scope just to
-		probe these two reserved completion names. Planning uses only its already
-		snapshotted bindings; execution borrows an existing lexical scope. */
+		/* Ordinary lookup does not create a scope for these reserved names.
+		Planning and guard code consume the admission snapshot explicitly. */
 		(define scope (session "__tsql_temporary_scope"))
 		(define bindings (if (session "__tsql_temporary_planning")
 			(coalesceNil (session "__tsql_temporary_bindings") '())
 			(if scope (tsql_temporary_visible scope (session "__memcp_tx")) '())))
-		(find bindings (lambda (entry)
-			(and (> (count entry) 3) (equal? (nth entry 3) "transition")
-				(equal? (cadr entry) database) (equal?? (car entry) name))) nil)) nil)))
+		(define binding (tsql_transition_binding_value bindings database name))
+		(tsql_record_temporary_lookup_guard session
+			(list 'tsql_transition_binding_value (list 'session "__tsql_temporary_bindings") database name) binding)
+		binding) nil)))
 (define tsql_resolve_relation (lambda (database name session tx) (begin
 	(if (sql_private_relation? name) (error "private SQL relation names cannot be referenced directly") true)
 	(define transition (tsql_transition_binding database name session))
@@ -95,6 +128,17 @@ DROP/recreate chain. The frontend never keeps an undo journal or table values. *
 					(error "temporary writes inside statement triggers are not supported")
 					(account database true write)))
 			(account database name write))))))
+/* Only immutable actor configuration belongs to a retained compile producer.
+The actual namespace comes from this miss's executing compile facts; neither
+the first session nor its temporary physical identities are retained. */
+(define tsql_compile_temporary_policy (lambda (actor)
+	(list (quote sql-compile-policy) (close_procedure (lambda (executing_session tx) (begin
+		(tx_check tx)
+		(if (equal? actor (tsql_session_actor executing_session)) true
+			(error "access denied: authenticated compile identity changed"))
+		(tsql_temporary_policy actor
+			(coalesceNil (executing_session "__tsql_temporary_bindings") '()))))))))
+
 (define tsql_create_temporary (lambda (database name columns options ifnotexists tx session) (begin
 	(tsql_temporary_check_name name)
 	(define scope (tsql_temporary_scope session))

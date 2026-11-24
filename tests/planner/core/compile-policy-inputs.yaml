@@ -1,0 +1,144 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Deferred compile policies use the executing namespace and preserve native account authority
+setup:
+- sql: DROP TABLE IF EXISTS compile_policy_first
+- sql: DROP TABLE IF EXISTS compile_policy_second
+- sql: DROP USER IF EXISTS compile_policy_member
+- sql: DROP USER IF EXISTS compile_policy_other
+- sql: DROP USER IF EXISTS compile_policy_replaced
+- sql: CREATE TABLE compile_policy_first(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE compile_policy_second(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO compile_policy_first VALUES(1,11)
+- sql: INSERT INTO compile_policy_second VALUES(1,22)
+- sql: CREATE USER compile_policy_member IDENTIFIED BY 'pw'
+- sql: CREATE USER compile_policy_other IDENTIFIED BY 'pw'
+- sql: GRANT ALL ON `memcp-tests`.* TO compile_policy_member
+- sql: GRANT ALL ON `memcp-tests`.* TO compile_policy_other
+test_cases:
+- name: One retained dispatcher recompiles against each executing namespace without inheriting an earlier policy
+  scm: |
+    (begin
+      (define cache (newcachemap))
+      (define text "SELECT value FROM compile_policy_input")
+      (define parser (lambda (database _text policy planning tx) (begin
+        (define input (planning "compile_input"))
+        (planner_record_guard_condition
+          (list 'equal? (list 'session "compile_input") input) planning)
+        (planner_record_guard_condition
+          (list 'equal? (list 'session "compile_allowed") (planning "compile_allowed")) planning)
+        (parse_sql database (concat "SELECT value FROM " input " WHERE id=1") policy planning tx))))
+      (define policy (list 'sql-compile-policy (close_procedure (lambda (request _tx) (begin
+        (define input (request "compile_allowed"))
+        (define account (sql_policy "root"))
+        (lambda (database name write) (begin
+          (account database name write)
+          (if (or (not (string? name)) (equal? name input)) true
+            (error "access denied: input belongs to another namespace")))))))))
+      (define make_request (lambda (input allowed) (begin
+        (define request (newsession)) (request "username" "root")
+        (request "compile_input" input) (request "compile_allowed" allowed) request)))
+      (define first (make_request "compile_policy_first" "compile_policy_first"))
+      (define second (make_request "compile_policy_second" "compile_policy_second"))
+      (define compile (lambda (request) (cached_parse cache "sql" (list parser)
+        "memcp-tests" text policy "root" request false nil)))
+      (define run (lambda (formula request output) (begin
+        (output "rows" 0)
+        (with_autocommit request nil nil text (lambda (tx)
+          (sql_execute_formula request tx formula (lambda (row) (begin
+            (output "rows" (+ 1 (output "rows"))) (output "value" (row "value"))))
+            (lambda fields true))))
+        (output "value"))))
+      (define first_formula (compile first))
+      (define output (newsession))
+      (define a (run first_formula first output))
+      (define b (run (compile second) second output))
+      (define retained (run first_formula first output))
+      (define denied_request (make_request "compile_policy_first" "compile_policy_second"))
+      (define denied_output (newsession))
+      (define denied_formula (compile denied_request))
+      (define denied (try (lambda () (begin
+        (run denied_formula denied_request denied_output) false))
+        (lambda (failure) (strlike (string failure) "%access denied%"))))
+      (list a b retained denied (denied_output "rows")))
+  expect: {data: [[11,22,11,true,0]]}
+- name: Raw and native account policy specifications retain ordinary row results
+  scm: |
+    (begin
+      (define run (lambda (policy username) (begin
+        (define request (newsession)) (request "username" username)
+        (define output (newsession))
+        (define text "SELECT value FROM compile_policy_first WHERE id=1")
+        (define formula (cached_parse (newcachemap) "sql" (list parse_sql)
+          "memcp-tests" text policy username request false nil))
+        (with_autocommit request nil nil text (lambda (tx)
+          (sql_execute_formula request tx formula (lambda (row) (output "value" (row "value")))
+            (lambda fields true))))
+        (output "value"))))
+      (list (run (lambda (_database _name _write) true) "root")
+        (run (list 'sql-policy-for "compile_policy_member") "compile_policy_member")))
+  expect: {data: [[11,11]]}
+- name: An authorized different login cannot inherit a retained frontend policy producer
+  scm: |
+    (begin
+      (define original (newsession)) (original "username" "compile_policy_member")
+      (tsql_validate_login_identity original)
+      (define other (newsession)) (other "username" "compile_policy_other")
+      (tsql_validate_login_identity other)
+      (define spec (tsql_compile_temporary_policy (tsql_session_actor original)))
+      (define denied (try (lambda () (begin
+        ((sql_policy_spec_resolve spec other nil) "memcp-tests" true false) false))
+        (lambda (failure) (strlike (string failure) "%access denied%"))))
+      (list denied (tsql_has_dbaccess "memcp-tests" (tsql_session_actor other))))
+  expect: {data: [[true,1]]}
+- name: Repeated frontend statements observe native revocation and regrant
+  scm: |
+    (begin
+      (define request (newsession))
+      (request "username" "compile_policy_member") (request "schema" "memcp-tests")
+      (tsql_validate_login_identity request)
+      (define text "SELECT value FROM compile_policy_first WHERE id=1")
+      (define run (lambda () (begin
+        (define output (newsession))
+        (with_autocommit request nil nil text (lambda (tx)
+          (tsql_execute_statement tx "memcp-tests" text request
+            (lambda (row) (output "value" (row "value"))) (lambda fields true))))
+        (output "value"))))
+      (define first (run))
+      (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM compile_policy_member" nil))
+      (define denied (try (lambda () (begin (run) false))
+        (lambda (failure) (strlike (string failure) "%access denied%"))))
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO compile_policy_member" nil))
+      (list first denied (run)))
+  expect: {data: [[11,true,11]]}
+- name: Replacement login grants cannot authorize a retained producer or its old connection
+  scm: |
+    (begin
+      (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS compile_policy_replaced" nil))
+      (eval (parse_sql "memcp-tests" "CREATE USER compile_policy_replaced IDENTIFIED BY 'pw'" nil))
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO compile_policy_replaced" nil))
+      (define original (newsession)) (original "username" "compile_policy_replaced")
+      (tsql_validate_login_identity original)
+      (define spec (tsql_compile_temporary_policy (tsql_session_actor original)))
+      (eval (parse_sql "memcp-tests" "DROP USER compile_policy_replaced" nil))
+      (eval (parse_sql "memcp-tests" "CREATE USER compile_policy_replaced IDENTIFIED BY 'pw'" nil))
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO compile_policy_replaced" nil))
+      (define replacement (newsession)) (replacement "username" "compile_policy_replaced")
+      (tsql_validate_login_identity replacement)
+      (define old_denied (try (lambda () (begin
+        ((sql_policy_spec_resolve spec original nil) "memcp-tests" true false) false))
+        (lambda (failure) (strlike (string failure) "%access denied%"))))
+      (define replacement_denied (try (lambda () (begin
+        (sql_policy_spec_resolve spec replacement nil) false))
+        (lambda (failure) (strlike (string failure) "%access denied%"))))
+      (list old_denied replacement_denied
+        (tsql_has_dbaccess "memcp-tests" (tsql_session_actor replacement))))
+  expect: {data: [[true,true,1]]}
+cleanup:
+- sql: DROP TABLE IF EXISTS compile_policy_first
+- sql: DROP TABLE IF EXISTS compile_policy_second
+- sql: DROP USER IF EXISTS compile_policy_member
+- sql: DROP USER IF EXISTS compile_policy_other
+- sql: DROP USER IF EXISTS compile_policy_replaced
