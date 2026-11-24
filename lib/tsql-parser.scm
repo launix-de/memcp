@@ -83,7 +83,7 @@ source and permission guards still belong to the enclosing write plan. */
 	(lambda args (match args
 		'(key) (if (equal? key "__tsql_expression_only") true
 			(has? '("__tsql_script_syntax" "__tsql_expression_syntax" "__tsql_logical_query"
-				"__tsql_logical_update" "__tsql_scalar_function_body" "__tsql_parameter_analysis" "__tsql_describe"
+				"__tsql_logical_mutation" "__tsql_logical_insert" "__tsql_scalar_function_body" "__tsql_parameter_analysis" "__tsql_describe"
 				"__tsql_expression_source" "__tsql_lexical_context" "__tsql_parameter_declarations") key) nil
 			(parent key))
 		_ (apply parent args))))))
@@ -5116,10 +5116,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(list 'tsql_view_scalar_call schema fn args)
 				script_syntax (list "scalar-function-call" fn args)
 				(and function_body (or (frontend_options "__tsql_logical_query")
-					(frontend_options "__tsql_logical_update")) (nil? access_policy))
+					(frontend_options "__tsql_logical_mutation")) (nil? access_policy))
 				(list 'tsql_deferred_scalar_call schema fn args)
 				(and function_body (not (or (frontend_options "__tsql_logical_query")
-					(frontend_options "__tsql_logical_update"))))
+					(frontend_options "__tsql_logical_mutation"))))
 				(error "scalar function call requires a relational plan")
 				(nil? access_policy) (error "scalar function call requires an authorized SQL plan")
 				(tsql_scalar_function_call schema fn args policy frontend_options tx false)))
@@ -6332,6 +6332,16 @@ that context explicitly; stored views refuse this scalar before publication. */
 			selection's tag only after its actual presence has been established. */
 			compiling true
 			(error "positioned cursor mutation requires native current-row ownership"))))
+	/* Local function mutations enter the same logical source/DML pipeline.
+	The actual target declaration, not its spelling, proves private ownership. */
+	(define tsql_local_mutation_query (lambda (query target count_matched)
+		(make_query_block (qb_schema query) (qb_sources query) (qb_fields query) (qb_where query)
+			(qb_group query) (qb_having query) (qb_order query) (qb_limit query) (qb_offset query)
+			(qb_hidden query) (qb_stages query)
+			(reduce (list (list 'dml true) (list 'dml_count_matched count_matched)
+				(list 'local_mutation_target (source_relation target))
+				(list 'dml_target_alias (source_alias target)))
+				(lambda (facts entry) (qassoc_set facts (car entry) (cadr entry))) (qb_facts query)))))
 	(define tsql_update (parser '(
 		tsql_keyword_update
 		(define limit tsql_write_limit)
@@ -6359,8 +6369,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(list (tsql_write_query source_query target (list "__compile" 1))
 					(tsql_finalize_sources cols "query" cte_bindings '())) tx) nil))
 			(if deferred deferred (begin
-				(define logical_update (frontend_options "__tsql_logical_update"))
-				(if logical_update
+				(define logical_mutation (frontend_options "__tsql_logical_mutation"))
+				(if logical_mutation
 					(if (local_relation_reference? (source_relation target)) true
 						(error "scalar function UPDATE requires a declared local table"))
 					(begin
@@ -6368,14 +6378,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 						(require_action (source_schema target) (source_relation target) "UPDATE")))
 				(define values (tsql_update_values target (tsql_finalize_sources cols "query" cte_bindings '())))
 				(define query (tsql_write_query source_query target values))
-				(if logical_update
-					(make_query_block (qb_schema query) (qb_sources query) (qb_fields query) (qb_where query)
-						(qb_group query) (qb_having query) (qb_order query) (qb_limit query) (qb_offset query)
-						(qb_hidden query) (qb_stages query)
-						(reduce (list (list 'dml true) (list 'dml_count_matched true)
-							(list 'local_update_target (source_relation target))
-							(list 'dml_target_alias (source_alias target)))
-							(lambda (facts entry) (qassoc_set facts (car entry) (cadr entry))) (qb_facts query)))
+				(if logical_mutation
+					(tsql_local_mutation_query query target true)
 					(if (or describe compile_only) (tsql_describe_dml query)
 						(tsql_build_dml_plan (source_relation target) (source_alias target) query
 							policy planning_session tx (tsql_arithmetic_enabled frontend_options))))))))))
@@ -6406,10 +6410,16 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(list (tsql_write_query source_query target (list "__compile" 1))
 					'()) tx) nil))
 			(if deferred deferred (begin
-				(if policy (policy (source_schema target) (source_relation target) true) true)
-				(require_action (source_schema target) (source_relation target) "DELETE")
-				(if (or describe compile_only) (tsql_describe_dml (tsql_write_query source_query target
-					(list "__prepare" (list (quote sql_type_expr) 1 "INT" nil))))
+				(define logical_mutation (frontend_options "__tsql_logical_mutation"))
+				(if logical_mutation
+					(if (local_relation_reference? (source_relation target)) true
+						(error "scalar function DELETE requires a declared local table"))
+					(begin
+						(if policy (policy (source_schema target) (source_relation target) true) true)
+						(require_action (source_schema target) (source_relation target) "DELETE")))
+				(if logical_mutation (tsql_local_mutation_query (tsql_write_query source_query target nil) target false)
+					(or describe compile_only) (tsql_describe_dml (tsql_write_query source_query target
+						(list "__prepare" (list (quote sql_type_expr) 1 "INT" nil))))
 					(tsql_build_dml_plan (source_relation target) (source_alias target)
 						(tsql_write_query source_query target nil) policy planning_session tx (tsql_arithmetic_enabled frontend_options)))))))))
 
@@ -6754,6 +6764,32 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(find cte_bindings (lambda (entry) (equal?? (car entry) name)) nil))
 			(error "INSERT target must be a base table, not a CTE") true) _ true)
 		(tsql_write_source target '()))))
+	/* A function-local VALUES batch is ordinary logical SELECT/UNION input.
+	Its cells remain expressions; the existing local INSERT owner converts
+	columns and streams the rows under the invocation's native lifetime. */
+	(define tsql_local_values_query (lambda (source columns rows cte_bindings limit) (begin
+		(define relation (source_relation source))
+		(if (local_relation_reference? relation) true
+			(error "scalar function INSERT requires a declared local table"))
+		(define columns (coalesceNil columns (map (local_relation_columns relation)
+			(lambda (column) (column "Field")))))
+		(if (reduce rows (lambda (valid row) (and valid (equal? (count row) (count columns)))) true)
+			true (error "INSERT column count does not match value count"))
+		(define declarations (map columns (lambda (name) (begin
+			(define declaration (find (local_relation_columns relation)
+				(lambda (column) (equal?? name (column "Field"))) nil))
+			(if declaration declaration (error "local INSERT column does not exist: " name))))))
+		(define rows (map rows (lambda (row) (mapIndex row (lambda (index value)
+			(tsql_assignment_value (tsql_finalize_sources value "query" cte_bindings '())
+				(nth declarations index) (source_schema source) policy planning_session tx))))))
+		(define query (tsql_inline_values_query columns rows))
+		(define query (tsql_finalize_sources
+			(if (query_block? query) query (tsql_query_from_source query)) "query" '() '()))
+		(make_query_block (qb_schema query) (qb_sources query) (qb_fields query) (qb_where query)
+			(qb_group query) (qb_having query) (qb_order query) limit (qb_offset query)
+			(qb_hidden query) (qb_stages query)
+			(qassoc_set (qassoc_set (qb_facts query) 'local_insert_target relation)
+				'local_insert_columns columns)))))
 	(define tsql_insert_into (parser '(
 		tsql_keyword_insert (define limit tsql_write_limit) (? tsql_keyword_into)
 		(define target tsql_insert_target)
@@ -6768,35 +6804,37 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(define deferred (if compile_only (tsql_compile_defer 'insert-values rows
 				(list (make_query_block database (list source) (list "__compile" 1)
 					true nil nil nil nil nil nil nil nil) (tsql_finalize_sources rows "query" cte_bindings '())) tx) nil))
-			(if deferred deferred (begin
-				(if policy (policy database tbl true) true)
-				(require_action database tbl "INSERT")
-				(define explicit_columns (not (nil? columns)))
-				(define identity (tsql_insert_identity database tbl planning_session tx))
-				(define declarations (tsql_insert_declarations database tbl
-					(coalesce columns (tsql_insert_target_columns database tbl tx)) planning_session tx))
-				(define columns (map declarations (lambda (column) (column "Field"))))
-				(if (reduce rows (lambda (valid row) (and valid (equal? (count row) (count columns)))) true)
-					true (error "INSERT column count does not match value count"))
-				/* VALUES is a syntax-bounded batch. Limit that batch before native ID
-				reservation; SELECT limits stay in the shared logical query block. */
-				(define rows (map (if (nil? limit) rows (slice rows 0 limit)) (lambda (row)
-					(map (produceN (count columns)) (lambda (i)
-						(tsql_assignment_value
-							(tsql_finalize_sources (nth row i) "query" cte_bindings '()) (nth declarations i) database policy planning_session tx))))))
-				(if (reduce rows (lambda (found row) (or found (tsql_dataset_requires_query_source row))) false)
-					(tsql_insert_select_plan database tbl columns explicit_columns (tsql_values_to_select_query database columns rows))
-					(begin
-						(define typed_rows (map rows (lambda (row) (map (produceN (count columns))
-							(lambda (i) (tsql_assignment_expr (nth row i) (nth declarations i)))))))
-						(if (or describe compile_only) (tsql_describe_dml (make_query_block database '()
-							(merge (map typed_rows (lambda (row)
-								(merge (map (produceN (count columns)) (lambda (i)
-									(list (nth columns i) (nth row i)))))))) true nil nil nil nil nil nil nil nil))
-							(tsql_identity_insert_statement database tbl identity explicit_columns columns
-								(tsql_native_insert_expr (quote __tsql_insert_target) identity columns (sql_insert_values_expr
-									(map typed_rows (lambda (row) (map row (lambda (value) (sql_type_formula '() value)))))) (count rows) true (tsql_insert_deferred_columns database tbl columns policy planning_session tx)
-									(tsql_write_declarations database tbl planning_session tx))))))
+			(if deferred deferred
+				(frontend_options "__tsql_logical_insert") (tsql_local_values_query source columns rows cte_bindings limit)
+				(begin
+					(if policy (policy database tbl true) true)
+					(require_action database tbl "INSERT")
+					(define explicit_columns (not (nil? columns)))
+					(define identity (tsql_insert_identity database tbl planning_session tx))
+					(define declarations (tsql_insert_declarations database tbl
+						(coalesce columns (tsql_insert_target_columns database tbl tx)) planning_session tx))
+					(define columns (map declarations (lambda (column) (column "Field"))))
+					(if (reduce rows (lambda (valid row) (and valid (equal? (count row) (count columns)))) true)
+						true (error "INSERT column count does not match value count"))
+					/* VALUES is a syntax-bounded batch. Limit that batch before native ID
+					reservation; SELECT limits stay in the shared logical query block. */
+					(define rows (map (if (nil? limit) rows (slice rows 0 limit)) (lambda (row)
+						(map (produceN (count columns)) (lambda (i)
+							(tsql_assignment_value
+								(tsql_finalize_sources (nth row i) "query" cte_bindings '()) (nth declarations i) database policy planning_session tx))))))
+					(if (reduce rows (lambda (found row) (or found (tsql_dataset_requires_query_source row))) false)
+						(tsql_insert_select_plan database tbl columns explicit_columns (tsql_values_to_select_query database columns rows))
+						(begin
+							(define typed_rows (map rows (lambda (row) (map (produceN (count columns))
+								(lambda (i) (tsql_assignment_expr (nth row i) (nth declarations i)))))))
+							(if (or describe compile_only) (tsql_describe_dml (make_query_block database '()
+								(merge (map typed_rows (lambda (row)
+									(merge (map (produceN (count columns)) (lambda (i)
+										(list (nth columns i) (nth row i)))))))) true nil nil nil nil nil nil nil nil))
+								(tsql_identity_insert_statement database tbl identity explicit_columns columns
+									(tsql_native_insert_expr (quote __tsql_insert_target) identity columns (sql_insert_values_expr
+										(map typed_rows (lambda (row) (map row (lambda (value) (sql_type_formula '() value)))))) (count rows) true (tsql_insert_deferred_columns database tbl columns policy planning_session tx)
+										(tsql_write_declarations database tbl planning_session tx))))))
 	))))))
 
 	/* Deferred cells are expanded before the native all-default row. Other
@@ -7461,8 +7499,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 		describe (parser (or (parser (define query tsql_root_select) (lambda () (tsql_build_select_plan query)))
 			tsql_cte_mutation tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete))
 		(parser (or p (parser empty (lambda () ""))))))
-	(if (frontend_options "__tsql_logical_update")
-		((parser '((* ";") (define update tsql_update) (* ";")) (update)
+	(if (frontend_options "__tsql_logical_insert")
+		((parser '((* ";") (define insertion tsql_insert_into) (* ";")) (insertion)
+			"^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\\x{0009}-\\x{000D}\\x{0085}\\p{Z}]+)+") s)
+		(frontend_options "__tsql_logical_mutation")
+		((parser '((* ";") (define mutation (or tsql_update tsql_delete)) (* ";")) (mutation)
 			"^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\\x{0009}-\\x{000D}\\x{0085}\\p{Z}]+)+") s)
 		(frontend_options "__tsql_logical_query")
 		((parser '((* ";") (define query tsql_root_select) (* ";"))

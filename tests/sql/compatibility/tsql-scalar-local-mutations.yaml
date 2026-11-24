@@ -1,0 +1,199 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server local side-effect boundary:
+# https://learn.microsoft.com/en-us/sql/relational-databases/user-defined-functions/user-defined-functions
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Scalar local mutations use the shared relational DML owner and independent invocation bags
+setup:
+- sql: DROP FUNCTION IF EXISTS dbo.local_changed_sum
+- sql: DROP FUNCTION IF EXISTS dbo.local_join_delete
+- sql: DROP FUNCTION IF EXISTS dbo.local_loop_delete
+- sql: DROP FUNCTION IF EXISTS dbo.local_values_sum
+- sql: DROP FUNCTION IF EXISTS dbo.local_delete_all
+- sql: DROP FUNCTION IF EXISTS dbo.local_limited_delete
+- sql: DROP FUNCTION IF EXISTS dbo.local_invalid_delete
+- sql: DROP FUNCTION IF EXISTS dbo.local_invalid_alias_delete
+- sql: DROP FUNCTION IF EXISTS dbo.local_invalid_temp_delete
+- sql: DROP TABLE IF EXISTS local_mutation_callers
+- sql: DROP TABLE IF EXISTS local_mutation_public
+- sql: DROP TABLE IF EXISTS #local_external
+  session_id: local_mutation_temp_guard
+- sql: CREATE TABLE #local_external(value INT)
+  session_id: local_mutation_temp_guard
+- sql: INSERT #local_external VALUES(7)
+  session_id: local_mutation_temp_guard
+- sql: CREATE TABLE local_mutation_callers(id INT PRIMARY KEY,cut INT NULL)
+- sql: INSERT local_mutation_callers VALUES(1,3),(2,4),(3,NULL),(4,0),(5,3)
+- sql: CREATE TABLE local_mutation_public(id INT PRIMARY KEY,amount INT NULL)
+- sql: INSERT local_mutation_public VALUES(1,50),(2,60)
+- sql: |
+    CREATE FUNCTION dbo.local_changed_sum(@cut INT) RETURNS INT AS BEGIN
+      DECLARE @t TABLE(id INT,amount INT NULL);
+      INSERT @t SELECT 1,2;
+      INSERT @t SELECT 2,3;
+      INSERT @t SELECT 3,CONVERT(INT,NULL);
+      INSERT @t SELECT 4,3;
+      UPDATE @t SET amount=amount+1 WHERE id<=2;
+      DELETE FROM @t WHERE amount>@cut;
+      DECLARE @result INT;
+      SELECT @result=SUM(amount) FROM @t;
+      RETURN @result;
+    END
+- sql: |
+    CREATE FUNCTION dbo.local_join_delete(@cut INT) RETURNS INT AS BEGIN
+      DECLARE @t TABLE(id INT,amount INT NULL);
+      DECLARE @drop TABLE(id INT);
+      INSERT @t SELECT 1,2;
+      INSERT @t SELECT 2,3;
+      INSERT @t SELECT 3,4;
+      INSERT @drop SELECT 2;
+      INSERT @drop SELECT 2;
+      DELETE target FROM @t AS target INNER JOIN @drop AS selected ON selected.id=target.id WHERE target.amount>=@cut;
+      DECLARE @result INT;
+      SELECT @result=SUM(amount) FROM @t;
+      RETURN @result;
+    END
+- sql: |
+    CREATE FUNCTION dbo.local_loop_delete(@n INT) RETURNS INT AS BEGIN
+      DECLARE @t TABLE(amount INT);
+      DECLARE @i INT=0;
+      DECLARE @result INT=0;
+      DECLARE @current INT;
+      WHILE @i<@n BEGIN
+        INSERT @t SELECT @i;
+        UPDATE @t SET amount=amount+1;
+        DELETE @t WHERE amount>2;
+        SELECT @current=SUM(amount) FROM @t;
+        SET @result=@result+ISNULL(@current,0);
+        SET @i=@i+1;
+      END
+      RETURN @result;
+    END
+- sql: |
+    CREATE FUNCTION dbo.local_values_sum(@n INT) RETURNS INT AS BEGIN
+      DECLARE @t TABLE(id INT,value INT NULL);
+      INSERT INTO @t(value,id) VALUES(ISNULL(@n,9),1),(@n+1,2),(@n+1,3),(NULL,4);
+      DELETE @t WHERE id=4;
+      DECLARE @result INT;
+      SELECT @result=SUM(value) FROM @t;
+      RETURN @result;
+    END
+- sql: |
+    CREATE FUNCTION dbo.local_delete_all() RETURNS INT AS BEGIN
+      DECLARE @t TABLE(amount INT);
+      INSERT @t SELECT 8;
+      DELETE FROM @t;
+      DECLARE @result INT;
+      SELECT @result=COUNT(*) FROM @t;
+      RETURN @result;
+    END
+- sql: |
+    CREATE FUNCTION dbo.local_limited_delete(@n INT) RETURNS INT AS BEGIN
+      DECLARE @t TABLE(amount INT);
+      INSERT @t SELECT 3;
+      INSERT @t SELECT 3;
+      INSERT @t SELECT 3;
+      DELETE TOP(@n) FROM @t;
+      DECLARE @result INT;
+      SELECT @result=COUNT(*) FROM @t;
+      RETURN @result;
+    END
+cleanup:
+- sql: DROP TABLE IF EXISTS #local_external
+  session_id: local_mutation_temp_guard
+- sql: DROP FUNCTION IF EXISTS dbo.local_changed_sum
+- sql: DROP FUNCTION IF EXISTS dbo.local_join_delete
+- sql: DROP FUNCTION IF EXISTS dbo.local_loop_delete
+- sql: DROP FUNCTION IF EXISTS dbo.local_values_sum
+- sql: DROP FUNCTION IF EXISTS dbo.local_delete_all
+- sql: DROP FUNCTION IF EXISTS dbo.local_limited_delete
+- sql: DROP FUNCTION IF EXISTS dbo.local_invalid_delete
+- sql: DROP FUNCTION IF EXISTS dbo.local_invalid_alias_delete
+- sql: DROP FUNCTION IF EXISTS dbo.local_invalid_temp_delete
+- sql: DROP TABLE IF EXISTS local_mutation_callers
+- sql: DROP TABLE IF EXISTS local_mutation_public
+
+test_cases:
+- name: UPDATE then DELETE sees current local rows and preserves duplicate survivors
+  sql: SELECT dbo.local_changed_sum(3) AS total,dbo.local_changed_sum(4) AS retained
+  expect: {rows: 1,data: [{total: 6,retained: 10}]}
+- name: UNKNOWN delete predicate preserves rows while all NULL survivors retain SUM NULL
+  sql: SELECT dbo.local_changed_sum(NULL) AS unknown_predicate,dbo.local_changed_sum(0) AS nullable_survivors
+  expect: {rows: 1,data: [{unknown_predicate: 10,nullable_survivors: null}]}
+- name: Caller duplicate and NULL bindings retain independent mutated row bags
+  sql: SELECT id,dbo.local_changed_sum(cut) AS total FROM local_mutation_callers ORDER BY id
+  expect:
+    rows: 5
+    data: [{id: 1,total: 6},{id: 2,total: 10},{id: 3,total: 10},{id: 4,total: null},{id: 5,total: 6}]
+- name: Joined DELETE removes a matched target once despite duplicate source matches
+  sql: SELECT dbo.local_join_delete(3) AS removed,dbo.local_join_delete(4) AS retained
+  expect: {rows: 1,data: [{removed: 6,retained: 9}]}
+- name: Local INSERT UPDATE and DELETE repeat in lexical loop order
+  sql: SELECT dbo.local_loop_delete(0) AS empty_loop,dbo.local_loop_delete(3) AS entered_loop
+  expect: {rows: 1,data: [{empty_loop: 0,entered_loop: 5}]}
+- name: VALUES expressions retain target column order duplicates and NULL rows
+  sql: SELECT dbo.local_values_sum(2) AS total,dbo.local_values_sum(NULL) AS null_total
+  expect: {rows: 1,data: [{total: 8,null_total: 9}]}
+- name: Unconditional DELETE produces an empty local relation
+  sql: SELECT dbo.local_delete_all() AS remaining
+  expect: {rows: 1,data: [{remaining: 0}]}
+- name: DELETE TOP binds each invocation limit before selecting native target rows
+  sql: SELECT dbo.local_limited_delete(0) AS skipped,dbo.local_limited_delete(1) AS limited,dbo.local_limited_delete(5) AS exhausted
+  expect: {rows: 1,data: [{skipped: 3,limited: 2,exhausted: 0}]}
+- name: Outer INSERT evaluates the local mutation under its original public statement
+  sql: INSERT local_mutation_public SELECT id+10,dbo.local_changed_sum(cut) FROM local_mutation_callers
+- name: Outer inserted rows preserve every local mutation result
+  sql: SELECT id,amount FROM local_mutation_public ORDER BY id
+  expect:
+    rows: 7
+    data: [{id: 1,amount: 50},{id: 2,amount: 60},{id: 11,amount: 6},{id: 12,amount: 10},{id: 13,amount: 10},{id: 14,amount: null},{id: 15,amount: 6}]
+- name: Outer UPDATE binds the target value to a complete local mutation factory
+  sql: UPDATE local_mutation_public SET amount=dbo.local_changed_sum(amount) WHERE id IN(11,12)
+- name: Outer UPDATE preserves target identity and independent local mutation results
+  sql: SELECT id,amount FROM local_mutation_public WHERE id>=11 ORDER BY id
+  expect:
+    rows: 5
+    data: [{id: 11,amount: 10},{id: 12,amount: 10},{id: 13,amount: 10},{id: 14,amount: null},{id: 15,amount: 6}]
+- name: Original caller savepoint remains usable after local mutations finish
+  sql: |
+    BEGIN TRAN;
+    INSERT local_mutation_public SELECT 99,dbo.local_changed_sum(3);
+    SAVE TRAN kept;
+    UPDATE local_mutation_public SET amount=11 WHERE id=99;
+    ROLLBACK TRAN kept;
+    SELECT amount,@@TRANCOUNT AS depth FROM local_mutation_public WHERE id=99;
+    ROLLBACK TRAN;
+  expect: {rows: 1,data: [{amount: 6,depth: 1}]}
+- name: Full rollback removes only the caller public changes
+  sql: SELECT COUNT(*) AS remaining FROM local_mutation_public WHERE id=99
+  expect: {rows: 1,data: [{remaining: 0}]}
+- name: A function cannot DELETE from a public table
+  sql: CREATE FUNCTION dbo.local_invalid_delete() RETURNS INT AS BEGIN DELETE local_mutation_public; RETURN 1; END
+  expect: {error: true}
+- name: Public targets do not become private through a local join alias
+  sql: |
+    CREATE FUNCTION dbo.local_invalid_alias_delete() RETURNS INT AS BEGIN
+      DECLARE @t TABLE(id INT);
+      INSERT @t SELECT 1;
+      DELETE target FROM local_mutation_public AS target INNER JOIN @t AS selected ON target.id=selected.id;
+      RETURN 1;
+    END
+  expect: {error: true}
+- name: A function cannot DELETE from a temporary table
+  session_id: local_mutation_temp_guard
+  sql: CREATE FUNCTION dbo.local_invalid_temp_delete() RETURNS INT AS BEGIN DELETE FROM #local_external; RETURN 1; END
+  expect: {error: true}
+- name: Rejected temporary target leaves its original rows intact
+  session_id: local_mutation_temp_guard
+  sql: SELECT value FROM #local_external
+  expect: {rows: 1,data: [{value: 7}]}
+- name: Rejected declarations leave the public relation unchanged
+  sql: SELECT id,amount FROM local_mutation_public WHERE id<10 ORDER BY id
+  expect: {rows: 2,data: [{id: 1,amount: 50},{id: 2,amount: 60}]}
+- name: Persisted local mutation definitions recompile from original SQL
+  action: restart
+- name: Reloaded UPDATE DELETE and VALUES create independent local bags
+  sql: SELECT dbo.local_changed_sum(3) AS changed,dbo.local_join_delete(3) AS joined,dbo.local_values_sum(2) AS inserted
+  expect: {rows: 1,data: [{changed: 6,joined: 6,inserted: 8}]}

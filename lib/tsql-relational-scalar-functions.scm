@@ -76,6 +76,7 @@ capture alone does not make INSERT/UPDATE/DELETE a relational read recipe. */
 (define tsql_relational_scalar_command_reads? (lambda (command) (match command
 	'("declare-table" _name _columns) true
 	'("insert-local" _name _columns _query) true
+	'("insert-local-source" _source) true
 	'("block" commands) (reduce commands (lambda (found child)
 		(or (tsql_relational_scalar_command_reads? child) found)) false)
 	'("while" condition body) (or (tsql_relational_scalar_expression_reads? condition)
@@ -90,7 +91,7 @@ capture alone does not make INSERT/UPDATE/DELETE a relational read recipe. */
 		(tsql_relational_scalar_command_reads? yes)
 		(if (nil? no) false (tsql_relational_scalar_command_reads? no)))
 	(cons kind arguments) (if (has? '("statement" "statement-source") kind)
-		(if (has? '("SELECT" "UPDATE") (tsql_insert_exec_leaf_kind (car arguments))) true
+		(if (has? '("SELECT" "UPDATE" "DELETE") (tsql_insert_exec_leaf_kind (car arguments))) true
 			(error "unsupported statement in scalar function body")) false)
 	_ false)))
 (define tsql_relational_scalar_source? (lambda (source database quoted ansi)
@@ -112,7 +113,7 @@ binding paths belong to the consuming plan, including calls inside a module. */
 				(equal? key "__tsql_local_relations") tables
 				/* A caller's captured SQL text and parser mode are not the
 				callee's source. Only semantic dependency owners are inherited. */
-				(has? '("__tsql_logical_update" "__tsql_lexical_context" "__tsql_script_syntax"
+				(has? '("__tsql_logical_mutation" "__tsql_logical_insert" "__tsql_lexical_context" "__tsql_script_syntax"
 					"__tsql_expression_syntax" "__tsql_expression_only"
 					"__tsql_expression_source" "__tsql_parameter_analysis"
 					"__tsql_describe" "__tsql_static_module") key) nil
@@ -147,29 +148,33 @@ binding paths belong to the consuming plan, including calls inside a module. */
 	(if (and (not (empty_list? (qb_order query))) (nil? (qb_limit query)))
 		(error "ordered unbounded scalar assignment needs ordered final-tuple lowering") true)
 	(list targets query))))
-(define tsql_relational_insert_query (lambda (database text contracts quoted policy planning tx tables) (begin
+(define tsql_relational_insert_query (lambda (database text contracts quoted policy planning tx tables values) (begin
+	(define context (tsql_relational_query_scope planning contracts quoted tables))
+	(define options (if values (lambda args (match args
+		'(key) (if (equal? key "__tsql_logical_insert") true (context key))
+		_ (apply context args))) context))
 	(define query (parse_tsql database text policy
-		(tsql_relational_query_scope planning contracts quoted tables) tx))
+		options tx))
 	(if (query_block? query) query (error "local table INSERT currently requires a query block")))))
-/* A local mutation retains ordinary UPDATE syntax until the shared planner
+/* A local mutation retains ordinary UPDATE/DELETE syntax until the shared planner
 binds and decorrelates its complete relational input. No SQL is interpreted by
 an execution callback, and only the declared private table is writable. */
-(define tsql_relational_update_scope (lambda (parent contracts quoted tables) (begin
+(define tsql_relational_mutation_scope (lambda (parent contracts quoted tables) (begin
 	(define context (tsql_relational_query_scope parent contracts quoted tables))
 	(lambda args (match args
 		'(key) (if (equal? key "__tsql_logical_query") false
-			(equal? key "__tsql_logical_update") true (context key))
+			(equal? key "__tsql_logical_mutation") true (context key))
 		_ (apply context args))))))
-(define tsql_relational_update_query (lambda (database text contracts quoted policy planning tx tables) (begin
+(define tsql_relational_mutation_query (lambda (database text contracts quoted policy planning tx tables) (begin
 	(define query (parse_tsql database text policy
-		(tsql_relational_update_scope planning contracts quoted tables) tx))
-	(if (and (query_block? query) (qassoc_get (qb_facts query) 'local_update_target nil)) query
-		(error "local UPDATE requires a declared relation target")))))
+		(tsql_relational_mutation_scope planning contracts quoted tables) tx))
+	(if (and (query_block? query) (qassoc_get (qb_facts query) 'local_mutation_target nil)) query
+		(error "local mutation requires a declared relation target")))))
 (define tsql_relational_statement_steps (lambda (database text contracts quoted tables planning) (begin
-	(if (equal? (tsql_insert_exec_leaf_kind text) "UPDATE")
+	(if (has? '("UPDATE" "DELETE") (tsql_insert_exec_leaf_kind text))
 		(begin
-			(tsql_relational_update_query database text contracts quoted nil planning nil tables)
-			(list (list "update-local" text quoted)))
+			(tsql_relational_mutation_query database text contracts quoted nil planning nil tables)
+			(list (list "mutate-local" text quoted)))
 		(begin
 			(define parsed (tsql_relational_scalar_query database text contracts quoted nil planning nil tables))
 			(list (list "select" (car parsed) text quoted)))))))
@@ -215,8 +220,17 @@ an execution callback, and only the declared private table is writable. */
 		'("insert-local" name columns query) (begin
 			(if (find (state "tables") (lambda (table) (equal? (car table) name)) nil) true
 				(error "undeclared local table INSERT target: @" name))
-			(define checked (tsql_relational_insert_query database query (state "contracts") quoted nil (tsql_ansi_planning_scope nil (state "ansi_nulls")) nil (state "tables")))
-			(list (list "insert-local" name columns query quoted)))
+			(define checked (tsql_relational_insert_query database query (state "contracts") quoted nil (tsql_ansi_planning_scope nil (state "ansi_nulls")) nil (state "tables") false))
+			(list (list "insert-local" name columns query quoted false)))
+		'("insert-local-source" source) (begin
+			(define checked (tsql_relational_insert_query database source (state "contracts") quoted nil
+				(tsql_ansi_planning_scope nil (state "ansi_nulls")) nil (state "tables") true))
+			(define target (qassoc_get (qb_facts checked) 'local_insert_target nil))
+			(define declaration (find (state "tables") (lambda (table)
+				(expression_equal? (nth table 1) (local_relation_symbol target))) nil))
+			(if declaration true (error "local VALUES INSERT lost its lexical declaration"))
+			(list (list "insert-local" (car declaration)
+				(qassoc_get (qb_facts checked) 'local_insert_columns nil) source quoted true)))
 		'("if" condition yes no) (begin
 			(define expression (tsql_relational_scalar_value database condition
 				(state "contracts") quoted nil (tsql_ansi_planning_scope nil (state "ansi_nulls")) nil (state "tables")))
@@ -514,10 +528,10 @@ this expansion's snapshot guards before slot substitution or query fusion. */
 			(tsql_relational_scalar_value database (nth step 2) contracts (nth step 3) policy planning tx (recipe "tables"))
 			(equal? (car step) "return-query")
 			(tsql_relational_scalar_value database (nth step 1) contracts (nth step 2) policy planning tx (recipe "tables"))
-			(equal? (car step) "update-local")
-			(tsql_relational_update_query database (nth step 1) contracts (nth step 2) policy planning tx (recipe "tables"))
+			(equal? (car step) "mutate-local")
+			(tsql_relational_mutation_query database (nth step 1) contracts (nth step 2) policy planning tx (recipe "tables"))
 			(equal? (car step) "insert-local")
-			(tsql_relational_insert_query database (nth step 3) contracts (nth step 4) policy planning tx (recipe "tables")) nil))
+			(tsql_relational_insert_query database (nth step 3) contracts (nth step 4) policy planning tx (recipe "tables") (nth step 5)) nil))
 		(define names (meta "names"))
 		(tsql_relational_reserve_names names (list step parsed))
 		(define alias (tsql_relational_fresh_alias names (concat "__fn_state_" (meta "step"))))
@@ -591,16 +605,16 @@ this expansion's snapshot guards before slot substitution or query fusion. */
 					(make_relational_choice previous next
 						(tsql_relational_expand_steps recipe (nth step 3) feedback outer_sources policy planning tx meta)
 						state_symbol outer_sources branch_predicate))))
-			(equal? (car step) "update-local") (begin
+			(equal? (car step) "mutate-local") (begin
 				/* The predecessor is one immutable state tuple, bound before the
 				whole native mutation. Its row expressions remain ordinary SQL. */
-				(define state_symbol (symbol (tsql_relational_fresh_alias names (concat alias "_update_state"))))
+				(define state_symbol (symbol (tsql_relational_fresh_alias names (concat alias "_mutation_state"))))
 				(define payload_bindings (merge (list
 					(tsql_relational_pure_slots_from_payload contracts state_symbol)
 					(tsql_relational_context_from_payload contracts state_symbol))))
 				(define input (tsql_relational_substitute parsed payload_bindings))
 				(state "query" (make_relational_sequence previous
-					(make_local_relation_update input state_symbol outer_sources) state_symbol outer_sources)))
+					(make_local_relation_mutation input state_symbol outer_sources) state_symbol outer_sources)))
 			(equal? (car step) "insert-local") (begin
 				(define declaration (find (recipe "tables") (lambda (table) (equal? (car table) (cadr step))) nil))
 				/* The payload may be a FROM-less projection of local variables.

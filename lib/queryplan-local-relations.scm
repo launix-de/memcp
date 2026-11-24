@@ -7,7 +7,7 @@ UNION ALL is a named child container for iteration/choice, never their bag
 semantics. This one classifier owns all shared child-scope boundaries. */
 (define scoped_relational_program_stage? (lambda (stage)
 	(and (group_stage? stage)
-		(reduce (list 'relational_iteration 'relational_choice 'relational_sequence 'local_relation_scope 'local_relation_insert 'local_relation_update 'local_relation_emit)
+		(reduce (list 'relational_iteration 'relational_choice 'relational_sequence 'local_relation_scope 'local_relation_insert 'local_relation_mutation 'local_relation_emit)
 			(lambda (found purpose) (or found
 				(expression_equal? purpose (qassoc_get (gs_facts stage) 'purpose nil)))) false))))
 
@@ -177,7 +177,7 @@ rows remain usable by their owning transaction without becoming volatile. */
 		(or (expression_equal? purpose 'local_relation_scope)
 			(expression_equal? purpose 'local_relation_insert)
 			(expression_equal? purpose 'local_relation_emit)
-			(expression_equal? purpose 'local_relation_update)
+			(expression_equal? purpose 'local_relation_mutation)
 			(query_requires_fresh_invocation? input nil false))))
 	(define identity (stable_structural_hash (list purpose input facts) false))
 	(define id (concat "scoped-program:" identity))
@@ -242,10 +242,10 @@ The transition is a logical child, not a correlated row-time interpreter. */
 	(make_scoped_relational_program 'local_relation_insert (qb_schema query) query outer_sources
 		(list (list 'target_relation relation) (list 'insert_columns columns)))))
 
-/* UPDATE's input is a normal mutation query; its bounded output is the
+/* UPDATE/DELETE input is a normal mutation query; its bounded output is the
 unchanged predecessor state. The enclosing sequence owns that lexical value. */
-(define make_local_relation_update (lambda (query state_symbol outer_sources)
-	(make_scoped_relational_program 'local_relation_update (qb_schema query) query outer_sources
+(define make_local_relation_mutation (lambda (query state_symbol outer_sources)
+	(make_scoped_relational_program 'local_relation_mutation (qb_schema query) query outer_sources
 		(list (list 'state_symbol state_symbol)))))
 /* A streaming scalar codec may initialize a real multiset relation. Its
 argument query remains ordinary logical input; emitted rows go directly to the
@@ -339,8 +339,8 @@ already bound caller coordinates. These names are never cache identities. */
 				(lower_local_relation_scope_program bound tx)
 				(expression_equal? purpose 'local_relation_insert)
 				(lower_local_relation_insert_program bound tx)
-				(expression_equal? purpose 'local_relation_update)
-				(lower_local_relation_update_program bound tx)
+				(expression_equal? purpose 'local_relation_mutation)
+				(lower_local_relation_mutation_program bound tx)
 				(expression_equal? purpose 'local_relation_emit)
 				(lower_local_relation_emit_program bound tx)
 				(neumann_fail "build_queryplan" "unknown scoped relational program")))
@@ -427,13 +427,13 @@ without a Scheme bag. LAST combines only the fixed-size forwarded state. */
 
 /* The generic DML owner executes the complete selection and mutation once.
 Local native handles are lexical physical inputs, not catalog-name lookups. */
-(define lower_local_relation_update_program (lambda (stage tx) (begin
+(define lower_local_relation_mutation_program (lambda (stage tx) (begin
 	(define input (gs_input stage))
-	(define relation (qassoc_get (qb_facts input) 'local_update_target nil))
+	(define relation (qassoc_get (qb_facts input) 'local_mutation_target nil))
 	(define target (dml_target_source (qb_sources input) (qb_schema input) relation
 		(qassoc_get (qb_facts input) 'dml_target_alias nil)))
 	(if (and target (local_relation_reference? (source_relation target))) true
-		(neumann_fail "build_queryplan" "local UPDATE target lost its lexical declaration"))
+		(neumann_fail "build_queryplan" "local mutation target lost its lexical declaration"))
 	(list 'begin
 		(physical_mutation_producer (list (source_table_expr target))
 			(physical_dml_descriptor input (qb_schema input) relation)
