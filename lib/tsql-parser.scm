@@ -6694,6 +6694,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(if (and xml_mode targets) (error "SELECT assignment cannot use terminal XML formatting") true)
 		(define query (if targets (tsql_select_assignment_query query targets) query))
 		(define bound_query (tsql_finalize_sources query "query" '() '()))
+		/* Original projection provenance needs the same native declarations as
+		the expanded result, before wildcard/name resolution consumes them. The
+		ordinary expansion reuses these immutable catalog facts. */
+		(define bound_query (if (frontend_options "__tsql_select_into_description")
+			(sql_bind_catalog_declarations bound_query tx planning_session) bound_query))
 		(if compile_only
 			(tsql_compile_query_binding bound_query policy planning_session tx)
 			(begin
