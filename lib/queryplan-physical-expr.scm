@@ -2537,15 +2537,35 @@ consumer admission separately proves those same values exist in its scope. */
 		(and covered (not (nil? (find lookup (lambda (key) (expression_equal? key value)) nil)))
 			(not (nil? (find (gs_domain stage) (lambda (key) (expression_equal? key value)) nil))))) true)
 		(scalar_probe_input_closed? (rewrite_scalar_query_probe_params index stage))))))
+/* Stage payloads execute in their input's source namespace. Analyze them in
+that same scope, alongside the input's own executable expressions. A retained
+child publishes its caller dependencies through D; fact catalogs do not read SQL
+columns. The inspection block is proof data and never a physical operator. */
+(define scalar_probe_free_column_refs (lambda (stage) (begin
+	(define input (gs_input stage))
+	(define input (if (query_block? input) input
+		(make_query_block (source_schema input) (list input) '() true '() nil '() nil nil '() '() '())))
+	(logical_relation_free_column_refs (make_query_block
+		(qb_schema input) (qb_sources input)
+		(merge (list (qb_fields input) (list "__scalar_probe_bindings"
+			(cons 'list (cdr (scalar_probe_executable_exprs stage))))))
+		(qb_where input) (qb_group input) (qb_having input) (qb_order input)
+		(qb_limit input) (qb_offset input) (qb_hidden input) (qb_stages input) (qb_facts input))))))
 (define scalar_probe_bindings_complete? (lambda (stage sources) (begin
 	(define lookup (qassoc_get (gs_facts stage) 'lookup-keys '()))
-	(define refs (btw2025_expr_outer_column_refs
-		(scalar_probe_executable_exprs stage) (list (gs_input stage)) sources))
-	(and (reduce (qassoc_get (gs_facts stage) 'btw2025_accessing_after_simple '())
-		(lambda (covered alias) (and covered (contains? (source_aliases sources) alias))) true)
-		(reduce refs (lambda (covered ref)
-			(and covered (not (nil? (find lookup (lambda (key) (expression_equal? key ref)) nil)))
-				(not (nil? (find (gs_domain stage) (lambda (key) (expression_equal? key ref)) nil))))) true)))))
+	/* Parameter substitution can consume every read of an ancestor while its
+	logical accessing-alias provenance remains. Actual free reads are the
+	authority: unknown callers must not disappear through a caller-filtered walk. */
+	(and (stage_lookup_keys_resolve_in_sources? stage sources nil)
+		(reduce (scalar_probe_free_column_refs stage) (lambda (covered reference) (begin
+			(define source (if (nil? (nth reference 1))
+				(source_for_unqualified_column sources nil (nth reference 3) (nth reference 4))
+				(source_for_alias sources nil (nth reference 1) (nth reference 2))))
+			(define ref (if (or (nil? source) (not (nil? (nth reference 1)))) reference
+				(list 'get_column (source_alias source) false (nth reference 3) (nth reference 4))))
+			(and covered (not (nil? source))
+				(not (nil? (find lookup (lambda (key) (expression_equal? key ref)) nil)))
+				(not (nil? (find (gs_domain stage) (lambda (key) (expression_equal? key ref)) nil)))))) true)))))
 (define scalar_first_probe_supported? (lambda (stage)
 	(if (scalar_first_physical_probe_stage? stage) true
 		(and (scalar_first_probe_contract? stage)

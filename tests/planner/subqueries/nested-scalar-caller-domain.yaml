@@ -212,3 +212,90 @@ test_cases:
       weighted: 0
     - lo: 8
       weighted: 9
+- name: Consumed ancestor coordinates remain complete after parameter substitution
+  scm: "(begin\n\t(define local_source (list \"local\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define\
+    \ caller_source (list \"caller\" \"memcp-tests\" \"nsl_driver\" false true nil))\n\t(define middle (list 'get_column\
+    \ \"caller\" false \"middle_id\" false))\n\t(define tenant (list 'get_column \"caller\" false \"tenant_id\"\
+    \ false))\n\t(define value (list 'get_column \"local\" false \"final_id\" false))\n\t(define stage (make_group_stage\
+    \ \"binding-proof\" local_source (list middle) (list middle)\n\t\t(list (list value (scalar_once_reduce_first)\
+    \ nil)) nil '() '() nil nil\n\t\t(list (list 'condition (list 'equal?? value middle)) (list 'lookup-keys (list\
+    \ middle))\n\t\t\t(list 'btw2025_domain (list middle)) (list 'btw2025_accessing_after_simple '(\"caller\")))))\n\
+    \t(define bound (rewrite_scalar_query_probe_params\n\t\t(scalar_query_probe_param_index (list middle) (list\
+    \ middle) (list 'bound_middle)) stage))\n\t(and (scalar_probe_bindings_complete? stage (list caller_source))\n\
+    \t\t(not (scalar_probe_bindings_complete? stage (list local_source)))\n\t\t(scalar_probe_bindings_complete?\
+    \ bound (list local_source))\n\t\t(empty_list? (scalar_probe_free_column_refs bound)))\n)\n"
+  expect:
+    result: true
+- name: Unknown executable caller columns cannot vanish from a supplied-source walk
+  scm: "(begin\n\t(define local_source (list \"local\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define\
+    \ caller_source (list \"caller\" \"memcp-tests\" \"nsl_driver\" false true nil))\n\t(define middle (list 'get_column\
+    \ \"caller\" false \"middle_id\" false))\n\t(define tenant (list 'get_column \"caller\" false \"tenant_id\"\
+    \ false))\n\t(define value (list 'get_column \"local\" false \"final_id\" false))\n\t(define unknown (list 'get_column\
+    \ \"unknown_caller\" false \"middle_id\" false))\n\t(define stage (make_group_stage \"binding-proof\" local_source\
+    \ (list unknown) (list unknown)\n\t\t(list (list value (scalar_once_reduce_first) nil)) nil '() '() nil nil\n\
+    \t\t(list (list 'condition (list 'equal?? value unknown)) (list 'lookup-keys (list unknown))\n\t\t\t(list 'btw2025_domain\
+    \ (list unknown)) (list 'btw2025_accessing_after_simple '()))))\n\t(not (scalar_probe_bindings_complete? stage\
+    \ (list caller_source)))\n)\n"
+  expect:
+    result: true
+- name: A declared caller source still requires every live coordinate in D and lookup
+  scm: "(begin\n\t(define local_source (list \"local\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define\
+    \ caller_source (list \"caller\" \"memcp-tests\" \"nsl_driver\" false true nil))\n\t(define middle (list 'get_column\
+    \ \"caller\" false \"middle_id\" false))\n\t(define tenant (list 'get_column \"caller\" false \"tenant_id\"\
+    \ false))\n\t(define value (list 'get_column \"local\" false \"final_id\" false))\n\t(define stage (make_group_stage\
+    \ \"binding-proof\" local_source (list middle) (list middle)\n\t\t(list (list value (scalar_once_reduce_first)\
+    \ nil)) nil '() '() nil nil\n\t\t(list (list 'condition (list 'equal?? value tenant)) (list 'lookup-keys (list\
+    \ middle))\n\t\t\t(list 'btw2025_domain (list middle)) (list 'btw2025_accessing_after_simple '()))))\n\t(not\
+    \ (scalar_probe_bindings_complete? stage (list caller_source)))\n)\n"
+  expect:
+    result: true
+- name: Lookup coverage cannot substitute for the stages published caller domain
+  scm: "(begin\n\t(define local_source (list \"local\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define\
+    \ caller_source (list \"caller\" \"memcp-tests\" \"nsl_driver\" false true nil))\n\t(define middle (list 'get_column\
+    \ \"caller\" false \"middle_id\" false))\n\t(define tenant (list 'get_column \"caller\" false \"tenant_id\"\
+    \ false))\n\t(define value (list 'get_column \"local\" false \"final_id\" false))\n\t(define stage (make_group_stage\
+    \ \"binding-proof\" local_source (list middle) (list middle)\n\t\t(list (list value (scalar_once_reduce_first)\
+    \ nil)) nil '() '() nil nil\n\t\t(list (list 'condition (list 'equal?? value tenant)) (list 'lookup-keys (list\
+    \ middle tenant))\n\t\t\t(list 'btw2025_domain (list middle)) (list 'btw2025_accessing_after_simple '()))))\n\
+    \t(not (scalar_probe_bindings_complete? stage (list caller_source)))\n)\n"
+  expect:
+    result: true
+- name: The producer input shadows an ancestor alias with the same spelling
+  scm: "(begin\n\t(define local_source (list \"local\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define\
+    \ caller_source (list \"caller\" \"memcp-tests\" \"nsl_driver\" false true nil))\n\t(define middle (list 'get_column\
+    \ \"caller\" false \"middle_id\" false))\n\t(define tenant (list 'get_column \"caller\" false \"tenant_id\"\
+    \ false))\n\t(define value (list 'get_column \"local\" false \"final_id\" false))\n\t(define local_source (list\
+    \ \"caller\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define value (list 'get_column \"caller\" false\
+    \ \"final_id\" false))\n\t(define stage (make_group_stage \"binding-proof\" local_source '() '()\n\t\t(list\
+    \ (list value (scalar_once_reduce_first) nil)) nil '() '() nil nil\n\t\t(list (list 'condition (list 'equal??\
+    \ value 100)) (list 'lookup-keys '())\n\t\t\t(list 'btw2025_domain '()) (list 'btw2025_accessing_after_simple\
+    \ '(\"caller\")))))\n\t(and (empty_list? (scalar_probe_free_column_refs stage))\n\t\t(scalar_probe_bindings_complete?\
+    \ stage (list (list \"other\" \"memcp-tests\" \"nsl_final\" false true nil))))\n)\n"
+  expect:
+    result: true
+- name: A retained nested producer still exposes its unbound caller domain
+  scm: "(begin\n\t(define local_source (list \"local\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define\
+    \ caller_source (list \"caller\" \"memcp-tests\" \"nsl_driver\" false true nil))\n\t(define middle (list 'get_column\
+    \ \"caller\" false \"middle_id\" false))\n\t(define tenant (list 'get_column \"caller\" false \"tenant_id\"\
+    \ false))\n\t(define value (list 'get_column \"local\" false \"final_id\" false))\n\t(define unknown (list 'get_column\
+    \ \"unknown_caller\" false \"middle_id\" false))\n\t(define nested (make_group_stage \"nested-binding-proof\"\
+    \ local_source\n\t\t(list unknown) (list unknown) (list (list value (scalar_once_reduce_first) nil))\n\t\tnil\
+    \ '() '() nil nil '()))\n\t(define local_source (make_query_block \"memcp-tests\" (list local_source)\n\t\t\
+    '() true '() nil '() nil nil '() (list nested) '()))\n\t(define stage (make_group_stage \"binding-proof\" local_source\
+    \ '() '()\n\t\t(list (list value (scalar_once_reduce_first) nil)) nil '() '() nil nil\n\t\t(list (list 'condition\
+    \ true) (list 'lookup-keys '())\n\t\t\t(list 'btw2025_domain '()) (list 'btw2025_accessing_after_simple '()))))\n\
+    \t(not (scalar_probe_bindings_complete? stage (list caller_source)))\n)\n"
+  expect:
+    result: true
+- name: A live lookup coordinate must resolve even when the producer does not read it
+  scm: "(begin\n\t(define local_source (list \"local\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define\
+    \ caller_source (list \"caller\" \"memcp-tests\" \"nsl_driver\" false true nil))\n\t(define middle (list 'get_column\
+    \ \"caller\" false \"middle_id\" false))\n\t(define tenant (list 'get_column \"caller\" false \"tenant_id\"\
+    \ false))\n\t(define value (list 'get_column \"local\" false \"final_id\" false))\n\t(define unknown (list 'get_column\
+    \ \"unknown_caller\" false \"middle_id\" false))\n\t(define stage (make_group_stage \"binding-proof\" local_source\
+    \ (list unknown) (list unknown)\n\t\t(list (list value (scalar_once_reduce_first) nil)) nil '() '() nil nil\n\
+    \t\t(list (list 'condition true) (list 'lookup-keys (list unknown))\n\t\t\t(list 'btw2025_domain (list unknown))\
+    \ (list 'btw2025_accessing_after_simple '()))))\n\t(not (scalar_probe_bindings_complete? stage (list caller_source)))\n\
+    )\n"
+  expect:
+    result: true
