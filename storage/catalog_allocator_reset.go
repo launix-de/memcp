@@ -56,7 +56,7 @@ func (t *table) resetTableIDs(column, token string, current, next int64, hasNext
 	if !hasNext && next != 0 {
 		panic("exhausted allocator cannot carry a next value")
 	}
-	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+	tx.requireDeclarationEndpoint(t, maintenanceAlter)
 	// Recover legacy observations before declaration admission, never while
 	// holding a table's exclusive maintenance or physical shard ownership.
 	t.prepareAllocatorRecovery()
