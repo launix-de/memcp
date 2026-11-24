@@ -7,10 +7,10 @@ bounded row/descriptor tuples cross the Scheme callback boundary. */
 /* Generated relation inputs use the same scoped MEMORY owner and native
 indexes as other execution-local carriers. The source producer has already
 computed their immutable positional cells with its actual transaction; no SQL
-datatype is inferred here. Filling this fresh private scratch is independent
-of user Undo, like other native query materialization. Its scans still use the
-actual caller and the native resource retains the scope until that decision;
-a nil-transaction invocation closes it directly. */
+datatype is inferred here. Filling the source borrows the actual caller's
+native mutation owner, so a failed consuming statement restores its private
+rows together with its public effects. The native resource retains the scope
+until that caller's decision; a nil-transaction invocation closes it directly. */
 (define runtime_generated_source (lambda (database names collations rows session tx scopes) (begin
 	(tx_check tx)
 	(if (equal? (count names) (count collations)) true
@@ -28,7 +28,7 @@ a nil-transaction invocation closes it directly. */
 			(list "engine" "memory" "ephemeral" true "scope" scope) false tx)
 		(define source (table database false name false tx))
 		(if (empty_list? rows) true
-			(with_table_mutation (list source) (list "insert" names) nil session
+			(with_table_mutation (list source) (list "insert" names) tx session
 				(lambda (sink) (insert source names rows '() (lambda () true) false nil sink))))
 		(tx_check tx)
 		(if (nil? tx) (scopes name scope) true)
