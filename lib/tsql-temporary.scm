@@ -264,8 +264,7 @@ result flags cannot prove that a direct export lacks an underlying identity. */
 				(define key (tsql_select_into_origin_key origin))
 				(define unique (equal? 1 (count (filter origins (lambda (other)
 					(and (tsql_select_into_identity_origin? other) (expression_equal? key (tsql_select_into_origin_key other))))))))
-				(list "mode" (if (or (> (count sources) 1) (not unique)
-					(not (source_is_native_table? (car origin)))) "discard" one_handle "inherit" "unknown")
+				(list "mode" (if (or (> (count sources) 1) (not unique)) "discard" one_handle "inherit" "unknown")
 					"source" key "source_uuid" (if one_handle (show one_handle "identity" tx) nil)))
 				(begin
 					(define status (tsql_select_into_identity_status (qb_sources expanded) (qb_facts expanded)
