@@ -7,6 +7,8 @@ metadata:
   isolated: true
   description: SELECT INTO identity inheritance uses direct source provenance and original native copy owners
 setup:
+- sql: DROP VIEW IF EXISTS identity_into_nullable_view
+- sql: DROP TABLE IF EXISTS identity_into_nullable_source
 - sql: DROP VIEW IF EXISTS identity_into_view
 - sql: DROP PROCEDURE IF EXISTS identity_into_nested
 - sql: DROP TABLE IF EXISTS identity_into_persistent
@@ -20,6 +22,9 @@ setup:
 - sql: 'CREATE PROCEDURE identity_into_nested AS SELECT * INTO #identity_module_copy FROM identity_into_source WHERE
     1=0; INSERT #identity_module_copy(value) VALUES(110); SELECT id,value FROM #identity_module_copy;'
 - sql: CREATE VIEW identity_into_view AS SELECT id,value FROM identity_into_source
+- sql: CREATE TABLE identity_into_nullable_source(value INT NULL)
+- sql: INSERT identity_into_nullable_source(value) VALUES(NULL),(10)
+- sql: CREATE VIEW identity_into_nullable_view AS SELECT value FROM identity_into_nullable_source
 test_cases:
 - name: An empty direct identity export retains the positive source seed and generates omitted IDs
   tds:
@@ -334,6 +339,64 @@ test_cases:
       (identical? (cadr (parent "__tsql_identity_insert")) source)))
   expect:
     result: true
+- name: A nullable ordinary view wildcard preserves NULL values without inheriting identity
+  tds:
+    statements:
+    - sql: SELECT * INTO #ordinary_view_star FROM identity_into_nullable_view
+    - sql: INSERT #ordinary_view_star(value) VALUES(20)
+    - sql: SELECT value FROM #ordinary_view_star ORDER BY value
+      expect:
+        rows: 3
+        data:
+        - value: null
+        - value: 10
+        - value: 20
+    - sql: SELECT TOP 0 value FROM #ordinary_view_star
+      expect:
+        rows: 0
+        column_types:
+        - name: value
+          type: INT
+          nullable: true
+- name: An explicit nullable ordinary view export preserves its actual declaration
+  tds:
+    statements:
+    - sql: SELECT value INTO #ordinary_view_column FROM identity_into_nullable_view
+    - sql: INSERT #ordinary_view_column(value) VALUES(20)
+    - sql: SELECT value FROM #ordinary_view_column ORDER BY value
+      expect:
+        rows: 3
+        data:
+        - value: null
+        - value: 10
+        - value: 20
+    - sql: SELECT TOP 0 value FROM #ordinary_view_column
+      expect:
+        rows: 0
+        column_types:
+        - name: value
+          type: INT
+          nullable: true
+- name: A nullable UNION export remains ordinary when its view source has no identity
+  tds:
+    statements:
+    - sql: SELECT value INTO #ordinary_view_union FROM identity_into_nullable_view UNION ALL SELECT CAST(NULL AS INT) AS value
+    - sql: INSERT #ordinary_view_union(value) VALUES(20)
+    - sql: SELECT value FROM #ordinary_view_union ORDER BY value
+      expect:
+        rows: 4
+        data:
+        - value: null
+        - value: null
+        - value: 10
+        - value: 20
+    - sql: SELECT TOP 0 value FROM #ordinary_view_union
+      expect:
+        rows: 0
+        column_types:
+        - name: value
+          type: INT
+          nullable: true
 - name: Native copy admission validates its bounded batch without altering the original transaction
   setup:
   - sql: DROP TABLE IF EXISTS identity_into_guard
@@ -473,6 +536,8 @@ test_cases:
     - '7'
     - 1
 cleanup:
+- sql: DROP VIEW IF EXISTS identity_into_nullable_view
+- sql: DROP TABLE IF EXISTS identity_into_nullable_source
 - sql: DROP TABLE IF EXISTS identity_into_guard
 - sql: DROP VIEW IF EXISTS identity_into_view
 - sql: DROP PROCEDURE IF EXISTS identity_into_nested

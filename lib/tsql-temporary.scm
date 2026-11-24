@@ -190,7 +190,10 @@ result flags cannot prove that a direct export lacks an underlying identity. */
 (define tsql_select_into_provenance (lambda (query expanded tx) (match query
 	((symbol union-block) _mode branches _order _limit _offset _facts)
 	(map (tsql_select_into_provenance (car branches) (car (caddr expanded)) tx)
-		(lambda (origin) (if origin (set_assoc origin "mode" "discard") nil)))
+		/* Only a proven identity becomes an ordinary NOT NULL export. Unknown
+		provenance may also describe an ordinary nullable column. */
+		(lambda (origin) (if origin
+			(if (equal? (origin "mode") "unknown") origin (set_assoc origin "mode" "discard")) nil)))
 	((symbol query-block) _schema sources _fields _where _group _having _order _limit _offset _hidden _stages facts)
 	(begin
 		(define entries (tsql_result_entries query false))
@@ -199,20 +202,23 @@ result flags cannot prove that a direct export lacks an underlying identity. */
 		(define one_handle (if (equal? (count sources) 1)
 			(if (source_is_base_table? (car sources))
 				(tsql_native_relation_handle (source_schema (car sources)) (source_relation (car sources)) tx) nil) nil))
-		(if (equal? (count entries) (count expanded_entries)) true
-			(error "SELECT INTO lost its original result projection"))
-		(mapIndex origins (lambda (index origin) (begin
-			(define direct (tsql_select_into_identity_origin? origin))
-			(define inherited (nth (nth expanded_entries index) 3))
-			(if direct (begin
+		/* A view wildcard has no native declaration before expansion. Its
+		expanded entries own the complete output order and can positively prove
+		an ordinary nullable export without inventing identity provenance. */
+		(define aligned (equal? (count entries) (count expanded_entries)))
+		(mapIndex expanded_entries (lambda (index expanded_entry) (begin
+			(define origin (if aligned (nth origins index) nil))
+			(if (tsql_select_into_identity_origin? origin) (begin
 				(define key (tsql_select_into_origin_key origin))
 				(define unique (equal? 1 (count (filter origins (lambda (other)
 					(and (tsql_select_into_identity_origin? other) (expression_equal? key (tsql_select_into_origin_key other))))))))
 				(list "mode" (if (or (> (count sources) 1) (not unique)) "discard" one_handle "inherit" "unknown")
 					"source" key "source_uuid" (if one_handle (show one_handle "identity" tx) nil)))
-				(tsql_select_into_identity_origin? inherited) (list "mode" "unknown" "source" (tsql_select_into_origin_key inherited))
-				(nil? (tsql_select_into_identity_status sources facts (nth (nth entries index) 2) tx)) (list "mode" "unknown")
-				nil)))))
+				(begin
+					(define status (tsql_select_into_identity_status (qb_sources expanded) (qb_facts expanded)
+						(nth expanded_entry 2) tx))
+					(if (identical? status false) nil
+						(list "mode" (if (and status (> (count sources) 1)) "discard" "unknown")))))))))
 	_ (error "SELECT INTO requires an authoritative logical projection"))))
 
 (define tsql_select_into_identity_source (lambda (origins tx) (begin
