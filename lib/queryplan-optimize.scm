@@ -8011,6 +8011,38 @@ constant projections cannot become ambiguous through duplicate membership. */
 			(equal? (qassoc_get (gs_facts stage) (quote partition_offset) 0) 0)
 			(empty_list? (qassoc_get (gs_facts stage) (quote partition_order) '()))))))
 
+/* A scalar producer labels each preserved caller partition with its complete
+binding, including NULL. An exact generated join on a self-binding is not a
+selection predicate on the producer's rows. Keep the executable join intact;
+only its contribution proof can omit that already established label. */
+(define contribution_source_join_predicate (lambda (catalog source) (begin
+	(define condition (source_join_expr source))
+	(define producer (if (source_is_stage_output? source)
+		(stage_for_output_relation catalog (source_relation source)) nil))
+	(if (or (nil? producer) (not (source_outer? source))
+		(not (scalar_value_stage? producer))
+		(not (expression_equal? (qassoc_get (gs_facts producer) 'preserve_empty_domain false) true))) condition
+		(begin
+			(define keys (gs_keys producer))
+			(define values (qassoc_get (gs_facts producer) 'lookup-keys '()))
+			(define names (group_key_cols keys))
+			(define local_sources (contribution_stage_sources producer))
+			(define identities (if (not (equal? (count keys) (count values))) '()
+				(filter (map (produceN (count keys)) (lambda (i) (begin
+					(define key (nth keys i))
+					(define external_column (match key
+						((symbol get_column) alias alias_ci _column _column_ci)
+						(and (not (nil? alias)) (nil? (source_for_alias local_sources nil alias alias_ci)))
+						_ false))
+					(if (and external_column (correlation_binding_identity? key (nth values i)))
+						(make_exists_stage_join_condition (source_alias source)
+							(list (nth names i)) (list (nth values i)) true) nil))))
+					(lambda (term) (not (nil? term))))))
+			(if (empty_list? identities) condition
+				(combine_where_terms (filter (split_and_terms condition) (lambda (term)
+					(not (reduce identities (lambda (found identity)
+						(or found (expression_equal? identity term))) false)))) true)))))))
+
 (define contribution_domain_proof (lambda (catalog graph stage)
 	(begin
 		(define block (gs_input stage))
@@ -8068,7 +8100,8 @@ constant projections cannot become ambiguous through duplicate membership. */
 											(empty_list? (qb_group block)) (nil? (qb_limit block)) (nil? (qb_offset block))
 											(not (contribution_expr_contains? axis (list (gs_keys stage)
 												(qassoc_get (gs_facts stage) (quote condition) true)
-												(map (qb_sources block) source_join_expr))))
+												(map (qb_sources block) (lambda (source)
+													(contribution_source_join_predicate catalog source))))))
 											(reduce (zip dependencies selections) (lambda (ok pair)
 												(begin
 													(define dependency (car pair))
