@@ -1,0 +1,153 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: Native transition retirement preserves original transactions and durable MEMORY and foreign declarations
+setup:
+- sql: DROP TABLE IF EXISTS transition_retire_survivor
+- sql: DROP TABLE IF EXISTS transition_memory_child
+- sql: DROP TABLE IF EXISTS transition_retire_parent
+- sql: DROP TABLE IF EXISTS transition_memory_kept
+- sql: DROP TABLE IF EXISTS transition_memory_dropped
+- sql: DROP TABLE IF EXISTS transition_retire_input
+- sql: DROP TABLE IF EXISTS transition_retire_audit
+- sql: CREATE TABLE transition_retire_input(id INT PRIMARY KEY,value INT)
+- sql: INSERT transition_retire_input VALUES(1,10),(2,NULL)
+- sql: CREATE TABLE transition_retire_audit(id INT,old_value INT,new_value INT)
+- sql: |
+    CREATE TRIGGER transition_retire_trigger ON transition_retire_input AFTER UPDATE AS
+    BEGIN
+      INSERT transition_retire_audit(id,old_value,new_value)
+      SELECT i.id,d.value,i.value FROM inserted i JOIN deleted d ON i.id=d.id;
+      IF EXISTS(SELECT 1 FROM inserted WHERE value<0)
+      BEGIN RAISERROR(N'negative transition value',16,1); ROLLBACK TRANSACTION; END;
+    END
+- syntax: mysql
+  sql: CREATE TABLE transition_memory_kept(id INT,value INT) ENGINE=MEMORY
+- syntax: mysql
+  sql: CREATE TABLE transition_memory_dropped(id INT,value INT) ENGINE=MEMORY
+- sql: INSERT transition_memory_kept VALUES(1,55)
+- sql: INSERT transition_memory_dropped VALUES(1,66)
+- sql: CREATE TABLE transition_retire_parent(id INT PRIMARY KEY)
+- sql: INSERT transition_retire_parent VALUES(1)
+- syntax: mysql
+  sql: CREATE TABLE transition_memory_child(id INT PRIMARY KEY,parent_id INT) ENGINE=MEMORY
+- sql: CREATE TABLE transition_retire_survivor(id INT PRIMARY KEY,parent_id INT)
+- sql: ALTER TABLE transition_memory_child ADD CONSTRAINT FK_transition_memory FOREIGN KEY(parent_id) REFERENCES transition_retire_parent(id)
+- sql: ALTER TABLE transition_retire_survivor ADD CONSTRAINT FK_transition_survivor FOREIGN KEY(parent_id) REFERENCES transition_retire_parent(id)
+- sql: INSERT transition_memory_child VALUES(1,1)
+- sql: INSERT transition_retire_survivor VALUES(1,1)
+test_cases:
+- name: Drained transitions retain OLD NEW values observer isolation and the original savepoint
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: UPDATE transition_retire_input SET value=value+1}
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM transition_retire_audit ORDER BY id
+      expect: {rows: 2,data: [{id: 1,old_value: 10,new_value: 11},{id: 2,old_value: null,new_value: null}]}
+    - connection: observer
+      sql: SELECT id,value FROM transition_retire_input ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 10},{id: 2,value: null}]}
+    - connection: observer
+      sql: SELECT id,old_value,new_value FROM transition_retire_audit
+      expect: {rows: 0}
+    - {connection: owner,sql: SAVE TRANSACTION after_first}
+    - {connection: owner,sql: 'UPDATE transition_retire_input SET value=COALESCE(value,0)+10'}
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM transition_retire_audit ORDER BY id,new_value
+      expect:
+        rows: 4
+        data:
+        - {id: 1,old_value: 10,new_value: 11}
+        - {id: 1,old_value: 11,new_value: 21}
+        - {id: 2,old_value: null,new_value: null}
+        - {id: 2,old_value: null,new_value: 10}
+    - {connection: owner,sql: ROLLBACK TRANSACTION after_first}
+    - connection: owner
+      sql: SELECT id,value,@@TRANCOUNT AS depth FROM transition_retire_input ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 11,depth: 1},{id: 2,value: null,depth: 1}]}
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM transition_retire_audit ORDER BY id
+      expect: {rows: 2,data: [{id: 1,old_value: 10,new_value: 11},{id: 2,old_value: null,new_value: null}]}
+    - {connection: owner,sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: SELECT id,value FROM transition_retire_input ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 11},{id: 2,value: null}]}
+- name: Trigger abort retires its images without committing prior work or its audit rows
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: UPDATE transition_retire_input SET value=12 WHERE id=1}
+    - connection: owner
+      sql: UPDATE transition_retire_input SET value=-1 WHERE id=1
+      expect: {error: true,contains: [negative transition value]}
+    - connection: owner
+      sql: SELECT id,value,@@TRANCOUNT AS depth FROM transition_retire_input ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: 11,depth: 0},{id: 2,value: null,depth: 0}]}
+    - connection: observer
+      sql: SELECT id,old_value,new_value FROM transition_retire_audit ORDER BY id
+      expect: {rows: 2,data: [{id: 1,old_value: 10,new_value: 11},{id: 2,old_value: null,new_value: null}]}
+- name: An empty event still retires both empty transition images
+  sql: UPDATE transition_retire_input SET value=value WHERE id=-1
+  expect: {rows: 1,data: [{affected_rows: 0}]}
+- name: Ordinary MEMORY DROP still removes its durable table declaration
+  syntax: mysql
+  sql: DROP TABLE transition_memory_dropped
+- name: Ordinary MEMORY child retirement still publishes its surviving foreign endpoint
+  syntax: mysql
+  sql: DROP TABLE transition_memory_child
+- name: Child retirement preserves the complete other foreign declaration
+  scm: |
+    (map ((show (table "memcp-tests" false "transition_retire_parent" false nil) "constraints") "ForeignKeys")
+      (lambda (foreign) (foreign "Id")))
+  expect: {result: [FK_transition_survivor]}
+- name: Crash after accepted trigger data and ordinary MEMORY declaration changes
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Recover the acknowledged declarations and original data decision
+  action: restart
+- name: Committed base values survive without resurrecting aborted statement values
+  sql: SELECT id,value FROM transition_retire_input ORDER BY id
+  expect: {rows: 2,data: [{id: 1,value: 11},{id: 2,value: null}]}
+- name: Only committed OLD NEW audit values recover
+  sql: SELECT id,old_value,new_value FROM transition_retire_audit ORDER BY id
+  expect: {rows: 2,data: [{id: 1,old_value: 10,new_value: 11},{id: 2,old_value: null,new_value: null}]}
+- name: An ordinary MEMORY table keeps its schema and loses only its volatile rows
+  sql: SELECT id,value FROM transition_memory_kept
+  expect: {rows: 0}
+- name: Ordinary MEMORY DROP decisions survive restart
+  sql: SELECT OBJECT_ID(N'transition_memory_dropped',N'U') AS removed_table,OBJECT_ID(N'transition_memory_child',N'U') AS removed_child
+  expect: {rows: 1,data: [{removed_table: null,removed_child: null}]}
+- name: Foreign endpoint retirement survives restart with its complete other declaration
+  scm: |
+    (map ((show (table "memcp-tests" false "transition_retire_parent" false nil) "constraints") "ForeignKeys")
+      (lambda (foreign) (foreign "Id")))
+  expect: {result: [FK_transition_survivor]}
+- name: The surviving declaration still rejects an orphan after recovery
+  sql: INSERT transition_retire_survivor VALUES(2,999)
+  expect: {error: true,contains: foreign key constraint}
+- name: The surviving declaration still admits a real parent
+  sql: INSERT transition_retire_survivor VALUES(2,1)
+  expect: {rows: 1,data: [{affected_rows: 1}]}
+- name: Recovered trigger declarations produce fresh complete transition images
+  sql: UPDATE transition_retire_input SET value=30 WHERE id=2
+  expect: {rows: 1,data: [{affected_rows: 1}]}
+- name: Recovered trigger execution keeps each original and fresh NULL-sensitive value
+  sql: SELECT id,old_value,new_value FROM transition_retire_audit ORDER BY id,new_value
+  expect:
+    rows: 3
+    data:
+    - {id: 1,old_value: 10,new_value: 11}
+    - {id: 2,old_value: null,new_value: null}
+    - {id: 2,old_value: null,new_value: 30}
+cleanup:
+- sql: DROP TABLE IF EXISTS transition_retire_survivor
+- sql: DROP TABLE IF EXISTS transition_memory_child
+- sql: DROP TABLE IF EXISTS transition_retire_parent
+- sql: DROP TABLE IF EXISTS transition_memory_kept
+- sql: DROP TABLE IF EXISTS transition_memory_dropped
+- sql: DROP TABLE IF EXISTS transition_retire_input
+- sql: DROP TABLE IF EXISTS transition_retire_audit

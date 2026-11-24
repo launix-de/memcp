@@ -2935,6 +2935,11 @@ func dropTableIdentity(schema, name string, ifexists bool, expected *table, reti
 	releaseAdmission := func() {}
 	releaseForeign := func() {}
 	dropSaveMode := t.schemaSaveMode()
+	// The transition constructor owns an ephemeral read-only MEMORY result.
+	// Its exact scope may remove that generation without changing the durable
+	// schema. Check foreign endpoints before their retirement can erase evidence
+	// that another table's durable declaration also needs publication.
+	transientTransitionRetirement := expected == t && t.transitionRelation != nil && len(t.Foreign) == 0
 	func() {
 		defer func() {
 			if failure := recover(); failure != nil {
@@ -2975,7 +2980,13 @@ func dropTableIdentity(schema, name string, ifexists bool, expected *table, reti
 	if name == ".blobs" {
 		db.blobRefState().table.Store(nil)
 	}
-	db.saveLockedAndUnlock(dropSaveMode)
+	if transientTransitionRetirement {
+		// Publication never saved this transition; persistent schema encoding
+		// excludes it. Its drained native lifetime still owns all cleanup below.
+		db.schemalock.Unlock()
+	} else {
+		db.saveLockedAndUnlock(dropSaveMode)
+	}
 	releaseForeign()
 	releaseForeign = func() {}
 	releaseAdmission()
