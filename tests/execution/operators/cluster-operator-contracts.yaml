@@ -1737,6 +1737,39 @@ test_cases:
         (lambda (acc id) (+ acc id (count (owner)))) 0 +))
   expect: {result: 9,cluster: {min_remote_shards: 1}}
 
+# An unconstrained shared heap keeps this on the ambiguous OUTER mutation path;
+# big_items itself has a UNIQUE id and would bypass that selection owner.
+- name: Delegated outer mutation selects one coherent tuple and effect per target
+  setup:
+  - sql: DROP TABLE IF EXISTS operator_outer_heap
+  - sql: DROP TABLE IF EXISTS operator_outer_targets
+  - sql: CREATE TABLE operator_outer_heap(id INT,value INT,marker INT)
+  - sql: INSERT INTO operator_outer_heap SELECT id,id+10,id+100 FROM big_items
+  - sql: INSERT INTO operator_outer_heap VALUES(245000,245020,245200)
+  - sql: SELECT COUNT(*) AS n FROM operator_outer_heap
+    expect: {rows: 1,data: [{n: 320001}]}
+  - sql: CREATE TABLE operator_outer_targets(id INT PRIMARY KEY,value INT,marker INT,visits INT) ENGINE=memory
+  - sql: INSERT INTO operator_outer_targets VALUES(245000,-1,-1,0),(245001,-1,-1,0),(400000,-1,-1,0)
+  steps:
+  - sql: UPDATE operator_outer_targets t LEFT JOIN operator_outer_heap s ON t.id=s.id
+      SET t.value=s.value,t.marker=s.marker,t.visits=t.visits+1
+    expect: {rows: 1,data: [{affected_rows: 3}]}
+  - sql: |
+      SELECT id,visits,CASE
+        WHEN id=245000 AND ((value=245010 AND marker=245100) OR (value=245020 AND marker=245200)) THEN 1
+        WHEN id=245001 AND value=245011 AND marker=245101 THEN 1
+        WHEN id=400000 AND value IS NULL AND marker IS NULL THEN 1
+        ELSE 0 END AS coherent
+      FROM operator_outer_targets ORDER BY id
+    expect:
+      rows: 3
+      data: [{id: 245000,visits: 1,coherent: 1},{id: 245001,visits: 1,coherent: 1},{id: 400000,visits: 1,coherent: 1}]
+  expect:
+    cluster: {min_remote_shards: 1}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS operator_outer_targets
+  - sql: DROP TABLE IF EXISTS operator_outer_heap
+
 # Calendar probes require the original rows 0..2, before the remote DELETE cases.
 - name: Subsecond native calendar captures retain their values on delegated workers
   scm: |
