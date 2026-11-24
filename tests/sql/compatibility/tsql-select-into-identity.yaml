@@ -423,20 +423,29 @@ test_cases:
        (run_copy "INSERT identity_into_guard(id,value) VALUES(8,80),(1,10)") false))
        (lambda (cause) (if (strlike (string (failure_value cause)) "%copied identity values below the inherited seed%") true
         (error cause)))))
-      (list true (and rejected (identical? original (s "__memcp_tx"))
-       (equal? ((run s "SELECT COUNT(*) AS n FROM identity_into_guard") "n") 0)
-       (equal? ((run s "SELECT value FROM identity_into_other WHERE id=7") "value") 71)
-       (equal? ((run s "SELECT @@TRANCOUNT AS depth") "depth") 1)))))
+      (list true (list rejected (identical? original (s "__memcp_tx"))
+       ((run s "SELECT COUNT(*) AS n FROM identity_into_guard") "n")
+       ((run s "SELECT value FROM identity_into_other WHERE id=7") "value")
+       ((run s "SELECT @@TRANCOUNT AS depth") "depth")))))
       (lambda (cause) (list false cause))))
      (if (s "transaction") (run s "ROLLBACK TRAN") true)
      (if (car outcome)
-      (and (cadr outcome)
-       (equal? ((run s "SELECT value FROM identity_into_other WHERE id=7") "value") 70)
-       (tsql_validate_explicit_identity -5 nil) (tsql_validate_explicit_identity 7 7)
-       (nil? (s "__tsql_select_into_copy")))
+      (merge (list (cadr outcome)
+       (list ((run s "SELECT value FROM identity_into_other WHERE id=7") "value")
+        (tsql_validate_explicit_identity -5 nil) (tsql_validate_explicit_identity 7 7)
+        (nil? (s "__tsql_select_into_copy")))))
       (error (cadr outcome))))
   expect:
-    result: true
+    result:
+    - true
+    - true
+    - 0
+    - 71
+    - 1
+    - 70
+    - true
+    - true
+    - true
   cleanup:
   - sql: DROP TABLE identity_into_guard
 - name: A derived direct identity export retains its documented future inheritance contract
