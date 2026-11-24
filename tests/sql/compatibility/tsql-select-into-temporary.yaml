@@ -209,6 +209,99 @@ test_cases:
     - sql: DROP TABLE IF EXISTS catalog_validation_child
     - sql: DROP TABLE IF EXISTS catalog_validation_parent
 
+  - name: Joined catalog validation retains pending CHECK and foreign declarations in the original transaction
+    tds:
+      statements:
+      - connection: owner
+        sql: BEGIN TRANSACTION
+      - connection: owner
+        sql: ALTER TABLE catalog_validation_child WITH NOCHECK ADD CONSTRAINT FK_catalog_validation FOREIGN KEY(parent_id)
+          REFERENCES catalog_validation_parent(id)
+      - connection: owner
+        sql: ALTER TABLE catalog_validation_child ADD CONSTRAINT CK_catalog_validation CHECK(amount>=0)
+      - connection: owner
+        sql: ALTER TABLE catalog_validation_child NOCHECK CONSTRAINT CK_catalog_validation
+      - connection: owner
+        sql: 'SELECT a.name AS constraint_name,b.name AS table_name INTO #catalog_validation_names
+
+          FROM sys.objects AS a INNER JOIN
+
+          (SELECT name,object_id FROM sys.objects WHERE type=''U'') AS b ON a.parent_object_id=b.object_id
+
+          WHERE b.name=''catalog_validation_child'' AND schema_name(a.schema_id)=''dbo'' AND (a.type=''C'' OR a.type=''F'')
+
+          ORDER BY a.type DESC,a.modify_date DESC
+
+          DECLARE @constraint_name NVARCHAR(256)
+
+          DECLARE @table_name NVARCHAR(256)
+
+          DECLARE catalog_validation_cursor CURSOR FAST_FORWARD FOR SELECT constraint_name,table_name FROM #catalog_validation_names
+
+          OPEN catalog_validation_cursor
+
+          FETCH NEXT FROM catalog_validation_cursor INTO @constraint_name,@table_name
+
+          WHILE @@FETCH_STATUS=0
+
+          BEGIN
+
+          PRINT ''ALTER TABLE [dbo].[''+@table_name+''] WITH CHECK CHECK CONSTRAINT [''+@constraint_name+'']''
+
+          EXEC (''ALTER TABLE [dbo].[''+@table_name+''] WITH CHECK CHECK CONSTRAINT [''+@constraint_name+'']'')
+
+          FETCH NEXT FROM catalog_validation_cursor INTO @constraint_name,@table_name
+
+          END
+
+          CLOSE catalog_validation_cursor
+
+          DEALLOCATE catalog_validation_cursor'
+      - connection: owner
+        sql: COMMIT TRANSACTION
+      - connection: owner
+        sql: INSERT catalog_validation_child VALUES(11,1,-1)
+        expect:
+          error: true
+      - connection: owner
+        sql: SELECT id,parent_id,amount FROM catalog_validation_child
+        expect:
+          rows: 1
+          data:
+          - id: 10
+            parent_id: 1
+            amount: 7
+      - connection: owner
+        sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name='FK_catalog_validation'
+        expect:
+          rows: 1
+          data:
+          - name: FK_catalog_validation
+            is_disabled: false
+            is_not_trusted: false
+      - connection: owner
+        sql: SELECT name,type FROM sys.check_constraints WHERE name='CK_catalog_validation'
+        expect:
+          rows: 1
+          data:
+          - name: CK_catalog_validation
+            type: C
+      - connection: owner
+        sql: 'DROP TABLE #catalog_validation_names'
+      - connection: owner
+        sql: 'SELECT constraint_name FROM #catalog_validation_names'
+        expect:
+          error: true
+    setup:
+    - sql: DROP TABLE IF EXISTS catalog_validation_child
+    - sql: DROP TABLE IF EXISTS catalog_validation_parent
+    - sql: CREATE TABLE catalog_validation_parent(id INT PRIMARY KEY)
+    - sql: INSERT catalog_validation_parent VALUES(1)
+    - sql: CREATE TABLE catalog_validation_child(id INT PRIMARY KEY,parent_id INT,amount INT)
+    - sql: INSERT catalog_validation_child VALUES(10,1,7)
+    cleanup:
+    - sql: DROP TABLE IF EXISTS catalog_validation_child
+    - sql: DROP TABLE IF EXISTS catalog_validation_parent
 cleanup:
   - session_id: select_into_session
     sql: |
