@@ -74,15 +74,25 @@ start_server base base-fill
 "${mysql_args[@]}" -D memcp-tests < candidate/tests/storage/persistence/upgrade-fill.sql
 curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
   (begin
-    /* This adapter runs only against predecessor binaries. The candidate has
-    one explicit-transaction table interface; old releases had two or four arguments.
-    Pinned two-argument native functions accept surplus arguments and return nil
-    for the false name; lazy coalesceNil then calls the two-argument shape.
-    Four-argument writers resolve the existing fixture first and never execute
-    that fallback. There is no exception catch or ignored arity error. */
+    /* OLD-only ABI adaptation uses the native declaration signature returned
+    by HELP. Its numeric bounds are emitted by Declaration.MinParams/MaxParams,
+    not inferred from descriptive prose or a release name. Accept only known
+    interfaces, supply every declared position, and fail on unknown signatures
+    or a missing fixture. No failed call is caught or treated as success. */
+    (define fixture_table_arity (match (help "table")
+      (regex "(?m)^Allowed nø of parameters: ([0-9]+)-([0-9]+)$" _ minimum maximum)
+      (begin
+        (define arity (simplify maximum))
+        (if (and (has? (quote (2 4 5)) arity) (<= (simplify minimum) arity)) arity
+          (error "unsupported declared predecessor table signature")))
+      _ (error "missing predecessor table declaration signature")))
     (define fixture_table (lambda (database name) (begin
-      (define handle (coalesceNil (apply table (list database false name false))
-        (apply table (list database name))))
+      (define args (match fixture_table_arity
+        5 (list database false name false nil)
+        4 (list database false name false)
+        2 (list database name)
+        _ (error "unsupported predecessor table interface")))
+      (define handle (apply table args))
       (if handle handle (error "missing owned upgrade fixture relation")))))
     (createcolumn (fixture_table "memcp-tests" "up_compute") "doubled" "INT" (quote ()) (quote ())
       (quote ("val")) (lambda (val) (* val 2)))
@@ -113,9 +123,20 @@ bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
 # oracle. No candidate-side data preparation or schema-file edits are allowed.
 curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
   (begin
+    (define fixture_table_arity (match (help "table")
+      (regex "(?m)^Allowed nø of parameters: ([0-9]+)-([0-9]+)$" _ minimum maximum)
+      (begin
+        (define arity (simplify maximum))
+        (if (and (has? (quote (2 4 5)) arity) (<= (simplify minimum) arity)) arity
+          (error "unsupported declared predecessor table signature")))
+      _ (error "missing predecessor table declaration signature")))
     (define fixture_table (lambda (database name) (begin
-      (define handle (coalesceNil (apply table (list database false name false))
-        (apply table (list database name))))
+      (define args (match fixture_table_arity
+        5 (list database false name false nil)
+        4 (list database false name false)
+        2 (list database name)
+        _ (error "unsupported predecessor table interface")))
+      (define handle (apply table args))
       (if handle handle (error "missing owned upgrade fixture relation")))))
     /* Legacy FK code is produced only by OLD, without weakening candidate
     system ownership or rewriting the persisted reader input. */
