@@ -330,7 +330,7 @@ test_cases:
         (reduce child_reads (lambda (valid ref) (and valid (expression_equal? ref coordinate))) true)))
   expect:
     result: true
-- name: Ordinary caller binding preserves canonical reuse while real contribution work retains ownership
+- name: Ordinary callers preserve reuse while contribution and guarded cache producers own fresh input
   scm: |
     (begin
       (define source (list "local" "memcp-tests" "nsl_target" false true nil))
@@ -350,7 +350,7 @@ test_cases:
       (and (expression_equal? ordinary stages)
         (not (qassoc_get (gs_facts (car ordinary)) 'contribution_probe false))
         (qassoc_get (gs_facts (cadr ordinary)) 'contribution_probe false)
-        (reduce (list 'full 'delta 'direct 'fresh) (lambda (valid mode)
+        (reduce (list 'full 'delta 'direct 'fresh 'point-cached) (lambda (valid mode)
           (and valid (not (nil? mode)) (owned (scalar_aggregate_probe_catalog stages mode nil)))) true)
         (owned (scalar_aggregate_probe_catalog stages nil (list 'property-witness)))))
   expect:

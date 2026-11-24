@@ -1005,10 +1005,10 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 			(list (quote lambda) '() coordinates) (physical_query_tx_symbol) sources producer))))
 
 
-/* Contribution producers deliberately own their transition's scalar work.
-Caller binding alone does not have that lifecycle: ordinary probes retain the
-existing costed dependency choices and query-scope memoization. Inherited
-contribution ownership remains intact when a nested caller is ordinary. */
+/* Contribution and guarded cache producers own evaluation under their source
+read scope. In particular point-cached cannot reuse a query memo populated before
+that scope's source revision. Ordinary caller binding grants no such ownership;
+its costed choices and memoization remain available. Preserve inherited flags. */
 (define scalar_aggregate_probe_catalog (lambda (stages contribution_mode property_cover)
 	(map stages (lambda (candidate)
 		(if (and (group_stage? candidate)
