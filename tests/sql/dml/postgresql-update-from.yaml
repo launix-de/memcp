@@ -65,17 +65,23 @@ test_cases:
   session_id: pg-from-rollback
   steps:
   - sql: BEGIN
+    session_id: pg-from-rollback
   - sql: UPDATE pg_from_target AS t SET amount=a.amount+100 FROM pg_from_source a WHERE t.id=a.id
+    session_id: pg-from-rollback
     expect: {affected_rows: 2}
   - sql: SELECT id,amount,note FROM pg_from_target ORDER BY id
+    session_id: pg-from-rollback
     expect:
       data: [{id: 1,amount: 110,note: '5'},{id: 2,amount: 120,note: none},{id: 3,amount: 0,note: old}]
   - sql: ROLLBACK
+    session_id: pg-from-rollback
   - sql: SELECT id,amount,note FROM pg_from_target ORDER BY id
+    session_id: pg-from-rollback
     expect:
       data: [{id: 1,amount: 15,note: '5'},{id: 2,amount: 21,note: none},{id: 3,amount: 0,note: old}]
   cleanup:
   - sql: ROLLBACK
+    session_id: pg-from-rollback
 cleanup:
 - sql: DROP TABLE IF EXISTS pg_from_extra
 - sql: DROP TABLE IF EXISTS pg_from_source
