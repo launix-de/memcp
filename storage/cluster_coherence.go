@@ -740,7 +740,7 @@ func (cluster *nodeCluster) referenceSource(source string, packet mosiPacket, c 
 		issued := r.issuedAcquisition(c, packet)
 		if publication.Phase().Requested() {
 			if (publication.Flight().ID() != packet.ID && !issued) || (owner != source && packet.Epoch <= record.Epoch) {
-				return nil, fmt.Errorf("unexpected shared reference request: resource=%s incoming=%s epoch=%d pending=%s epoch=%d owner=%s source=%s", packet.Resource.key(), packet.ID, packet.Epoch, publication.Flight().ID(), record.Epoch, record.Owner, source)
+				return nil, fmt.Errorf("unexpected shared reference request: resource=%s incoming=%s epoch=%d pending=%s epoch=%d owner=%s source=%s handoff=%s effective_owner=%s record_state=%s phase=%s retained=%s packet_state=%s packet_owner=%s issued=%t record_resource=%s", packet.Resource.key(), packet.ID, packet.Epoch, publication.Flight().ID(), record.Epoch, record.Owner, source, record.Handoff, owner, record.State, publication.Phase(), publication.Retained(), packet.State, packet.Owner, issued, record.Resource.key())
 			}
 		} else if (issued && owner != source && packet.Epoch <= record.Epoch) || (!issued && (publication.Phase() != mosi.S || record.Owner != source || record.Epoch != packet.Epoch)) {
 			// Unsolicited O updates may refresh existing S readers only at the
