@@ -342,16 +342,16 @@ test_cases:
 - name: A nullable ordinary view wildcard preserves NULL values without inheriting identity
   tds:
     statements:
-    - sql: SELECT * INTO #ordinary_view_star FROM identity_into_nullable_view
-    - sql: INSERT #ordinary_view_star(value) VALUES(20)
-    - sql: SELECT value FROM #ordinary_view_star ORDER BY value
+    - sql: 'SELECT * INTO #ordinary_view_star FROM identity_into_nullable_view'
+    - sql: 'INSERT #ordinary_view_star(value) VALUES(20)'
+    - sql: 'SELECT value FROM #ordinary_view_star ORDER BY value'
       expect:
         rows: 3
         data:
         - value: null
         - value: 10
         - value: 20
-    - sql: SELECT TOP 0 value FROM #ordinary_view_star
+    - sql: 'SELECT TOP 0 value FROM #ordinary_view_star'
       expect:
         rows: 0
         column_types:
@@ -361,16 +361,16 @@ test_cases:
 - name: An explicit nullable ordinary view export preserves its actual declaration
   tds:
     statements:
-    - sql: SELECT value INTO #ordinary_view_column FROM identity_into_nullable_view
-    - sql: INSERT #ordinary_view_column(value) VALUES(20)
-    - sql: SELECT value FROM #ordinary_view_column ORDER BY value
+    - sql: 'SELECT value INTO #ordinary_view_column FROM identity_into_nullable_view'
+    - sql: 'INSERT #ordinary_view_column(value) VALUES(20)'
+    - sql: 'SELECT value FROM #ordinary_view_column ORDER BY value'
       expect:
         rows: 3
         data:
         - value: null
         - value: 10
         - value: 20
-    - sql: SELECT TOP 0 value FROM #ordinary_view_column
+    - sql: 'SELECT TOP 0 value FROM #ordinary_view_column'
       expect:
         rows: 0
         column_types:
@@ -380,9 +380,9 @@ test_cases:
 - name: A nullable UNION export remains ordinary when its view source has no identity
   tds:
     statements:
-    - sql: SELECT value INTO #ordinary_view_union FROM identity_into_nullable_view UNION ALL SELECT CAST(NULL AS INT) AS value
-    - sql: INSERT #ordinary_view_union(value) VALUES(20)
-    - sql: SELECT value FROM #ordinary_view_union ORDER BY value
+    - sql: 'SELECT value INTO #ordinary_view_union FROM identity_into_nullable_view UNION ALL SELECT CAST(NULL AS INT) AS value'
+    - sql: 'INSERT #ordinary_view_union(value) VALUES(20)'
+    - sql: 'SELECT value FROM #ordinary_view_union ORDER BY value'
       expect:
         rows: 4
         data:
@@ -390,7 +390,7 @@ test_cases:
         - value: null
         - value: 10
         - value: 20
-    - sql: SELECT TOP 0 value FROM #ordinary_view_union
+    - sql: 'SELECT TOP 0 value FROM #ordinary_view_union'
       expect:
         rows: 0
         column_types:
