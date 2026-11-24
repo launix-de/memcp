@@ -1061,8 +1061,18 @@ and logical producer exports use the same name for both coordinates. */
 (define sql_drop_column_expr (lambda (database name column ignorecase ifexists planning_session tx) (begin
 	(define declaration (find (sql_write_column_declarations database name planning_session tx)
 		(lambda (declaration) ((if ignorecase equal?? equal?) (declaration "Field") column)) nil))
-	(if declaration (list 'altertable (list 'table database false name false 'tx)
-		(if ifexists "drop_if_exists" "drop") (sql_column_storage_name declaration) 'tx)
+	(if declaration (begin
+		(define target (list 'table database false name false 'tx))
+		(define physical (sql_column_storage_name declaration))
+		(define drop (list 'altertable target (if ifexists "drop_if_exists" "drop") physical 'tx))
+		/* MySQL/PostgreSQL column defaults belong to the dropped column.
+		T-SQL owns its separate named-constraint refusal in its own emitter. */
+		(if (or (not (nil? (declaration "Default")))
+			(not (equal? (coalesceNil (declaration "DefaultExpression") "") ""))
+			(not (equal? (coalesceNil (declaration "DefaultName") "") ""))
+			(declaration "DefaultDeferred"))
+			(list '!begin (list 'altercolumn target physical "default" nil 'tx) drop)
+			drop))
 		ifexists true (error "DROP column does not exist: " column)))))
 /* INSERT collision callbacks use native old/NEW column arguments. Translate
 their already typed references once while constructing the callback, retaining
