@@ -15,10 +15,11 @@ setup:
     \ \"x\")))\n    (define lookup (if (equal? mode \"different-coordinate\") (column \"d\" \"y\") (column \"d\"\
     \ \"x\")))\n    (define keys (list (column \"h\" \"entity_id\") key))\n    (define lookups (if (equal? mode\
     \ \"misaligned\") (list (column \"e\" \"id\"))\n      (list (column \"e\" \"id\") lookup)))\n    (define stage\
-    \ (make_group_stage \"caller_predicate\"\n      (list input_alias \"unused\" \"unused\" false nil)\n      lookups\
-    \ keys (list '(1 + 0)) true (list) (list) nil nil\n      (list (list 'null_semantics (if (equal? mode \"non-scalar\"\
-    ) 'aggregate 'scalar))\n        (list 'result_max_rows_per_partition 1)\n        (list 'preserve_empty_domain\
-    \ (not (equal? mode \"not-preserved\")))\n        (list 'lookup-keys lookups))))\n    (define identity (make_exists_stage_join_condition\
+    \ (make_group_stage \"caller_predicate\"\n      (list input_alias \"unused\" \"unused\" false nil)\n      (if\
+    \ (equal? mode \"domain-mismatch\") (list (column \"e\" \"id\") (column \"d\" \"y\")) lookups) keys (list '(1\
+    \ + 0)) true (list) (list) nil nil\n      (list (list 'null_semantics (if (equal? mode \"non-scalar\") 'aggregate\
+    \ 'scalar))\n        (list 'result_max_rows_per_partition 1)\n        (list 'preserve_empty_domain (not (equal?\
+    \ mode \"not-preserved\")))\n        (list 'lookup-keys lookups))))\n    (define identity (make_exists_stage_join_condition\
     \ \"p\" (list \"k1\") (list lookup) true))\n    (define parent (make_exists_stage_join_condition \"p\" (list\
     \ \"k0\") (list (column \"e\" \"id\")) false))\n    (define actual_selection (list '<= (column \"d\" \"x\")\
     \ 5))\n    (define predicate (if (equal? mode \"real\") (combine_where identity actual_selection)\n      (equal?\
@@ -92,6 +93,10 @@ test_cases:
     result: false
 - name: Misaligned producer keys cannot prove a caller identity
   scm: ((globalvars "__test_contribution_predicate") "misaligned" 1 2 0)
+  expect:
+    result: false
+- name: An independently published caller domain is not an identity label
+  scm: ((globalvars "__test_contribution_predicate") "domain-mismatch" 1 2 0)
   expect:
     result: false
 - name: Complete nullable and duplicate caller coordinates retain every category and endpoint

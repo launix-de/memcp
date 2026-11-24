@@ -8011,6 +8011,30 @@ constant projections cannot become ambiguous through duplicate membership. */
 			(equal? (qassoc_get (gs_facts stage) (quote partition_offset) 0) 0)
 			(empty_list? (qassoc_get (gs_facts stage) (quote partition_order) '()))))))
 
+/* A caller label is not a grouping expression on inner rows. Certify all
+three published coordinates before using that fact in contribution proofs:
+inner key, caller domain and live lookup must denote one external column. */
+(define contribution_caller_label_indices (lambda (stage) (begin
+	(define keys (gs_keys stage))
+	(define domain (gs_domain stage))
+	(define values (qassoc_get (gs_facts stage) 'lookup-keys '()))
+	(define sources (contribution_stage_sources stage))
+	(if (or (not (equal? (count keys) (count domain)))
+		(not (equal? (count keys) (count values)))) '()
+		(filter (produceN (count keys)) (lambda (i) (begin
+			(define key (nth keys i))
+			(define external_column (match key
+				((symbol get_column) alias alias_ci _column _column_ci)
+				(and (not (nil? alias)) (nil? (source_for_alias sources nil alias alias_ci)))
+				_ false))
+			(and external_column (correlation_binding_identity? key (nth domain i))
+				(correlation_binding_identity? key (nth values i))))))))))
+
+(define contribution_stage_selection_keys (lambda (stage) (begin
+	(define labels (contribution_caller_label_indices stage))
+	(map (filter (produceN (count (gs_keys stage))) (lambda (i) (not (has? labels i))))
+		(lambda (i) (nth (gs_keys stage) i))))))
+
 /* A scalar producer labels each preserved caller partition with its complete
 binding, including NULL. An exact generated join on a self-binding is not a
 selection predicate on the producer's rows. Keep the executable join intact;
@@ -8026,18 +8050,9 @@ only its contribution proof can omit that already established label. */
 			(define keys (gs_keys producer))
 			(define values (qassoc_get (gs_facts producer) 'lookup-keys '()))
 			(define names (group_key_cols keys))
-			(define local_sources (contribution_stage_sources producer))
-			(define identities (if (not (equal? (count keys) (count values))) '()
-				(filter (map (produceN (count keys)) (lambda (i) (begin
-					(define key (nth keys i))
-					(define external_column (match key
-						((symbol get_column) alias alias_ci _column _column_ci)
-						(and (not (nil? alias)) (nil? (source_for_alias local_sources nil alias alias_ci)))
-						_ false))
-					(if (and external_column (correlation_binding_identity? key (nth values i)))
-						(make_exists_stage_join_condition (source_alias source)
-							(list (nth names i)) (list (nth values i)) true) nil))))
-					(lambda (term) (not (nil? term))))))
+			(define identities (map (contribution_caller_label_indices producer) (lambda (i)
+				(make_exists_stage_join_condition (source_alias source)
+					(list (nth names i)) (list (nth values i)) true))))
 			(if (empty_list? identities) condition
 				(combine_where_terms (filter (split_and_terms condition) (lambda (term)
 					(not (reduce identities (lambda (found identity)
@@ -8098,7 +8113,7 @@ only its contribution proof can omit that already established label. */
 												(not (empty_list? (range_stage_domains stage))))
 											(reduce expressions (lambda (ok expr) (and ok (contribution_pure_expr? expr))) true)
 											(empty_list? (qb_group block)) (nil? (qb_limit block)) (nil? (qb_offset block))
-											(not (contribution_expr_contains? axis (list (gs_keys stage)
+											(not (contribution_expr_contains? axis (list (contribution_stage_selection_keys stage)
 												(qassoc_get (gs_facts stage) (quote condition) true)
 												(map (qb_sources block) (lambda (source)
 													(contribution_source_join_predicate catalog source))))))
