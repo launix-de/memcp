@@ -826,26 +826,40 @@ arithmetic; leave expressions containing columns or functions untouched. */
 
 	(define psql_update (parser '(
 		(atom "UPDATE" true)
-		/* TODO: UPDATE tbl FROM tbl, tbl, tbl */
-		(define tables (+ psql_identifier ","))
+		(? (define target_schema psql_identifier) ".") (define tbl psql_identifier)
+		(? (define alias (or
+			(parser '((atom "AS" true) (define name psql_identifier)) name)
+			(parser (not psql_identifier (atom "SET" true))))))
+		/* Retain the existing comma-source extension while PostgreSQL FROM
+		uses the same complete relation grammar as SELECT. */
+		(? "," (define extra_tables (+ psql_identifier ",")))
 		(atom "SET" true)
 		(define cols (+ (or
 			/* TODO: tbl.identifier */
 			(parser '((define title psql_identifier) "=" (define e psql_expression)) '(title e))
 		) ","))
+		(? (atom "FROM" true) (define from_sources (+ tabledefs ",")))
 		(? '(
 			(atom "WHERE" true)
 			(define condition psql_expression)
 		))
 	) (begin
-			(define tbl (car tables))
-			(if policy (policy schema tbl true) true)
-			(define all_defs (map tables (lambda (t) (list t schema t false nil nil))))
+			/* UPDATE aliases hide the target's original visible name. FROM
+			bindings remain available to assignments and predicates in the same
+			logical query block, before shared DML binding and decorrelation.
+			https://www.postgresql.org/docs/current/sql-update.html */
+			(define database (coalesceNil target_schema schema))
+			(define target_alias (coalesceNil alias tbl))
+			(if policy (policy database tbl true) true)
+			(define all_defs (merge (list
+				(list (list target_alias database tbl false nil nil))
+				(map (coalesceNil extra_tables '()) (lambda (t) (list t schema t false nil nil)))
+				(merge (coalesceNil from_sources '())))))
 			(define assignments (sql_canonical_assignments
-				(sql_write_column_declarations schema tbl planning_session tx) (merge cols) false))
-			(build_dml_plan tbl nil
-				(make_query_block schema all_defs assignments (coalesceNil condition true)
-					nil nil nil nil nil nil nil nil) planning_session tx)
+				(sql_write_column_declarations database tbl planning_session tx) (merge cols) false))
+			(build_dml_plan tbl target_alias
+				(make_query_block database all_defs assignments (coalesceNil condition true)
+					nil nil nil nil nil nil nil (list (list 'dml_count_matched true))) planning_session tx)
 	)))
 
 	(define psql_delete (parser '(
