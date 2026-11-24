@@ -3333,7 +3333,7 @@ func Init(en scm.Env) {
 				defer t.admitNativeMaintenance()()
 				next := uint64(scm.ToInt(a[2]))
 				if next > 0 {
-					t.reserveAutoIncrement(tableIDExplicit{High: next - 1}, 0, nil)
+					t.reserveAutoIncrement(tableIDExplicit{High: next - 1, Advance: true}, 0, nil)
 					db.save()
 				}
 				return scm.NewBool(true)

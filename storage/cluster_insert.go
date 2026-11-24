@@ -26,6 +26,7 @@ type clusterIDRequest struct {
 	Explicit         uint64 `json:"explicit"`
 	Count            uint64 `json:"count"`
 	SignedExplicit   string `json:"signed_explicit,omitempty"`
+	Advance          bool   `json:"advance,omitempty"`
 }
 
 type clusterIDReply struct {
@@ -38,7 +39,7 @@ func (cluster *nodeCluster) reserveInsertIDs(t *table, input tableIDExplicit, co
 	if cluster == nil {
 		panic(mosi.NetworkError)
 	}
-	request := clusterIDRequest{Database: t.schema.Name, Table: t.Name, Identity: t.RuntimeIdentity, Explicit: input.High, Count: count, ObservedExplicit: input.Observed}
+	request := clusterIDRequest{Database: t.schema.Name, Table: t.Name, Identity: t.RuntimeIdentity, Explicit: input.High, Count: count, ObservedExplicit: input.Observed, Advance: input.Advance}
 	if input.Observed {
 		request.SignedExplicit = strconv.FormatInt(input.Value, 10)
 	}
@@ -78,7 +79,7 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 	if request.SignedExplicit != "" && !request.ObservedExplicit {
 		return reply, fmt.Errorf("signed allocator input requires explicit-ID provenance")
 	}
-	if !cluster.databases[request.Database] || request.Table == "" || (request.Read && (request.Identity == "" || request.Count != 0 || request.Explicit != 0 || request.ObservedExplicit || request.SignedExplicit != "")) {
+	if !cluster.databases[request.Database] || request.Table == "" || (request.Read && (request.Identity == "" || request.Count != 0 || request.Explicit != 0 || request.ObservedExplicit || request.SignedExplicit != "" || request.Advance)) {
 		return reply, fmt.Errorf("invalid cluster ID reservation")
 	}
 	owner, err := cluster.locate(ctx, mosiResource{Database: request.Database})
@@ -127,7 +128,7 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 		reply.State = t.localTableAllocator()
 		return reply, nil
 	}
-	input := tableIDExplicit{High: request.Explicit, Observed: request.ObservedExplicit}
+	input := tableIDExplicit{High: request.Explicit, Observed: request.ObservedExplicit, Advance: request.Advance}
 	if request.SignedExplicit != "" {
 		input.Value = allocatorSignedDecimal(request.SignedExplicit)
 	} else if request.Explicit <= math.MaxInt64 {

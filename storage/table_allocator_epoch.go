@@ -19,6 +19,7 @@ type tableIDReservation struct {
 
 type tableIDExplicit struct {
 	High     uint64 // historical unsigned maintenance inputs remain readable
+	Advance  bool   // an explicitly supplied native highwater, including zero
 	Value    int64
 	Observed bool
 }
@@ -46,7 +47,7 @@ func epochTableIDReservation(previous tableAllocatorState, input tableIDExplicit
 	next := previous
 	// Native maintenance's unsigned highwater input still means advancement,
 	// not a reset. Its historical raw range cannot become signed generation.
-	if !input.Observed && input.High > 0 {
+	if !input.Observed && (input.High > 0 || input.Advance) {
 		if next.HasNext && int64(input.High) >= next.Next {
 			next.Current = int64(input.High)
 			if next.Current == math.MaxInt64 {

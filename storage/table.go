@@ -4017,7 +4017,7 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 					t.schema.schemalock.Lock()
 					metadataLocked = true
 				}()
-				t.reserveAutoIncrement(tableIDExplicit{High: uint64(scm.ToInt(value))}, 0, nil)
+				t.reserveAutoIncrement(tableIDExplicit{High: uint64(scm.ToInt(value)), Advance: true}, 0, nil)
 			}()
 		} else {
 			replacement := current
