@@ -197,22 +197,18 @@ func (tx *TxContext) readSchema(db *database) {
 			panic("schema access conflicts with another schema transaction; retry transaction")
 		}
 		db.readAuthority(tx)
-		if writer {
-			if !db.definitionAdmission.TryLock() {
-				panic("schema access conflicts with pending definition admission; retry transaction")
-			}
-		} else {
-			db.definitionAdmission.Lock()
-		}
+		// A queued DDL has not changed the definitions. Readers must still
+		// join existing transactions: one session can need another session's
+		// read before it releases the final lease awaited by that DDL.
+		// definitionMu excludes readers once publication actually owns it;
+		// definitionAdmission serializes only competing writer upgrades.
 		if writer {
 			if !db.definitionMu.TryRLock() {
-				db.definitionAdmission.Unlock()
 				panic("schema access conflicts with another schema transaction; retry transaction")
 			}
 		} else {
 			db.definitionMu.RLock()
 		}
-		db.definitionAdmission.Unlock()
 		if r := activeReplication(db); tx.coordinator == nil && r != nil && validReplicaDatabase(db.Name) {
 			var wait <-chan struct{}
 			reader, wait = r.resourceCell(mosiResource{Database: db.Name}).ownstate.TryRetainRead()

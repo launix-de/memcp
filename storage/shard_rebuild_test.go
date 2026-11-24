@@ -1256,6 +1256,37 @@ func TestDatabaseRebuildDoesNotForceFreeTableIntoSingleShardPartition(t *testing
 	}
 }
 
+func TestRepartitionExistingLayoutReleasesMaintenance(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "trepartitionagain", 128)
+	if !tbl.beginManualRepartition() {
+		t.Fatal("initial free topology did not accept repartition")
+	}
+	tbl.repartition([]shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(64)}}})
+	tbl.maintenanceMu.Lock()
+	// This is the legitimate rebuild-to-repartition handoff: PShards is the
+	// current layout, rather than evidence of a concurrent repartition.
+	tbl.mu.Lock()
+	tbl.maintenanceKind = 2
+	tbl.mu.Unlock()
+	tbl.repartition([]shardDimension{{Column: "id", NumPartitions: 3, Pivots: []scm.Scmer{scm.NewInt(43), scm.NewInt(86)}}})
+	if got := len(tbl.activeTopology().shards); got != 3 {
+		// The broken early-return path transferred maintenance to nobody.
+		tbl.mu.Lock()
+		tbl.maintenanceKind = 0
+		tbl.mu.Unlock()
+		tbl.maintenanceMu.Unlock()
+		t.Fatalf("second repartition retained %d shards, want 3", got)
+	}
+	tbl.maintenanceMu.Lock()
+	tbl.maintenanceMu.Unlock()
+	if got := tbl.Count(); got != 128 {
+		t.Fatalf("second repartition row count = %d, want 128", got)
+	}
+	ddl := NewTxContext(TxACID)
+	defer ddl.Rollback()
+	ddl.recordSchema(tbl, false)
+}
+
 func TestPartitionTableEmptySpecKeepsFreeShardMode(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-empty-partition-*")
 	if err != nil {

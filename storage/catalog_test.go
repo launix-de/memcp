@@ -1354,6 +1354,59 @@ func TestCatalogEditsFollowOriginalTransaction(t *testing.T) {
 	}
 }
 
+func TestQueuedDDLAllowsReadersNeededByAnExistingTransaction(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "tqueuedddlreader", 1)
+	db := tbl.schema
+	owner := NewTxContext(TxACID)
+	owner.readSchema(db)
+	writer := NewTxContext(TxACID)
+	writer.autoCommit = true
+	writer.readSchema(db)
+	reader := NewTxContext(TxACID)
+	readDone := make(chan struct{})
+	readerStarted := false
+	finishWriter := make(chan struct{})
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		defer writer.Rollback()
+		writer.writeSchema(db)
+		<-finishWriter
+	}()
+	defer func() {
+		owner.Rollback()
+		close(finishWriter)
+		select {
+		case <-writerDone:
+		case <-time.After(3 * time.Second):
+			t.Error("queued DDL did not finish after the original reader")
+		}
+		if readerStarted {
+			<-readDone
+		}
+		reader.Rollback()
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for db.definitionAdmission.TryLock() {
+		db.definitionAdmission.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("DDL did not enter its admission wait")
+		}
+		runtime.Gosched()
+	}
+	readerStarted = true
+	go func() {
+		reader.readSchema(db)
+		close(readDone)
+	}()
+	select {
+	case <-readDone:
+		reader.Rollback()
+	case <-time.After(time.Second):
+		t.Fatal("queued DDL blocked the second reader required before the original transaction can finish")
+	}
+}
+
 func TestSchemaDefinitionScopeExcludesConflictingDDL(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "schema-definition-scope", 1)
 	reader, writer := NewTxContext(TxACID), NewTxContext(TxACID)

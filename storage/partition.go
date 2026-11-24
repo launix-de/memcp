@@ -922,10 +922,8 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 			t.schema.definitionMu.RUnlock()
 		}
 	}()
-	// Safety-net: if somehow called directly without the flag being set.
-	if t.maintenanceKind == 2 && t.PShards != nil {
-		return
-	}
+	// The caller owns maintenanceMu for this handoff. Existing PShards may
+	// be the accepted source layout, including during a later repartition.
 	preflightComplete := false
 	defer func() {
 		if !preflightComplete {
