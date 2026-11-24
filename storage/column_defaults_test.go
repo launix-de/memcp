@@ -461,7 +461,7 @@ func TestAddedNullableRetiredNameDoesNotRestoreOldValues(t *testing.T) {
 	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
-	tbl.DropColumn("reused")
+	tbl.DropColumn("reused", scm.NewNil())
 	reloaded := reloadTableFromPersistence(t, "taddednullablereused", persistence)
 	reloaded.CreateColumn("reused", "INT", nil, nil)
 	assertInitializedColumn(t, reloaded, "reused", scm.NewNil(), 2)

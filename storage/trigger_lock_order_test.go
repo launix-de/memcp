@@ -870,9 +870,9 @@ func TestDropColumnLifecycleReleasesDDLOwnership(t *testing.T) {
 					return scm.NewNil()
 				})})
 			if migration {
-				tbl.dropColumnForMigration("payload")
+				tbl.dropColumnForMigration("payload", scm.NewNil())
 			} else {
-				tbl.DropColumn("payload")
+				tbl.DropColumn("payload", scm.NewNil())
 			}
 			if !called || !unlocked {
 				t.Fatalf("DROP lifecycle ran under DDL ownership: called=%v unlocked=%v", called, unlocked)

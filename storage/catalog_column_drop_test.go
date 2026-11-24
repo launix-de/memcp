@@ -21,7 +21,7 @@ func TestStoredColumnRetirementFencesLifecyclePublication(t *testing.T) {
 				}
 			}()
 			sp := tx.CreateSavepoint()
-			if !tx.dropPublicColumn(tbl, "payload", false) {
+			if !tx.dropPublicColumn(tbl, "payload", false, scm.NewNil()) {
 				t.Fatal("stored declaration was not retired")
 			}
 			trigger := TriggerDescription{Name: ".retire-lifecycle-proof", Timing: AfterDropColumn, IsSystem: true,

@@ -3984,7 +3984,7 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 		t.prepareAllocatorRecovery()
 	}
 	if operation == "drop" {
-		return scm.NewBool(t.DropColumn(name))
+		return scm.NewBool(t.DropColumn(name, scm.NewNil()))
 	}
 	if operation == "drop_default" {
 		requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
@@ -4162,7 +4162,7 @@ func (t *table) alterColumnDeclarationOwned(name string, declaration, expected s
 	panic("column " + t.schema.Name + "." + t.Name + "." + name + " does not exist")
 }
 
-func (t *table) dropColumnDDLLocked(name string) bool {
+func (t *table) dropColumnDDLLocked(name string, expectedInput scm.Scmer) bool {
 	t.requireNoDeclaredComputationInput(name)
 	t.schema.schemalock.Lock()
 	if dependency := t.checkColumnDependency(name); dependency != nil {
@@ -4176,6 +4176,17 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 	var removedCol *column
 	for i, c := range t.Columns {
 		if c.Name == name {
+			if !expectedInput.IsNil() {
+				func() {
+					defer func() {
+						if failure := recover(); failure != nil {
+							t.schema.schemalock.Unlock()
+							panic(failure)
+						}
+					}()
+					requireExpectedStoredColumnInput(c, expectedInput)
+				}()
+			}
 			removedCol = c
 			if t.DroppedColumns != nil && !c.IsTemp {
 				t.DroppedColumns[name] = true
@@ -4212,20 +4223,20 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 	panic("drop column does not exist: " + t.Name + "." + name)
 }
 
-func (t *table) DropColumn(name string) bool {
+func (t *table) DropColumn(name string, expectedInput scm.Scmer) bool {
 	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
 	defer t.admitNativeMaintenance()()
-	return t.dropColumnForMigration(name)
+	return t.dropColumnForMigration(name, expectedInput)
 }
 
-func (t *table) dropColumnForMigration(name string) bool {
+func (t *table) dropColumnForMigration(name string, expectedInput scm.Scmer) bool {
 	dropped := func() bool {
 		var schemaAccess WriteAccess
 		t, schemaAccess = t.schemaWrite()
 		defer schemaAccess.Release()
 		t.ddlMu.Lock()
 		defer t.ddlMu.Unlock()
-		return t.dropColumnDDLLocked(name)
+		return t.dropColumnDDLLocked(name, expectedInput)
 	}()
 	// Dependency callbacks can retire other columns on this same table.
 	// Publication and persistence finish first; callbacks own neither schema
@@ -4236,13 +4247,13 @@ func (t *table) dropColumnForMigration(name string) bool {
 	return dropped
 }
 
-func (t *table) DropColumnIfExists(name string) bool {
+func (t *table) DropColumnIfExists(name string, expectedInput scm.Scmer) bool {
 	t.schema.GetRead(nil)
 	t.schema.schemalock.Lock()
 	for _, c := range t.Columns {
 		if c.Name == name {
 			t.schema.schemalock.Unlock()
-			return t.DropColumn(name)
+			return t.DropColumn(name, expectedInput)
 		}
 	}
 	t.schema.schemalock.Unlock()

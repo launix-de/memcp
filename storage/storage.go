@@ -3264,6 +3264,10 @@ func Init(en scm.Env) {
 			t := TableFromScmer(a[0])
 			db := t.schema
 			operation := scm.String(a[1])
+			expectedInput := scm.NewNil()
+			if len(a) > 4 {
+				expectedInput = a[4]
+			}
 			var tx *TxContext
 			if len(a) > 3 {
 				tx = scmerToTxContext(a[3])
@@ -3271,15 +3275,15 @@ func Init(en scm.Env) {
 
 			switch operation {
 			case "drop":
-				if tx != nil {
-					return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[2]), false))
+				if tx != nil && !t.implicitSharedColumnDrop(tx) {
+					return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[2]), false, expectedInput))
 				}
-				return scm.NewBool(t.DropColumn(scm.String(a[2])))
+				return scm.NewBool(t.DropColumn(scm.String(a[2]), expectedInput))
 			case "drop_if_exists":
-				if tx != nil {
-					return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[2]), true))
+				if tx != nil && !t.implicitSharedColumnDrop(tx) {
+					return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[2]), true, expectedInput))
 				}
-				return scm.NewBool(t.DropColumnIfExists(scm.String(a[2])))
+				return scm.NewBool(t.DropColumnIfExists(scm.String(a[2]), expectedInput))
 			case "engine":
 				newMode := parsePersistencyMode(scm.String(a[2]))
 				if t.Ephemeral && newMode != Memory {
@@ -3357,6 +3361,7 @@ func Init(en scm.Env) {
 				{Kind: "string", Label: "operation", Description: "one of owner|drop|engine|collation|auto_increment"},
 				{Kind: "any", Label: "parameter", Description: "name of the column to drop or value of the parameter"},
 				{Kind: "any", Label: "tx", Description: "original transaction for stored-column retirement", Optional: true},
+				{Kind: "any", Label: "expected_input", Description: "optional exact stored-column input recipe inspected by the caller", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -3382,7 +3387,7 @@ func Init(en scm.Env) {
 			// A supplied public execution context owns its default change even for
 			// an implicit statement. A later declaration failure must roll back
 			// that same decision instead of leaving an immediate prefix behind.
-			if currentTx != nil && !t.Ephemeral && !t.ScopedSchema && t.PersistencyMode != Cache && columnDefaultOperation(scm.String(a[2])) {
+			if currentTx != nil && !t.Ephemeral && !t.ScopedSchema && t.PersistencyMode != Cache && activeReplication(t.schema) == nil && !sharedClusterDatabase(t.schema.Name) && columnDefaultOperation(scm.String(a[2])) {
 				return currentTx.alterPublicStoredColumn(t, scm.String(a[1]), scm.String(a[2]), a[3])
 			}
 			if currentTx != nil && !currentTx.autoCommit {
@@ -3446,18 +3451,23 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
+			expectedInput := scm.NewNil()
+			if len(a) > 3 {
+				expectedInput = a[3]
+			}
 			if len(a) > 2 {
-				if tx := scmerToTxContext(a[2]); tx != nil {
-					return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[1]), false))
+				if tx := scmerToTxContext(a[2]); tx != nil && !t.implicitSharedColumnDrop(tx) {
+					return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[1]), false, expectedInput))
 				}
 			}
-			return scm.NewBool(t.DropColumn(scm.String(a[1])))
+			return scm.NewBool(t.DropColumn(scm.String(a[1]), expectedInput))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "drops a column from a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
 				{Kind: "string", Label: "column", Description: "name of the column to drop"},
 				{Kind: "any", Label: "tx", Optional: true},
+				{Kind: "any", Label: "expected_input", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -3488,7 +3498,7 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
-			return scm.NewBool(t.dropColumnForMigration(scm.String(a[1])))
+			return scm.NewBool(t.dropColumnForMigration(scm.String(a[1]), scm.NewNil()))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "drops a legacy system column during startup migration", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{

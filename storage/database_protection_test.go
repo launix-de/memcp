@@ -103,7 +103,7 @@ func TestDropRefusesInternalObjectsBeforeMutation(t *testing.T) {
 	if db.tables.Get("user") == nil || db.tables.Get("renamed_user") != nil {
 		t.Fatal("protected table was renamed")
 	}
-	requirePanic(t, func() { db.tables.Get("user").DropColumn("admin") })
+	requirePanic(t, func() { db.tables.Get("user").DropColumn("admin", scm.NewNil()) })
 
 	requirePanic(t, func() { DropDatabase("system", false) })
 	if databases.Get("system") != db {

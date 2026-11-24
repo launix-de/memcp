@@ -350,19 +350,68 @@ test_cases:
       data:
       - id: 1
         retired: 29
-- name: A live DEFAULT refuses retirement before declaration effects
+- name: Native intrinsic retirement clears its owned default only inside the same rollback decision
   scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner\
-    \ \"__memcp_tx\"))\n(define target (table \"memcp-tests\" false \"retire_guard\" false tx))\n (define rejected\
-    \ (try (lambda () (begin (altertable target \"drop\" \"retired\" tx) false)) (lambda (_failure) true)))\n (define\
-    \ same (identical? tx (owner \"__memcp_tx\")))\n (define present (not (nil? (show target \"column\" \"retired\"\
-    \ false tx))))\n (define own (scan tx target '() '() '() (lambda () true) '(\"retired\") + 0 +))\n (tx_rollback\
-    \ owner) (list rejected same present own))"
+    \ \"__memcp_tx\"))\n (define target (table \"memcp-tests\" false \"retire_guard\" false tx))\n (define removed\
+    \ (altertable target \"drop\" \"retired\" tx))\n (define same (identical? tx (owner \"__memcp_tx\")))\n (define\
+    \ hidden (nil? (show target \"column\" \"retired\" false tx)))\n (define public_default (get_assoc (show target\
+    \ \"column\" \"retired\" false nil) \"Default\"))\n (tx_rollback owner)\n (list removed same hidden public_default\n\
+    \   (scan nil target '() '() '() (lambda () true) '(\"retired\") + 0 +)\n   (get_assoc (show target \"column\"\
+    \ \"retired\" false nil) \"Default\")))"
   expect:
     result:
     - true
     - true
     - true
     - 3
+    - 3
+    - 3
+- name: TSQL bound-default refusal preserves its original transaction and complete values
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE retire_guard DROP COLUMN retired
+      expect:
+        error: true
+    - connection: owner
+      sql: SELECT id,retired,@@TRANCOUNT AS depth FROM retire_guard ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          retired: 3
+          depth: 1
+    - connection: owner
+      sql: SELECT o.name FROM sys.columns c JOIN sys.objects o ON c.default_object_id=o.object_id WHERE c.object_id=OBJECT_ID(N'retire_guard')
+        AND c.name=N'retired'
+      expect:
+        rows: 1
+        data:
+        - name: DF_retire_guard
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+- name: A stale absent-default input cannot retire a foreign default or prior original work
+  scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner\
+    \ \"__memcp_tx\"))\n (define marker (table \"memcp-tests\" false \"retire_marker\" false tx))\n (define target\
+    \ (table \"memcp-tests\" false \"retire_raw\" false tx))\n (define expected (list (get_assoc (show target \"\
+    column\" \"retired\" false tx) \"Default\") \"\" \"\" false))\n (insert marker '(\"id\" \"value\") (list (list\
+    \ 99 9)) '() nil false nil tx)\n (altercolumn target \"retired\" \"default\" 7 nil)\n (define rejected (try\
+    \ (lambda () (begin (altertable target \"drop\" \"retired\" tx expected) false)) (lambda (_failure) true)))\n\
+    \ (define own (scan tx marker '() '() '() (lambda () true) '(\"value\") + 0 +))\n (define outside (scan nil\
+    \ marker '() '() '() (lambda () true) '(\"value\") + 0 +))\n (define present (not (nil? (show target \"column\"\
+    \ \"retired\" false nil))))\n (define foreign_default (get_assoc (show target \"column\" \"retired\" false nil)\
+    \ \"Default\"))\n (tx_rollback owner)\n (altercolumn target \"retired\" \"default\" nil nil)\n (list rejected\
+    \ own outside present foreign_default\n   (scan nil marker '() '() '() (lambda () true) '(\"value\") + 0 +)))"
+  expect:
+    result:
+    - true
+    - 10
+    - 1
+    - true
+    - 7
+    - 1
 - name: An escaped native update callback prevents retiring its stored input
   scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner\
     \ \"__memcp_tx\"))\n(define target (table \"memcp-tests\" false \"retire_raw\" false tx)) (define held (newsession))\n\

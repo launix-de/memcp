@@ -9,6 +9,7 @@ import "slices"
 import "unsafe"
 import "unicode/utf8"
 import "github.com/google/uuid"
+import "github.com/launix-de/memcp/scm"
 
 // Retirement removes a declaration, not its historical physical storage. The
 // original snapshot/undo and readers retain those values until native rebuild
@@ -134,7 +135,7 @@ func (db *database) projectColumnDrop(d *catalogColumnDrop, columns []*column, p
 	return t, updated
 }
 
-func (tx *TxContext) dropPublicColumn(t *table, name string, ifExists bool) bool {
+func (tx *TxContext) dropPublicColumn(t *table, name string, ifExists bool, expectedInput scm.Scmer) bool {
 	if tx == nil || tx.transactionState == nil || tx.State != TxActive || tx.coordinator != nil || tx.remoteObject != nil || tx.remoteInvocation || t == nil || activeReplication(t.schema) != nil || sharedClusterDatabase(t.schema.Name) || t.Ephemeral || t.ScopedSchema || t.PersistencyMode == Cache {
 		panic("column retirement requires an original local native transaction")
 	}
@@ -148,10 +149,12 @@ func (tx *TxContext) dropPublicColumn(t *table, name string, ifExists bool) bool
 		}
 	}()
 	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
-	return tx.stagePublicCatalogDeclaration(t.schema, catalogColumnKind, nil, func(changes *publicCatalogChanges) bool { return changes.stageColumnDrop(tx, t, name, ifExists) })
+	return tx.stagePublicCatalogDeclaration(t.schema, catalogColumnKind, nil, func(changes *publicCatalogChanges) bool {
+		return changes.stageColumnDrop(tx, t, name, ifExists, expectedInput)
+	})
 }
 
-func (changes *publicCatalogChanges) stageColumnDrop(tx *TxContext, t *table, name string, ifExists bool) bool {
+func (changes *publicCatalogChanges) stageColumnDrop(tx *TxContext, t *table, name string, ifExists bool, expectedInput scm.Scmer) bool {
 	changes.mu.Lock()
 	defer changes.mu.Unlock()
 	defer changes.refreshMemoryLocked()
@@ -217,6 +220,27 @@ func (changes *publicCatalogChanges) stageColumnDrop(tx *TxContext, t *table, na
 		panic("drop column does not exist: " + t.Name + "." + name)
 	}
 	c := base.metadata.columnNames.declarations[ordinal]
+	if !expectedInput.IsNil() {
+		requireExpectedStoredColumnInput(c, expectedInput)
+	}
+	// A default belongs to its stored declaration. Retiring it intrinsically
+	// still records the established V28 clear-default -> drop program. Build
+	// both amendments before touching history/accounting so a later dependency
+	// refusal cannot leave a default-clearing prefix in this original T.
+	var clear *catalogStoredColumnAmendment
+	beforeDrop := changes.views.Load().tables[t]
+	if !c.Default.IsNil() || c.DefaultName != "" || c.DefaultExpression != "" || c.DefaultDeferred {
+		replacement := cloneStoredColumnDeclaration(c)
+		replacement.Alter("default", scm.NewNil())
+		cleared := append([]*column(nil), base.metadata.columnNames.declarations...)
+		cleared[ordinal] = replacement
+		view, bytes := replaceStoredColumnMetadata(t, base, cleared, observed.metadata.columnNames)
+		clear = &catalogStoredColumnAmendment{table: t, columns: cleared, previous: beforeDrop,
+			defaultDeclaration: catalogColumnDefaultDeclaration{Table: t.Name, Identity: t.RuntimeIdentity, Column: c.Name, Value: replacement.Default, Expression: replacement.DefaultExpression, Name: replacement.DefaultName, Deferred: replacement.DefaultDeferred}}
+		clear.columnBytes = storedColumnBytes(replacement)
+		clear.retainedBytes = uint(unsafe.Sizeof(*clear)) + uint(cap(cleared))*uint(unsafe.Sizeof((*column)(nil))) + clear.columnBytes + bytes
+		base, beforeDrop = view, view
+	}
 	d := &catalogColumnDrop{t.Name, t.RuntimeIdentity, c.Name, c.displayName(), ordinal, storedColumnTypeOf(c)}
 	// Reuse the same chronological native dependency interpreter as prepare and
 	// recovery, including previous default/key/FK/type removals and changes.
@@ -227,8 +251,11 @@ func (changes *publicCatalogChanges) stageColumnDrop(tx *TxContext, t *table, na
 	}
 	_, columns := changes.db.projectColumnDrop(d, base.metadata.columnNames.declarations, projection)
 	view, bytes := replaceStoredColumnMetadata(t, base, columns, observed.metadata.columnNames)
-	a := &catalogStoredColumnAmendment{drop: d, table: t, columns: columns, previous: changes.views.Load().tables[t]}
+	a := &catalogStoredColumnAmendment{drop: d, table: t, columns: columns, previous: beforeDrop}
 	a.retainedBytes = uint(unsafe.Sizeof(*a)) + uint(cap(columns))*uint(unsafe.Sizeof((*column)(nil))) + bytes + d.memory()
+	if clear != nil {
+		history = appendCatalogDeclarationHistory(history, catalogDeclarationAmendment{column: clear})
+	}
 	history = appendCatalogDeclarationHistory(history, catalogDeclarationAmendment{column: a})
 	views := maps.Clone(changes.views.Load().tables)
 	views[t] = view
@@ -246,6 +273,9 @@ func (changes *publicCatalogChanges) stageColumnDrop(tx *TxContext, t *table, na
 		changes.baselinesHighWater = max(changes.baselinesHighWater, len(changes.baselines))
 		changes.viewsHighWater = max(changes.viewsHighWater, len(views))
 		changes.amendmentBytes += a.retainedBytes
+		if clear != nil {
+			changes.amendmentBytes += clear.retainedBytes
+		}
 		changes.historyBytes = uint(unsafe.Sizeof(history)) + uint(cap(history))*uint(unsafe.Sizeof(catalogDeclarationAmendment{}))
 		tx.noteStatementMutation(t)
 		tx.catalogAmendments.Store(&history)
@@ -310,4 +340,15 @@ func columnRetirementMapBytes(retired map[string]bool) uint {
 		bytes += 64 + uint(len(name))
 	}
 	return bytes
+}
+
+// Only implicit statements may use the existing shared/MOSI DDL executor.
+// Mode is not an implicitness proof: implicit T-SQL also uses ACID. Explicit
+// original transactions keep their local retirement owner and its refusals.
+func (t *table) implicitSharedColumnDrop(tx *TxContext) bool {
+	return tx != nil && tx.transactionState != nil && tx.State == TxActive && !tx.decisionStarted && tx.autoCommit &&
+		tx.catalogIdentity.Load() == nil && tx.publicCatalog.Load() == nil && tx.catalogIntents.Load() == nil && tx.catalogCommit == nil &&
+		tx.coordinator == nil && tx.remoteObject == nil && !tx.remoteInvocation &&
+		!tx.rowAccessed.Load() && tx.shards.Load() == nil && tx.readViews.Load() == nil &&
+		(activeReplication(t.schema) != nil || sharedClusterDatabase(t.schema.Name))
 }
