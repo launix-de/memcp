@@ -311,7 +311,7 @@ test_cases:
     - id: 1
       retired: 29
 - name: mysql DROP COLUMN retains the executing rollback owner
-  sql: BEGIN; ALTER TABLE retire_raw DROP COLUMN retired; ROLLBACK; SELECT id,retired FROM retire_raw
+  sql: START ACID TRANSACTION; ALTER TABLE retire_raw DROP COLUMN retired; ROLLBACK; SELECT id,retired FROM retire_raw
   expect:
     rows: 1
     data:
@@ -319,7 +319,7 @@ test_cases:
       retired: 29
   syntax: mysql
 - name: psql DROP COLUMN retains the executing rollback owner
-  sql: BEGIN; ALTER TABLE retire_raw DROP COLUMN retired; ROLLBACK; SELECT id,retired FROM retire_raw
+  sql: START ACID TRANSACTION; ALTER TABLE retire_raw DROP COLUMN retired; ROLLBACK; SELECT id,retired FROM retire_raw
   expect:
     rows: 1
     data:
