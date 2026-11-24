@@ -381,7 +381,7 @@ test_cases:
 - name: Native domain proof examines unmaterialized literal defaults before accepting a new descriptor
   scm: |-
     (begin
-     (define target (table "memcp-tests" false "projection_constants"))
+     (define target (table "memcp-tests" false "projection_constants" false nil))
      (altercolumn target "value" "default" "😀😀")
      (define owner (newsession)) (owner "username" "root")
      (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
@@ -419,7 +419,7 @@ test_cases:
 - name: Native character projection rejects a legacy-codepage loss before effects and retains the original transaction
   scm: |-
     (begin
-     (define target (table "memcp-tests" false "projection_loss"))
+     (define target (table "memcp-tests" false "projection_loss" false nil))
      (define owner (newsession)) (owner "username" "root")
      (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
      (insert target '("value") (list (list "😀")) '() nil false nil tx)
