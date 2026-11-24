@@ -219,9 +219,13 @@ result flags cannot prove that a direct export lacks an underlying identity. */
 	((symbol get_column) alias alias_ic name name_ic) (begin
 		(define source (source_for_alias sources (if (empty_list? sources) nil (source_alias (car sources))) alias alias_ic))
 		(if (nil? source) nil
-			(source_is_base_table? source)
+			(source_is_native_table? source)
 			(if (tsql_native_relation_handle (source_schema source) (source_relation source) tx)
 				(tsql_select_into_identity_origin? (tsql_result_origin sources facts info false)) nil)
+			(source_is_base_table? source) (begin
+				/* Logical producers own column declarations, not native addresses. */
+				(define origin (tsql_result_origin sources facts info false))
+				(if origin (tsql_select_into_identity_origin? origin) nil))
 			(match (source_relation source)
 				((symbol query-block) _schema inner_sources fields _where _group _having _order _limit _offset _hidden _stages inner_facts)
 				(begin
@@ -248,7 +252,7 @@ result flags cannot prove that a direct export lacks an underlying identity. */
 		(define expanded_entries (tsql_result_entries expanded true))
 		(define origins (map entries (lambda (entry) (nth entry 3))))
 		(define one_handle (if (equal? (count sources) 1)
-			(if (source_is_base_table? (car sources))
+			(if (source_is_native_table? (car sources))
 				(tsql_native_relation_handle (source_schema (car sources)) (source_relation (car sources)) tx) nil) nil))
 		/* A view wildcard has no native declaration before expansion. Its
 		expanded entries own the complete output order and can positively prove
@@ -260,7 +264,8 @@ result flags cannot prove that a direct export lacks an underlying identity. */
 				(define key (tsql_select_into_origin_key origin))
 				(define unique (equal? 1 (count (filter origins (lambda (other)
 					(and (tsql_select_into_identity_origin? other) (expression_equal? key (tsql_select_into_origin_key other))))))))
-				(list "mode" (if (or (> (count sources) 1) (not unique)) "discard" one_handle "inherit" "unknown")
+				(list "mode" (if (or (> (count sources) 1) (not unique)
+					(not (source_is_native_table? (car origin)))) "discard" one_handle "inherit" "unknown")
 					"source" key "source_uuid" (if one_handle (show one_handle "identity" tx) nil)))
 				(begin
 					(define status (tsql_select_into_identity_status (qb_sources expanded) (qb_facts expanded)
