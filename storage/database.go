@@ -1241,6 +1241,63 @@ func upgradePersistedTableCalls(value scm.Scmer) scm.Scmer {
 	return restored
 }
 
+// Stored generated cleanup procedures already had a four-slot trigger frame,
+// but older native DROP calls omitted its transaction. Only adapt this known
+// generated grammar; user procedures and quoted data remain unchanged.
+func restorePlannerLifecycleTransaction(trigger *TriggerDescription) {
+	if !(trigger.Hidden || trigger.IsSystem) ||
+		(trigger.Timing != AfterDropTable && trigger.Timing != AfterDropColumn) || !trigger.Func.IsProc() {
+		return
+	}
+	known := false
+	for _, prefix := range []string{".prejoin:", ".cache:", ".kt_cleanup:", ".self_cleanup:", ".orcdep_cleanup:"} {
+		known = known || strings.HasPrefix(trigger.Name, prefix)
+	}
+	if !known {
+		return
+	}
+	proc := trigger.Func.Proc()
+	params := proc.Params.WithoutSourceInfo()
+	if !params.IsSlice() || len(params.Slice()) != 4 || !params.Slice()[3].IsSymbol() {
+		return
+	}
+	argument := params.Slice()[3]
+	if proc.NumberedOnly {
+		argument = scm.NewNthLocalVar(3)
+	}
+	var bind func(scm.Scmer) scm.Scmer
+	bind = func(value scm.Scmer) scm.Scmer {
+		body := value.WithoutSourceInfo()
+		if !body.IsSlice() || len(body.Slice()) == 0 {
+			return value
+		}
+		parts := body.Slice()
+		if len(parts) == 4 && (callHeadIs(parts[0], "droptable") || callHeadIs(parts[0], "droptrigger")) {
+			return scm.NewSlice(append(append([]scm.Scmer(nil), parts...), argument))
+		}
+		if !callHeadIs(parts[0], "begin") && !callHeadIs(parts[0], "!begin") && !callHeadIs(parts[0], "begin_mut") {
+			return value
+		}
+		var changed []scm.Scmer
+		for i := 1; i < len(parts); i++ {
+			if next := bind(parts[i]); next != parts[i] {
+				if changed == nil {
+					changed = append([]scm.Scmer(nil), parts...)
+				}
+				changed[i] = next
+			}
+		}
+		if changed == nil {
+			return value
+		}
+		return scm.NewSlice(changed)
+	}
+	if body := bind(proc.Body); body != proc.Body {
+		trigger.Func = scm.NewProcStruct(scm.Proc{Params: proc.Params, Body: body, En: proc.En,
+			NumVars: proc.NumVars, NumberedOnly: proc.NumberedOnly})
+	}
+}
+
 func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 	if initializer := t.OnInit.Load(); initializer != nil {
 		restored := upgradePersistedTableCalls(*initializer)
@@ -1254,6 +1311,7 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 	for i := range t.Triggers {
 		trigger := &t.Triggers[i]
 		trigger.Func = upgradePersistedTableCalls(trigger.Func)
+		restorePlannerLifecycleTransaction(trigger)
 		if trigger.Language == "scheme" && trigger.Source != "" {
 			definition := scm.Read("stored trigger", trigger.Source, true)
 			if restored := upgradePersistedTableCalls(definition); restored != definition {

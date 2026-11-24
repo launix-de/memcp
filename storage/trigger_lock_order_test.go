@@ -235,6 +235,52 @@ func TestLegacyPersistedCacheTriggerWaitsForRuntimeTarget(t *testing.T) {
 	}
 }
 
+func TestLegacyPrejoinLifecycleKeepsOriginalTransaction(t *testing.T) {
+	for _, numbered := range []bool{false, true} {
+		t.Run(fmt.Sprint(numbered), func(t *testing.T) {
+			source, _ := createDurabilityTestTable(t, "legacy-prejoin-tx", 1)
+			db := source.schema
+			cache, _ := CreateTable(nil, db.Name, ".prejoin:legacy", Cache, false)
+			var observed *TxContext
+			cache.AddTrigger(TriggerDescription{Name: "observe-original-owner", Timing: AfterDropTable,
+				Func: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+					observed = scmerToTxContext(args[3])
+					return scm.NewNil()
+				})})
+			// This is the old stored procedure shape: a four-slot frame whose
+			// DROP call predates the native transaction argument.
+			legacy := TriggerDescription{Name: ".prejoin:legacy|items|after_drop_table", Timing: AfterDropTable, Hidden: true,
+				Func: buildFKProc(scm.NewSlice([]scm.Scmer{scm.NewSymbol("droptable"), scm.NewString(db.Name),
+					scm.NewString(cache.Name), scm.NewBool(true)}))}
+			var restored TriggerDescription
+			if err := json.Unmarshal(marshalCatalogValue(legacy), &restored); err != nil {
+				t.Fatal(err)
+			}
+			restored.Func.Proc().NumberedOnly = numbered
+			source.Triggers = append(source.Triggers, restored)
+			cleanup := TriggerDescription{Name: ".self_cleanup:legacy", Timing: AfterDropTable, IsSystem: true,
+				Func: buildFKProc(scm.NewSlice([]scm.Scmer{scm.NewSymbol("begin"),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("droptrigger"), scm.NewString(db.Name),
+						scm.NewString(legacy.Name), scm.NewBool(true)})}))}
+			var storedCleanup TriggerDescription
+			if err := json.Unmarshal(marshalCatalogValue(cleanup), &storedCleanup); err != nil {
+				t.Fatal(err)
+			}
+			storedCleanup.Func.Proc().NumberedOnly = numbered
+			cache.Triggers = append(cache.Triggers, storedCleanup)
+			invalidatePersistedPlannerCodeAfterLoad(source)
+			invalidatePersistedPlannerCodeAfterLoad(cache)
+			tx := NewTxContext(TxACID)
+			defer tx.Rollback()
+			tx.writeSchema(db)
+			source.ExecuteTableLifecycleTriggers(AfterDropTable, tx)
+			if observed != tx || db.tables.Get(cache.Name) != nil || len(source.Triggers) != 0 {
+				t.Fatal("legacy cleanup lost its original transaction or did not drop its derived cache")
+			}
+		})
+	}
+}
+
 func TestDropTriggerDoesNotHoldSchemaLockWhileWaitingForTableDDL(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "trigger-lock-order", 1)
 	db := table.schema
