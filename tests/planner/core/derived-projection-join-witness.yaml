@@ -1,0 +1,499 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Strict outer join predicates prove row presence without changing nullable derived projection semantics
+setup:
+- sql: DROP TABLE IF EXISTS dpw_rule
+- sql: DROP TABLE IF EXISTS dpw_right
+- sql: DROP TABLE IF EXISTS dpw_left
+- sql: CREATE TABLE dpw_left(id INT,k INT)
+- sql: CREATE TABLE dpw_right(k INT,payload INT)
+- sql: CREATE TABLE dpw_rule(k INT)
+- sql: INSERT INTO dpw_left VALUES(1,7),(2,8),(3,NULL),(4,9)
+- sql: INSERT INTO dpw_right VALUES(7,NULL),(7,NULL),(NULL,NULL),(9,9)
+- sql: INSERT INTO dpw_rule VALUES(7)
+test_cases:
+- name: 'mysql: Strict equality preserves duplicates and null extends computed exports'
+  syntax: mysql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=l.k ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: null
+      payload: null
+      allowed: null
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+- name: 'mysql: A reversed strict conjunct proves the same witness'
+  syntax: mysql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON l.k=d.k AND d.marker=17 ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: null
+      payload: null
+      allowed: null
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+- name: 'mysql: An OR branch preserves real rows with nullable keys'
+  syntax: mysql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=l.k OR d.k IS NULL ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 6
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 3
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 4
+      marker: 17
+      payload: null
+      allowed: 0
+- name: 'mysql: Null safe equality retains a real all NULL source row'
+  syntax: mysql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=l.k OR (d.k IS NULL AND l.k IS NULL) ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+- name: 'mysql: COALESCE around the compared value is not a presence witness'
+  syntax: mysql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON COALESCE(d.k,-1)=COALESCE(l.k,-1) ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+- name: 'mysql: A computed exported key does not attest its nullable input'
+  syntax: mysql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT COALESCE(r.k,-1) AS k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=COALESCE(l.k,-1) ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+- name: 'psql: Strict equality preserves duplicates and null extends computed exports'
+  syntax: psql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=l.k ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: null
+      payload: null
+      allowed: null
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+- name: 'psql: A reversed strict conjunct proves the same witness'
+  syntax: psql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON l.k=d.k AND d.marker=17 ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: null
+      payload: null
+      allowed: null
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+- name: 'psql: An OR branch preserves real rows with nullable keys'
+  syntax: psql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=l.k OR d.k IS NULL ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 6
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 3
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 4
+      marker: 17
+      payload: null
+      allowed: 0
+- name: 'psql: Null safe equality retains a real all NULL source row'
+  syntax: psql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=l.k OR (d.k IS NULL AND l.k IS NULL) ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+- name: 'psql: COALESCE around the compared value is not a presence witness'
+  syntax: psql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON COALESCE(d.k,-1)=COALESCE(l.k,-1) ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+- name: 'psql: A computed exported key does not attest its nullable input'
+  syntax: psql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT COALESCE(r.k,-1) AS k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=COALESCE(l.k,-1) ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+- name: 'tsql: Strict equality preserves duplicates and null extends computed exports'
+  syntax: tsql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=l.k ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: null
+      payload: null
+      allowed: null
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+- name: 'tsql: A reversed strict conjunct proves the same witness'
+  syntax: tsql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON l.k=d.k AND d.marker=17 ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: null
+      payload: null
+      allowed: null
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+- name: 'tsql: An OR branch preserves real rows with nullable keys'
+  syntax: tsql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=l.k OR d.k IS NULL ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 6
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 3
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 4
+      marker: 17
+      payload: null
+      allowed: 0
+- name: 'tsql: Null safe equality retains a real all NULL source row'
+  syntax: tsql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=l.k OR (d.k IS NULL AND l.k IS NULL) ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+- name: 'tsql: COALESCE around the compared value is not a presence witness'
+  syntax: tsql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT r.k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON COALESCE(d.k,-1)=COALESCE(l.k,-1) ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+- name: 'tsql: A computed exported key does not attest its nullable input'
+  syntax: tsql
+  sql: SELECT l.id,d.marker,d.payload,d.allowed FROM dpw_left l LEFT JOIN (SELECT COALESCE(r.k,-1) AS k,r.payload,17 AS marker,CASE WHEN EXISTS (SELECT 1 FROM dpw_rule z WHERE z.k=r.k) THEN 1 ELSE 0 END AS allowed FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=COALESCE(l.k,-1) ORDER BY l.id,d.marker,d.allowed
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 1
+      marker: 17
+      payload: null
+      allowed: 1
+    - id: 2
+      marker: null
+      payload: null
+      allowed: null
+    - id: 3
+      marker: 17
+      payload: null
+      allowed: 0
+    - id: 4
+      marker: null
+      payload: null
+      allowed: null
+cleanup:
+- sql: DROP TABLE IF EXISTS dpw_rule
+- sql: DROP TABLE IF EXISTS dpw_right
+- sql: DROP TABLE IF EXISTS dpw_left

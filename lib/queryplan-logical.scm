@@ -7796,12 +7796,37 @@ When no witness exists, the caller keeps the complete relational operand. */
 	(if column (list 'get_column alias false (column "Field") false)
 		lateral (neumann_fail "untangle_query" "lateral outer projection needs a non-null row-presence key")
 		nil))))
+
+/* A strict conjunct in ON can also prove presence: a matched row satisfying
+column = value cannot have NULL in column. Inspect the substituted projection,
+not its output name; COALESCE, null-safe equality and OR do not prove this.
+Only a direct column of the preserved base input is a reusable witness. */
+(define derived_join_projection_presence (lambda (src inner lateral) (begin
+	(define base (car (qb_sources inner)))
+	(define alias (source_alias src))
+	(define declared (derived_projection_presence base alias false))
+	(define condition (rewrite_derived_ref alias (qb_fields inner) (source_join_expr src)))
+	(define witness (if (or declared (source_outer? base)) nil
+		(reduce (split_and_terms condition) (lambda (found term)
+			(if found found
+				(match term
+					((symbol equal??) left right)
+					(find (list left right) (lambda (operand)
+						(match operand
+							((symbol get_column) owner _ci _column false)
+							(equal? owner (source_alias base))
+							_ false)) nil)
+					_ nil))) nil)))
+	(if declared declared
+		witness (requalify_single_source_expr (source_alias base) alias witness)
+		lateral (neumann_fail "untangle_query" "lateral outer projection needs a non-null row-presence key")
+		nil))))
 (define derived_projection_requires_operand? (lambda (src inner lateral) (begin
 	(define sources (qb_sources inner))
 	(if (and (source_outer? src) (not (empty_list? sources)))
 		(if (or (equal? (count sources) 1) (scalar_source_shape_supported? sources))
 			(if (derived_block_needs_operator? inner) false
-				(nil? (derived_projection_presence (car sources) (source_alias src) lateral))) false)
+				(nil? (derived_join_projection_presence src inner lateral))) false)
 		false))))
 
 (define literal_true? (lambda (expr)
@@ -8072,7 +8097,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 												(requalify_single_source_fields inner_alias alias (qb_fields inner))))
 											(define effective_projection (if (source_outer? src)
 												(null_extend_projection_fields projection
-													(derived_projection_presence only_inner alias lateral))
+													(derived_join_projection_presence src inner lateral))
 												projection))
 											(define inner_where (requalify_single_source_expr inner_alias alias
 												(combine_where (qb_where inner) (source_join_expr only_inner))))
@@ -8111,7 +8136,7 @@ bindings are stable here, unlike mutable SQL session variables. */
 														(requalify_single_source_fields inner_alias alias (qb_fields inner))))
 													(define effective_projection (if (source_outer? src)
 														(null_extend_projection_fields projection
-															(derived_projection_presence only_inner alias lateral))
+															(derived_join_projection_presence src inner lateral))
 														projection))
 													(define inner_where (requalify_single_source_expr inner_alias alias
 														(combine_where (qb_where inner) (source_join_expr only_inner))))
