@@ -160,7 +160,87 @@ DROP/recreate chain. The frontend never keeps an undo journal or table values. *
 	(cons _head _tail) (not (nil? (find node tsql_temporary_query? nil)))
 	_ false)))
 
-(define tsql_select_into_column (lambda (field) (begin
+/* Preserve the SQL projection's original shape before inlining or join
+optimization. Ordinary result flags alone cannot attest identity inheritance.
+These records contain declaration data only, never a native handle or rows. */
+(define tsql_select_into_identity_origin? (lambda (origin)
+	(if (nil? origin) false (equal? ((cadr origin) "Extra") "auto_increment"))))
+(define tsql_select_into_origin_key (lambda (origin)
+	(list (source_schema (car origin)) (source_relation (car origin))
+		(sql_column_storage_name (cadr origin)))))
+/* FALSE proves an ordinary expression/declaration, TRUE traces an identity,
+and NULL means provenance is unavailable. In particular a view's ordinary
+result flags cannot prove that a direct export lacks an underlying identity. */
+(define tsql_select_into_identity_status (lambda (sources facts info tx) (match (sql_info_formula info)
+	((symbol get_column) alias alias_ic name name_ic) (begin
+		(define source (source_for_alias sources (if (empty_list? sources) nil (source_alias (car sources))) alias alias_ic))
+		(if (nil? source) nil
+			(source_is_base_table? source)
+			(if (tsql_native_relation_handle (source_schema source) (source_relation source) tx)
+				(tsql_select_into_identity_origin? (tsql_result_origin sources facts info false)) nil)
+			(match (source_relation source)
+				((symbol query-block) _schema inner_sources fields _where _group _having _order _limit _offset _hidden _stages inner_facts)
+				(begin
+					(define expression ((expand_query_block_fields inner_sources fields) name))
+					(define scope (tsql_result_derived_scope sources source inner_sources))
+					(tsql_select_into_identity_status scope inner_facts (sql_expr_info scope expression) tx))
+				((symbol union-block) _mode _branches _order _limit _offset _facts) false
+				_ nil)))
+	_ false)))
+(define tsql_select_into_provenance (lambda (query expanded tx) (match query
+	((symbol union-block) _mode branches _order _limit _offset _facts)
+	(map (tsql_select_into_provenance (car branches) (car (caddr expanded)) tx)
+		(lambda (origin) (if origin (set_assoc origin "mode" "discard") nil)))
+	((symbol query-block) _schema sources _fields _where _group _having _order _limit _offset _hidden _stages facts)
+	(begin
+		(define entries (tsql_result_entries query false))
+		(define expanded_entries (tsql_result_entries expanded true))
+		(define origins (map entries (lambda (entry) (nth entry 3))))
+		(define one_handle (if (equal? (count sources) 1)
+			(if (source_is_base_table? (car sources))
+				(tsql_native_relation_handle (source_schema (car sources)) (source_relation (car sources)) tx) nil) nil))
+		(if (equal? (count entries) (count expanded_entries)) true
+			(error "SELECT INTO lost its original result projection"))
+		(mapIndex origins (lambda (index origin) (begin
+			(define direct (tsql_select_into_identity_origin? origin))
+			(define inherited (nth (nth expanded_entries index) 3))
+			(if direct (begin
+				(define key (tsql_select_into_origin_key origin))
+				(define unique (equal? 1 (count (filter origins (lambda (other)
+					(and (tsql_select_into_identity_origin? other) (expression_equal? key (tsql_select_into_origin_key other))))))))
+				(list "mode" (if (or (> (count sources) 1) (not unique)) "discard" one_handle "inherit" "unknown")
+					"source" key "source_uuid" (if one_handle (show one_handle "identity" tx) nil)))
+				(tsql_select_into_identity_origin? inherited) (list "mode" "unknown" "source" (tsql_select_into_origin_key inherited))
+				(nil? (tsql_select_into_identity_status sources facts (nth (nth entries index) 2) tx)) (list "mode" "unknown")
+				nil)))))
+	_ (error "SELECT INTO requires an authoritative logical projection"))))
+
+(define tsql_select_into_identity_source (lambda (origins tx) (begin
+	(if (find origins (lambda (origin) (if origin (equal? (origin "mode") "unknown") false)) nil)
+		(error "SELECT INTO identity provenance requires a direct local base-table export") true)
+	(define candidates (filter origins (lambda (origin) (if origin (equal? (origin "mode") "inherit") false))))
+	(if (> (count candidates) 1) (error "SELECT INTO cannot inherit multiple identity columns") true)
+	(define inherited (if (empty_list? candidates) nil (car candidates)))
+	(if (nil? inherited) nil (begin
+		(define source (inherited "source"))
+		(define handle (tsql_native_relation_handle (car source) (cadr source) tx))
+		(if (if handle (equal? (show handle "identity" tx) (inherited "source_uuid")) false) true
+			(error "SELECT INTO source generation changed during description"))
+		(define column (find (show handle "columns" tx) (lambda (column)
+			(equal? (sql_column_storage_name column) (nth source 2))) nil))
+		(if (if column (equal? (column "Extra") "auto_increment") false) true
+			(error "SELECT INTO lost its original identity declaration"))
+		(define state (table_id_state handle tx))
+		(if (and (state "start") (equal? (state "table_uuid") (show handle "identity" tx))) true
+			(error "SELECT INTO identity seed provenance is unavailable"))
+		/* Existing native identities have increment one. Other increments are
+		not admitted by the declaration grammar and are never guessed here. */
+		(define seed (tsql_parse_integer (state "start")))
+		(if (and (>= seed 1) (<= seed (tsql_identity_maximum (column "RawType") (column "Dimensions")))) true
+			(error "SELECT INTO requires a supported positive identity seed"))
+		(list "handle" handle "source" source "seed" seed))))))
+
+(define tsql_select_into_column (lambda (field origin) (begin
 	(define contract (field "sql_datatype"))
 	(define type (if (list? contract) (car contract) contract))
 	(define dimensions (if (list? contract) (cadr contract) '()))
@@ -170,13 +250,24 @@ DROP/recreate chain. The frontend never keeps an undo journal or table values. *
 		(equal? dimensions '(0))) '(1) dimensions))
 	(if (or (nil? type) (has? '("any" "NULL" "ROWVERSION" "TIMESTAMP") type))
 		(error "SELECT INTO requires an authoritative ordinary SQL result type") true)
-	/* IDENTITY inheritance has additional query-shape rules. Reject it until
-	that producer contract is represented, rather than silently lose identity. */
-	(if (not (equal? (bit_and (field "flags") 16) 0))
-		(error "SELECT INTO identity inheritance is not supported") true)
+	(if (and (nil? origin) (not (equal? (bit_and (field "flags") 16) 0)))
+		(error "SELECT INTO identity projection provenance is unavailable") true)
+	(define inherited (if origin (equal? (origin "mode") "inherit") false))
 	(list "column" (field "name") type dimensions
-		(merge (list (list "null" (not (equal? (bit_and (field "flags") 1) 0)))
+		(merge (list (list "null" (if origin false (not (equal? (bit_and (field "flags") 1) 0))))
+			(if inherited '("auto_increment" true) '())
 			(if (field "sql_collation") (list "collate" (car (field "sql_collation"))) '())))))))
+
+/* This immutable invocation wrapper is not installed on the connection and
+enumerates only its parent. The exact copy capability cannot enter a cache key,
+session projection or another statement's public IDENTITY_INSERT setting. */
+(define tsql_select_into_population_session (lambda (parent copy)
+	(lambda args (match args
+		'() (parent)
+		'(key) (if (equal? key "__tsql_select_into_copy") copy (parent key))
+		'(key value) (if (equal? key "__tsql_select_into_copy")
+			(error "SELECT INTO copy target is immutable") (parent key value))
+		_ (apply parent args)))))
 
 /* SQL Server SELECT INTO semantics:
 https://learn.microsoft.com/en-us/sql/t-sql/queries/select-into-clause-transact-sql
@@ -201,14 +292,18 @@ instead retain their existing actual transaction across both operations. */
 	use the ordinary database permission and native declaration owners. */
 	(define destination (if temporary schema (tsql_qualifier_database owner schema session)))
 	(if temporary true (tsql_require_permission (tsql_session_actor session) destination "CREATE TABLE"))
-	(define fields (tsql_describe_statement tx schema (concat definitions query)
-		(coalesceNil (session "__tsql_parameter_declarations") '()) session))
+	(define description (tsql_describe_statement tx schema (concat definitions query)
+		(coalesceNil (session "__tsql_parameter_declarations") '()) session true))
+	(define fields (car description))
+	(define origins (cadr description))
 	(if (empty_list? fields) (error "SELECT INTO requires result columns") true)
 	(define names (map fields (lambda (field) (field "name"))))
 	(if (equal? (count names) (count (merge_unique (list (map names toLower))))) true
 		(error "SELECT INTO has duplicate result column names"))
-	(define columns (map fields tsql_select_into_column))
-	(if (not temporary) (tsql_create_relation destination name columns '() false tx session)
+	(define identity_source (tsql_select_into_identity_source origins tx))
+	(define columns (mapIndex fields (lambda (index field) (tsql_select_into_column field (nth origins index)))))
+	(define options (if identity_source (list "auto_increment" (identity_source "seed")) '()))
+	(if (not temporary) (tsql_create_relation destination name columns options false tx session)
 		trigger (begin
 			/* Completion borrows the caller's still-running mutation. Its native result
 			lifetime must therefore outlive the lexical trigger module. */
@@ -216,20 +311,31 @@ instead retain their existing actual transaction across both operations. */
 				(lambda () (new_relation_scope (tsql_connection_session session)))))
 			(define native_name (concat "." (scope "id") name ":" (uuid)))
 			(tsql_create_relation schema native_name columns
-				(list "engine" "memory" "ephemeral" true "scope" native) false tx session)
+				(merge options (list "engine" "memory" "ephemeral" true "scope" native)) false tx session)
 			(scope "bindings" (cons (list name schema native_name) (scope "bindings"))))
-		(tsql_create_temporary schema name columns '() false tx session))
+		(tsql_create_temporary schema name columns options false tx session))
+	(define resolved (if temporary (tsql_resolve_relation schema name session tx) (list destination name)))
+	(define handle (tsql_native_relation_handle (car resolved) (cadr resolved) tx))
+	(define identity (if identity_source (find (show handle "columns" tx)
+		(lambda (column) (equal? (column "Extra") "auto_increment")) nil) nil))
 	/* The normal INSERT SELECT compiler owns the complete source stream, casts,
 	row effects and count. This rebuild quotes only parsed/declared identifiers. */
 	(define quoted (lambda (name) (concat "[" (replace name "]" "]]") "]")))
 	/* Keep the CTE before the mutation, so the ordinary CTE binder owns its
 	definitions for both description and the INSERT SELECT source. */
 	(define target (if temporary (quoted name) (concat (quoted destination) ".[dbo]." (quoted name))))
-	(concat definitions "INSERT INTO " target " (" (reduce (map names quoted)
-		(lambda (text column) (concat text (if (equal? text "") "" ",") column)) "") ") " query))))
+	(list (concat definitions "INSERT INTO " target " (" (reduce (map names quoted)
+		(lambda (text column) (concat text (if (equal? text "") "" ",") column)) "") ") " query)
+		(if identity (list handle (sql_column_storage_name identity)) nil) identity_source))))
 (define tsql_run_select_into (lambda (name query definitions owner statement session) (begin
-	(define populate (lambda (tx input)
-		(tsql_execute_statement tx (session "schema") input session (lambda (_row) true) (lambda args true))))
+	(define populate (lambda (tx input) (begin
+		(define source (nth input 2))
+		(if source (begin
+			(define binding (source "source"))
+			(if (identical? (source "handle") (tsql_native_relation_handle (car binding) (cadr binding) tx)) true
+				(error "SELECT INTO source generation changed before population"))) true)
+		(tsql_execute_statement tx (session "schema") (car input)
+			(tsql_select_into_population_session session (cadr input)) (lambda (_row) true) (lambda args true)))))
 	(if (or (session "transaction") (session "__tsql_trigger_event"))
 		(tsql_statement_call statement session "SELECT INTO" false (lambda (tx)
 			(populate tx (tsql_prepare_select_into name query definitions owner tx session))))

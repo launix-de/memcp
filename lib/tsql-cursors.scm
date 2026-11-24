@@ -315,7 +315,7 @@ https://learn.microsoft.com/sql/t-sql/language-elements/set-local-variable-trans
 			(not (equal? (cursor "owner_scope") (tsql_cursor_scope_id session))))
 			(error "cursor query binding is outside its declaring scope") true)
 		(if (cursor "dynamic") (tsql_cursor_dynamic_open cursor session tx) (begin
-			(define fields (tsql_describe_statement tx (cursor "schema") (cursor "text") (cursor "contracts") session))
+			(define fields (tsql_describe_statement tx (cursor "schema") (cursor "text") (cursor "contracts") session false))
 			(if (empty_list? fields) (error "cursor SELECT must return columns") true)
 			(define columns (mapIndex fields tsql_cursor_column))
 			(define native (new_relation_scope (tsql_connection_session session)))

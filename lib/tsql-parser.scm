@@ -83,7 +83,7 @@ source and permission guards still belong to the enclosing write plan. */
 	(lambda args (match args
 		'(key) (if (equal? key "__tsql_expression_only") true
 			(has? '("__tsql_script_syntax" "__tsql_expression_syntax" "__tsql_logical_query"
-				"__tsql_logical_mutation" "__tsql_logical_insert" "__tsql_scalar_function_body" "__tsql_parameter_analysis" "__tsql_describe"
+				"__tsql_logical_mutation" "__tsql_logical_insert" "__tsql_scalar_function_body" "__tsql_parameter_analysis" "__tsql_describe" "__tsql_select_into_description"
 				"__tsql_expression_source" "__tsql_lexical_context" "__tsql_parameter_declarations") key) nil
 			(parent key))
 		_ (apply parent args))))))
@@ -2858,10 +2858,15 @@ The current directory/name and column descriptors remain native metadata. */
 			(session "__tsql_identity_insert" (list database handle (sql_column_storage_name identity))))
 		same (session "__tsql_identity_insert" nil) true)
 	0)))
-(define tsql_check_identity_insert (lambda (session handle explicit_columns supplied) (begin
+(define tsql_check_identity_insert (lambda (session handle physical explicit_columns supplied) (begin
+	(define copy (session "__tsql_select_into_copy"))
 	(define mode (session "__tsql_identity_insert"))
 	(define enabled (if (nil? mode) false (identical? handle (cadr mode))))
-	(if supplied
+	(if copy
+		(if (and explicit_columns supplied (identical? handle (car copy)) (equal? physical (cadr copy))) true
+			(error "SELECT INTO lost its exact created identity target"))
+		(nil? physical) true
+		supplied
 		(if (and explicit_columns enabled) true
 			(tsql_raise_error 544 "explicit IDENTITY values require a column list and IDENTITY_INSERT ON" 1))
 		enabled (tsql_raise_error 545 "IDENTITY_INSERT ON requires an explicit IDENTITY value" 1) true))))
@@ -2894,9 +2899,9 @@ with_table_mutation borrows that same owner rather than reopening its writer. */
 		(list 'table database false name false 'tx)))
 	(define formula (physical_mutation_producer (list target) (list "insert" '()) (list (quote begin)
 		(list (quote define) (quote __tsql_insert_target) target)
-		(if identity
-			(list (quote tsql_check_identity_insert) (quote session) (quote __tsql_insert_target)
-				explicit_columns (has? columns (identity "Field"))) true)
+		(list (quote tsql_check_identity_insert) (quote session) (quote __tsql_insert_target)
+			(if identity (sql_column_storage_name identity) nil)
+			explicit_columns (if identity (has? columns (identity "Field")) false))
 		body)))
 	(if (local_relation_reference? name)
 		(tsql_independent_dml_expr target (list "insert" '()) formula) formula))))
@@ -6663,8 +6668,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(tsql_assignment_source_plan source targets reducer values))))))
 	/* SELECT, INSERT sources and diagnostics consume the same expanded relation.
 	A planning factory must never survive into EXPLAIN as executable row code. */
-	(define tsql_expand_select_query (lambda (query) (begin
-		(define bound_query (tsql_finalize_sources query "query" '() '()))
+	(define tsql_expand_select_query (lambda (bound_query) (begin
 		(tsql_bind_computed_profile
 			(tsql_prepare_query_relations bound_query policy planning_session tx)
 			planning_session tx (tsql_arithmetic_enabled frontend_options)))))
@@ -6676,10 +6680,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(define targets (tsql_select_assignment_targets query))
 		(if (and xml_mode targets) (error "SELECT assignment cannot use terminal XML formatting") true)
 		(define query (if targets (tsql_select_assignment_query query targets) query))
+		(define bound_query (tsql_finalize_sources query "query" '() '()))
 		(if compile_only
-			(tsql_compile_query_binding (tsql_finalize_sources query "query" '() '()) policy planning_session tx)
+			(tsql_compile_query_binding bound_query policy planning_session tx)
 			(begin
-				(define expanded (tsql_expand_select_query query))
+				(define expanded (tsql_expand_select_query bound_query))
 				/* Binding validates names and contracts but lowers conversion callbacks.
 				Describe the original declared expressions so NULL folding cannot erase
 				their explicit widths or temporal precision. Analysis still consumes the
@@ -6688,7 +6693,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(define descriptors (if xml_mode (tsql_for_xml_descriptors (qb_schema expanded) parameters)
 					(tsql_result_columns expanded parameters)))
 				(if analyze_parameters (list (quote quote) checked)
-					describe (list (quote quote) (if targets '() descriptors))
+					describe (list (quote quote) (if targets '()
+						(if (frontend_options "__tsql_select_into_description")
+							(list descriptors (if xml_mode (map descriptors (lambda (_field) nil))
+								(tsql_select_into_provenance bound_query expanded tx))) descriptors)))
 					targets (tsql_assignment_plan expanded targets)
 					xml_mode (tsql_for_xml_plan expanded xml_alias parameters planning_session tx)
 					(list (quote !begin)
@@ -6713,7 +6721,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 						(list 'sql_type_expr nil (sql_info_datatype info) (sql_info_collation info)) declaration))))))
 				(tsql_command_binding 'insert-select (list typed declarations conversions) '()))))
 			(begin
-				(define expanded (tsql_expand_select_query query))
+				(define expanded (tsql_expand_select_query (tsql_finalize_sources query "query" '() '())))
 				(define identity (tsql_insert_identity database tbl planning_session tx))
 				(define deferred (tsql_insert_deferred_columns database tbl columns policy planning_session tx))
 				(define default_reads (query_expr_session_reads (map deferred cadr)))
@@ -7428,15 +7436,15 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(list 'tsql_checkident (list 'quote command) 'session 'tx))))
 		tsql_cte_mutation
 		(parser (define query tsql_root_select) (lambda () (tsql_build_select_plan query)))
-		(parser '(tsql_keyword_explain tsql_keyword_ir (define query tsql_root_select)) (lambda () (if compile_only (tsql_compile_query_binding (tsql_finalize_sources query "query" '() '()) policy planning_session tx) (explain_queryplan_ir (tsql_expand_select_query query)))))
-		(parser '(tsql_keyword_explain tsql_keyword_reorder (define query tsql_root_select)) (lambda () (if compile_only (tsql_compile_query_binding (tsql_finalize_sources query "query" '() '()) policy planning_session tx) (explain_queryplan_reorder (tsql_expand_select_query query) planning_session))))
-		(parser '(tsql_keyword_explain tsql_keyword_compile (define query tsql_root_select)) (lambda () (if compile_only (tsql_compile_query_binding (tsql_finalize_sources query "query" '() '()) policy planning_session tx) (explain_queryplan_compile (tsql_expand_select_query query) parse_started_ns (strlen s) planning_session))))
-		(parser '(tsql_keyword_explain tsql_keyword_physical (define query tsql_root_select)) (lambda () (if compile_only (tsql_compile_query_binding (tsql_finalize_sources query "query" '() '()) policy planning_session tx) (explain_queryplan_physical (tsql_expand_select_query query) planning_session))))
+		(parser '(tsql_keyword_explain tsql_keyword_ir (define query tsql_root_select)) (lambda () (if compile_only (tsql_compile_query_binding (tsql_finalize_sources query "query" '() '()) policy planning_session tx) (explain_queryplan_ir (tsql_expand_select_query (tsql_finalize_sources query "query" '() '()))))))
+		(parser '(tsql_keyword_explain tsql_keyword_reorder (define query tsql_root_select)) (lambda () (if compile_only (tsql_compile_query_binding (tsql_finalize_sources query "query" '() '()) policy planning_session tx) (explain_queryplan_reorder (tsql_expand_select_query (tsql_finalize_sources query "query" '() '())) planning_session))))
+		(parser '(tsql_keyword_explain tsql_keyword_compile (define query tsql_root_select)) (lambda () (if compile_only (tsql_compile_query_binding (tsql_finalize_sources query "query" '() '()) policy planning_session tx) (explain_queryplan_compile (tsql_expand_select_query (tsql_finalize_sources query "query" '() '())) parse_started_ns (strlen s) planning_session))))
+		(parser '(tsql_keyword_explain tsql_keyword_physical (define query tsql_root_select)) (lambda () (if compile_only (tsql_compile_query_binding (tsql_finalize_sources query "query" '() '()) policy planning_session tx) (explain_queryplan_physical (tsql_expand_select_query (tsql_finalize_sources query "query" '() '())) planning_session))))
 		(parser '(tsql_keyword_explain (define query tsql_root_select))
 			(lambda () (if compile_only
 				(tsql_compile_query_binding (tsql_finalize_sources query "query" '() '()) policy planning_session tx)
 				(list 'resultrow (list 'list "code" (pretty_print (optimize
-					(build_queryplan_term (tsql_expand_select_query query)
+					(build_queryplan_term (tsql_expand_select_query (tsql_finalize_sources query "query" '() '()))
 						planning_session tx)) (settings "ExplainWidth")))))))
 		tsql_insert_bulk tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete tsql_truncate
 		tsql_create_view tsql_create_table tsql_rebuild_table tsql_alter_table tsql_create_index tsql_alter_index tsql_drop_index

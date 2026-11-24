@@ -885,13 +885,14 @@ value; the wire descriptor and SQL declaration own the type independently. */
 /* Description binds names and expression contracts without physical planning
 or execution. A single mutation without OUTPUT has an empty result contract;
 its ordinary grammar still validates declarations and input expressions. */
-(define tsql_describe_statement (lambda (tx schema text declarations session) (begin
+(define tsql_describe_statement (lambda (tx schema text declarations session select_into) (begin
 	(tsql_validate_login_identity session)
 	(tsql_require_database_access (tsql_session_actor session) schema)
 	(define planning (newsession))
 	(planning "__tsql_parameter_declarations" declarations)
 	(planning "__tsql_local_relations" (coalesceNil (session "__tsql_local_relations") '()))
 	(planning "__tsql_describe" true)
+	(planning "__tsql_select_into_description" select_into)
 	(planning "__tsql_quoted_identifier" (tsql_quoted_identifier session))
 	(planning "__tsql_ansi_nulls" (tsql_ansi_nulls session))
 	(planning "username" (session "username"))
@@ -909,7 +910,7 @@ its ordinary grammar still validates declarations and input expressions. */
 	/* The trusted diagnostic API keeps its historical default; wire sessions
 	always retain the authenticated explicit account. */
 	(if (nil? (session "username")) (session "username" "root") true)
-	(tsql_describe_statement tx schema text (tds_bind_declarations schema declarations) session))))
+	(tsql_describe_statement tx schema text (tds_bind_declarations schema declarations) session false))))
 
 /* INSERT EXEC borrows one native statement transaction across its procedure.
 Public DDL and transaction boundaries retain their separate owner. The full
@@ -1139,7 +1140,7 @@ admit another statement through the aborted-transaction recovery capability. */
 		(session "__tsql_fmtonly") (begin
 			/* Describe before physical planning: no scan, DML preparation or
 			volatile expression can execute in metadata-only mode. */
-			(define fields (tsql_describe_statement tx schema input declarations session))
+			(define fields (tsql_describe_statement tx schema input declarations session false))
 			(if (empty_list? fields) true
 				(resultfields (map fields (lambda (field) (field "name"))) fields))
 			0)
@@ -1224,14 +1225,17 @@ planner session or stored in a reusable plan. Nested SQL scopes inherit it. */
 					(or (has? '("__tsql_scope" "__tsql_connection_session" "__tsql_local_relations" "__tsql_table_variables" "__tsql_ansi_nulls_locked") key) (strlike key "__tsql_error_%"))
 					(and owner_schema (equal? key "schema"))
 					(has? module_keys key)))))))
-		'(key) (if (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
-			(or (has? '("__tsql_scope" "__tsql_connection_session" "__tsql_local_relations" "__tsql_table_variables" "__tsql_ansi_nulls_locked") key) (strlike key "__tsql_error_%"))
-			(and owner_schema (equal? key "schema"))
-			(has? module_keys key)) (local key) (parent key))
-		'(key value) (if (or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
-			(or (has? '("__tsql_scope" "__tsql_connection_session" "__tsql_local_relations" "__tsql_table_variables" "__tsql_ansi_nulls_locked") key) (strlike key "__tsql_error_%"))
-			(and owner_schema (equal? key "schema"))
-			(has? module_keys key)) (local key value) (parent key value))
+		'(key) (if (equal? key "__tsql_select_into_copy") nil
+			(or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
+				(or (has? '("__tsql_scope" "__tsql_connection_session" "__tsql_local_relations" "__tsql_table_variables" "__tsql_ansi_nulls_locked") key) (strlike key "__tsql_error_%"))
+				(and owner_schema (equal? key "schema"))
+				(has? module_keys key)) (local key) (parent key))
+		'(key value) (if (equal? key "__tsql_select_into_copy")
+			(error "SELECT INTO copy permission belongs to its population statement")
+			(or (strlike key "__tsql_parameter:%") (equal? key "__tsql_parameter_declarations")
+				(or (has? '("__tsql_scope" "__tsql_connection_session" "__tsql_local_relations" "__tsql_table_variables" "__tsql_ansi_nulls_locked") key) (strlike key "__tsql_error_%"))
+				(and owner_schema (equal? key "schema"))
+				(has? module_keys key)) (local key value) (parent key value))
 		_ (apply parent args))))))
 /* Table variables are lexical native relations. Only immutable SQL declarations
 are visible to planning; native scopes/handles stay in the non-enumerated frame
@@ -2037,7 +2041,7 @@ autocommit and unproved dispositions retain ordinary failure unwinding. */
 			The EXEC source uses its own admitted scope of the caller authority;
 			it may have its own local variables or ordinary public side effects.
 			Persistent destinations keep their existing joined statement owner. */
-			(if identity (tsql_check_identity_insert session target (not (nil? explicit_columns))
+			(if identity (tsql_check_identity_insert session target (sql_column_storage_name identity) (not (nil? explicit_columns))
 				(has? columns (identity "Field"))) true)
 			(define state (newsession))
 			(state "count" 0)

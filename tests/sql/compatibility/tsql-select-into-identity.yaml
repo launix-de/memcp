@@ -1,0 +1,367 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/en-us/sql/t-sql/queries/select-into-clause-transact-sql
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: SELECT INTO identity inheritance uses direct source provenance and original native copy owners
+setup:
+- sql: DROP VIEW IF EXISTS identity_into_view
+- sql: DROP PROCEDURE IF EXISTS identity_into_nested
+- sql: DROP TABLE IF EXISTS identity_into_persistent
+- sql: DROP TABLE IF EXISTS identity_into_source
+- sql: DROP TABLE IF EXISTS identity_into_other
+- sql: CREATE TABLE identity_into_source(id INT IDENTITY(7,1) NOT NULL,value INT NULL)
+- sql: INSERT identity_into_source(value) VALUES(10),(20)
+- sql: CREATE TABLE identity_into_other(id INT NOT NULL,value INT NULL)
+- sql: INSERT identity_into_other VALUES(7,70),(8,80)
+- sql: 'CREATE PROCEDURE identity_into_nested AS SELECT * INTO #identity_module_copy FROM identity_into_source WHERE
+    1=0; INSERT #identity_module_copy(value) VALUES(110); SELECT id,value FROM #identity_module_copy;'
+- sql: CREATE VIEW identity_into_view AS SELECT id,value FROM identity_into_source
+test_cases:
+- name: An empty direct identity export retains the positive source seed and generates omitted IDs
+  tds:
+    statements:
+    - sql: 'SELECT * INTO #identity_empty FROM identity_into_source WHERE value<0'
+    - sql: 'INSERT #identity_empty(value) VALUES(30),(40)'
+    - sql: 'SELECT id,value FROM #identity_empty ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 7
+          value: 30
+        - id: 8
+          value: 40
+    - sql: 'SELECT TOP 0 id FROM #identity_empty'
+      expect:
+        rows: 0
+        column_types:
+        - name: id
+          type: INT
+          nullable: false
+- name: A nonempty direct export copies actual IDs and advances only its own native counter
+  tds:
+    statements:
+    - sql: 'SELECT id,value INTO #identity_full FROM identity_into_source'
+    - sql: 'INSERT #identity_full(value) VALUES(30)'
+    - sql: 'SELECT id,value FROM #identity_full ORDER BY id'
+      expect:
+        rows: 3
+        data:
+        - id: 7
+          value: 10
+        - id: 8
+          value: 20
+        - id: 9
+          value: 30
+    - sql: SELECT id,value FROM identity_into_source ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 7
+          value: 10
+        - id: 8
+          value: 20
+- name: Renaming the direct identity result preserves generation under its new output name
+  tds:
+    statements:
+    - sql: 'SELECT id AS copied_id,value INTO #identity_alias FROM identity_into_source WHERE 1=0'
+    - sql: 'INSERT #identity_alias(value) VALUES(50)'
+    - sql: 'SELECT copied_id,value FROM #identity_alias'
+      expect:
+        rows: 1
+        data:
+        - copied_id: 7
+          value: 50
+- name: Temporary identity copy and generated rows rewind with native savepoints and generations
+  tds:
+    statements:
+    - sql: BEGIN TRAN
+    - sql: SAVE TRAN before_copy
+    - sql: 'SELECT * INTO #identity_rewind FROM identity_into_source WHERE 1=0'
+    - sql: 'INSERT #identity_rewind(value) VALUES(60)'
+    - sql: 'SELECT id,value FROM #identity_rewind'
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          value: 60
+    - sql: ROLLBACK TRAN before_copy
+    - sql: 'SELECT id FROM #identity_rewind'
+      expect:
+        error: true
+    - sql: 'SELECT * INTO #identity_rewind FROM identity_into_source WHERE 1=0'
+    - sql: 'INSERT #identity_rewind(value) VALUES(70)'
+    - sql: 'SELECT id,value,@@TRANCOUNT AS depth FROM #identity_rewind'
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          value: 70
+          depth: 1
+    - sql: ROLLBACK TRAN
+    - sql: 'SELECT id FROM #identity_rewind'
+      expect:
+        error: true
+- name: Persistent identity copy rollback removes its exact original declaration and rows
+  tds:
+    statements:
+    - sql: BEGIN TRAN
+    - sql: SELECT * INTO identity_into_persistent FROM identity_into_source
+    - sql: INSERT identity_into_persistent(value) VALUES(30)
+    - sql: SELECT id,value FROM identity_into_persistent ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 7
+          value: 10
+        - id: 8
+          value: 20
+        - id: 9
+          value: 30
+    - sql: ROLLBACK TRAN
+    - sql: SELECT OBJECT_ID(N'dbo.identity_into_persistent',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null
+- name: Persistent identity copies survive their creating connection with the correct next ID
+  tds:
+    statements:
+    - sql: SELECT * INTO identity_into_persistent FROM identity_into_source WHERE 1=0
+      connection: creator
+    - connection: creator
+      close: true
+    - sql: INSERT identity_into_persistent(value) VALUES(90)
+      connection: reader
+    - sql: SELECT id,value FROM identity_into_persistent
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          value: 90
+      connection: reader
+- name: A different public IDENTITY_INSERT setting survives internal identity population unchanged
+  tds:
+    statements:
+    - sql: 'CREATE TABLE #identity_other(id INT IDENTITY(101,1) NOT NULL,value INT)'
+    - sql: 'SET IDENTITY_INSERT #identity_other ON'
+    - sql: 'SELECT * INTO #identity_with_mode FROM identity_into_source WHERE 1=0'
+    - sql: 'INSERT #identity_with_mode(value) VALUES(5)'
+    - sql: 'INSERT #identity_with_mode(id,value) VALUES(123,6)'
+      expect:
+        error: true
+    - sql: 'SELECT id,value FROM #identity_with_mode'
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          value: 5
+    - sql: 'INSERT #identity_other(id,value) VALUES(150,7)'
+    - sql: 'SET IDENTITY_INSERT #identity_other OFF'
+    - sql: 'INSERT #identity_other(value) VALUES(8)'
+    - sql: 'SELECT id,value FROM #identity_other ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 150
+          value: 7
+        - id: 151
+          value: 8
+- name: Failed autocommit population leaves an empty inherited declaration without leaking copy permission
+  tds:
+    statements:
+    - sql: 'SELECT id,10/(id-7) AS quotient INTO #identity_failed FROM identity_into_source WHERE id=7'
+      expect:
+        error: true
+    - sql: 'INSERT #identity_failed(quotient) VALUES(5)'
+    - sql: 'SELECT id,quotient FROM #identity_failed'
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          quotient: 5
+    - sql: 'INSERT #identity_failed(id,quotient) VALUES(99,6)'
+      expect:
+        error: true
+    - sql: 'SELECT id,quotient FROM #identity_failed'
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          quotient: 5
+- name: A JOIN exports ordinary values instead of copying the identity property
+  tds:
+    statements:
+    - sql: 'SELECT s.id,s.value INTO #identity_join FROM identity_into_source s INNER JOIN identity_into_other o
+        ON s.id=o.id'
+    - sql: 'INSERT #identity_join(id,value) VALUES(99,90)'
+    - sql: 'SELECT id,value FROM #identity_join ORDER BY id'
+      expect:
+        rows: 3
+        data:
+        - id: 7
+          value: 10
+        - id: 8
+          value: 20
+        - id: 99
+          value: 90
+    - sql: 'SELECT TOP 0 id FROM #identity_join'
+      expect:
+        rows: 0
+        column_types:
+        - name: id
+          type: INT
+          nullable: false
+- name: UNION exports ordinary values instead of copying the identity property
+  tds:
+    statements:
+    - sql: 'SELECT id,value INTO #identity_union FROM identity_into_source UNION ALL SELECT id,value FROM identity_into_source'
+    - sql: 'INSERT #identity_union(id,value) VALUES(99,90)'
+    - sql: 'SELECT id,value FROM #identity_union ORDER BY id'
+      expect:
+        rows: 5
+        data:
+        - id: 7
+          value: 10
+        - id: 7
+          value: 10
+        - id: 8
+          value: 20
+        - id: 8
+          value: 20
+        - id: 99
+          value: 90
+    - sql: 'SELECT TOP 0 id FROM #identity_union'
+      expect:
+        rows: 0
+        column_types:
+        - name: id
+          type: INT
+          nullable: false
+- name: Duplicating an identity projection creates two ordinary nonnullable columns
+  tds:
+    statements:
+    - sql: 'SELECT id AS first_id,id AS second_id INTO #identity_duplicate FROM identity_into_source'
+    - sql: 'INSERT #identity_duplicate(first_id,second_id) VALUES(99,100)'
+    - sql: 'SELECT first_id,second_id FROM #identity_duplicate ORDER BY first_id'
+      expect:
+        rows: 3
+        data:
+        - first_id: 7
+          second_id: 7
+        - first_id: 8
+          second_id: 8
+        - first_id: 99
+          second_id: 100
+    - sql: 'SELECT TOP 0 first_id,second_id FROM #identity_duplicate'
+      expect:
+        rows: 0
+        column_types:
+        - name: first_id
+          type: INT
+          nullable: false
+        - name: second_id
+          type: INT
+          nullable: false
+- name: An identity expression copies its values without inheriting generation
+  tds:
+    statements:
+    - sql: 'SELECT id+0 AS id,value INTO #identity_expression FROM identity_into_source'
+    - sql: 'INSERT #identity_expression(id,value) VALUES(99,90)'
+    - sql: 'SELECT id,value FROM #identity_expression ORDER BY id'
+      expect:
+        rows: 3
+        data:
+        - id: 7
+          value: 10
+        - id: 8
+          value: 20
+        - id: 99
+          value: 90
+- name: A stored module owns and retires its inherited temporary identity generation
+  setup:
+  - sql: 'CREATE PROCEDURE identity_into_module AS SELECT * INTO #identity_module_copy FROM identity_into_source
+      WHERE 1=0; INSERT #identity_module_copy(value) VALUES(110); SELECT id,value FROM #identity_module_copy;'
+  sql: EXEC identity_into_module
+  expect:
+    rows: 1
+    data:
+    - id: 7
+      value: 110
+  cleanup:
+  - sql: DROP PROCEDURE identity_into_module
+- name: Nested module-local identity copies cannot replace a callers same-named generation
+  tds:
+    statements:
+    - sql: 'CREATE TABLE #identity_module_copy(id INT IDENTITY(41,1),value INT)'
+    - sql: 'INSERT #identity_module_copy(value) VALUES(200)'
+    - sql: EXEC identity_into_nested
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          value: 110
+    - sql: 'INSERT #identity_module_copy(value) VALUES(300)'
+    - sql: 'SELECT id,value FROM #identity_module_copy ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 41
+          value: 200
+        - id: 42
+          value: 300
+- name: Copy permission is immutable hidden and bound to the exact native target independently of public settings
+  scm: |-
+    (begin
+     (define source (table "memcp-tests" false "identity_into_source" false nil))
+     (define other (table "memcp-tests" false "identity_into_other" false nil))
+     (define parent (newsession)) (parent "visible" 7)
+     (parent "__tsql_identity_insert" (list "memcp-tests" source "id"))
+     (define scoped (tsql_select_into_population_session parent (list other "id")))
+     (define exact_target (try (lambda () (begin
+      (tsql_check_identity_insert scoped source "id" true true) false))
+      (lambda (cause) (if (strlike (string (failure_value cause)) "%lost its exact created identity target%") true (error cause)))))
+     (define immutable (try (lambda () (begin (scoped "__tsql_select_into_copy" nil) false))
+      (lambda (cause) (if (strlike (string (failure_value cause)) "%copy target is immutable%") true (error cause)))))
+     (define nested (tsql_scope_session scoped '() nil false))
+     (define nested_normal (tsql_check_identity_insert nested source "id" true true))
+     (and exact_target immutable nested_normal (nil? (nested "__tsql_select_into_copy")) (expression_equal? (scoped) (parent))
+      (not (has? (scoped) "__tsql_select_into_copy"))
+      (nil? (parent "__tsql_select_into_copy"))
+      (identical? (cadr (parent "__tsql_identity_insert")) source)))
+  expect:
+    result: true
+- name: A derived direct identity export retains its documented future inheritance contract
+  noncritical: true
+  tds:
+    statements:
+    - sql: 'SELECT id,value INTO #identity_derived FROM (SELECT id,value FROM identity_into_source) source WHERE
+        1=0'
+    - sql: 'INSERT #identity_derived(value) VALUES(120)'
+    - sql: 'SELECT id,value FROM #identity_derived'
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          value: 120
+- name: A view direct identity export retains its documented future inheritance contract
+  noncritical: true
+  tds:
+    statements:
+    - sql: 'SELECT id,value INTO #identity_view FROM identity_into_view WHERE 1=0'
+    - sql: 'INSERT #identity_view(value) VALUES(120)'
+    - sql: 'SELECT id,value FROM #identity_view'
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          value: 120
+cleanup:
+- sql: DROP VIEW IF EXISTS identity_into_view
+- sql: DROP PROCEDURE IF EXISTS identity_into_nested
+- sql: DROP PROCEDURE IF EXISTS identity_into_module
+- sql: DROP TABLE IF EXISTS identity_into_persistent
+- sql: DROP TABLE IF EXISTS identity_into_other
+- sql: DROP TABLE IF EXISTS identity_into_source
