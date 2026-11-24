@@ -189,7 +189,7 @@ result flags cannot prove that a direct export lacks an underlying identity. */
 	_ false)))
 (define tsql_select_into_provenance (lambda (query expanded tx) (match query
 	((symbol union-block) _mode branches _order _limit _offset _facts)
-	(map (tsql_select_into_provenance (car branches) (car (caddr expanded)) tx)
+	(map (tsql_select_into_provenance (car branches) (car (union_branches expanded)) tx)
 		/* Only a proven identity becomes an ordinary NOT NULL export. Unknown
 		provenance may also describe an ordinary nullable column. */
 		(lambda (origin) (if origin
