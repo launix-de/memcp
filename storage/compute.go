@@ -1849,12 +1849,19 @@ func buildColsChangedExpr(cols []string) scm.Scmer {
 	}
 	checks := make([]scm.Scmer, len(cols))
 	for i, col := range cols {
+		// Match sameUpdateValue: NULL has its own stored presence, while
+		// non-NULL inputs retain Scheme's existing coercing/content equality.
+		// This is a value-change guard, not the computor's filter equality.
 		checks[i] = scm.NewSlice([]scm.Scmer{
-			scm.NewSymbol("not"),
-			scm.NewSlice([]scm.Scmer{
-				scm.NewSymbol("equal?"),
-				fkGetAssocExpr("OLD", col),
-				fkGetAssocExpr("NEW", col),
+			scm.NewSymbol("or"),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("not"),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("nil?"), fkGetAssocExpr("OLD", col)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("nil?"), fkGetAssocExpr("NEW", col)}),
+				}),
+			}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("not"),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), fkGetAssocExpr("OLD", col), fkGetAssocExpr("NEW", col)}),
 			}),
 		})
 	}
