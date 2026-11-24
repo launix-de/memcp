@@ -100,6 +100,45 @@ test_cases:
       SELECT id,quotient FROM #failed;
       DROP TABLE #failed;
     expect: {rows: 1,data: [{id: 8,quotient: 9}]}
+  - name: Direct catalog SELECT INTO copies ordinary declaration columns
+    setup:
+      - sql: CREATE TABLE catalog_into_source(id INT NOT NULL)
+    tds:
+      statements:
+        - sql: |
+            SELECT object_id,name INTO #catalog_direct
+            FROM sys.objects WHERE name=N'catalog_into_source' AND type=N'U'
+        - sql: SELECT TOP 0 object_id,name FROM #catalog_direct
+          expect:
+            rows: 0
+            column_types:
+              - {name: object_id, type: INT, nullable: false}
+              - {name: name, type: NVARCHAR, nullable: false}
+        - sql: INSERT #catalog_direct(object_id,name) VALUES(-7,N'manual')
+        - sql: |
+            SELECT name,CASE WHEN object_id=OBJECT_ID(N'dbo.catalog_into_source') THEN 1 ELSE 0 END AS source_match
+            FROM #catalog_direct ORDER BY object_id
+          expect:
+            rows: 2
+            data: [{name: manual, source_match: 0}, {name: catalog_into_source, source_match: 1}]
+    cleanup:
+      - sql: DROP TABLE catalog_into_source
+  - name: Derived empty catalog SELECT INTO retains writable ordinary types
+    tds:
+      statements:
+        - sql: |
+            SELECT object_id,name INTO #catalog_derived_empty
+            FROM (SELECT object_id,name FROM sys.objects WHERE type=N'U') AS objects
+            WHERE 1=0
+        - sql: SELECT TOP 0 object_id,name FROM #catalog_derived_empty
+          expect:
+            rows: 0
+            column_types:
+              - {name: object_id, type: INT, nullable: false}
+              - {name: name, type: NVARCHAR, nullable: false}
+        - sql: INSERT #catalog_derived_empty(object_id,name) VALUES(-9,N'after')
+        - sql: SELECT object_id,name FROM #catalog_derived_empty
+          expect: {rows: 1, data: [{object_id: -9, name: after}]}
 cleanup:
   - session_id: select_into_session
     sql: |
