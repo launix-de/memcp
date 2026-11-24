@@ -1849,7 +1849,7 @@ formula reaches the existing native INSERT. No relational list is retained. */
 			(list (quote sql_type_expr) (list (quote nth) (quote row) (+ 1 (* 2 index)))
 				type (field "sql_collation")) (nth declarations index))))))))
 	(define formula (tsql_native_insert_expr (quote target) identity columns
-		(list (quote list) values) 1 false (tsql_insert_deferred_columns database target_name columns policy planning tx)
+		(list (quote list) values) 1 false nil (tsql_insert_deferred_columns database target_name columns policy planning tx)
 		(tsql_write_declarations database target_name planning tx)))
 	(define compiled (eval (list (quote lambda)
 		(list (quote row) (quote session) (quote tx) (quote target))
@@ -1947,7 +1947,7 @@ the storage engine owns rollback, partitioning, constraints and durability. */
 				(tsql_assignment_expr (tsql_default_assignment_expr declaration (pending "database") policy planning tx) declaration) assigned)
 			assigned)))))))
 	(define identity (tsql_insert_identity (pending "database") (pending "name") nil tx))
-	(define formula (tsql_native_insert_expr (quote target) identity columns (list (quote list) values) 1 false
+	(define formula (tsql_native_insert_expr (quote target) identity columns (list (quote list) values) 1 false nil
 		(tsql_insert_deferred_columns (pending "database") (pending "name") columns policy planning tx)
 		(tsql_write_declarations (pending "database") (pending "name") planning tx)))
 	(define compiled (eval (list (quote lambda) (list (quote row) (quote session) (quote tx) (quote target))

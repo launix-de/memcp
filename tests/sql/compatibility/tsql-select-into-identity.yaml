@@ -10,6 +10,7 @@ setup:
 - sql: DROP VIEW IF EXISTS identity_into_view
 - sql: DROP PROCEDURE IF EXISTS identity_into_nested
 - sql: DROP TABLE IF EXISTS identity_into_persistent
+- sql: DROP TABLE IF EXISTS identity_into_guard
 - sql: DROP TABLE IF EXISTS identity_into_source
 - sql: DROP TABLE IF EXISTS identity_into_other
 - sql: CREATE TABLE identity_into_source(id INT IDENTITY(7,1) NOT NULL,value INT NULL)
@@ -319,7 +320,7 @@ test_cases:
      (define other (table "memcp-tests" false "identity_into_other" false nil))
      (define parent (newsession)) (parent "visible" 7)
      (parent "__tsql_identity_insert" (list "memcp-tests" source "id"))
-     (define scoped (tsql_select_into_population_session parent (list other "id")))
+     (define scoped (tsql_select_into_population_session parent (list other "id" 7)))
      (define exact_target (try (lambda () (begin
       (tsql_check_identity_insert scoped source "id" true true) false))
       (lambda (cause) (if (strlike (string (failure_value cause)) "%lost its exact created identity target%") true (error cause)))))
@@ -327,12 +328,46 @@ test_cases:
       (lambda (cause) (if (strlike (string (failure_value cause)) "%copy target is immutable%") true (error cause)))))
      (define nested (tsql_scope_session scoped '() nil false))
      (define nested_normal (tsql_check_identity_insert nested source "id" true true))
-     (and exact_target immutable nested_normal (nil? (nested "__tsql_select_into_copy")) (expression_equal? (scoped) (parent))
+     (and exact_target immutable (nil? nested_normal) (nil? (nested "__tsql_select_into_copy")) (expression_equal? (scoped) (parent))
       (not (has? (scoped) "__tsql_select_into_copy"))
       (nil? (parent "__tsql_select_into_copy"))
       (identical? (cadr (parent "__tsql_identity_insert")) source)))
   expect:
     result: true
+- name: Native copy admission validates its bounded batch without altering the original transaction
+  setup:
+  - sql: DROP TABLE IF EXISTS identity_into_guard
+  - sql: CREATE TABLE identity_into_guard(id INT IDENTITY(7,1) NOT NULL,value INT)
+  scm: |-
+    (begin
+     (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+     (define run (lambda (session text) (begin
+      (define out (newsession))
+      (tsql_execute_request "memcp-tests" text session nil 0
+       (lambda (row) (out "row" row)) (lambda fields true))
+      (out "row"))))
+     (define target (table "memcp-tests" false "identity_into_guard" false nil))
+     (run s "BEGIN TRAN")
+     (run s "UPDATE identity_into_other SET value=71 WHERE id=7")
+     (define original (s "__memcp_tx"))
+     (define scoped (tsql_select_into_population_session s (list target "id" 7)))
+     (define rejected (try (lambda () (begin
+      (run scoped "INSERT identity_into_guard(id,value) VALUES(8,80),(1,10)") false))
+      (lambda (cause) (if (strlike (string (failure_value cause)) "%copied identity values below the inherited seed%") true
+       (error cause)))))
+     (define preserved (and rejected (identical? original (s "__memcp_tx"))
+      (equal? ((run s "SELECT COUNT(*) AS n FROM identity_into_guard") "n") 0)
+      (equal? ((run s "SELECT value FROM identity_into_other WHERE id=7") "value") 71)
+      (equal? ((run s "SELECT @@TRANCOUNT AS depth") "depth") 1)))
+     (run s "ROLLBACK TRAN")
+     (and preserved
+      (equal? ((run s "SELECT value FROM identity_into_other WHERE id=7") "value") 70)
+      (tsql_validate_explicit_identity -5 nil) (tsql_validate_explicit_identity 7 7)
+      (nil? (s "__tsql_select_into_copy"))))
+  expect:
+    result: true
+  cleanup:
+  - sql: DROP TABLE identity_into_guard
 - name: A derived direct identity export retains its documented future inheritance contract
   noncritical: true
   tds:
@@ -358,7 +393,87 @@ test_cases:
         data:
         - id: 7
           value: 120
+- name: Direct identity copies preserve explicit positive IDs below the inherited seed
+  noncritical: true
+  scm: |-
+    (begin
+     (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+     (define run (lambda (text) (begin
+      (define out (newsession))
+      (tsql_execute_request "memcp-tests" text s nil 0
+       (lambda (row) (out "row" row)) (lambda fields true))
+      (out "row"))))
+     (run "BEGIN TRAN")
+     (define outcome (try (lambda () (begin
+      (run "CREATE TABLE #identity_low_source(id INT IDENTITY(7,1) NOT NULL,value INT)")
+      (run "SET IDENTITY_INSERT #identity_low_source ON")
+      (run "INSERT #identity_low_source(id,value) VALUES(1,10),(2,20)")
+      (run "SET IDENTITY_INSERT #identity_low_source OFF")
+      (run "SELECT id,value INTO #identity_low_copy FROM #identity_low_source")
+      (define tx (s "__memcp_tx"))
+      (define binding (tsql_resolve_relation "memcp-tests" "#identity_low_copy" s tx))
+      (define target (tsql_native_relation_handle (car binding) (cadr binding) tx))
+      (define identity (find (show target "columns" tx) (lambda (column) (equal? (column "Field") "id")) nil))
+      (list true (list ((run "SELECT id FROM #identity_low_copy WHERE value=10") "id")
+       ((run "SELECT id FROM #identity_low_copy WHERE value=20") "id")
+       ((run "SELECT COUNT(*) AS n FROM #identity_low_copy") "n")
+       (identity "Extra") (identity "RawType") (identity "Null") ((table_id_state target tx) "start")
+       ((run "SELECT @@TRANCOUNT AS depth") "depth")))))
+      (lambda (cause) (list false cause))))
+     (if (s "transaction") (run "ROLLBACK TRAN") true)
+     (tsql_temporary_close s)
+     (if (car outcome) (cadr outcome) (error (cadr outcome))))
+  expect:
+    result:
+    - 1
+    - 2
+    - 2
+    - auto_increment
+    - INT
+    - false
+    - '7'
+    - 1
+- name: Direct identity copies preserve negative IDs generated after a source reseed
+  noncritical: true
+  scm: |-
+    (begin
+     (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+     (define run (lambda (text) (begin
+      (define out (newsession))
+      (tsql_execute_request "memcp-tests" text s nil 0
+       (lambda (row) (out "row" row)) (lambda fields true))
+      (out "row"))))
+     (run "BEGIN TRAN")
+     (define outcome (try (lambda () (begin
+      (run "CREATE TABLE #identity_low_source(id INT IDENTITY(7,1) NOT NULL,value INT)")
+      (run "DBCC CHECKIDENT (N'#identity_low_source',RESEED,-5)")
+      (run "INSERT #identity_low_source(value) VALUES(10),(20)")
+      (run "SELECT id,value INTO #identity_low_copy FROM #identity_low_source")
+      (define tx (s "__memcp_tx"))
+      (define binding (tsql_resolve_relation "memcp-tests" "#identity_low_copy" s tx))
+      (define target (tsql_native_relation_handle (car binding) (cadr binding) tx))
+      (define identity (find (show target "columns" tx) (lambda (column) (equal? (column "Field") "id")) nil))
+      (list true (list ((run "SELECT id FROM #identity_low_copy WHERE value=10") "id")
+       ((run "SELECT id FROM #identity_low_copy WHERE value=20") "id")
+       ((run "SELECT COUNT(*) AS n FROM #identity_low_copy") "n")
+       (identity "Extra") (identity "RawType") (identity "Null") ((table_id_state target tx) "start")
+       ((run "SELECT @@TRANCOUNT AS depth") "depth")))))
+      (lambda (cause) (list false cause))))
+     (if (s "transaction") (run "ROLLBACK TRAN") true)
+     (tsql_temporary_close s)
+     (if (car outcome) (cadr outcome) (error (cadr outcome))))
+  expect:
+    result:
+    - -5
+    - -4
+    - 2
+    - auto_increment
+    - INT
+    - false
+    - '7'
+    - 1
 cleanup:
+- sql: DROP TABLE IF EXISTS identity_into_guard
 - sql: DROP VIEW IF EXISTS identity_into_view
 - sql: DROP PROCEDURE IF EXISTS identity_into_nested
 - sql: DROP PROCEDURE IF EXISTS identity_into_module

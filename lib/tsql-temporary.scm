@@ -326,7 +326,7 @@ instead retain their existing actual transaction across both operations. */
 	(define target (if temporary (quoted name) (concat (quoted destination) ".[dbo]." (quoted name))))
 	(list (concat definitions "INSERT INTO " target " (" (reduce (map names quoted)
 		(lambda (text column) (concat text (if (equal? text "") "" ",") column)) "") ") " query)
-		(if identity (list handle (sql_column_storage_name identity)) nil) identity_source))))
+		(if identity (list handle (sql_column_storage_name identity) (identity_source "seed")) nil) identity_source))))
 (define tsql_run_select_into (lambda (name query definitions owner statement session) (begin
 	(define populate (lambda (tx input) (begin
 		(define source (nth input 2))

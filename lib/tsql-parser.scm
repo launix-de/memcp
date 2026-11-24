@@ -2858,18 +2858,28 @@ The current directory/name and column descriptors remain native metadata. */
 			(session "__tsql_identity_insert" (list database handle (sql_column_storage_name identity))))
 		same (session "__tsql_identity_insert" nil) true)
 	0)))
+/* Admit once before the source stream. The result is an optional immutable
+copy lower bound, not a connection setting or a sink-local session lookup. */
 (define tsql_check_identity_insert (lambda (session handle physical explicit_columns supplied) (begin
 	(define copy (session "__tsql_select_into_copy"))
 	(define mode (session "__tsql_identity_insert"))
 	(define enabled (if (nil? mode) false (identical? handle (cadr mode))))
 	(if copy
-		(if (and explicit_columns supplied (identical? handle (car copy)) (equal? physical (cadr copy))) true
+		(if (and explicit_columns supplied (identical? handle (car copy)) (equal? physical (cadr copy))) (nth copy 2)
 			(error "SELECT INTO lost its exact created identity target"))
-		(nil? physical) true
+		(nil? physical) nil
 		supplied
-		(if (and explicit_columns enabled) true
+		(if (and explicit_columns enabled) nil
 			(tsql_raise_error 544 "explicit IDENTITY values require a column list and IDENTITY_INSERT ON" 1))
-		enabled (tsql_raise_error 545 "IDENTITY_INSERT ON requires an explicit IDENTITY value" 1) true))))
+		enabled (tsql_raise_error 545 "IDENTITY_INSERT ON requires an explicit IDENTITY value" 1) nil))))
+/* Native V1 counters do not attest first-explicit values below their seed.
+Until that profile has a proven SQL counter contract, reject those copied
+values in the existing bounded row validator; ordinary explicit INSERT has no
+copy bound and retains its existing value semantics. Never pre-scan the source. */
+(define tsql_validate_explicit_identity (lambda (value copy_minimum)
+	(if (nil? value) (error "IDENTITY cannot be assigned NULL")
+		(if copy_minimum (< value copy_minimum) false)
+		(error "SELECT INTO copied identity values below the inherited seed are not supported") true)))
 /* Only compile-time declarations choose identity policy and value bounds.
 The statement binds one native handle before either its source or allocator;
 parallel SELECT sinks borrow it without session-setting probes per row. */
@@ -2899,10 +2909,13 @@ with_table_mutation borrows that same owner rather than reopening its writer. */
 		(list 'table database false name false 'tx)))
 	(define formula (physical_mutation_producer (list target) (list "insert" '()) (list (quote begin)
 		(list (quote define) (quote __tsql_insert_target) target)
-		(list (quote tsql_check_identity_insert) (quote session) (quote __tsql_insert_target)
-			(if identity (sql_column_storage_name identity) nil)
-			explicit_columns (if identity (has? columns (identity "Field")) false))
-		body)))
+		/* MATCH keeps admission before the whole producer even if its bound
+		minimum is used only once inside the parallel sink, or not at all. */
+		(list (quote match)
+			(list (quote tsql_check_identity_insert) (quote session) (quote __tsql_insert_target)
+				(if identity (sql_column_storage_name identity) nil)
+				explicit_columns (if identity (has? columns (identity "Field")) false))
+			(quote __tsql_insert_copy_minimum) body))))
 	(if (local_relation_reference? name)
 		(tsql_independent_dml_expr target (list "insert" '()) formula) formula))))
 /* Emit the existing native INSERT. VALUES and DEFAULT supply their bounded
@@ -2911,7 +2924,7 @@ scan/count/materialize SELECT input to reserve IDs, or rewind consumed blocks.
 The frontend checks the complete reserved block before any row publication.
 Explicit NULL must fail here: native auto_increment would otherwise allocate
 an unchecked replacement. Completion uses only this invocation's reserved range. */
-(define tsql_native_insert_expr (lambda (relation identity columns values row_count capture_identity deferred storage_declarations) (begin
+(define tsql_native_insert_expr (lambda (relation identity columns values row_count capture_identity copy_minimum deferred storage_declarations) (begin
 	(define columns (merge (list columns (map deferred car))))
 	(define values (if (empty_list? deferred) values
 		(list (quote map) values (list (quote lambda) (list (quote __default_row))
@@ -2941,7 +2954,7 @@ an unchecked replacement. Completion uses only this invocation's reserved range.
 					'('define '__tsql_rows values)
 					'('reduce '__tsql_rows
 						'('lambda '('valid 'row)
-							'('if '('nil? '('nth 'row explicit)) '('error "IDENTITY cannot be assigned NULL") 'valid)) true)
+							'('tsql_validate_explicit_identity '('nth 'row explicit) copy_minimum)) true)
 					(match (native_insert columns (quote __tsql_rows) callback) explicit_insert
 						(if capture_identity
 							'('match explicit_insert '__tsql_explicit_result
@@ -6733,7 +6746,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 							(sql_type_formula '() (tsql_assignment_expr
 								(list (quote sql_type_expr) '('nth 'item (+ (* i 2) 1))
 									(sql_info_datatype info) (sql_info_collation info))
-								(nth declarations i))))))))) 1 false deferred
+								(nth declarations i))))))))) 1 false (quote __tsql_insert_copy_minimum) deferred
 					(tsql_write_declarations database tbl planning_session tx)))
 				(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
 					(error "INSERT column count does not match SELECT column count"))
@@ -6900,7 +6913,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 										(list (nth columns i) (nth row i)))))))) true nil nil nil nil nil nil nil nil))
 								(tsql_identity_insert_statement database tbl identity explicit_columns columns
 									(tsql_native_insert_expr (quote __tsql_insert_target) identity columns (sql_insert_values_expr
-										(map typed_rows (lambda (row) (map row (lambda (value) (sql_type_formula '() value)))))) (count rows) true (tsql_insert_deferred_columns database tbl columns policy planning_session tx)
+										(map typed_rows (lambda (row) (map row (lambda (value) (sql_type_formula '() value)))))) (count rows) true (quote __tsql_insert_copy_minimum) (tsql_insert_deferred_columns database tbl columns policy planning_session tx)
 										(tsql_write_declarations database tbl planning_session tx))))))
 	))))))
 
@@ -6929,7 +6942,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(tsql_identity_insert_statement database tbl identity false '()
 						(tsql_native_insert_expr (quote __tsql_insert_target) identity '()
 							(if (equal?? limit 0) '('list) '('list '(list)))
-							(if (equal?? limit 0) 0 1) true (tsql_insert_deferred_columns database tbl '() policy planning_session tx)
+							(if (equal?? limit 0) 0 1) true (quote __tsql_insert_copy_minimum) (tsql_insert_deferred_columns database tbl '() policy planning_session tx)
 							(tsql_write_declarations database tbl planning_session tx))))))))))
 
 	(define tsql_insert_select (parser '(
