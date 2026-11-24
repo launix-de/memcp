@@ -2988,7 +2988,15 @@ func RenameTable(t *table, newname string, ignoreCase bool, expectedIdentity str
 		panic("table rename requires an actual native table")
 	}
 	if tx != nil {
-		return tx.renameCatalogTable(t, newname, ignoreCase, expectedIdentity)
+		if tx.State != TxActive {
+			panic("table rename requires an active native transaction")
+		}
+		// ACID owns a private catalog delta. Cursor-stability requests use the
+		// established immediate schema owner, including its replication/MOSI
+		// acquisition; a non-nil request context is not an ACID decision.
+		if tx.Mode == TxACID {
+			return tx.renameCatalogTable(t, newname, ignoreCase, expectedIdentity)
+		}
 	}
 	db := t.schema
 	if db == nil || GetDatabase(db.Name) != db {
