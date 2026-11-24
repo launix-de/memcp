@@ -1049,7 +1049,14 @@ preparing nested stages; no free caller SQL column may enter an inner program. *
 				not an inner SQL comparison against a possibly NULL-bearing tuple. */
 				(define input_sources (qb_sources input))
 				(define scoped_sources (filter input_sources (lambda (src)
-					(scoped_program_probe_stage? all_stages (source_stage_output_stage all_stages src)))))
+					(begin
+						(define dependency (source_stage_output_stage all_stages src))
+						(or (scoped_program_probe_stage? all_stages dependency)
+							/* A residual D coordinate belongs to this input's driver
+							row. Its scalar dependency cannot prepare an independent
+							carrier before that row binds the complete caller tuple. */
+							(and (scalar_first_probe_supported? dependency)
+								(stage_has_residual_outer_refs? dependency)))))))
 				(define contribution_sources (if (or (not (nil? property_cover)) (equal? contribution_mode (quote delta)) (equal? contribution_mode (quote fresh)))
 					(filter input_sources source_is_stage_output?) '()))
 				(define caller_sources (sources_without_probe_outputs input_sources
@@ -1057,8 +1064,11 @@ preparing nested stages; no free caller SQL column may enter an inner program. *
 				(define default_alias (qassoc_get (qb_facts input) 'default_alias
 					(if (empty_list? input_sources) nil (source_alias (car input_sources)))))
 				(define scoped_sources (filter scoped_sources (lambda (src)
-					(stage_lookup_keys_resolve_in_sources?
-						(source_stage_output_stage all_stages src) caller_sources default_alias))))
+					(begin
+						(define dependency (source_stage_output_stage all_stages src))
+						(and (stage_lookup_keys_resolve_in_sources? dependency caller_sources default_alias)
+							(or (scoped_program_probe_stage? all_stages dependency)
+								(scalar_first_probe_bindings_complete? dependency caller_sources)))))))
 				(define scoped_input (if (empty_list? scoped_sources) input
 					(query_block_with_selected_probe_sources_using probe_catalog scoped_sources input)))
 				(define scoped_sources (consumed_probe_sources_for_block scoped_input scoped_sources))

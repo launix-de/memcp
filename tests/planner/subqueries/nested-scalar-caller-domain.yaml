@@ -1,0 +1,214 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Nested scalar dependencies bind their complete driver domain before preparation
+setup:
+- sql: DROP TABLE IF EXISTS nsl_driver
+- sql: DROP TABLE IF EXISTS nsl_middle
+- sql: DROP TABLE IF EXISTS nsl_target
+- sql: DROP TABLE IF EXISTS nsl_final
+- sql: CREATE TABLE nsl_driver (id INT, middle_id INT, tenant_id INT)
+- sql: CREATE TABLE nsl_middle (id INT, tenant_id INT, target_id INT, PRIMARY KEY (id, tenant_id))
+- sql: CREATE TABLE nsl_target (id INT PRIMARY KEY, tenant_id INT, final_id INT)
+- sql: CREATE TABLE nsl_final (id INT PRIMARY KEY, tenant_id INT, value INT)
+- sql: INSERT INTO nsl_driver VALUES (0,10,1),(1,10,1),(2,10,2),(3,11,1),(4,12,1),(5,NULL,1),(6,10,NULL),(7,99,1),(8,13,1)
+- sql: INSERT INTO nsl_middle VALUES (10,1,100),(10,2,200),(11,1,101),(12,1,102),(13,1,103)
+- sql: INSERT INTO nsl_target VALUES (100,1,1000),(101,1,1001),(102,1,1099),(103,1,1003),(200,2,2000)
+- sql: INSERT INTO nsl_final VALUES (1000,1,4),(1001,1,NULL),(1003,1,5),(2000,2,5)
+cleanup:
+- sql: DROP TABLE IF EXISTS nsl_driver
+- sql: DROP TABLE IF EXISTS nsl_middle
+- sql: DROP TABLE IF EXISTS nsl_target
+- sql: DROP TABLE IF EXISTS nsl_final
+test_cases:
+- name: Nested scalar rows preserve duplicate callers NULL payloads and absent matches
+  sql: |
+    SELECT d.id, (SELECT f.value FROM nsl_final f
+      WHERE f.tenant_id = 1 AND f.id = (
+        SELECT t.final_id FROM nsl_target t
+        WHERE t.tenant_id = 1 AND t.id = (
+          SELECT m.target_id FROM nsl_middle m
+          WHERE m.tenant_id = 1 AND m.id = d.middle_id LIMIT 1
+        ) LIMIT 1
+      ) LIMIT 1) AS value FROM nsl_driver d ORDER BY d.id
+  expect:
+    rows: 9
+    data:
+    - id: 0
+      value: 4
+    - id: 1
+      value: 4
+    - id: 2
+      value: 4
+    - id: 3
+      value: null
+    - id: 4
+      value: null
+    - id: 5
+      value: null
+    - id: 6
+      value: 4
+    - id: 7
+      value: null
+    - id: 8
+      value: 5
+- name: Aggregate predicate binds each driver coordinate before nested carrier preparation
+  sql: |
+    SELECT bounds.lo, category.val, COALESCE((
+      SELECT COUNT(*) FROM nsl_driver d
+      WHERE d.id BETWEEN bounds.lo AND bounds.lo + 3
+        AND (SELECT f.value FROM nsl_final f
+      WHERE f.tenant_id = 1 AND f.id = (
+        SELECT t.final_id FROM nsl_target t
+        WHERE t.tenant_id = 1 AND t.id = (
+          SELECT m.target_id FROM nsl_middle m
+          WHERE m.tenant_id = 1 AND m.id = d.middle_id LIMIT 1
+        ) LIMIT 1
+      ) LIMIT 1) = category.val
+    ), 0) AS matched
+    FROM (SELECT 0 AS lo UNION ALL SELECT 4 AS lo UNION ALL SELECT 8 AS lo) bounds CROSS JOIN (SELECT 4 AS val UNION ALL SELECT 5 AS val UNION ALL SELECT NULL AS val) category
+    ORDER BY bounds.lo, category.val
+  expect:
+    rows: 9
+    data:
+    - lo: 0
+      val: null
+      matched: 0
+    - lo: 0
+      val: 4
+      matched: 3
+    - lo: 0
+      val: 5
+      matched: 0
+    - lo: 4
+      val: null
+      matched: 0
+    - lo: 4
+      val: 4
+      matched: 1
+    - lo: 4
+      val: 5
+      matched: 0
+    - lo: 8
+      val: null
+      matched: 0
+    - lo: 8
+      val: 4
+      matched: 0
+    - lo: 8
+      val: 5
+      matched: 1
+- name: NULL scalar payload and missing nested rows are both visible to aggregate predicates
+  sql: |
+    SELECT bounds.lo, (
+      SELECT COUNT(*) FROM nsl_driver d
+      WHERE d.id BETWEEN bounds.lo AND bounds.lo + 3 AND (SELECT f.value FROM nsl_final f
+      WHERE f.tenant_id = 1 AND f.id = (
+        SELECT t.final_id FROM nsl_target t
+        WHERE t.tenant_id = 1 AND t.id = (
+          SELECT m.target_id FROM nsl_middle m
+          WHERE m.tenant_id = 1 AND m.id = d.middle_id LIMIT 1
+        ) LIMIT 1
+      ) LIMIT 1) IS NULL
+    ) AS missing
+    FROM (SELECT 0 AS lo UNION ALL SELECT 4 AS lo UNION ALL SELECT 8 AS lo) bounds ORDER BY bounds.lo
+  expect:
+    rows: 3
+    data:
+    - lo: 0
+      missing: 1
+    - lo: 4
+      missing: 3
+    - lo: 8
+      missing: 0
+- name: An empty driver still returns the complete neutral count result
+  sql: |
+    SELECT category.val, (
+      SELECT COUNT(*) FROM nsl_driver d WHERE d.id < 0 AND (SELECT f.value FROM nsl_final f
+      WHERE f.tenant_id = 1 AND f.id = (
+        SELECT t.final_id FROM nsl_target t
+        WHERE t.tenant_id = 1 AND t.id = (
+          SELECT m.target_id FROM nsl_middle m
+          WHERE m.tenant_id = 1 AND m.id = d.middle_id LIMIT 1
+        ) LIMIT 1
+      ) LIMIT 1) = category.val
+    ) AS matched
+    FROM (SELECT 4 AS val UNION ALL SELECT 5 AS val UNION ALL SELECT NULL AS val) category ORDER BY category.val
+  expect:
+    rows: 3
+    data:
+    - val: null
+      matched: 0
+    - val: 4
+      matched: 0
+    - val: 5
+      matched: 0
+- name: Two caller coordinates remain aligned through all three scalar stages
+  sql: |
+    SELECT bounds.lo, category.val, (
+      SELECT COUNT(*) FROM nsl_driver d
+      WHERE d.id BETWEEN bounds.lo AND bounds.lo + 3 AND (SELECT f.value FROM nsl_final f
+      WHERE f.tenant_id = d.tenant_id AND f.id = (
+        SELECT t.final_id FROM nsl_target t
+        WHERE t.tenant_id = d.tenant_id AND t.id = (
+          SELECT m.target_id FROM nsl_middle m
+          WHERE m.tenant_id = d.tenant_id AND m.id = d.middle_id LIMIT 1
+        ) LIMIT 1
+      ) LIMIT 1) = category.val
+    ) AS matched
+    FROM (SELECT 0 AS lo UNION ALL SELECT 4 AS lo UNION ALL SELECT 8 AS lo) bounds CROSS JOIN (SELECT 4 AS val UNION ALL SELECT 5 AS val UNION ALL SELECT NULL AS val) category
+    ORDER BY bounds.lo, category.val
+  expect:
+    rows: 9
+    data:
+    - lo: 0
+      val: null
+      matched: 0
+    - lo: 0
+      val: 4
+      matched: 2
+    - lo: 0
+      val: 5
+      matched: 1
+    - lo: 4
+      val: null
+      matched: 0
+    - lo: 4
+      val: 4
+      matched: 0
+    - lo: 4
+      val: 5
+      matched: 0
+    - lo: 8
+      val: null
+      matched: 0
+    - lo: 8
+      val: 4
+      matched: 0
+    - lo: 8
+      val: 5
+      matched: 1
+- name: Nested caller tuples preserve weighted aggregation and NULL tenant rejection
+  sql: |
+    SELECT bounds.lo, COALESCE((
+      SELECT SUM(d.id + 1) FROM nsl_driver d
+      WHERE d.id BETWEEN bounds.lo AND bounds.lo + 3 AND (SELECT f.value FROM nsl_final f
+      WHERE f.tenant_id = d.tenant_id AND f.id = (
+        SELECT t.final_id FROM nsl_target t
+        WHERE t.tenant_id = d.tenant_id AND t.id = (
+          SELECT m.target_id FROM nsl_middle m
+          WHERE m.tenant_id = d.tenant_id AND m.id = d.middle_id LIMIT 1
+        ) LIMIT 1
+      ) LIMIT 1) = 5
+    ), 0) AS weighted
+    FROM (SELECT 0 AS lo UNION ALL SELECT 4 AS lo UNION ALL SELECT 8 AS lo) bounds ORDER BY bounds.lo
+  expect:
+    rows: 3
+    data:
+    - lo: 0
+      weighted: 3
+    - lo: 4
+      weighted: 0
+    - lo: 8
+      weighted: 9
