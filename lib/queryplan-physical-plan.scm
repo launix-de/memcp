@@ -10979,9 +10979,9 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 				(prejoin_create_trigger_plan src (concat prefix "after_update") "after_update"
 					(list (quote !begin) delete_body insert_body))
 				(prejoin_create_trigger_plan src (concat prefix "after_drop_table") "after_drop_table"
-					(list (quote droptable) (qb_schema block) table_name true))
+					(list (quote droptable) (qb_schema block) table_name true (physical_query_tx_symbol)))
 				(prejoin_create_trigger_plan src (concat prefix "after_drop_column") "after_drop_column"
-					(list (quote droptable) (qb_schema block) table_name true)))))))))
+					(list (quote droptable) (qb_schema block) table_name true (physical_query_tx_symbol))))))))))
 
 (define prejoin_lookup_computed_column_plan (lambda (block table_name sources src col)
 	(begin

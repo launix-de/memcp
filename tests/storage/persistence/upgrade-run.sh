@@ -75,9 +75,12 @@ start_server base base-fill
 curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
   (begin
     /* This adapter runs only against predecessor binaries. The candidate has
-    one four-argument table interface; old releases had two arguments. */
+    a transaction argument; older releases had four or two arguments. */
     (define fixture_table (lambda (database name)
-      (coalesceNil (apply table (list database false name false))
+      (coalesceNil
+        (try (lambda () (apply table (list database false name false nil)))
+          (lambda (err) nil))
+        (apply table (list database false name false))
         (apply table (list database name)))))
     (createcolumn (fixture_table "memcp-tests" "up_compute") "doubled" "INT" (quote ()) (quote ())
       (quote ("val")) (lambda (val) (* val 2)))

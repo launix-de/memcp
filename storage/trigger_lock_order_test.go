@@ -24,7 +24,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/launix-de/NonLockingReadMap"
 	"github.com/launix-de/memcp/scm"
 )
 
@@ -237,11 +236,9 @@ func TestLegacyPersistedCacheTriggerWaitsForRuntimeTarget(t *testing.T) {
 }
 
 func TestDropTriggerDoesNotHoldSchemaLockWhileWaitingForTableDDL(t *testing.T) {
-	db := &database{Name: "trigger-lock-order", srState: COLD}
-	db.tables = NonLockingReadMap.NewReadMap[string, *table]()
-	table := &table{Name: "items", schema: db}
+	table, _ := createDurabilityTestTable(t, "trigger-lock-order", 1)
+	db := table.schema
 	table.Triggers = []TriggerDescription{{Name: "items_after_drop"}}
-	db.tables.Set(table.Name, table)
 
 	table.ddlMu.Lock()
 	dropped := make(chan bool, 1)
