@@ -57,8 +57,23 @@ test_cases:
     - connection: owner
       sql: ALTER TABLE validated_widen_child ADD CONSTRAINT PK_validated_widen_child PRIMARY KEY(id,stamp,part)
     - connection: owner
-      sql: ALTER TABLE validated_widen_child ADD CONSTRAINT FK_validated_widen FOREIGN KEY(id,stamp) REFERENCES validated_widen_parent(id,stamp)
-        ON UPDATE CASCADE ON DELETE CASCADE
+      sql: ALTER TABLE validated_widen_child ADD CONSTRAINT FK_validated_widen FOREIGN KEY(id,stamp) REFERENCES
+        validated_widen_parent(id,stamp) ON UPDATE CASCADE ON DELETE CASCADE
+    - connection: owner
+      sql: UPDATE validated_widen_marker SET value=100 WHERE id=1
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM validated_widen_marker WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 100
+          depth: 1
+    - connection: observer
+      sql: SELECT value FROM validated_widen_marker WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 0
     - connection: owner
       sql: SELECT max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent') AND name=N'stamp'
       expect:
@@ -156,6 +171,15 @@ test_cases:
     - connection: owner
       sql: UPDATE validated_widen_marker SET value=7 WHERE id=1
     - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM validated_widen_marker WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 7
+          depth: 2
+    - connection: owner
       sql: ALTER TABLE validated_widen_child DROP CONSTRAINT FK_validated_widen
     - connection: owner
       sql: ALTER TABLE validated_widen_child DROP CONSTRAINT PK_validated_widen_child
@@ -179,20 +203,40 @@ test_cases:
       sql: ALTER TABLE validated_widen_child ADD CONSTRAINT FK_validated_widen FOREIGN KEY(id,recorded) REFERENCES
         validated_widen_parent(id,recorded) ON UPDATE CASCADE ON DELETE CASCADE
     - connection: owner
-      sql: DBCC CHECKIDENT(validated_widen_counter,RESEED,20) WITH NO_INFOMSGS
+      sql: UPDATE validated_widen_marker SET value=8 WHERE id=1
     - connection: owner
-      sql: UPDATE validated_widen_parent SET recorded='2024-01-02T03:04:05.007' WHERE id=1
-    - connection: owner
-      sql: SELECT id,CONVERT(VARCHAR(30),recorded,121) AS stamp,value FROM validated_widen_parent ORDER BY id
+      sql: SELECT value,@@TRANCOUNT AS depth FROM validated_widen_marker WHERE id=1
       expect:
-        rows: 2
+        rows: 1
         data:
-        - id: 1
-          stamp: '2024-01-02 03:04:05.007'
-          value: 10
-        - id: 2
-          stamp: '2024-02-03 04:05:00.000'
-          value: 20
+        - value: 8
+          depth: 2
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM validated_widen_marker WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 8
+          depth: 1
+    - connection: owner
+      sql: UPDATE validated_widen_marker SET value=7 WHERE id=1
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM validated_widen_marker WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 7
+          depth: 1
+    - connection: observer
+      sql: SELECT value FROM validated_widen_marker WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 0
+    - connection: owner
+      sql: DBCC CHECKIDENT(validated_widen_counter,RESEED,20) WITH NO_INFOMSGS
     - connection: observer
       sql: SELECT max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent') AND name=N'stamp'
       expect:
@@ -220,6 +264,26 @@ test_cases:
           value: 20
     - connection: owner
       sql: COMMIT TRAN
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM validated_widen_marker WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 7
+          depth: 0
+    - connection: owner
+      sql: UPDATE validated_widen_parent SET recorded='2024-01-02T03:04:05.007' WHERE id=1
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(30),recorded,121) AS stamp,value FROM validated_widen_parent ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          stamp: '2024-01-02 03:04:05.007'
+          value: 10
+        - id: 2
+          stamp: '2024-02-03 04:05:00.000'
+          value: 20
     - connection: observer
       sql: SELECT max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent') AND name=N'recorded'
       expect:
@@ -402,6 +466,45 @@ test_cases:
     \ (restored \"Default\")) (date_parts requested))))\n\n"
   expect:
     result: true
+- name: Affected-table writes after rebuilding foreign declarations retain original transaction semantics
+  noncritical: true
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: ALTER TABLE validated_widen_child DROP CONSTRAINT FK_validated_widen
+    - connection: owner
+      sql: ALTER TABLE validated_widen_child ADD CONSTRAINT FK_validated_widen FOREIGN KEY(id,recorded) REFERENCES
+        validated_widen_parent(id,recorded) ON UPDATE CASCADE ON DELETE CASCADE
+    - connection: owner
+      sql: UPDATE validated_widen_parent SET recorded='2024-01-02T03:04:05.010' WHERE id=1
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(30),recorded,121) AS stamp,part,value FROM validated_widen_child ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          stamp: '2024-01-02 03:04:05.010'
+          part: 1
+          value: 100
+        - id: 2
+          stamp: '2024-02-03 04:05:00.000'
+          part: 1
+          value: 200
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(30),recorded,121) AS stamp,value FROM validated_widen_parent ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          stamp: '2024-01-02 03:04:05.007'
+          value: 10
+        - id: 2
+          stamp: '2024-02-03 04:05:00.000'
+          value: 20
 cleanup:
 - sql: DROP TABLE IF EXISTS validated_widen_child
 - sql: DROP TABLE IF EXISTS validated_widen_parent
