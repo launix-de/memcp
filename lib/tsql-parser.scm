@@ -851,14 +851,18 @@ https://learn.microsoft.com/sql/t-sql/statements/alter-table-transact-sql */
 			(and (equal? old "VARCHAR") (equal? type "NVARCHAR")
 				(equal? (count old_dimensions) 1) (equal? (count dimensions) 1)
 				(> (car old_dimensions) 0) (>= (car dimensions) (car old_dimensions))))))))
-/* ALTER cannot change a SQL datatype while a DEFAULT definition is bound.
-The native input recipe check separately rejects opaque ON UPDATE callbacks.
+/* A bound DEFAULT definition forbids changing the SQL datatype, including a
+named DEFAULT NULL. Same-type width/precision changes retain their old rules.
+This frontend rule applies before selecting either native declaration profile. */
+(define tsql_require_column_type_change (lambda (previous type)
+	(if (and (not (equal? (toUpper (previous "RawType")) type))
+		(or (not (nil? (previous "Default")))
+			(not (equal? (coalesceNil (previous "DefaultName") "") ""))
+			(not (equal? (coalesceNil (previous "DefaultExpression") "") ""))))
+		(error "ALTER COLUMN datatype change requires dropping its DEFAULT definition") true)))
+/* The native input recipe check separately rejects opaque ON UPDATE callbacks.
 Unlike an assignment CAST, this proof never truncates or replaces the value. */
-(define tsql_column_value_projection (lambda (previous type dimensions collation) (begin
-	(if (or (not (nil? (previous "Default")))
-		(not (equal? (coalesceNil (previous "DefaultName") "") ""))
-		(not (equal? (coalesceNil (previous "DefaultExpression") "") "")))
-		(error "ALTER COLUMN datatype change requires dropping its DEFAULT definition") true)
+(define tsql_column_value_projection (lambda (type dimensions collation) (begin
 	(define national (equal? type "NVARCHAR"))
 	(define width (car dimensions))
 	(define encoding (if national nil (tsql_character_encoding (sql_info nil type (list collation 2)))))
@@ -7231,6 +7235,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 						(if (and (not (equal? (toUpper (previous "RawType")) type))
 							(has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT") type))
 							(tsql_resolve_collation "DATABASE_DEFAULT") (coalesceNil (previous "Collation") ""))))
+					(tsql_require_column_type_change previous type)
 					(define operation (if (tsql_compatible_column_declaration? previous type dimensions nullable collation)
 						"declaration"
 						(tsql_value_preserving_column_transition? previous type dimensions collation)
@@ -7239,7 +7244,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(define declaration (list (list type dimensions nullable collation) (tsql_column_declaration_tuple previous)))
 					(define value (if (tsql_character_column_transition? previous type dimensions collation)
 						(list 'list (list 'quote (car declaration)) (list 'quote (cadr declaration))
-							(tsql_column_value_projection previous type dimensions collation))
+							(tsql_column_value_projection type dimensions collation))
 						(list 'quote declaration)))
 					(list (quote !begin) (list (quote altercolumn) (list (quote table) database false name false (quote tx))
 						(sql_column_storage_name previous) operation

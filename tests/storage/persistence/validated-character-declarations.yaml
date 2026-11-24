@@ -6,6 +6,7 @@ metadata:
   requires_tds: true
   description: Guarded value projections validate character declarations in their original native transaction
 setup:
+- sql: DROP TABLE IF EXISTS projection_bound_temporal
 - sql: DROP TABLE IF EXISTS projection_nondefault
 - sql: DROP TABLE IF EXISTS projection_bound_default
 - sql: DROP TABLE IF EXISTS projection_characters
@@ -29,6 +30,8 @@ setup:
 - sql: CREATE TABLE projection_bound_default(value VARCHAR(10) NULL CONSTRAINT DF_projection_bound_default DEFAULT
     NULL)
 - sql: CREATE TABLE projection_nondefault(value VARCHAR(10) COLLATE latin1_general_ci NULL)
+- sql: CREATE TABLE projection_bound_temporal(value SMALLDATETIME NULL CONSTRAINT DF_projection_bound_temporal DEFAULT
+    NULL)
 test_cases:
 - name: Seven national text changes preserve original transaction savepoint values and observer metadata
   tds:
@@ -365,13 +368,12 @@ test_cases:
   expect:
     result: true
 - name: National projection counts supplementary characters as two units
-  scm: (begin (define p (tsql_column_value_projection (list "Default" nil "DefaultName" "" "DefaultExpression" "")
-    "NVARCHAR" '(2) "utf8mb4_general_ci")) (equal? (p "😀") "😀"))
+  scm: (begin (define p (tsql_column_value_projection "NVARCHAR" '(2) "utf8mb4_general_ci")) (equal? (p "😀") "😀"))
   expect:
     result: true
 - name: ANSI projection retains representable accents and euro sign
-  scm: (begin (define p (tsql_column_value_projection (list "Default" nil "DefaultName" "" "DefaultExpression" "")
-    "VARCHAR" '(-1) "utf8mb4_general_ci")) (equal? (p "Ä €") "Ä €"))
+  scm: (begin (define p (tsql_column_value_projection "VARCHAR" '(-1) "utf8mb4_general_ci")) (equal? (p "Ä €") "Ä
+    €"))
   expect:
     result: true
 - name: Native domain proof examines unmaterialized literal defaults before accepting a new descriptor
@@ -422,7 +424,7 @@ test_cases:
      (define previous (show target "column" "value" true tx))
      (define collation (coalesceNil (previous "Collation") ""))
      (define projection (tsql_column_value_projection
-      (list "Default" nil "DefaultName" "" "DefaultExpression" "") "VARCHAR" '(-1) collation))
+      "VARCHAR" '(-1) collation))
      (define rejected (try (lambda () (begin
       (altercolumn target "value" "validated_declaration"
        (list (list "VARCHAR" '(-1) true collation) (list "VARCHAR" '(2) true collation) projection) tx)
@@ -544,6 +546,25 @@ test_cases:
       (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +) 0)))
   expect:
     result: true
+- name: Temporal datatype changes also reject a bound default definition
+  sql: ALTER TABLE projection_bound_temporal ALTER COLUMN value DATETIME NULL
+  expect:
+    error: true
+- name: Rejected temporal type change retains the original client type and usable default
+  tds:
+    statements:
+    - sql: SELECT TOP 0 value AS observed FROM projection_bound_temporal
+      expect:
+        rows: 0
+        column_types:
+        - name: observed
+          type: SMALLDATETIME
+          nullable: true
+    - sql: INSERT projection_bound_temporal DEFAULT VALUES; SELECT value FROM projection_bound_temporal
+      expect:
+        rows: 1
+        data:
+        - value: null
 - name: Cross-type ALTER without COLLATE selects the database default comparison policy
   noncritical: true
   tds:
@@ -569,3 +590,4 @@ cleanup:
 - sql: DROP TABLE IF EXISTS projection_loss
 - sql: DROP TABLE IF EXISTS projection_bound_default
 - sql: DROP TABLE IF EXISTS projection_nondefault
+- sql: DROP TABLE IF EXISTS projection_bound_temporal
