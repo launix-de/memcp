@@ -3460,7 +3460,7 @@ func (t *table) CreateColumn(tx *TxContext, name string, typ string, typdimensio
 			temporary = true
 		}
 	}
-	if tx == nil && !temporary && !t.RuntimeOnly {
+	if tx == nil && !temporary && !t.RuntimeOnly && !t.isEphemeralQueryTable() {
 		var result bool
 		schemaAutocommit(func(current *TxContext) { result = t.CreateColumn(current, name, typ, typdimensions, extrainfo) })
 		return result

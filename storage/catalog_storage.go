@@ -1371,16 +1371,6 @@ func (db *database) detachCatalog() {
 	retireCatalogGenerations(retired)
 }
 
-// resetCatalogPersistence follows a backend switch: the next save writes
-// every catalog shard to the new backend, the old one goes with its storage.
-func (db *database) resetCatalogPersistence() {
-	db.catalogMu.Lock()
-	defer db.catalogMu.Unlock()
-	db.catalog.committed = [catalogRelationCount]*storageShard{}
-	db.catalog.retired = nil
-	db.catalog.rootReady.Store(false)
-}
-
 // catalogShardIDs lists the catalog shard files GC must keep for db: the
 // committed generation and every retired one whose removal is pending.
 func (db *database) catalogShardIDs() []string {

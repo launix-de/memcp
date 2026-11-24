@@ -2223,7 +2223,6 @@ func publishStorageMoveGenerations(db *database, dst PersistenceEngine, generati
 	}
 	writeDatabaseBackendConfig(db.Name, targetConfig)
 	db.persistence = dst
-	db.resetCatalogPersistence()
 
 	for _, generation := range generations {
 		generation.table.mu.Lock()
@@ -2295,6 +2294,10 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 	// update it, and no table may appear while the destination generation is
 	// being prepared.
 	db.ensureBlobTable()
+	// Keep declarations stable through the backend switch and its physical
+	// catalog checkpoint. Ordinary row readers/writers retain the old generation.
+	db.definitionMu.RLock()
+	defer db.definitionMu.RUnlock()
 	defer db.GetWrite(nil).Release()
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
@@ -2321,7 +2324,6 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 		defer db.schemalock.Unlock()
 		writeDatabaseBackendConfig(schema, targetConfig)
 		db.persistence = dst
-		db.resetCatalogPersistence()
 		return true
 	}
 
@@ -2374,6 +2376,11 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 		publishStorageMoveGenerations(db, dst, generations, targetConfig)
 	}()
 	published = true
+	// Catalog payloads remain on the system backend. Publish the successor
+	// user shard IDs there and export both formats to the destination before
+	// retiring source storage; the already-written legacy snapshot is recoverable
+	// if this physical checkpoint fails.
+	db.save(nil, nil)
 	retireSourceStorage(src, generations, oldTransactionLog)
 	return true
 }

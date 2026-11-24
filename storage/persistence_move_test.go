@@ -351,7 +351,9 @@ func TestAlterDatabaseStorageKeepsReadersOnPublishedGeneration(t *testing.T) {
 	}
 	readDone := make(chan scm.Scmer, 1)
 	go func() {
-		readDone <- table.scanLookup(NewTxContext(TxCursorStability), testLookupAccess([]string{"id"}, []scm.Scmer{scm.NewInt(1)}), "value", true)
+		reader := NewTxContext(TxCursorStability)
+		defer reader.Rollback()
+		readDone <- table.scanLookup(reader, testLookupAccess([]string{"id"}, []scm.Scmer{scm.NewInt(1)}), "value", true)
 	}()
 	select {
 	case got := <-readDone:

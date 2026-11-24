@@ -981,14 +981,17 @@ func (s *storageShard) GetRead(currentTx *TxContext, mayDelegate bool) ReadAcces
 // Physical query-local IDs retain their original immutable generation. Rights
 // acquisition may install a successor, but must never reinterpret those IDs.
 func (s *storageShard) getRead(currentTx *TxContext, options shardReadOptions) ReadAccess {
-	if !s.t.RuntimeOnly {
+	if err := scanQueryContext(currentTx, context.Background()).Err(); err != nil {
+		panic(err)
+	}
+	if s.t != nil && !s.t.RuntimeOnly {
 		currentTx.readSchema(s.t.schema)
 	}
-	definitionWriter := currentTx.hasSchemaWriter(s.authorityDatabase())
+	definitionWriter := s.t != nil && currentTx.hasSchemaWriter(s.authorityDatabase())
 	if definitionWriter {
 		options.mayDelegate = false
 	}
-	if s.t.retired.Load() {
+	if s.t != nil && s.t.retired.Load() {
 		panic("table handle belongs to a rolled-back or dropped definition")
 	}
 	admissionTable := s.t

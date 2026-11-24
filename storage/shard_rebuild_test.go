@@ -552,6 +552,11 @@ func TestForcedDatabaseRebuildCompactsTransactionLog(t *testing.T) {
 	tbl, engine := createDurabilityTestTable(t, "ttxlogrebuild", 4)
 	db := tbl.schema
 	db.commitTransaction("completed-before-rebuild/1", true)
+	// Physical catalog checkpoints have native decisions of their own. Give
+	// compaction a real history to remove while retaining any later decisions.
+	for i := 2; i <= 20; i++ {
+		db.commitTransaction(fmt.Sprintf("completed-before-rebuild/%d", i), true)
+	}
 	logPath := engine.(*FileStorage).path + transactionLogName + ".log"
 	before, err := os.Stat(logPath)
 	if err != nil {
@@ -570,6 +575,11 @@ func TestForcedDatabaseRebuildCompactsTransactionLog(t *testing.T) {
 	t.Logf("transaction log size: before=%d bytes after=%d bytes", before.Size(), after.Size())
 	if db.transactionCommitted("completed-before-rebuild/1") {
 		t.Fatal("rebuilt transaction remains in the commit authority")
+	}
+	for i := 2; i <= 20; i++ {
+		if db.transactionCommitted(fmt.Sprintf("completed-before-rebuild/%d", i)) {
+			t.Fatalf("rebuilt transaction %d remains in the commit authority", i)
+		}
 	}
 	db.closeTransactionLog()
 }
