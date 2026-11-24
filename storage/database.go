@@ -1559,9 +1559,18 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 					}
 				}
 			}
-			if !t.maintenanceMu.TryLock() {
-				incomplete.Store(true)
-				return // another rebuild/repartition is in progress
+			for !t.maintenanceMu.TryLock() {
+				if len(only) == 0 {
+					incomplete.Store(true)
+					return // background maintenance may skip a busy table
+				}
+				// An explicit table rebuild must finish its requested work even
+				// when overflow already started a partial rebuild. Do not retain
+				// ddlMu while waiting: repartition may need its write side.
+				t.ddlMu.RUnlock()
+				t.maintenanceMu.Lock()
+				t.maintenanceMu.Unlock()
+				t.ddlMu.RLock()
 			}
 			t.mu.Lock() // table lock
 			tableLocked = true

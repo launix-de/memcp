@@ -2614,6 +2614,59 @@ func TestRepartitionPostFlipUpdateDoesNotDuplicateRow(t *testing.T) {
 	}
 }
 
+func TestExplicitRebuildWaitsForExistingMaintenance(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "texplicitrebuildwait", 1)
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("pending")}}, nil, scm.NewNil(), false, nil)
+	tbl.maintenanceMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			tbl.maintenanceMu.Unlock()
+		}
+	}()
+	done := make(chan string, 1)
+	go func() { done <- RebuildTable(tbl, true, false) }()
+	select {
+	case result := <-done:
+		t.Fatalf("explicit rebuild skipped existing maintenance: %s", result)
+	case <-time.After(20 * time.Millisecond):
+	}
+	// A maintenance owner can still finish its DDL publication while the
+	// explicit rebuild waits; retaining ddlMu.RLock here would deadlock it.
+	published := make(chan struct{})
+	go func() {
+		tbl.ddlMu.Lock()
+		tbl.ddlMu.Unlock()
+		close(published)
+	}()
+	select {
+	case <-published:
+	case <-time.After(3 * time.Second):
+		t.Fatal("explicit rebuild blocked the existing maintenance publication")
+	}
+	tbl.maintenanceMu.Unlock()
+	locked = false
+	select {
+	case result := <-done:
+		if strings.Contains(result, "errors:") {
+			t.Fatal(result)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("explicit rebuild did not finish after existing maintenance")
+	}
+	for _, shard := range tbl.activeTopology().shards {
+		shard.mu.RLock()
+		pending := len(shard.deltaRows())
+		shard.mu.RUnlock()
+		if pending != 0 {
+			t.Fatalf("explicit rebuild left %d pending rows", pending)
+		}
+	}
+	if got := tbl.Count(); got != 2 {
+		t.Fatalf("rebuild count = %d, want 2", got)
+	}
+}
+
 func TestFailedRebuildSchemaPublicationKeepsLaterWritesRecoverable(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "trebuildsavefailure", 1)
 	tbl.schema.ensureBlobTable()
