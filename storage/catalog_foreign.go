@@ -229,8 +229,16 @@ func (tx *TxContext) stageCatalogForeign(child, parent *table, fk foreignKey, ex
 	}
 	fk.Untrusted = !validateExisting
 	owned := (catalogForeignEndpointScope{owner: tx.transactionState}).owns(child) || (catalogForeignEndpointScope{owner: tx.transactionState}).owns(parent)
+	tx.mu.Lock()
+	mode := tx.Mode
+	tx.mu.Unlock()
+	// Only a validated pair of committed local endpoints may borrow earlier
+	// original-T writers. Private generations and unchecked declarations retain
+	// their own admission profiles; distributed authority is never adopted.
+	validated := !owned && validateExisting && mode == TxACID && !tx.hasTableDrops() && child.schema == parent.schema &&
+		localCatalogRowDatabase(child.schema) && child.committedAt(child.schema.catalogView().version) && parent.committedAt(parent.schema.catalogView().version)
 	profile := catalogEnforcementConstruction
-	if owned {
+	if owned || validated {
 		profile = catalogValidationConstruction
 	}
 	finish := tx.beginCatalogConstruction(profile, nil, child, parent)
@@ -253,12 +261,14 @@ func (tx *TxContext) stageCatalogForeign(child, parent *table, fk foreignKey, ex
 	kind := catalogEnforcementKind
 	if owned {
 		kind = catalogOwnedForeignKind
+	} else if validated {
+		kind = catalogValidatedForeignKind
 	}
 	if tx.foreignReplacement(fk.Id, child, parent) {
 		kind = catalogForeignReplacementKind
 	}
 	return tx.stagePublicCatalogDeclaration(child.schema, kind, nil, func(changes *publicCatalogChanges) bool {
-		return changes.stageForeign(tx, child, parent, fk, expected, validateExisting)
+		return changes.stageForeign(tx, child, parent, fk, expected, validateExisting, validated)
 	})
 }
 
@@ -306,10 +316,16 @@ func (tx *TxContext) stagePublicCatalogDeclaration(db *database, kind catalogDec
 
 // The first call runs inside the native resource constructor; later callers
 // reuse precisely the same admitted stage after the existing factory completes.
-func (state *publicCatalogChanges) stageForeign(tx *TxContext, child, parent *table, fk foreignKey, expected *foreignDeclarationExpectations, validateExisting bool) bool {
+func (state *publicCatalogChanges) stageForeign(tx *TxContext, child, parent *table, fk foreignKey, expected *foreignDeclarationExpectations, validateExisting, validated bool) bool {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	defer state.refreshMemoryLocked()
+	// Recheck after entering the shared history owner: an unrelated DROP may
+	// have been staged since the outer kind admission. This bounded profile
+	// does not extend the table-retirement composition contract.
+	if validated && tx.hasTableDrops() {
+		panic("validated public foreign declaration cannot join table removal")
+	}
 	endpoints := foreignEndpointTables(child, parent)
 	sort.Slice(endpoints, func(i, j int) bool { return endpoints[i].Name < endpoints[j].Name })
 	var acquired []*table
@@ -332,7 +348,7 @@ func (state *publicCatalogChanges) stageForeign(tx *TxContext, child, parent *ta
 			continue
 		}
 		kind := tableCatalogDeclarationAdmission
-		if owned {
+		if owned || validated {
 			kind = tableValidatedDeclarationAdmission
 		}
 		lease, err := t.writeAdmission.admit(scanQueryContext(tx, context.Background()), tx.transactionState, kind, false)
@@ -349,7 +365,7 @@ func (state *publicCatalogChanges) stageForeign(tx *TxContext, child, parent *ta
 		}
 	}
 	var restore []func()
-	if owned {
+	if owned || validated {
 		defer func() {
 			if !accepted {
 				for i := len(restore) - 1; i >= 0; i-- {
@@ -393,7 +409,7 @@ func (state *publicCatalogChanges) stageForeign(tx *TxContext, child, parent *ta
 			releaseForeignTriggerPrograms(tx.transactionState, reserved)
 		}
 	}()
-	amendment := &catalogForeignAmendment{declaration: declaration, programs: programs, reservations: reserved}
+	amendment := &catalogForeignAmendment{declaration: declaration, programs: programs, reservations: reserved, validatedInput: validated}
 	amendment.retainedBytes = foreignAmendmentFootprint(amendment) + uint(unsafe.Sizeof(catalogConstraintState{}))
 	views := maps.Clone(state.views.Load().tables)
 	for i, t := range endpoints {
@@ -552,6 +568,9 @@ type catalogForeignAmendment struct {
 	endpoints     [2]*table
 	previous      [2]*tableShowColumnsSnapshot
 	retainedBytes uint
+	// Original-T input admission, not a persisted SQL or recovery property.
+	// Reprojection after publication/savepoint must retain these input guards.
+	validatedInput bool
 }
 
 func (tx *TxContext) publicForeignAmendments() []catalogDeclarationAmendment {

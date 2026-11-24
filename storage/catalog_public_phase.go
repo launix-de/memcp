@@ -21,8 +21,8 @@ func (scope *transactionResources) publicDeclarationPendingLocked() bool {
 	return false
 }
 
-// Non-enforcing public deltas join an existing local ACID owner. Earlier WAL still
-// names that owner's original T; catalog prepare binds T to the final decision.
+// Public deltas and guarded validation join a local ACID owner. Earlier WAL
+// still names that owner's original T; prepare binds T to the final decision.
 // No prepared/remote authority, isolation conversion or database migration can
 // be adopted here. Caller holds tx.mu at both identity-admission boundaries.
 func (tx *TxContext) validateLatePublicOwnerLocked(db *database, participants bool, initializer *nativeColumnInitializer) error {
