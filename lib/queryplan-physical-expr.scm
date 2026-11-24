@@ -1055,7 +1055,8 @@ preparing nested stages; no free caller SQL column may enter an inner program. *
 							/* A residual D coordinate belongs to this input's driver
 							row. Its scalar dependency cannot prepare an independent
 							carrier before that row binds the complete caller tuple. */
-							(and (scalar_first_probe_supported? dependency)
+							(and (group_stage? dependency)
+								(scalar_first_probe_supported? dependency)
 								(stage_has_residual_outer_refs? dependency)))))))
 				(define contribution_sources (if (or (not (nil? property_cover)) (equal? contribution_mode (quote delta)) (equal? contribution_mode (quote fresh)))
 					(filter input_sources source_is_stage_output?) '()))
