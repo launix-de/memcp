@@ -139,9 +139,9 @@ curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
       (define handle (apply table args))
       (if handle handle (error "missing owned upgrade fixture relation")))))
     /* The public native cleanup endpoint attests the separate system-trigger
-    owner. HELP(nil) lists declarations without invoking an absent function;
+    owner. Zero-argument HELP lists declarations without invoking an absent function;
     the owner, when declared, must expose its exact schema/name interface. */
-    (define fixture_native_fk_owner (match (help nil)
+    (define fixture_native_fk_owner (match (help)
       (regex "(?m)^  remove_system_trigger: " _)
       (match (help "remove_system_trigger")
         (regex "(?m)^Allowed nø of parameters: 2-2$" _) true
