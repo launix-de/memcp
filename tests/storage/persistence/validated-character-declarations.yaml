@@ -1,0 +1,464 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Guarded value projections validate character declarations in their original native transaction
+setup:
+- sql: DROP TABLE IF EXISTS projection_nondefault
+- sql: DROP TABLE IF EXISTS projection_bound_default
+- sql: DROP TABLE IF EXISTS projection_characters
+- sql: DROP TABLE IF EXISTS projection_text_a
+- sql: DROP TABLE IF EXISTS projection_text_b
+- sql: DROP TABLE IF EXISTS projection_marker
+- sql: DROP TABLE IF EXISTS projection_constants
+- sql: DROP TABLE IF EXISTS projection_loss
+- sql: CREATE TABLE projection_characters(id INT PRIMARY KEY,first_name VARCHAR(35) NULL,last_name VARCHAR(35) NULL,street
+    VARCHAR(50) NULL,birth_name VARCHAR(35) NULL,birth_place VARCHAR(35) NULL,mailbox VARCHAR(35) NULL,city VARCHAR(35)
+    NULL)
+- sql: CREATE TABLE projection_text_a(id INT PRIMARY KEY,payload TEXT NULL)
+- sql: CREATE TABLE projection_text_b(id INT PRIMARY KEY,payload TEXT NULL)
+- sql: CREATE TABLE projection_marker(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE projection_constants(value VARCHAR(2) NULL)
+- sql: CREATE TABLE projection_loss(value VARCHAR(2) NULL)
+- sql: INSERT projection_characters VALUES(1,'Müller €','Doe','Am Markt 1','Müller','Zürich','001','Berlin'),(2,NULL,NULL,NULL,NULL,NULL,NULL,NULL)
+- sql: INSERT projection_marker VALUES(1,0)
+- sql: INSERT projection_text_a VALUES(1,REPLICATE(CAST('x' AS VARCHAR(MAX)),9001)+'€'),(2,NULL)
+- sql: INSERT projection_text_b VALUES(1,'Ä €'),(2,NULL)
+- sql: CREATE TABLE projection_bound_default(value VARCHAR(10) NULL CONSTRAINT DF_projection_bound_default DEFAULT
+    NULL)
+- sql: CREATE TABLE projection_nondefault(value VARCHAR(10) COLLATE latin1_general_ci NULL)
+test_cases:
+- name: Seven national text changes preserve original transaction savepoint values and observer metadata
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE projection_marker SET value=9 WHERE id=1
+    - connection: owner
+      sql: SAVE TRAN before_characters
+    - connection: owner
+      sql: ALTER TABLE projection_characters ALTER COLUMN first_name NVARCHAR(35) NULL
+    - connection: owner
+      sql: ALTER TABLE projection_characters ALTER COLUMN last_name NVARCHAR(35) NULL
+    - connection: owner
+      sql: ALTER TABLE projection_characters ALTER COLUMN street NVARCHAR(50) NULL
+    - connection: owner
+      sql: ALTER TABLE projection_characters ALTER COLUMN birth_name NVARCHAR(35) NULL
+    - connection: owner
+      sql: ALTER TABLE projection_characters ALTER COLUMN birth_place NVARCHAR(35) NULL
+    - connection: owner
+      sql: ALTER TABLE projection_characters ALTER COLUMN mailbox NVARCHAR(35) NULL
+    - connection: owner
+      sql: ALTER TABLE projection_characters ALTER COLUMN city NVARCHAR(35) NULL
+    - connection: owner
+      sql: UPDATE projection_marker SET value=10 WHERE id=1
+    - connection: owner
+      sql: SELECT max_length,is_nullable FROM sys.columns WHERE object_id=OBJECT_ID(N'projection_characters') AND
+        name=N'first_name'
+      expect:
+        rows: 1
+        data:
+        - max_length: 70
+          is_nullable: true
+    - connection: owner
+      sql: SELECT TOP 0 first_name AS observed FROM projection_characters
+      expect:
+        rows: 0
+        column_types:
+        - name: observed
+          type: NVARCHAR
+          nullable: true
+    - connection: owner
+      sql: SELECT id,first_name,last_name,street,birth_name,birth_place,mailbox,city FROM projection_characters
+        ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          first_name: Müller €
+          last_name: Doe
+          street: Am Markt 1
+          birth_name: Müller
+          birth_place: Zürich
+          mailbox: '001'
+          city: Berlin
+        - id: 2
+          first_name: null
+          last_name: null
+          street: null
+          birth_name: null
+          birth_place: null
+          mailbox: null
+          city: null
+    - connection: observer
+      sql: SELECT max_length,is_nullable FROM sys.columns WHERE object_id=OBJECT_ID(N'projection_characters') AND
+        name=N'first_name'
+      expect:
+        rows: 1
+        data:
+        - max_length: 35
+          is_nullable: true
+    - connection: observer
+      sql: SELECT TOP 0 first_name AS observed FROM projection_characters
+      expect:
+        rows: 0
+        column_types:
+        - name: observed
+          type: VARCHAR
+          nullable: true
+    - connection: owner
+      sql: ROLLBACK TRAN before_characters
+    - connection: owner
+      sql: SELECT TOP 0 first_name AS observed FROM projection_characters
+      expect:
+        rows: 0
+        column_types:
+        - name: observed
+          type: VARCHAR
+          nullable: true
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM projection_marker WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 9
+          depth: 1
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: observer
+      sql: SELECT value FROM projection_marker WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 0
+- name: Character and large text declarations commit in one original native decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE projection_marker SET value=7 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE projection_characters ALTER COLUMN first_name NVARCHAR(35) NULL
+    - connection: owner
+      sql: ALTER TABLE projection_characters ALTER COLUMN last_name NVARCHAR(35) NULL
+    - connection: owner
+      sql: ALTER TABLE projection_characters ALTER COLUMN street NVARCHAR(50) NULL
+    - connection: owner
+      sql: ALTER TABLE projection_characters ALTER COLUMN birth_name NVARCHAR(35) NULL
+    - connection: owner
+      sql: ALTER TABLE projection_characters ALTER COLUMN birth_place NVARCHAR(35) NULL
+    - connection: owner
+      sql: ALTER TABLE projection_characters ALTER COLUMN mailbox NVARCHAR(35) NULL
+    - connection: owner
+      sql: ALTER TABLE projection_characters ALTER COLUMN city NVARCHAR(35) NULL
+    - connection: owner
+      sql: ALTER TABLE projection_text_a ALTER COLUMN payload VARCHAR(MAX) NULL
+    - connection: owner
+      sql: ALTER TABLE projection_text_b ALTER COLUMN payload VARCHAR(MAX) NULL
+    - connection: owner
+      sql: UPDATE projection_marker SET value=8 WHERE id=1
+    - connection: owner
+      sql: SELECT TOP 0 first_name AS observed FROM projection_characters
+      expect:
+        rows: 0
+        column_types:
+        - name: observed
+          type: NVARCHAR
+          nullable: true
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,first_name,last_name,street,birth_name,birth_place,mailbox,city FROM projection_characters
+        ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          first_name: Müller €
+          last_name: Doe
+          street: Am Markt 1
+          birth_name: Müller
+          birth_place: Zürich
+          mailbox: '001'
+          city: Berlin
+        - id: 2
+          first_name: null
+          last_name: null
+          street: null
+          birth_name: null
+          birth_place: null
+          mailbox: null
+          city: null
+- name: Crash after accepted character declarations
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart after character declaration decision
+  action: restart
+- name: Recovery keeps every original national text value and NULL
+  sql: SELECT id,first_name,last_name,street,birth_name,birth_place,mailbox,city FROM projection_characters ORDER
+    BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      first_name: Müller €
+      last_name: Doe
+      street: Am Markt 1
+      birth_name: Müller
+      birth_place: Zürich
+      mailbox: '001'
+      city: Berlin
+    - id: 2
+      first_name: null
+      last_name: null
+      street: null
+      birth_name: null
+      birth_place: null
+      mailbox: null
+      city: null
+- name: Recovery exposes exact national text metadata to a real client
+  tds:
+    statements:
+    - connection: owner
+      sql: SELECT max_length,is_nullable FROM sys.columns WHERE object_id=OBJECT_ID(N'projection_characters') AND
+        name=N'first_name'
+      expect:
+        rows: 1
+        data:
+        - max_length: 70
+          is_nullable: true
+    - connection: owner
+      sql: SELECT TOP 0 first_name AS observed FROM projection_characters
+      expect:
+        rows: 0
+        column_types:
+        - name: observed
+          type: NVARCHAR
+          nullable: true
+- name: Large text remains unbounded and byte identical after recovery
+  sql: SELECT id,LEN(payload) AS size,CASE WHEN payload=REPLICATE(CAST('x' AS VARCHAR(MAX)),9001)+'€' OR payload
+    IS NULL THEN 1 ELSE 0 END AS matches FROM projection_text_a ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      size: 9002
+      matches: 1
+    - id: 2
+      size: null
+      matches: 1
+- name: Second former text column preserves accents and NULL after recovery
+  sql: SELECT id,payload FROM projection_text_b ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      payload: Ä €
+    - id: 2
+      payload: null
+- name: Former text column reports MAX width and ANSI client datatype
+  tds:
+    statements:
+    - connection: owner
+      sql: SELECT max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'projection_text_a') AND name=N'payload'
+      expect:
+        rows: 1
+        data:
+        - max_length: -1
+    - connection: owner
+      sql: SELECT TOP 0 payload AS observed FROM projection_text_a
+      expect:
+        rows: 0
+        column_types:
+        - name: observed
+          type: VARCHAR
+          nullable: true
+- name: Future national assignment accepts a whole surrogate pair at the exact UTF16 boundary
+  sql: INSERT projection_characters(id,first_name) VALUES(3,REPLICATE(N'A',33)+N'😀'); SELECT id,first_name FROM
+    projection_characters WHERE id=3
+  expect:
+    rows: 1
+    data:
+    - id: 3
+      first_name: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA😀
+- name: Future national assignment rejects values exceeding UTF16 width
+  sql: INSERT projection_characters(id,first_name) VALUES(4,REPLICATE(N'A',34)+N'😀')
+  expect:
+    error: true
+- name: Failed assignment leaves every acknowledged national value unchanged
+  sql: SELECT id,first_name,last_name,street,birth_name,birth_place,mailbox,city FROM projection_characters ORDER
+    BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      first_name: Müller €
+      last_name: Doe
+      street: Am Markt 1
+      birth_name: Müller
+      birth_place: Zürich
+      mailbox: '001'
+      city: Berlin
+    - id: 2
+      first_name: null
+      last_name: null
+      street: null
+      birth_name: null
+      birth_place: null
+      mailbox: null
+      city: null
+    - id: 3
+      first_name: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA😀
+      last_name: null
+      street: null
+      birth_name: null
+      birth_place: null
+      mailbox: null
+      city: null
+- name: Native projection rejects invalid UTF16 extent before effects without losing original rows or transaction
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root")
+     (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "projection_loss" false tx))
+     (insert target '("value") (list (list "😀😀")) '() nil false nil tx)
+     (define previous (show target "column" "value" true tx))
+     (define collation (coalesceNil (previous "Collation") ""))
+     (define before (list "VARCHAR" '(2) true collation))
+     (define projection (lambda (value) (if (or (nil? value) (<= (utf16_length value) 2)) value (error "value exceeds projection domain"))))
+     (define rejected (try (lambda () (begin
+      (altercolumn target "value" "validated_declaration" (list (list "NVARCHAR" '(2) true collation) before projection) tx)
+      false)) (lambda (cause) (if (strlike (string (failure_value cause)) "%value exceeds projection domain%") true (error cause)))))
+     (define current (show target "column" "value" true tx))
+     (define local_count (scan tx target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +))
+     (define active (equal? (tx_state tx) "active"))
+     (tx_rollback owner)
+     (and rejected active (equal? (current "RawType") "VARCHAR") (equal? local_count 1)
+      (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +) 0)))
+  expect:
+    result: true
+- name: Native projection cannot replace a value while claiming unchanged storage
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root")
+     (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "projection_loss" false tx))
+     (insert target '("value") (list (list "😀😀")) '() nil false nil tx)
+     (define previous (show target "column" "value" true tx))
+     (define collation (coalesceNil (previous "Collation") ""))
+     (define before (list "VARCHAR" '(2) true collation))
+     (define projection (lambda (value) (if (nil? value) value "changed")))
+     (define rejected (try (lambda () (begin
+      (altercolumn target "value" "validated_declaration" (list (list "NVARCHAR" '(2) true collation) before projection) tx)
+      false)) (lambda (cause) (if (strlike (string (failure_value cause)) "%column value projection would convert an existing native value%") true (error cause)))))
+     (define current (show target "column" "value" true tx))
+     (define local_count (scan tx target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +))
+     (define active (equal? (tx_state tx) "active"))
+     (tx_rollback owner)
+     (and rejected active (equal? (current "RawType") "VARCHAR") (equal? local_count 1)
+      (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +) 0)))
+  expect:
+    result: true
+- name: National projection counts supplementary characters as two units
+  scm: (begin (define p (tsql_column_value_projection (list "Default" nil "DefaultName" "" "DefaultExpression" "")
+    "NVARCHAR" '(2) "utf8mb4_general_ci")) (equal? (p "😀") "😀"))
+  expect:
+    result: true
+- name: ANSI projection retains representable accents and euro sign
+  scm: (begin (define p (tsql_column_value_projection (list "Default" nil "DefaultName" "" "DefaultExpression" "")
+    "VARCHAR" '(-1) "utf8mb4_general_ci")) (equal? (p "Ä €") "Ä €"))
+  expect:
+    result: true
+- name: Native domain proof examines unmaterialized literal defaults before accepting a new descriptor
+  scm: |-
+    (begin
+     (define target (table "memcp-tests" false "projection_constants"))
+     (altercolumn target "value" "default" "😀😀")
+     (define owner (newsession)) (owner "username" "root")
+     (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+     (define previous (show target "column" "value" true tx))
+     (define collation (coalesceNil (previous "Collation") ""))
+     (define projection (lambda (value) (if (or (nil? value) (<= (utf16_length value) 2)) value (error "constant exceeds projection domain"))))
+     (define rejected (try (lambda () (begin
+      (altercolumn target "value" "validated_declaration"
+       (list (list "NVARCHAR" '(2) true collation) (list "VARCHAR" '(2) true collation) projection) tx)
+      false)) (lambda (cause) (if (strlike (string (failure_value cause)) "%constant exceeds projection domain%") true (error cause)))))
+     (define current (show target "column" "value" true tx))
+     (define active (equal? (tx_state tx) "active"))
+     (tx_rollback owner)
+     (define after (show target "column" "value" true))
+     (altercolumn target "value" "default" nil)
+     (and rejected active (equal? (current "RawType") "VARCHAR") (equal? (current "Default") "😀😀")
+      (equal? (after "RawType") "VARCHAR") (equal? (after "Default") "😀😀")
+      (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +) 0)))
+  expect:
+    result: true
+- name: A bound default definition must be dropped before changing a SQL datatype
+  sql: ALTER TABLE projection_bound_default ALTER COLUMN value NVARCHAR(10) NULL
+  expect:
+    error: true
+- name: Rejected bound-default alteration preserves the original descriptor
+  tds:
+    statements:
+    - sql: SELECT TOP 0 value AS observed FROM projection_bound_default
+      expect:
+        rows: 0
+        column_types:
+        - name: observed
+          type: VARCHAR
+          nullable: true
+- name: Native character projection rejects a legacy-codepage loss before effects and retains the original transaction
+  scm: |-
+    (begin
+     (define target (table "memcp-tests" false "projection_loss"))
+     (define owner (newsession)) (owner "username" "root")
+     (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+     (insert target '("value") (list (list "😀")) '() nil false nil tx)
+     (define previous (show target "column" "value" true tx))
+     (define collation (coalesceNil (previous "Collation") ""))
+     (define projection (tsql_column_value_projection
+      (list "Default" nil "DefaultName" "" "DefaultExpression" "") "VARCHAR" '(-1) collation))
+     (define rejected (try (lambda () (begin
+      (altercolumn target "value" "validated_declaration"
+       (list (list "VARCHAR" '(-1) true collation) (list "VARCHAR" '(2) true collation) projection) tx)
+      false)) (lambda (cause) (if (strlike (string (failure_value cause)) "%not representable in single-byte encoding%") true (error cause)))))
+     (define current (show target "column" "value" true tx))
+     (define active (equal? (tx_state tx) "active"))
+     (define values (scan tx target '() '() '() (lambda () true) '("value")
+      (lambda (values value) (append values value)) '() append))
+     (tx_rollback owner)
+     (and rejected active (expression_equal? (current "Dimensions") '(2))
+      (expression_equal? values '("😀"))
+      (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +) 0)))
+  expect:
+    result: true
+- name: Cross-type ALTER without COLLATE selects the database default comparison policy
+  noncritical: true
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: ALTER TABLE projection_nondefault ALTER COLUMN value NVARCHAR(10) NULL
+    - connection: owner
+      sql: SELECT collation_name FROM sys.columns WHERE object_id=OBJECT_ID(N'projection_nondefault') AND name=N'value'
+      expect:
+        rows: 1
+        data:
+        - collation_name: utf8mb4_general_ci
+    - connection: owner
+      sql: ROLLBACK TRAN
+cleanup:
+- sql: DROP TABLE IF EXISTS projection_characters
+- sql: DROP TABLE IF EXISTS projection_text_a
+- sql: DROP TABLE IF EXISTS projection_text_b
+- sql: DROP TABLE IF EXISTS projection_marker
+- sql: DROP TABLE IF EXISTS projection_constants
+- sql: DROP TABLE IF EXISTS projection_loss
+- sql: DROP TABLE IF EXISTS projection_bound_default
+- sql: DROP TABLE IF EXISTS projection_nondefault

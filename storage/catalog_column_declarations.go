@@ -220,11 +220,12 @@ func requireStoredScalarIdentity(target *column, value scm.Scmer) {
 // Constant descriptor payloads still use the established schema JSON boundary.
 // Prove its target reader, rather than assuming a runtime sanitizer proves the
 // persisted representation. Opaque deferred recipes remain frontend-owned.
-func requireStoredDeclarationConstants(previous, target *column) {
+func requireStoredDeclarationConstants(previous, target *column, projection scm.Scmer) {
 	check := func(value scm.Scmer) {
 		if value.IsNil() {
 			return
 		}
+		requireStoredValueProjection(projection, target.Name, value)
 		requireStoredScalarIdentity(target, value)
 		encoded, err := json.Marshal(value)
 		var recovered scm.Scmer
@@ -246,9 +247,31 @@ func requireStoredDeclarationConstants(previous, target *column) {
 	}
 }
 
-func validateStoredColumnValues(tx *TxContext, t *table, previous, target *column) {
-	requireStoredDeclarationConstants(previous, target)
+// A language may supply a transient scalar-domain proof, never a conversion.
+// Its closed procedure is borrowed only during preparation, outside mutation
+// locks, and is not retained by the accepted native descriptor or journal.
+func requireStoredValueProjection(projection scm.Scmer, name string, value scm.Scmer) {
+	if !projection.IsNil() && !sameStoredScalar(value, scm.Apply(projection, value)) {
+		panic(declarationValidationViolation("value-preserving-declaration", name, "column value projection would convert an existing native value"))
+	}
+}
+
+func closeStoredValueProjection(value scm.Scmer) scm.Scmer {
+	value = value.WithoutSourceInfo()
+	if !value.IsProc() {
+		panic("column value projection requires a one-argument procedure")
+	}
+	parameters := value.Proc().Params.WithoutSourceInfo()
+	if !parameters.IsSlice() || len(parameters.Slice()) != 1 {
+		panic("column value projection requires a one-argument procedure")
+	}
+	return scm.CompileJIT(scm.CloseProcedure(value), true)
+}
+
+func validateStoredColumnValues(tx *TxContext, t *table, previous, target *column, projection scm.Scmer) {
+	requireStoredDeclarationConstants(previous, target, projection)
 	validate := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		requireStoredValueProjection(projection, target.Name, values[1])
 		requireStoredScalarIdentity(target, values[1])
 		return scm.NewBool(true)
 	})
@@ -377,7 +400,7 @@ func (db *database) projectStoredDeclaration(d *catalogColumnDeclaration, column
 			replacement = d.After.replace(previous)
 		} else {
 			replacement = d.After.replaceValidated(previous)
-			requireStoredDeclarationConstants(previous, replacement)
+			requireStoredDeclarationConstants(previous, replacement, scm.NewNil())
 		}
 		updated := append([]*column(nil), columns...)
 		updated[index] = replacement

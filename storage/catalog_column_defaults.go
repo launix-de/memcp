@@ -199,8 +199,15 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 		var propertyChange *catalogColumnPropertyChange
 		result := scm.NewBool(true)
 		if columnDeclarationOperation(operation) {
-			if !value.IsSlice() || len(value.Slice()) != 2 {
+			if !value.IsSlice() || len(value.Slice()) != 2 && (operation != "validated_declaration" || len(value.Slice()) != 3) {
 				panic("declaration ALTER requires new and expected declarations")
+			}
+			projection := scm.NewNil()
+			if len(value.Slice()) == 3 {
+				projection = value.Slice()[2]
+				if !previous.OnUpdate.IsNil() {
+					panic("column value projection requires an unchanged scalar input recipe")
+				}
 			}
 			after, before := decodeStoredColumnType(value.Slice()[0]), decodeStoredColumnType(value.Slice()[1])
 			actual := storedColumnTypeOf(previous)
@@ -229,20 +236,39 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 			defer func() {
 				if !accepted {
 					restore()
+					// A sibling constructor may have accepted history while this
+					// scalar validation ran without the amendment mutex.
+					changes.publishViews(tx.publicForeignAmendments(), changes.views.Load().tables)
 				}
 			}()
 			if operation == "validated_declaration" {
 				replacement = after.replaceValidated(previous)
-				// Default amendments keep their established independent stream.
-				// Both the current descriptor and the replay predecessor must
-				// therefore carry constants losslessly in this bounded profile.
-				for _, baseline := range t.columnDeclarations() {
-					if baseline.Name == previous.Name {
-						requireStoredDeclarationConstants(baseline, replacement)
-						break
+				priorViews, priorHistory := changes.views.Load(), tx.catalogAmendments.Load()
+				lease := changes.leases[t]
+				baselineColumns := t.columnDeclarations()
+				// The original constructor, endpoint lease and input guard stay
+				// live. Compilation and language scalar callbacks must not run
+				// under amendment, schema or shard mutation locks.
+				changes.mu.Unlock()
+				func() {
+					defer changes.mu.Lock()
+					if !projection.IsNil() {
+						projection = closeStoredValueProjection(projection)
 					}
+					// DEFAULT recovery retains its independent stream; prove both
+					// the current and committed predecessor's precise constants.
+					for _, baseline := range baselineColumns {
+						if baseline.Name == previous.Name {
+							requireStoredDeclarationConstants(baseline, replacement, projection)
+							break
+						}
+					}
+					validateStoredColumnValues(tx, t, previous, replacement, projection)
+				}()
+				if changes.views.Load() != priorViews || tx.catalogAmendments.Load() != priorHistory || changes.leases[t] != lease ||
+					t.showColumnsSnapshot.Load().metadata.declarations != observed.metadata.declarations {
+					panic("validated declaration lost its exact scalar input predecessor")
 				}
-				validateStoredColumnValues(tx, t, previous, replacement)
 			} else {
 				if before.Nullable && !after.Nullable {
 					validateColumnNotNull(tx, t, previous.Name)

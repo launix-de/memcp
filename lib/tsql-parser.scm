@@ -834,10 +834,46 @@ https://learn.microsoft.com/sql/t-sql/data-types/float-and-real-transact-sql */
 independently proves unchanged values, storage carriers and comparison policy.
 https://learn.microsoft.com/sql/t-sql/data-types/smalldatetime-transact-sql */
 (define tsql_value_preserving_column_transition? (lambda (previous type dimensions collation)
-	(and (equal? (toUpper (previous "RawType")) "SMALLDATETIME")
+	(or (and (equal? (toUpper (previous "RawType")) "SMALLDATETIME")
 		(equal? type "DATETIME") (empty_list? dimensions)
 		(empty_list? (coalesceNil (previous "Dimensions") '()))
-		(tsql_compatible_column_collation? type (coalesceNil (previous "Collation") "") collation))))
+		(tsql_compatible_column_collation? type (coalesceNil (previous "Collation") "") collation))
+		(tsql_character_column_transition? previous type dimensions collation))))
+/* These character transitions require a target-domain proof under the native
+declaration lease. A VARCHAR(n) header alone does not prove that old values
+from every frontend occupy at most n UTF16 units. No frontend scan is used.
+https://learn.microsoft.com/sql/t-sql/statements/alter-table-transact-sql */
+(define tsql_character_column_transition? (lambda (previous type dimensions collation) (begin
+	(define old (toUpper (previous "RawType")))
+	(define old_dimensions (coalesceNil (previous "Dimensions") '()))
+	(and (equal? (coalesceNil (previous "Collation") "") collation)
+		(or (and (equal? old "TEXT") (equal? type "VARCHAR") (expression_equal? dimensions '(-1)))
+			(and (equal? old "VARCHAR") (equal? type "NVARCHAR")
+				(equal? (count old_dimensions) 1) (equal? (count dimensions) 1)
+				(> (car old_dimensions) 0) (>= (car dimensions) (car old_dimensions))))))))
+/* ALTER cannot change a SQL datatype while a DEFAULT definition is bound.
+The native input recipe check separately rejects opaque ON UPDATE callbacks.
+Unlike an assignment CAST, this proof never truncates or replaces the value. */
+(define tsql_column_value_projection (lambda (previous type dimensions collation) (begin
+	(if (or (not (nil? (previous "Default")))
+		(not (equal? (coalesceNil (previous "DefaultName") "") ""))
+		(not (equal? (coalesceNil (previous "DefaultExpression") "") "")))
+		(error "ALTER COLUMN datatype change requires dropping its DEFAULT definition") true)
+	(define national (equal? type "NVARCHAR"))
+	(define width (car dimensions))
+	(define encoding (if national nil (tsql_character_encoding (sql_info nil type (list collation 2)))))
+	(close_procedure ((lambda (width national encoding encode decode raise_error)
+		(lambda (value) (if (nil? value) value (begin
+			(if (string? value) true (raise_error 245 "Character declaration requires a character value." 1))
+			/* The unlimited prefix validates UTF8; retain the ORIGINAL carrier,
+			including BufferString, rather than returning this temporary text. */
+			(utf8_prefix value (strlen value))
+			(if national
+				(if (> (utf16_length value) width)
+					(raise_error 8152 "String or binary data would be truncated." 1) true)
+				(if (equal? (decode (encode value encoding -1) encoding) value) true
+					(raise_error 245 "Character declaration would change its encoded value." 1)))
+			value)))) width national encoding tsql_encode_character tsql_decode_character tsql_raise_error)))))
 (define tds_bind_declarations (lambda (_schema text)
 	(if (equal? (strtrim text) "") (list)
 		((parser (define declarations (+ (parser '(
@@ -7188,16 +7224,26 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(define dimensions (if builtin (builtin "dimensions") dimensions))
 					(define type (tsql_storage_type type))
 					(define dimensions (tsql_native_column_dimensions previous type dimensions))
-					(define collation (coalesceNil (tsql_resolve_collation collation) (coalesceNil (previous "Collation") "")))
+					/* Cross-type character ALTER with omitted COLLATE chooses the
+					database default, rather than inheriting an old explicit policy.
+					A changed comparison policy still needs its native owner. */
+					(define collation (coalesceNil (tsql_resolve_collation collation)
+						(if (and (not (equal? (toUpper (previous "RawType")) type))
+							(has? '("CHAR" "VARCHAR" "NCHAR" "NVARCHAR" "TEXT" "NTEXT") type))
+							(tsql_resolve_collation "DATABASE_DEFAULT") (coalesceNil (previous "Collation") ""))))
 					(define operation (if (tsql_compatible_column_declaration? previous type dimensions nullable collation)
 						"declaration"
 						(tsql_value_preserving_column_transition? previous type dimensions collation)
 						"validated_declaration"
 						(error "ALTER COLUMN requires native validation or conversion")))
+					(define declaration (list (list type dimensions nullable collation) (tsql_column_declaration_tuple previous)))
+					(define value (if (tsql_character_column_transition? previous type dimensions collation)
+						(list 'list (list 'quote (car declaration)) (list 'quote (cadr declaration))
+							(tsql_column_value_projection previous type dimensions collation))
+						(list 'quote declaration)))
 					(list (quote !begin) (list (quote altercolumn) (list (quote table) database false name false (quote tx))
 						(sql_column_storage_name previous) operation
-						(list (quote quote) (list (list type dimensions nullable collation)
-							(tsql_column_declaration_tuple previous))) (quote tx)) true)))))
+						value (quote tx)) true)))))
 
 			(parser '(tsql_keyword_add (? tsql_keyword_constraint (define key tsql_identifier))
 				tsql_keyword_primary tsql_keyword_key tsql_key_placement "(" (define columns tsql_key_columns) ")" tsql_key_layout)
