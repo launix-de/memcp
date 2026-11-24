@@ -3002,17 +3002,16 @@ func RenameTable(t *table, newname string, ignoreCase bool, expectedIdentity str
 	if db == nil || GetDatabase(db.Name) != db {
 		panic("table rename belongs to a replaced database")
 	}
-	defer db.GetWrite(nil).Release()
+	// Schema acquisition may install the same physical generation from a peer.
+	// Reuse the ordinary DDL owner to acquire data before schema handover where
+	// necessary and resolve that installed handle; the UUID check below still
+	// rejects a replacement generation before any rename effect.
+	var schemaAccess WriteAccess
+	t, schemaAccess = t.schemaWrite()
+	defer schemaAccess.Release()
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	db.ensureLoaded()
-	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
-		for _, shard := range t.ActiveShards() {
-			if shard != nil {
-				r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", nil)
-			}
-		}
-	}
 	db.schemalock.Lock()
 	locked := true
 	defer func() {
