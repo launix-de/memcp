@@ -357,7 +357,10 @@ represented as fabricated named objects in this declaration profile. */
 		(define source (column "DefaultExpression"))
 		(define value (column "Default"))
 		(define type (toUpper (column "RawType")))
-		(if (not (equal? source "")) source
+		/* The native UUID generator is an inert marker, not SQL source. Its
+		catalog spelling must be callable when replayed; deferred SQL stays exact. */
+		(if (and (equal?? source "NEWID") (identical? (column "DefaultDeferred") false)) "NEWID()"
+			(not (equal? source "")) source
 			(nil? value) "NULL"
 			(has? '("CHAR" "VARCHAR" "TEXT" "NCHAR" "NVARCHAR" "NTEXT" "UNIQUEIDENTIFIER") type)
 			(concat (if (has? '("NCHAR" "NVARCHAR" "NTEXT") type) "N" "") "'" (replace value "'" "''") "'")

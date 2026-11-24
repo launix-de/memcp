@@ -5,6 +5,7 @@
 metadata:
   syntax: tsql
   isolated: true
+  requires_tds: true
   description: Temporal DEFAULT catalog rendering uses actual native declarations and ISO literal contracts
 setup:
 - sql: CREATE TABLE temporal_catalog_defaults(id INT PRIMARY KEY,d DATE,dt DATETIME,sm SMALLDATETIME,modern DATETIME2(7),clock
@@ -23,9 +24,13 @@ setup:
       true))))
 - sql: CREATE TABLE temporal_catalog_legacy_zero(id INT PRIMARY KEY,dt DATETIME CONSTRAINT DF_temporal_zero_dt DEFAULT
     0,sm SMALLDATETIME CONSTRAINT DF_temporal_zero_sm DEFAULT 0)
+- sql: CREATE TABLE catalog_uuid_default(id INT,g UNIQUEIDENTIFIER CONSTRAINT DF_catalog_uuid_default
+    DEFAULT(NEWID()))
+- sql: INSERT catalog_uuid_default(id) VALUES(1)
 cleanup:
 - sql: DROP TABLE IF EXISTS temporal_catalog_defaults
 - sql: DROP TABLE IF EXISTS temporal_catalog_legacy_zero
+- sql: DROP TABLE IF EXISTS catalog_uuid_default
 test_cases:
 - name: Folded native temporal defaults expose every declared catalog definition
   sql: SELECT name,definition FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID(N'temporal_catalog_defaults',N'U')
@@ -226,3 +231,41 @@ test_cases:
 - name: DATETIME rounding carries into the next date before literal rendering
   scm: (tsql_catalog_default_definition (list "RawType" "DATETIME" "DefaultExpression" "" "Default" (date_from_parts 1709251199 999600000 0)))
   expect: {result: "'2024-03-01T00:00:00.000'"}
+- name: UUID default definition and compatibility text retain executable call syntax
+  sql: SELECT d.name,d.definition,c.text FROM sys.default_constraints d JOIN sys.syscomments c ON c.id=d.object_id
+    WHERE d.parent_object_id=OBJECT_ID('catalog_uuid_default')
+  expect:
+    rows: 1
+    data:
+    - name: DF_catalog_uuid_default
+      definition: NEWID()
+      text: NEWID()
+- name: Replaying a catalog UUID default preserves source rows and fresh invocation values
+  tds:
+    statements:
+    - sql: BEGIN TRANSACTION
+    - sql: DECLARE @definition NVARCHAR(4000); SELECT @definition=definition FROM sys.default_constraints WHERE
+        name='DF_catalog_uuid_default'; ALTER TABLE catalog_uuid_default DROP CONSTRAINT DF_catalog_uuid_default;
+        EXEC('ALTER TABLE catalog_uuid_default ADD CONSTRAINT DF_catalog_uuid_replayed DEFAULT '+@definition+' FOR
+        g');
+    - sql: COMMIT TRANSACTION
+    - sql: INSERT catalog_uuid_default(id) VALUES(2),(3)
+    - sql: SELECT id,CASE WHEN g IS NOT NULL THEN 1 ELSE 0 END AS has_guid FROM catalog_uuid_default ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          has_guid: 1
+        - id: 2
+          has_guid: 1
+        - id: 3
+          has_guid: 1
+    - sql: SELECT COUNT(DISTINCT g) AS n FROM catalog_uuid_default
+      expect:
+        rows: 1
+        data:
+        - n: 3
+- name: Deferred SQL default source retains its exact caller spelling
+  scm: |
+    (tsql_catalog_default_definition (list "RawType" "UNIQUEIDENTIFIER" "DefaultExpression" "nEwId()" "DefaultDeferred" true "Default" nil))
+  expect: {result: "nEwId()"}
