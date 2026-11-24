@@ -348,7 +348,7 @@ test_cases:
     - sql: DROP TABLE IF EXISTS ddl_failed_default_drop
       syntax: mysql
       session_id: failed-default-drop-mysql
-    - sql: CREATE TABLE ddl_failed_default_drop(id INT PRIMARY KEY,marker INT DEFAULT 7,CONSTRAINT uq_failed_default_drop UNIQUE(marker))
+    - sql: CREATE TABLE ddl_failed_default_drop(id INT PRIMARY KEY,marker INT DEFAULT 7,UNIQUE KEY uq_failed_default_drop(marker))
       syntax: mysql
       session_id: failed-default-drop-mysql
     - sql: INSERT INTO ddl_failed_default_drop VALUES(1,17),(2,19)
