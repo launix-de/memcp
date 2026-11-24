@@ -6,7 +6,6 @@ metadata:
   requires_tds: true
   description: Stored column retirement shares original rows private catalog declarations ordered defaults and recovery
 setup:
-- sql: DROP TABLE IF EXISTS retire_lookup
 - sql: DROP TABLE IF EXISTS retire_lifecycle
 - sql: DROP TABLE IF EXISTS retire_child
 - sql: DROP TABLE IF EXISTS retire_parent
@@ -19,6 +18,7 @@ setup:
 - sql: DROP TABLE IF EXISTS retire_save
 - sql: DROP TABLE IF EXISTS retire_crash
 - sql: DROP TABLE IF EXISTS retire_marker
+- sql: DROP TABLE IF EXISTS retire_lookup
 - sql: CREATE TABLE retire_marker(id INT PRIMARY KEY,value INT)
 - sql: INSERT retire_marker VALUES(1,0)
 - sql: CREATE TABLE retire_lookup(id INT PRIMARY KEY)

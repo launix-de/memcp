@@ -9,7 +9,6 @@ import "slices"
 import "unsafe"
 import "unicode/utf8"
 import "github.com/google/uuid"
-import "github.com/launix-de/memcp/scm"
 
 // Retirement removes a declaration, not its historical physical storage. The
 // original snapshot/undo and readers retain those values until native rebuild
