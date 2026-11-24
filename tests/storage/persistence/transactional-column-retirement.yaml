@@ -398,7 +398,8 @@ test_cases:
     \ (table \"memcp-tests\" false \"retire_raw\" false tx))\n (define expected (list (get_assoc (show target \"\
     column\" \"retired\" false tx) \"Default\") \"\" \"\" false))\n (insert marker '(\"id\" \"value\") (list (list\
     \ 99 9)) '() nil false nil tx)\n (altercolumn target \"retired\" \"default\" 7 nil)\n (define rejected (try\
-    \ (lambda () (begin (altertable target \"drop\" \"retired\" tx expected) false)) (lambda (_failure) true)))\n\
+    \ (lambda () (begin (altertable target \"drop\" \"retired\" tx expected) false)) (lambda (cause) (if (strlike\
+    \ (string (failure_value cause)) \"%column declaration lost its expected input recipe%\") true (error cause)))))\n\
     \ (define own (scan tx marker '() '() '() (lambda () true) '(\"value\") + 0 +))\n (define outside (scan nil\
     \ marker '() '() '() (lambda () true) '(\"value\") + 0 +))\n (define present (not (nil? (show target \"column\"\
     \ \"retired\" false nil))))\n (define foreign_default (get_assoc (show target \"column\" \"retired\" false nil)\
