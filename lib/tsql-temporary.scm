@@ -188,12 +188,16 @@ result flags cannot prove that a direct export lacks an underlying identity. */
 				_ nil)))
 	_ false)))
 (define tsql_select_into_provenance (lambda (query expanded tx) (match query
-	((symbol union-block) _mode branches _order _limit _offset _facts)
-	(map (tsql_select_into_provenance (car branches) (car (union_branches expanded)) tx)
-		/* Only a proven identity becomes an ordinary NOT NULL export. Unknown
-		provenance may also describe an ordinary nullable column. */
-		(lambda (origin) (if origin
-			(if (equal? (origin "mode") "unknown") origin (set_assoc origin "mode" "discard")) nil)))
+	((symbol union-block) _mode _branches _order _limit _offset _facts)
+	(begin
+		/* UNION disqualifies identity inheritance. Its fully expanded first
+		branch owns result provenance; evaluating the original view's delayed
+		UNION conversion would attempt to type its unresolved ANY input. */
+		(define branch (car (union_branches expanded)))
+		(map (tsql_result_entries branch true) (lambda (entry) (begin
+			(define status (tsql_select_into_identity_status (qb_sources branch) (qb_facts branch) (nth entry 2) tx))
+			(if (identical? status false) nil
+				(list "mode" (if status "discard" "unknown")))))))
 	((symbol query-block) _schema sources _fields _where _group _having _order _limit _offset _hidden _stages facts)
 	(begin
 		(define entries (tsql_result_entries query false))
