@@ -380,7 +380,24 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	for t := range columnInputs {
 		statementInput(t)
 	}
+	var allocators map[*table]*catalogAllocatorReset
+	if previous := changes.views.Load(); previous != nil && len(previous.allocators) != 0 {
+		allocators = make(map[*table]*catalogAllocatorReset, len(previous.allocators))
+		// Savepoint rewind removes the epoch, not the original owner's endpoint
+		// lease. A headless slot borrows the baseline without selecting a reset.
+		for t := range previous.allocators {
+			allocators[t] = nil
+			writers[t] = struct{}{}
+		}
+	}
 	for _, entry := range history {
+		if a := entry.allocator; a != nil {
+			if allocators == nil {
+				allocators = make(map[*table]*catalogAllocatorReset)
+			}
+			allocators[a.table] = a
+			writers[a.table] = struct{}{}
+		}
 		if rename := entry.tableRename; rename != nil {
 			blocked[rename.table] = struct{}{}
 			guarded[rename.table] = true
@@ -473,7 +490,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	}
 	names := nativeNamespaceProjection(history)
 	tables = changes.projectNameViews(tables, names)
-	changes.views.Store(&publicCatalogViews{names: names, keys: keys, tables: tables, columnWriters: writers, nullColumns: nullColumns, appendedColumns: appendedColumns, blockedWriters: blocked, dropped: dropped, checkedWriters: checked, history: history, foreignHistory: foreignHistory})
+	changes.views.Store(&publicCatalogViews{allocators: allocators, names: names, keys: keys, tables: tables, columnWriters: writers, nullColumns: nullColumns, appendedColumns: appendedColumns, blockedWriters: blocked, dropped: dropped, checkedWriters: checked, history: history, foreignHistory: foreignHistory})
 }
 
 func replaceStoredColumnMetadata(t *table, base *tableShowColumnsSnapshot, columns []*column, public *tableColumnNamesSnapshot) (*tableShowColumnsSnapshot, uint) {

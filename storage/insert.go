@@ -871,7 +871,7 @@ func (t *table) prepareInsertDefaults(columns []string, values [][]scm.Scmer, de
 
 // Every generated value is assigned before shard ownership or UNIQUE guards.
 // The shard sink receives complete explicit values; recovery never reserves.
-func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify func(int64), declarations []*column) ([]string, [][]scm.Scmer, bool) {
+func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify func(int64), declarations []*column, tx *TxContext) ([]string, [][]scm.Scmer, bool) {
 	for _, c := range declarations {
 		if !c.AutoIncrement {
 			continue
@@ -884,21 +884,24 @@ func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify 
 			}
 		}
 		generated := uint64(0)
-		explicit := uint64(0)
-		observedExplicit := false
+		input := tableIDExplicit{}
 		for _, row := range values {
 			if position < 0 || position >= len(row) || row[position].IsNil() {
 				generated++
 				continue
 			}
-			observedExplicit = true
-			if id := scm.ToInt(row[position]); id > 0 {
-				explicit = max(explicit, uint64(id))
+			id := int64(scm.ToInt(row[position]))
+			if !input.Observed || id > input.Value {
+				input.Value = id
+			}
+			input.Observed = true
+			if id > 0 {
+				input.High = max(input.High, uint64(id))
 			}
 		}
-		base := t.reserveAutoIncrement(explicit, generated, observedExplicit)
+		reservation := t.reserveAutoIncrement(input, generated, tx)
 		if generated > 0 && notify != nil {
-			notify(int64(base + 1))
+			notify(reservation.First)
 		}
 		cols := append([]string(nil), columns...)
 		if position < 0 {
@@ -906,12 +909,13 @@ func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify 
 			cols = append(cols, c.Name)
 		}
 		rows := make([][]scm.Scmer, len(values))
+		generatedOffset := int64(0)
 		for i, row := range values {
 			rows[i] = make([]scm.Scmer, len(cols))
 			copy(rows[i], row)
 			if rows[i][position].IsNil() {
-				base++
-				rows[i][position] = scm.NewInt(int64(base))
+				rows[i][position] = scm.NewInt(reservation.First + generatedOffset)
+				generatedOffset++
 			}
 		}
 		return cols, rows, true

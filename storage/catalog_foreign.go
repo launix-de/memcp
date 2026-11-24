@@ -102,6 +102,7 @@ func (snapshot *foreignMaintenanceSnapshot) validateLocked() {
 // The first profile admits declaration-only transactions: row mutations by
 // this owner are rejected by ordinary catalog admission before native effects.
 type publicCatalogViews struct {
+	allocators      map[*table]*catalogAllocatorReset
 	names           *catalogNamespaceView
 	keys            map[*table][]uniqueKey
 	checkedWriters  map[*table]nativeMutationInputProfile
@@ -593,6 +594,10 @@ func (tx *TxContext) restorePublicDeclarations(keep int) {
 		panic("invalid native public declaration boundary")
 	}
 	for i := len(history) - 1; i >= keep; i-- {
+		if a := history[i].allocator; a != nil {
+			changes.amendmentBytes -= a.bytes
+			continue
+		}
 		if rename := history[i].tableRename; rename != nil {
 			changes.amendmentBytes -= rename.bytes
 			if rename.previous == nil {

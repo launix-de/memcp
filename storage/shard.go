@@ -2006,7 +2006,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						if uniqueGuard != nil {
 							uniqueGuard.releaseKeys()
 						}
-						_, rows, _ := t.t.prepareInsertIDs([]string{identityName}, [][]scm.Scmer{{value}}, nil, declarations)
+						_, rows, _ := t.t.prepareInsertIDs([]string{identityName}, [][]scm.Scmer{{value}}, nil, declarations, currentTx)
 						value = rows[0][0]
 					})
 					d2[identityPosition] = value
@@ -4019,7 +4019,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 		}
 		if !alreadyLocked {
 			for i, row := range preparedRows {
-				cols, rows, assigned := t.t.prepareInsertIDs(preparedColumns[i], [][]scm.Scmer{row}, onFirstInsertId, declarations)
+				cols, rows, assigned := t.t.prepareInsertIDs(preparedColumns[i], [][]scm.Scmer{row}, onFirstInsertId, declarations, currentTx)
 				preparedColumns[i], preparedRows[i] = cols, rows[0]
 				if assigned {
 					onFirstInsertId = nil
@@ -4053,7 +4053,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 
 	if validatedSchema == nil && !alreadyLocked {
 		var assigned bool
-		columns, values, assigned = t.t.prepareInsertIDs(columns, values, onFirstInsertId, declarations)
+		columns, values, assigned = t.t.prepareInsertIDs(columns, values, onFirstInsertId, declarations, currentTx)
 		if assigned {
 			onFirstInsertId = nil
 		}

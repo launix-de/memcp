@@ -26,6 +26,7 @@ const (
 	catalogColumnKind
 	catalogStatementTriggerKind
 	catalogOwnedForeignKind
+	catalogAllocatorResetKind
 )
 
 // Identity is allocated before the first unpublished declaration. It is part of
@@ -130,7 +131,7 @@ func (scope *transactionResources) catalogReadOnlyLocked() bool {
 }
 
 func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarationKind, initializer *nativeColumnInitializer) {
-	public := kind == catalogDefaultKind || kind == catalogSourceKind || kind == catalogTableDropKind || kind == catalogForeignDropKind || kind == catalogForeignReplacementKind || kind == catalogPublicKeyKind || kind == catalogColumnKind || kind == catalogStatementTriggerKind || kind == catalogOwnedForeignKind
+	public := kind == catalogAllocatorResetKind || kind == catalogDefaultKind || kind == catalogSourceKind || kind == catalogTableDropKind || kind == catalogForeignDropKind || kind == catalogForeignReplacementKind || kind == catalogPublicKeyKind || kind == catalogColumnKind || kind == catalogStatementTriggerKind || kind == catalogOwnedForeignKind
 	privateCreate := kind == catalogCreateKind
 
 	if tx.hasTableDrops() && (!public && !privateCreate || kind == catalogStatementTriggerKind) {
@@ -531,6 +532,10 @@ func (tx *TxContext) prepareCatalogDecision() error {
 		db.validateNameNamespace(names, catalogForeignEndpointScope{owner: tx.transactionState})
 	}
 
+	record.AllocatorResets = tx.allocatorResetDeclarations()
+	if len(record.AllocatorResets) != 0 {
+		record.Format = 25
+	}
 	encoded := encodeCatalogDecision(record)
 	db.schemalock.Unlock()
 	frozen, err := decodeCatalogDecision(encoded)
@@ -596,6 +601,7 @@ func (tx *TxContext) publishCatalogDecision() error {
 		if len(commit.record.StatementTriggers) != 0 {
 			tx.publicCatalogChanges().publishStatementTriggersLocked(commit.record.Version)
 		}
+		db.publishAllocatorResets(commit.record.AllocatorResets, false)
 	}
 	tx.publishTableDropCutsLocked(commit.record.Version)
 	db.catalogVersion = commit.record.Version
@@ -936,6 +942,7 @@ const (
 	catalogEnforcementConstruction
 	catalogValidationConstruction
 	catalogStatementTriggerConstruction
+	catalogAllocatorResetConstruction
 )
 
 // Catalog construction shares the native resource/decision admission. A native
@@ -948,7 +955,7 @@ const (
 // definition without re-executing an earlier row phase.
 func (tx *TxContext) beginCatalogConstruction(profile catalogConstructionProfile, initializer *nativeColumnInitializer, endpoints ...*table) func() {
 	switch profile {
-	case catalogDeclarationConstruction, catalogEnforcementConstruction, catalogStatementTriggerConstruction:
+	case catalogDeclarationConstruction, catalogEnforcementConstruction, catalogStatementTriggerConstruction, catalogAllocatorResetConstruction:
 		tx.noteStatementMutation(nil)
 	case catalogValidationConstruction:
 		// Admission itself changes no declaration. Validation retains the same
@@ -964,11 +971,16 @@ func (tx *TxContext) beginCatalogConstruction(profile catalogConstructionProfile
 	}
 	scope := tx.resourceScope()
 	scope.mu.Lock()
-	if scope.closed || scope.deciding {
+	if scope.closed || scope.deciding || profile == catalogAllocatorResetConstruction && scope.constructing != 0 {
 		scope.mu.Unlock()
-		panic("native transaction is finishing")
+		panic("native transaction is finishing or constructing another declaration")
 	}
 	tx.mu.Lock()
+	if profile == catalogAllocatorResetConstruction && tx.mutationOperations != 0 {
+		tx.mu.Unlock()
+		scope.mu.Unlock()
+		panic(newNativeMutationBusyError(tx.transactionState, "allocator reset construction"))
+	}
 	initializing := tx.checkedMutation
 	if initializing != nil && initializing.columnInitializer != nil && (initializer != initializing.columnInitializer || !initializer.owns(tx, initializer.target.schema)) {
 		tx.mu.Unlock()

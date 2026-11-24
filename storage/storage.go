@@ -3333,7 +3333,7 @@ func Init(en scm.Env) {
 				defer t.admitNativeMaintenance()()
 				next := uint64(scm.ToInt(a[2]))
 				if next > 0 {
-					t.reserveAutoIncrement(next-1, 0, false)
+					t.reserveAutoIncrement(tableIDExplicit{High: next - 1}, 0, nil)
 					db.save()
 				}
 				return scm.NewBool(true)
@@ -3956,12 +3956,29 @@ func Init(en scm.Env) {
 			if t.schema == nil || GetDatabase(t.schema.Name) != t.schema || t.schema.tables.Get(t.Name) != t || !t.visibleIn(tx, t.schema.catalogView().version) {
 				panic("table allocator handle is outside its visible native generation")
 			}
-			return tableAllocatorObservation(t.currentTableAllocator())
+			return tableAllocatorObservation(t.currentTableAllocator(tx))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true,
 			Description: "Reads authoritative table UUID allocation provenance without reserving IDs. Unknown historical start/issued facts are returned as nil; the raw highwater and its actual allocation proof are separate fields; no row, metadata estimate or session identity is substituted. Reservations are nontransactional.",
 			Params:      []*scm.TypeDescriptor{{Kind: "table", Label: "table"}, {Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "list"}},
 	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "reset_table_ids",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if len(a) != 6 || !a[1].IsString() || !a[2].IsString() || !a[3].IsString() || !a[4].IsNil() && !a[4].IsString() {
+				panic("reset_table_ids expects table, column, observation token, current, next-or-nil, native transaction")
+			}
+			t := TableFromScmer(a[0])
+			tx := scmerToTxContext(a[5])
+			current, next := allocatorSignedDecimal(a[3].String()), int64(0)
+			if !a[4].IsNil() {
+				next = allocatorSignedDecimal(a[4].String())
+			}
+			return scm.NewBool(t.resetTableIDs(a[1].String(), a[2].String(), current, next, !a[4].IsNil(), tx))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Description: "Selects a new signed native table allocator epoch through the original local transaction decision; expected_token guards the complete observed state. Current and next are exact decimal strings; nil next means exhaustion. Original start and issued provenance remain unchanged.", Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}, {Kind: "string", Label: "column"}, {Kind: "string", Label: "expected_token"}, {Kind: "string", Label: "current"}, {Kind: "any", Label: "next"}, {Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+	})
+
 	scm.Declare(&en, &scm.Declaration{
 		Name: "reserve_ids",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -3975,12 +3992,14 @@ func Init(en scm.Env) {
 			}
 			releaseAdmission := t.admitNativeWrite(tx)
 			defer releaseAdmission()
+			finishReservation := tx.admitAllocatorReservation()
+			defer finishReservation()
 			count := uint64(a[1].Int())
 			if count == 0 {
 				return scm.NewSlice(nil)
 			}
-			base := t.reserveAutoIncrement(0, count, false)
-			return scm.NewSlice([]scm.Scmer{scm.NewInt(int64(base + 1)), scm.NewInt(int64(base + count))})
+			reservation := t.reserveAutoIncrement(tableIDExplicit{}, count, tx)
+			return scm.NewSlice([]scm.Scmer{scm.NewInt(reservation.First), scm.NewInt(reservation.Last)})
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "reserves a disjoint ID block from the existing table counter; returns inclusive (first last), or an empty list for zero. SAFE/LOGGED reservations have independent table-UUID WAL durability and survive rollback, savepoints and restart, including unused blocks. MEMORY/SLOPPY retain their existing engine durability guarantees.", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{

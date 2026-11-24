@@ -23,7 +23,9 @@ import "github.com/launix-de/memcp/scm"
 // decisions. Issued records an actual supplied/generated ID input; HighAllocated
 // separately proves that the highwater came from a forward counter reservation. The complete immutable observation has one UUID owner. Historical
 // Auto_increment headers carry only High; missing provenance stays unknown.
-// Version 1 is also used by the schema field, never by a catalog decision.
+// Version 1 is also used by historical schema fields. Version 2 carries a
+// signed cursor selected by an accepted native catalog decision. Reservations
+// advance only that epoch; neither row replay nor raw High can select a reset.
 type tableAllocatorState struct {
 	Version       int    `json:"version"`
 	Table         string `json:"table"`
@@ -33,13 +35,17 @@ type tableAllocatorState struct {
 	Issued        bool   `json:"issued"`
 	HighAllocated bool   `json:"high_allocated"`
 	High          uint64 `json:"high"`
+	Epoch         string `json:"epoch,omitempty"`
+	Current       int64  `json:"current,omitempty"`
+	Next          int64  `json:"next,omitempty"`
+	HasNext       bool   `json:"has_next,omitempty"`
 }
 
 type LogEntryTableAllocator struct{ state tableAllocatorState }
 
 func (s tableAllocatorState) validate() error {
 	id, err := uuid.Parse(s.Table)
-	if err != nil || id == uuid.Nil || id.String() != s.Table || s.Version != 1 ||
+	if err != nil || id == uuid.Nil || id.String() != s.Table || (s.Version != 1 && s.Version != 2) ||
 		(s.StartKnown && (s.Start == 0 || s.Start > math.MaxInt64)) ||
 		(!s.StartKnown && s.Start != 0) || (s.Issued && !s.IssuedKnown) ||
 		(s.HighAllocated && (!s.IssuedKnown || !s.Issued || s.High == 0 || (s.StartKnown && s.High < s.Start))) ||
@@ -47,7 +53,29 @@ func (s tableAllocatorState) validate() error {
 		(s.IssuedKnown && !s.Issued && (!s.StartKnown || s.High != s.Start-1)) {
 		return fmt.Errorf("invalid native table allocator state")
 	}
+	if s.Version == 1 && (s.Epoch != "" || s.Current != 0 || s.Next != 0 || s.HasNext) {
+		return fmt.Errorf("legacy allocator cannot carry reset state")
+	}
+	if s.Version == 2 {
+		epoch, err := uuid.Parse(s.Epoch)
+		if err != nil || epoch == uuid.Nil || epoch.String() != s.Epoch || (!s.HasNext && (s.Next != 0 || s.Current != math.MaxInt64)) || s.HasNext && s.Next != s.Current && (s.Current == math.MaxInt64 || s.Next != s.Current+1) {
+			return fmt.Errorf("invalid allocator reset epoch")
+		}
+	}
 	return nil
+}
+
+func (state tableAllocatorState) MarshalJSON() ([]byte, error) {
+	type plain tableAllocatorState
+	if state.Version != 2 {
+		return json.Marshal(plain(state))
+	}
+	return json.Marshal(struct {
+		plain
+		Current int64 `json:"current"`
+		Next    int64 `json:"next"`
+		HasNext bool  `json:"has_next"`
+	}{plain(state), state.Current, state.Next, state.HasNext})
 }
 
 // Versioned provenance is required data: reject omitted/null fields rather
@@ -70,6 +98,21 @@ func (state *tableAllocatorState) UnmarshalJSON(data []byte) error {
 	if err := decoder.Decode(&decoded); err != nil {
 		return err
 	}
+	if decoded.Version == 1 {
+		for _, name := range []string{"epoch", "current", "next", "has_next"} {
+			if _, ok := fields[name]; ok {
+				return fmt.Errorf("legacy allocator cannot contain epoch field: %s", name)
+			}
+		}
+	}
+	if decoded.Version == 2 {
+		for _, name := range []string{"epoch", "current", "next", "has_next"} {
+			value, ok := fields[name]
+			if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return fmt.Errorf("missing allocator epoch field: %s", name)
+			}
+		}
+	}
 	*state = tableAllocatorState(decoded)
 	return state.validate()
 }
@@ -83,10 +126,18 @@ func encodeTableAllocatorRecord(entry LogEntryTableAllocator) string {
 		panic(err)
 	}
 	checksum := sha256.Sum256(raw)
-	return base64.RawURLEncoding.EncodeToString(raw) + "." + fmt.Sprintf("%x", checksum[:])
+	frame := base64.RawURLEncoding.EncodeToString(raw) + "." + fmt.Sprintf("%x", checksum[:])
+	if entry.state.Version == 2 {
+		return "v2/" + frame
+	}
+	return frame
 }
 
 func decodeTableAllocatorRecord(encoded string) LogEntryTableAllocator {
+	epochFrame := strings.HasPrefix(encoded, "v2/")
+	if epochFrame {
+		encoded = strings.TrimPrefix(encoded, "v2/")
+	}
 	payload, checksum, found := strings.Cut(encoded, ".")
 	raw, err := base64.RawURLEncoding.DecodeString(payload)
 	if !found || err != nil || strings.Contains(checksum, ".") {
@@ -108,6 +159,9 @@ func decodeTableAllocatorRecord(encoded string) LogEntryTableAllocator {
 	if decoder.Decode(new(any)) != io.EOF {
 		panic("trailing native allocator frame payload")
 	}
+	if epochFrame != (state.Version == 2) {
+		panic("allocator state/frame version mismatch")
+	}
 	return LogEntryTableAllocator{state}
 }
 
@@ -124,6 +178,28 @@ func mergeTableAllocator(previous, incoming tableAllocatorState) (tableAllocator
 	}
 	if previous.Table != incoming.Table || (previous.StartKnown && incoming.StartKnown && previous.Start != incoming.Start) {
 		return previous, fmt.Errorf("conflicting native table allocator provenance")
+	}
+	if previous.Version == 2 || incoming.Version == 2 {
+		if previous.Version != incoming.Version || previous.Epoch != incoming.Epoch {
+			return previous, fmt.Errorf("allocator epoch requires its native catalog decision")
+		}
+		// Within one accepted epoch reservations are monotone in signed space.
+		// Raw legacy highwaters cannot select or advance an epoch.
+		next := previous
+		if incoming.Current > next.Current || next.HasNext && !incoming.HasNext || next.HasNext && incoming.HasNext && incoming.Next > next.Next {
+			next.Current, next.Next, next.HasNext = incoming.Current, incoming.Next, incoming.HasNext
+		}
+		if incoming.High > previous.High {
+			next.High, next.HighAllocated = incoming.High, incoming.HighAllocated
+		} else if incoming.High == previous.High {
+			next.HighAllocated = previous.HighAllocated || incoming.HighAllocated
+		}
+		if !next.StartKnown && incoming.StartKnown {
+			next.StartKnown, next.Start = true, incoming.Start
+		}
+		next.Issued = previous.Issued || incoming.Issued
+		next.IssuedKnown = next.Issued || previous.IssuedKnown && incoming.IssuedKnown
+		return next, next.validate()
 	}
 	next := previous
 	if !next.StartKnown && incoming.StartKnown {
@@ -153,7 +229,11 @@ func (db *database) acceptTableAllocator(state tableAllocatorState) error {
 	if db.tableAllocators == nil {
 		db.tableAllocators = make(map[string]tableAllocatorState)
 	}
-	previous, exists := db.tableAllocators[state.Table]
+	key := state.Table
+	if state.Version == 2 {
+		key += "/" + state.Epoch
+	}
+	previous, exists := db.tableAllocators[key]
 	if exists {
 		var err error
 		state, err = mergeTableAllocator(previous, state)
@@ -163,12 +243,16 @@ func (db *database) acceptTableAllocator(state tableAllocatorState) error {
 	} else {
 		db.adjustMetadataMemory(0, tableAllocatorRecordMemory(state))
 	}
-	db.tableAllocators[state.Table] = state
+	db.tableAllocators[key] = state
 	return nil
 }
 
 func tableAllocatorRecordMemory(state tableAllocatorState) uint {
-	return uint(unsafe.Sizeof(state)) + 64 + uint(len(state.Table))
+	bytes := uint(unsafe.Sizeof(state)) + 64 + uint(len(state.Table)+len(state.Epoch))
+	if state.Version == 2 {
+		bytes += uint(len(state.Table) + 1 + len(state.Epoch))
+	}
+	return bytes
 }
 
 func (db *database) tableAllocatorLogEntries() []interface{} {
@@ -180,7 +264,11 @@ func (db *database) tableAllocatorLogEntries() []interface{} {
 	version := db.catalogView().version
 	for _, t := range db.tables.GetAll() {
 		if t.committedAt(version) && !t.droppedAt(version) {
-			live[t.RuntimeIdentity] = true
+			key := t.RuntimeIdentity
+			if state := t.allocatorSnapshot(); state != nil && state.Version == 2 {
+				key += "/" + state.Epoch
+			}
+			live[key] = true
 		}
 	}
 	retired := false
@@ -286,7 +374,11 @@ func (t *table) loadAllocatorAuthorityLocked() tableAllocatorState {
 			panic("invalid native table allocator schema provenance")
 		}
 	}
-	if accepted, exists := t.schema.tableAllocators[t.RuntimeIdentity]; exists {
+	key := t.RuntimeIdentity
+	if state.Version == 2 {
+		key += "/" + state.Epoch
+	}
+	if accepted, exists := t.schema.tableAllocators[key]; exists {
 		var err error
 		state, err = mergeTableAllocator(state, accepted)
 		if err != nil {
@@ -303,7 +395,11 @@ func (t *table) loadAllocatorAuthorityLocked() tableAllocatorState {
 
 // This pure arithmetic is shared by RAM-only CAS and durable WAL publication.
 // Inputs come from validated immutable producers; there is no row/catalog work.
-func tableAllocatorReservation(previous tableAllocatorState, high, explicit, generated uint64, observedExplicit bool) (uint64, tableAllocatorState, bool) {
+func tableAllocatorReservation(previous tableAllocatorState, high uint64, input tableIDExplicit, generated uint64) (tableIDReservation, tableAllocatorState, bool) {
+	if previous.Version == 2 {
+		return epochTableIDReservation(previous, input, generated)
+	}
+	explicit, observedExplicit := input.High, input.Observed
 	if high > previous.High {
 		previous.High, previous.HighAllocated = high, false
 		previous.IssuedKnown = previous.Issued
@@ -313,7 +409,7 @@ func tableAllocatorReservation(previous tableAllocatorState, high, explicit, gen
 		panic("generated ID block exceeds native integer capacity")
 	}
 	if generated == 0 && base == previous.High && (!observedExplicit || previous.Issued) {
-		return base, previous, false
+		return legacyTableIDReservation(base, generated), previous, false
 	}
 	next := previous
 	next.High = base + generated
@@ -322,12 +418,12 @@ func tableAllocatorReservation(previous tableAllocatorState, high, explicit, gen
 	// highwater allocated by this counter. Preserve that distinction as data;
 	// each frontend owns its identity/sequence interpretation.
 	next.HighAllocated = generated > 0 || explicit > previous.High || (previous.Issued && previous.HighAllocated)
-	return base, next, true
+	return legacyTableIDReservation(base, generated), next, true
 }
 
 // No-WAL engines retain per-table CAS admission. They must not acquire a
 // database-global log/mutex merely to publish volatile allocator provenance.
-func (t *table) reserveVolatileAutoIncrement(explicit, generated uint64, observedExplicit bool) uint64 {
+func (t *table) reserveVolatileAutoIncrement(input tableIDExplicit, generated uint64) tableIDReservation {
 	for {
 		current := t.allocator.Load()
 		previous := tableAllocatorState{Version: 1, Table: t.RuntimeIdentity}
@@ -336,7 +432,7 @@ func (t *table) reserveVolatileAutoIncrement(explicit, generated uint64, observe
 		} else if t.Allocator != nil {
 			previous = *t.Allocator
 		}
-		base, next, changed := tableAllocatorReservation(previous, atomic.LoadUint64(&t.Auto_increment), explicit, generated, observedExplicit)
+		base, next, changed := tableAllocatorReservation(previous, atomic.LoadUint64(&t.Auto_increment), input, generated)
 		if !changed {
 			return base
 		}
@@ -350,7 +446,7 @@ func (t *table) reserveVolatileAutoIncrement(explicit, generated uint64, observe
 // Called only at a table's batch preparation / explicit reservation owner.
 // Callers release physical shard locks before entry; ordinary INSERT prepares
 // before target write/UNIQUE ownership. Lifecycle admission excludes MOVE/Drop.
-func (t *table) reserveLocalAutoIncrement(explicit, generated uint64, observedExplicit bool) uint64 {
+func (t *table) reserveLocalAutoIncrement(input tableIDExplicit, generated uint64) tableIDReservation {
 	t.prepareAllocatorRecovery()
 	db := t.schema
 	if failure := db.allocatorFailure.Load(); failure != nil {
@@ -362,7 +458,7 @@ func (t *table) reserveLocalAutoIncrement(explicit, generated uint64, observedEx
 		// attach a UUID-bound reservation frame to a name-only generation.
 		for {
 			high := atomic.LoadUint64(&t.Auto_increment)
-			base, next, changed := tableAllocatorReservation(tableAllocatorState{High: high}, high, explicit, generated, false)
+			base, next, changed := tableAllocatorReservation(tableAllocatorState{High: high}, high, tableIDExplicit{High: input.High}, generated)
 			if !changed || atomic.CompareAndSwapUint64(&t.Auto_increment, high, next.High) {
 				return base
 			}
@@ -370,11 +466,11 @@ func (t *table) reserveLocalAutoIncrement(explicit, generated uint64, observedEx
 	}
 	// Already supplied/reserved IDs add no facts. The immutable accepted
 	// witness makes this a linearizable no-op, including under concurrent WAL.
-	if snapshot := t.allocatorSnapshot(); generated == 0 && snapshot != nil && explicit <= snapshot.High && (!observedExplicit || snapshot.Issued) {
-		return snapshot.High
+	if snapshot := t.allocatorSnapshot(); generated == 0 && snapshot != nil && snapshot.Version == 1 && input.High <= snapshot.High && (!input.Observed || snapshot.Issued) {
+		return legacyTableIDReservation(snapshot.High, 0)
 	}
 	if t.PersistencyMode != Safe && t.PersistencyMode != Logged {
-		return t.reserveVolatileAutoIncrement(explicit, generated, observedExplicit)
+		return t.reserveVolatileAutoIncrement(input, generated)
 	}
 	if !db.persistenceLifecycle.TryRLock() {
 		panic("database maintenance in progress; retry table ID reservation")
@@ -387,12 +483,12 @@ func (t *table) reserveLocalAutoIncrement(explicit, generated uint64, observedEx
 		panic(*failure)
 	}
 	previous := t.loadAllocatorAuthorityLocked()
-	var base uint64
+	var base tableIDReservation
 	var next tableAllocatorState
 	for {
 		high := atomic.LoadUint64(&t.Auto_increment)
 		var changed bool
-		base, next, changed = tableAllocatorReservation(previous, high, explicit, generated, observedExplicit)
+		base, next, changed = tableAllocatorReservation(previous, high, input, generated)
 		if !changed {
 			return base
 		}
@@ -449,10 +545,18 @@ func tableAllocatorObservation(state tableAllocatorState) scm.Scmer {
 	if state.IssuedKnown {
 		issued = scm.NewBool(state.Issued)
 	}
-	return scm.NewSlice([]scm.Scmer{scm.NewString("table_uuid"), scm.NewString(state.Table),
+	values := []scm.Scmer{scm.NewString("token"), scm.NewString(tableAllocatorToken(state)), scm.NewString("table_uuid"), scm.NewString(state.Table),
 		scm.NewString("start"), start, scm.NewString("issued"), issued,
 		scm.NewString("high"), scm.NewString(strconv.FormatUint(state.High, 10)),
-		scm.NewString("high_allocated"), scm.NewBool(state.HighAllocated)})
+		scm.NewString("high_allocated"), scm.NewBool(state.HighAllocated)}
+	if state.Version == 2 {
+		next := scm.NewNil()
+		if state.HasNext {
+			next = scm.NewString(strconv.FormatInt(state.Next, 10))
+		}
+		values = append(values, scm.NewString("epoch"), scm.NewString(state.Epoch), scm.NewString("current"), scm.NewString(strconv.FormatInt(state.Current, 10)), scm.NewString("next"), next)
+	}
+	return scm.NewSlice(values)
 }
 
 // Handover carries the actual immutable publisher state, not guessed seed facts
@@ -495,7 +599,10 @@ func (t *table) mergeImportedAllocator(state tableAllocatorState, high uint64) {
 	t.mergeRecoveredAutoIncrement(high)
 }
 
-func (t *table) currentTableAllocator() tableAllocatorState {
+func (t *table) currentTableAllocator(tx *TxContext) tableAllocatorState {
+	if branch := t.transactionAllocator(tx); branch != nil {
+		return *branch.state.Load()
+	}
 	if t.RuntimeIdentity == "" {
 		panic("table allocator current-value provenance is unavailable for a legacy table without native identity")
 	}

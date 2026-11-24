@@ -673,10 +673,10 @@ func TestInsertConcurrentAutoIncrementReservations(t *testing.T) {
 	if len(seen) != 256 {
 		t.Fatalf("generated %d distinct IDs", len(seen))
 	}
-	if base := tbl.reserveAutoIncrement(1000, 2, true); base != 1000 {
+	if base := tbl.reserveAutoIncrement(tableIDExplicit{High: 1000, Value: 1000, Observed: true}, 2, nil).LegacyBase; base != 1000 {
 		t.Fatalf("explicit ID range starts at %d", base)
 	}
-	if base := tbl.reserveAutoIncrement(900, 1, true); base != 1002 {
+	if base := tbl.reserveAutoIncrement(tableIDExplicit{High: 900, Value: 900, Observed: true}, 1, nil).LegacyBase; base != 1002 {
 		t.Fatalf("counter moved backwards to %d", base)
 	}
 }

@@ -72,6 +72,7 @@ func (t *table) mayHaveDefaultDeclaration(name string, tx *TxContext) bool {
 // Declaration amendments belong to the same private generation as CREATE.
 // Immutable previous slices preserve interleaved column/key savepoint changes.
 type catalogDeclarationAmendment struct {
+	allocator        *catalogAllocatorReset
 	table            *table
 	keys             []uniqueKey
 	columns          []*column
@@ -173,7 +174,7 @@ func (tx *TxContext) amendCatalogDeclaration(t *table, amend func(*table) bool) 
 			panic("private amendment lost its joined catalog owner")
 		}
 		for _, entry := range tx.publicForeignAmendments() {
-			if entry.foreign != nil && (entry.foreign.endpoints[0] == t || entry.foreign.endpoints[1] == t) || entry.column != nil && entry.column.table == t || entry.publicKey != nil && entry.publicKey.table == t || entry.statementTrigger != nil && entry.statementTrigger.slot.table == t {
+			if entry.allocator != nil && entry.allocator.table == t || entry.foreign != nil && (entry.foreign.endpoints[0] == t || entry.foreign.endpoints[1] == t) || entry.column != nil && entry.column.table == t || entry.publicKey != nil && entry.publicKey.table == t || entry.statementTrigger != nil && entry.statementTrigger.slot.table == t {
 				panic("private declaration is already bound to its endpoint input")
 			}
 		}

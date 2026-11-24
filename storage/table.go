@@ -2042,10 +2042,10 @@ func (t *table) metadataMemory() uint {
 		size += uint(cap(topology.retirementDependencies)) * uint(unsafe.Sizeof((<-chan struct{})(nil)))
 	}
 	if initial := t.Allocator; initial != nil {
-		size += uint(unsafe.Sizeof(*initial)) + uint(len(initial.Table))
+		size += uint(unsafe.Sizeof(*initial)) + uint(len(initial.Table)+len(initial.Epoch))
 	}
 	if current := t.allocator.Load(); current != nil && current != t.Allocator {
-		size += uint(unsafe.Sizeof(*current)) + uint(len(current.Table))
+		size += uint(unsafe.Sizeof(*current)) + uint(len(current.Table)+len(current.Epoch))
 	}
 	size += t.writeAdmission.metadataMemory()
 	size += uint(t.triggerMemoryBytes.Load())
@@ -4017,7 +4017,7 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 					t.schema.schemalock.Lock()
 					metadataLocked = true
 				}()
-				t.reserveAutoIncrement(uint64(scm.ToInt(value)), 0, false)
+				t.reserveAutoIncrement(tableIDExplicit{High: uint64(scm.ToInt(value))}, 0, nil)
 			}()
 		} else {
 			replacement := current
@@ -4400,11 +4400,14 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 
 // Reserve one generated-ID range per batch without taking the topology mutex
 // from inside a shard writer. Explicit IDs advance the same monotonic counter.
-func (t *table) reserveAutoIncrement(explicit, generated uint64, observedExplicit bool) uint64 {
-	if sharedClusterSource(t) {
-		return activeNodeCluster().reserveInsertIDs(t, explicit, generated, observedExplicit)
+func (t *table) reserveAutoIncrement(input tableIDExplicit, generated uint64, tx *TxContext) tableIDReservation {
+	if branch := t.transactionAllocator(tx); branch != nil {
+		return branch.reserve(input, generated)
 	}
-	return t.reserveLocalAutoIncrement(explicit, generated, observedExplicit)
+	if sharedClusterSource(t) {
+		return activeNodeCluster().reserveInsertIDs(t, input, generated)
+	}
+	return t.reserveLocalAutoIncrement(input, generated)
 }
 
 // Insert chooses the native execution site before evaluating defaults, allocating
@@ -4521,7 +4524,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 	}
 
 	var idsPrepared bool
-	columns, values, idsPrepared = t.prepareInsertIDs(columns, values, onFirstInsertId, validatedSchema.declarations)
+	columns, values, idsPrepared = t.prepareInsertIDs(columns, values, onFirstInsertId, validatedSchema.declarations, currentTx)
 	if idsPrepared {
 		onFirstInsertId = nil
 	}
@@ -4655,7 +4658,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 		// Free routing may have switched to a newly published hash topology.
 		// Bind generated routing values to that retained publication as well.
 		if !idsPrepared {
-			columns, values, idsPrepared = t.prepareInsertIDs(columns, values, onFirstInsertId, validatedSchema.declarations)
+			columns, values, idsPrepared = t.prepareInsertIDs(columns, values, onFirstInsertId, validatedSchema.declarations, currentTx)
 			if idsPrepared {
 				onFirstInsertId = nil
 			}

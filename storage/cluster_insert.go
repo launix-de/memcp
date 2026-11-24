@@ -5,9 +5,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
+import "math"
 import "time"
 import "bytes"
 import "context"
+import "strconv"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -23,18 +25,23 @@ type clusterIDRequest struct {
 	ObservedExplicit bool   `json:"observed_explicit"`
 	Explicit         uint64 `json:"explicit"`
 	Count            uint64 `json:"count"`
+	SignedExplicit   string `json:"signed_explicit,omitempty"`
 }
 
 type clusterIDReply struct {
 	Base  uint64              `json:"base"`
+	Range *tableIDReservation `json:"range,omitempty"`
 	State tableAllocatorState `json:"state"`
 }
 
-func (cluster *nodeCluster) reserveInsertIDs(t *table, explicit, count uint64, observedExplicit bool) uint64 {
+func (cluster *nodeCluster) reserveInsertIDs(t *table, input tableIDExplicit, count uint64) tableIDReservation {
 	if cluster == nil {
 		panic(mosi.NetworkError)
 	}
-	request := clusterIDRequest{Database: t.schema.Name, Table: t.Name, Identity: t.RuntimeIdentity, Explicit: explicit, Count: count, ObservedExplicit: observedExplicit}
+	request := clusterIDRequest{Database: t.schema.Name, Table: t.Name, Identity: t.RuntimeIdentity, Explicit: input.High, Count: count, ObservedExplicit: input.Observed}
+	if input.Observed {
+		request.SignedExplicit = strconv.FormatInt(input.Value, 10)
+	}
 	reply, err := cluster.reserveIDs(cluster.ctx, request)
 	if err != nil {
 		panic(err)
@@ -47,9 +54,19 @@ func (cluster *nodeCluster) reserveInsertIDs(t *table, explicit, count uint64, o
 		}
 		t.mergeRecoveredAutoIncrement(reply.Base + count)
 	} else {
-		t.mergeImportedAllocator(reply.State, reply.Base+count)
+		high := reply.State.High
+		if reply.State.Version == 1 {
+			high = max(high, reply.Base+count)
+		}
+		t.mergeImportedAllocator(reply.State, high)
 	}
-	return reply.Base
+	if reply.State.Version == 2 {
+		if reply.Range == nil {
+			panic("allocator epoch reply is missing its signed range")
+		}
+		return *reply.Range
+	}
+	return legacyTableIDReservation(reply.Base, count)
 }
 
 func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDRequest) (reply clusterIDReply, err error) {
@@ -58,7 +75,10 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 			err = fmt.Errorf("%v", failure)
 		}
 	}()
-	if !cluster.databases[request.Database] || request.Table == "" || (request.Read && (request.Identity == "" || request.Count != 0 || request.Explicit != 0 || request.ObservedExplicit)) {
+	if request.SignedExplicit != "" && !request.ObservedExplicit {
+		return reply, fmt.Errorf("signed allocator input requires explicit-ID provenance")
+	}
+	if !cluster.databases[request.Database] || request.Table == "" || (request.Read && (request.Identity == "" || request.Count != 0 || request.Explicit != 0 || request.ObservedExplicit || request.SignedExplicit != "")) {
 		return reply, fmt.Errorf("invalid cluster ID reservation")
 	}
 	owner, err := cluster.locate(ctx, mosiResource{Database: request.Database})
@@ -107,7 +127,20 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 		reply.State = t.localTableAllocator()
 		return reply, nil
 	}
-	reply.Base = t.reserveLocalAutoIncrement(request.Explicit, request.Count, request.ObservedExplicit)
+	input := tableIDExplicit{High: request.Explicit, Observed: request.ObservedExplicit}
+	if request.SignedExplicit != "" {
+		input.Value = allocatorSignedDecimal(request.SignedExplicit)
+	} else if request.Explicit <= math.MaxInt64 {
+		input.Value = int64(request.Explicit)
+	}
+	if state := t.localTableAllocator(); state.Version == 2 && input.Observed && request.SignedExplicit == "" {
+		return reply, fmt.Errorf("allocator epoch requires signed explicit-ID provenance")
+	}
+	reservation := t.reserveLocalAutoIncrement(input, request.Count)
+	reply.Base = reservation.LegacyBase
+	if t.localTableAllocator().Version == 2 {
+		reply.Range = &reservation
+	}
 	if request.Identity != "" {
 		reply.State = t.localTableAllocator()
 	}
@@ -136,6 +169,13 @@ func (r *replicationManager) mergeClusterInsertTopology(previous, incoming *tabl
 	if previous.ShardMode != ShardModeFree || incoming.ShardMode != ShardModeFree {
 		return false, nil
 	}
+	previousAllocator, incomingAllocator := previous.localTableAllocator(), incoming.localTableAllocator()
+	if previousAllocator.Version != incomingAllocator.Version || previousAllocator.Epoch != incomingAllocator.Epoch {
+		// Schema coherence owns epoch replacement. An append-only topology merge
+		// cannot reinterpret the old schema's selected allocator authority.
+		return false, nil
+	}
+
 	before, after := previous.activeTopology(), incoming.activeTopology()
 	if len(after.shards) <= len(before.shards) {
 		return false, nil
