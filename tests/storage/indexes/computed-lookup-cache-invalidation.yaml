@@ -30,6 +30,53 @@ setup:
   - sql: "INSERT INTO lookup_cache_document VALUES (1000, 10), (2000, 20)"
 
 test_cases:
+
+  - name: Exact native computed calendars retain their complete value
+    setup:
+      - sql: DROP TABLE IF EXISTS ci_exact_calendar
+      - sql: CREATE TABLE ci_exact_calendar(id INT PRIMARY KEY)
+      - sql: INSERT INTO ci_exact_calendar VALUES(0),(1)
+      - scm: |
+          (createcolumn (table "memcp-tests" false "ci_exact_calendar" false)
+            "clock" "DATETIME" '() '() '("id")
+            (lambda (id) (date_from_parts (+ 1788172496 id) 123456789 7)))
+    scm: &exact_calendar_rows |
+      (sort (scan nil (table "memcp-tests" false "ci_exact_calendar" false)
+        '() '() '() (lambda () true) '("id" "clock")
+        (lambda (rows id clock) (cons (list id (date_parts clock)) rows))
+        '() (lambda (left right) (merge (list left right))))
+        (lambda (left right) (< (car left) (car right))))
+    expect:
+      result: [[0, [1788172496, 123456789, 7]], [1, [1788172497, 123456789, 7]]]
+  - name: Persist both computed calendar values through the native codecs
+    scm: (rebuild (table "memcp-tests" false "ci_exact_calendar" false) true false)
+  - name: Restart exact native computed values
+    action: restart
+  - name: Restored computed calendars retain seconds nanoseconds and zone
+    scm: *exact_calendar_rows
+    expect:
+      result: [[0, [1788172496, 123456789, 7]], [1, [1788172497, 123456789, 7]]]
+  - name: Invalidate one restored native computed calendar
+    sql: UPDATE ci_exact_calendar SET id=2 WHERE id=0
+    expect: {affected_rows: 1}
+  - name: Restored computation regenerates the changed calendar exactly
+    scm: *exact_calendar_rows
+    expect:
+      result: [[1, [1788172497, 123456789, 7]], [2, [1788172498, 123456789, 7]]]
+  - name: Failed mixed script rolls back a restored computed input
+    sql: UPDATE ci_exact_calendar SET id=3 WHERE id=1; SELECT missing FROM ci_exact_calendar
+    expect: {error: true}
+  - name: Rollback preserves every original computed calendar part
+    scm: *exact_calendar_rows
+    expect:
+      result: [[1, [1788172497, 123456789, 7]], [2, [1788172498, 123456789, 7]]]
+  - name: Restart after computed calendar rollback
+    action: restart
+  - name: Cold restored computed calendars agree with the accepted transaction
+    scm: *exact_calendar_rows
+    expect:
+      result: [[1, [1788172497, 123456789, 7]], [2, [1788172498, 123456789, 7]]]
+
   - name: "Create the first canonical lookup cache"
     scm: |
       (createcolumn
@@ -287,6 +334,7 @@ test_cases:
     expect: {error: true}
 
 cleanup:
+  - sql: DROP TABLE IF EXISTS ci_exact_calendar
   - sql: "DROP TABLE IF EXISTS filtered_prepare_values"
   - sql: "DROP TABLE IF EXISTS lookup_cache_document"
   - sql: "DROP TABLE IF EXISTS lookup_cache_file"

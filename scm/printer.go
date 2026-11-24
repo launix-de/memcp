@@ -415,7 +415,15 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		value := strconv.AppendInt(buffer[:0], v.Int(), 10)
 		_, _ = b.Write(value)
 	case tagDate:
-		if b.objects != nil {
+		if b.objects != nil && v.DateNanosecond() != 0 {
+			b.WriteString("(date_from_parts ")
+			b.writeInt(v.Int())
+			b.WriteByte(' ')
+			b.writeInt(int64(v.DateNanosecond()))
+			b.WriteByte(' ')
+			b.writeInt(int64(v.DateZone()))
+			b.WriteByte(')')
+		} else if b.objects != nil {
 			// Network values preserve the native date scalar, including its zone.
 			// Local diagnostic/persistence text keeps its historical spelling.
 			b.WriteString("(serialized_date ")

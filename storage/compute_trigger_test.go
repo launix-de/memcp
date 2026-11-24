@@ -39,7 +39,7 @@ func TestComputeProxyRestoresPersistedProcedures(t *testing.T) {
 		`[{"symbol":"lambda"},[{"symbol":"value"}],[{"symbol":"if"},false,[{"symbol":"table"},"memcp-tests","items"],[{"symbol":"*"},{"symbol":"value"},2]]]`,
 		`[{"symbol":"lambda"}`, // corrupt JSON must fail, not become a nil computor
 	} {
-		for version := uint8(0); version <= 2; version++ {
+		for version := uint8(0); version <= 3; version++ {
 			t.Run(fmt.Sprintf("version%d/%s", version, encoded), func(t *testing.T) {
 				var wire bytes.Buffer
 				// Magic 50 is already consumed by the shard loader. The shared
@@ -50,7 +50,11 @@ func TestComputeProxyRestoresPersistedProcedures(t *testing.T) {
 					}
 				}
 				wire.WriteString("value")
-				if err := binary.Write(&wire, binary.LittleEndian, uint32(len(encoded))); err != nil {
+				var length any = uint32(len(encoded))
+				if version == 3 {
+					length = uint64(len(encoded))
+				}
+				if err := binary.Write(&wire, binary.LittleEndian, length); err != nil {
 					t.Fatal(err)
 				}
 				wire.WriteString(encoded)
@@ -61,7 +65,11 @@ func TestComputeProxyRestoresPersistedProcedures(t *testing.T) {
 				}
 				if !json.Valid([]byte(encoded)) {
 					defer func() {
-						if got := recover(); got == nil || !strings.Contains(fmt.Sprint(got), "decode computor") {
+						message := "decode computor"
+						if version == 3 {
+							message = "decode computed scalar"
+						}
+						if got := recover(); got == nil || !strings.Contains(fmt.Sprint(got), message) {
 							t.Fatalf("invalid computor JSON panic = %v", got)
 						}
 					}()

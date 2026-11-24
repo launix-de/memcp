@@ -28,6 +28,55 @@ import (
 	"go.mongodb.org/mongo-driver/v2/x/bsonx/bsoncore"
 )
 
+func TestPersistentJSONDistinguishesQuotedCallablesFromSyntax(t *testing.T) {
+	literal := NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(nil), NewInt(123)})
+	callable := Eval(Read("persistent fixture", "(lambda (value) (+ value 2))", true), &Globalenv)
+	value := NewProcStruct(Proc{Params: NewSlice(nil), En: &Globalenv,
+		Body: NewSlice([]Scmer{NewSymbol("quote"), NewSlice([]Scmer{Globalenv.Vars["+"], callable, literal})})})
+	legacy, err := value.MarshalJSON()
+	if err != nil || bytes.Contains(legacy, []byte("scmer_custom")) {
+		t.Fatalf("legacy schema JSON acquired a private runtime envelope: %s (%v)", legacy, err)
+	}
+	encoded, err := MarshalPersistentJSON(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored Scmer
+	if err := UnmarshalPersistentJSON(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	result := Apply(restored).Slice()
+	if len(result) != 3 || !result[0].IsNativeFunc() || !result[1].IsProc() || !result[2].IsSlice() {
+		t.Fatalf("quoted callable/syntax identities changed: %s", encoded)
+	}
+	if Apply(result[0], NewInt(3), NewInt(4)).Int() != 7 || Apply(result[1], NewInt(5)).Int() != 7 || !Equal(result[2], literal) {
+		t.Fatal("restored quoted values do not retain their full semantics")
+	}
+}
+
+func TestPersistentCalendarPartsSurviveJSONAndTransport(t *testing.T) {
+	value := NewDateNanoWithZone(1788172496, 123456789, 7)
+	encoded, err := MarshalPersistentJSON(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored Scmer
+	if err := UnmarshalPersistentJSON(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	var wire bytes.Buffer
+	Serialize(&wire, restored, &Globalenv, &SerializationContext{})
+	transported := Eval(Read("calendar transport", wire.String(), true), &Globalenv)
+	for _, got := range []Scmer{restored, transported} {
+		if !got.IsDate() || got.Int() != value.Int() || got.DateNanosecond() != 123456789 || got.DateZone() != 7 {
+			t.Fatalf("calendar identity changed: %s", encoded)
+		}
+		if Equal(got, NewDate(got.Int())) || !Less(NewDate(got.Int()), got) || !Equal(got, NewString("2026-08-31 10:34:56.123456789")) {
+			t.Fatal("calendar comparisons discarded the fractional clock")
+		}
+	}
+}
+
 func callJSONTest(t *testing.T, name string, args ...Scmer) Scmer {
 	t.Helper()
 	fn, ok := Globalenv.Vars[Symbol(name)]

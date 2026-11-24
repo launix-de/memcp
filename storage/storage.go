@@ -453,10 +453,12 @@ func (j *storageJITFunctions) finish(owner storageJITEmitter) {
 //
 //	 1  StorageSCMER   – generic Scmer values        (no version byte — see above)
 //	 2  StorageSparse  – sparse/NULL-only column     (no version byte — see above)
+//	 3  StorageSCMER   – length-framed exact native scalars (version 1)
 //	10  StorageInt     – bit-packed integer
 //	11  StorageSeq     – sequential/auto-increment integer
 //	12  StorageFloat   – 64-bit float
 //	13  StorageDecimal – fixed-precision decimal      (no version byte — see above)
+//	14  StorageDate    – seconds/nanoseconds/zones (version 1)
 //	20  StorageString  – dictionary-compressed or buffer string
 //	21  Reserved (unused experimental prefix encoding; never persisted)
 //	31  OverlayBlob    – large binary/blob overlay
@@ -464,12 +466,14 @@ func (j *storageJITFunctions) finish(owner storageJITEmitter) {
 //	41  StorageConst   – single constant value column
 //	50  StorageComputeProxy – computed/cached column
 var storages = map[uint8]reflect.Type{
-	1:  reflect.TypeOf(StorageSCMER{}),
+	1:  reflect.TypeOf(storageSCMERLegacy{}),
 	2:  reflect.TypeOf(StorageSparse{}),
+	3:  reflect.TypeOf(StorageSCMER{}),
 	10: reflect.TypeOf(StorageInt{}),
 	11: reflect.TypeOf(StorageSeq{}),
 	12: reflect.TypeOf(StorageFloat{}),
 	13: reflect.TypeOf(StorageDecimal{}),
+	14: reflect.TypeOf(StorageDate{}),
 	20: reflect.TypeOf(StorageString{}),
 	//30: reflect.TypeOf(OverlaySCMER{}),
 	31: reflect.TypeOf(OverlayBlob{}),

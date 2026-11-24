@@ -77,7 +77,7 @@ func toTime(v Scmer) (time.Time, bool) {
 	}
 	switch v.GetTag() {
 	case tagDate:
-		return time.Unix(v.Int(), 0).UTC(), true
+		return time.Unix(v.Int(), int64(v.DateNanosecond())).UTC(), true
 	case tagInt:
 		return time.Unix(v.Int(), 0).UTC(), true
 	case tagFloat:
@@ -128,6 +128,7 @@ func sqlTemporalOutput(value Scmer, sqlType string, timezone Scmer) Scmer {
 }
 
 func init_date() {
+	initDateParts()
 	// string functions
 	DeclareTitle("Date")
 
