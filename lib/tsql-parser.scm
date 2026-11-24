@@ -7392,7 +7392,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 							(define declaration (tsql_column_description database name col true planning_session tx))
 							(if declaration
 								(list 'altertable (list 'table database false name false 'tx)
-									(if ifexists "drop_if_exists" "drop") (sql_column_storage_name declaration))
+									(if ifexists "drop_if_exists" "drop") (sql_column_storage_name declaration) 'tx)
 								ifexists true (error "DROP column does not exist: " col)))))))))
 			(parser '(tsql_keyword_drop tsql_keyword_constraint
 				(define ifexists (? tsql_keyword_if tsql_keyword_exists))

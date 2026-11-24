@@ -17,13 +17,14 @@ const (
 	nativeStatementTriggerRowInput
 	nativeOwnedCatalogRowInput
 	nativeColumnBindingRowInput
+	nativeColumnRetirementRowInput
 )
 
 func (views *publicCatalogViews) mutationEventAllowed(t *table, event nativeMutationEvent) bool {
 	switch views.checkedWriters[t] {
 	case nativeDeclarationRowInput:
 		return event == nativeMutationInsert || event == nativeMutationUpdate
-	case nativeStatementTriggerRowInput, nativeOwnedCatalogRowInput, nativeColumnBindingRowInput:
+	case nativeStatementTriggerRowInput, nativeOwnedCatalogRowInput, nativeColumnBindingRowInput, nativeColumnRetirementRowInput:
 		return event == nativeMutationInsert || event == nativeMutationUpdate || event == nativeMutationDelete
 	default:
 		return false
@@ -221,7 +222,7 @@ func checkedCatalogWriters(history []catalogDeclarationAmendment, statements, co
 				if _, exists := result[c.table]; !exists || result[c.table] != nativeDeclarationRowInput {
 					result[c.table] = nativeColumnBindingRowInput
 				}
-			} else if c.declaration != nil || c.appendDeclaration != nil || c.propertyChange != nil {
+			} else if c.declaration != nil || c.appendDeclaration != nil || c.propertyChange != nil || c.drop != nil {
 				result[c.table] = nativeDeclarationRowInput
 			} else if _, exists := result[c.table]; !exists {
 				result[c.table] = nativeDeclarationRowInput
@@ -268,6 +269,14 @@ func checkedCatalogWriters(history []catalogDeclarationAmendment, statements, co
 					}
 				}
 			}
+		}
+	}
+	// Retirement has already proven the remaining native descriptor program.
+	// The same checked source input owns DELETE as well as INSERT/UPDATE; no
+	// raw writer may borrow the changed layout or retired physical spelling.
+	for _, entry := range history {
+		if c := entry.column; c != nil && c.drop != nil {
+			result[c.table] = nativeColumnRetirementRowInput
 		}
 	}
 	for t := range blocked {

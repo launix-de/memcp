@@ -276,7 +276,7 @@ func (t *table) validateDeclarationTrigger(transaction *transactionState, name s
 // Caller holds table.mu through the actual trigger-list mutation. Non-system
 // definitions borrow the ordinary fail-fast semantic maintenance admission;
 // system cache churn only conflicts with an explicitly reserved program name.
-func (t *table) admitTriggerMutationLocked(name string, system bool) func() {
+func (t *table) admitTriggerMutationLocked(name string, system bool, timing TriggerTiming) func() {
 	t.requireCatalogDataVisibility(nil)
 	if !system {
 		t.requireTriggerDeclarationMutationLocked()
@@ -285,6 +285,22 @@ func (t *table) admitTriggerMutationLocked(name string, system bool) func() {
 	owner := &t.writeAdmission
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
+	// Only the cold lifecycle publication which would need an accepted DROP
+	// cleanup is excluded. Other system-cache churn keeps its existing owner.
+	// Stage arms this immutable history while holding the same table.mu, so
+	// admission cannot slip between its no-consumer check and publication.
+	if timing == AfterDropColumn && owner.declaration != nil {
+		if history := owner.declaration.catalogAmendments.Load(); history != nil {
+			for _, entry := range *history {
+				if a := entry.column; a != nil && a.table == t && a.drop != nil {
+					if a.drop.Identity != t.RuntimeIdentity || t.schema.tables.Get(t.Name) != t {
+						panic("column retirement lifecycle lost its native generation")
+					}
+					panic("native lifecycle publication conflicts with pending column retirement")
+				}
+			}
+		}
+	}
 	if _, reserved := owner.triggerNames[name]; reserved {
 		panic("native declaration conflict: trigger name has a pending declaration: " + name)
 	}

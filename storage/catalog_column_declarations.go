@@ -304,7 +304,7 @@ func validateStoredColumnValues(tx *TxContext, t *table, previous, target *colum
 func (tx *TxContext) validatedDeclarationTables(history []catalogDeclarationAmendment) map[*table]bool {
 	var result map[*table]bool
 	for _, entry := range history {
-		if a := entry.column; a != nil && a.validatedDeclaration && !tx.ownsTableDrop(a.table) {
+		if a := entry.column; a != nil && (a.validatedDeclaration || a.drop != nil) && !tx.ownsTableDrop(a.table) {
 			if result == nil {
 				result = make(map[*table]bool)
 			}
@@ -337,6 +337,9 @@ func (record *catalogDecisionRecord) validateValidatedDeclarationProfile() error
 	for _, action := range record.NativeDeclarations {
 		if action.Declaration != nil {
 			endpoints[action.Declaration.Table] = true
+		}
+		if action.Drop != nil {
+			endpoints[action.Drop.Table] = true
 		}
 	}
 	for _, declaration := range record.ColumnDeclarations {

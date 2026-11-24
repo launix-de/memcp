@@ -3264,11 +3264,21 @@ func Init(en scm.Env) {
 			t := TableFromScmer(a[0])
 			db := t.schema
 			operation := scm.String(a[1])
+			var tx *TxContext
+			if len(a) > 3 {
+				tx = scmerToTxContext(a[3])
+			}
 
 			switch operation {
 			case "drop":
+				if tx != nil {
+					return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[2]), false))
+				}
 				return scm.NewBool(t.DropColumn(scm.String(a[2])))
 			case "drop_if_exists":
+				if tx != nil {
+					return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[2]), true))
+				}
 				return scm.NewBool(t.DropColumnIfExists(scm.String(a[2])))
 			case "engine":
 				newMode := parsePersistencyMode(scm.String(a[2]))
@@ -3346,6 +3356,7 @@ func Init(en scm.Env) {
 				{Kind: "table", Label: "table"},
 				{Kind: "string", Label: "operation", Description: "one of owner|drop|engine|collation|auto_increment"},
 				{Kind: "any", Label: "parameter", Description: "name of the column to drop or value of the parameter"},
+				{Kind: "any", Label: "tx", Description: "original transaction for stored-column retirement", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -3429,12 +3440,18 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
+			if len(a) > 2 {
+				if tx := scmerToTxContext(a[2]); tx != nil {
+					return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[1]), false))
+				}
+			}
 			return scm.NewBool(t.DropColumn(scm.String(a[1])))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "drops a column from a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
 				{Kind: "string", Label: "column", Description: "name of the column to drop"},
+				{Kind: "any", Label: "tx", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -5815,7 +5832,7 @@ func validateForeignTriggerProgramsLocked(programs []foreignKeyTrigger) {
 				panic("foreign declaration trigger name already exists: " + existing.Name)
 			}
 		}
-		release := program.table.admitTriggerMutationLocked(program.trigger.Name, true)
+		release := program.table.admitTriggerMutationLocked(program.trigger.Name, true, program.trigger.Timing)
 		release()
 	}
 }

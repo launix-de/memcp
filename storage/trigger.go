@@ -760,7 +760,7 @@ func (t *table) replaceTrigger(trigger TriggerDescription) {
 			userDefinition = true
 		}
 	}
-	release := t.admitTriggerMutationLocked(trigger.Name, !userDefinition)
+	release := t.admitTriggerMutationLocked(trigger.Name, !userDefinition, trigger.Timing)
 	defer release()
 	for i, old := range t.Triggers {
 		if old.Name == trigger.Name {
@@ -775,7 +775,7 @@ func (t *table) replaceTrigger(trigger TriggerDescription) {
 
 // addTriggerLocked inserts a compiled trigger while the caller holds t.mu.
 func (t *table) addTriggerLocked(trigger TriggerDescription) {
-	release := t.admitTriggerMutationLocked(trigger.Name, trigger.IsSystem)
+	release := t.admitTriggerMutationLocked(trigger.Name, trigger.IsSystem, trigger.Timing)
 	defer release()
 	t.insertTriggerLocked(trigger)
 }
@@ -821,7 +821,7 @@ func (t *table) removeTriggerLocked(name string, system *bool) bool {
 				}
 				return false
 			}
-			release := t.admitTriggerMutationLocked(name, tr.IsSystem)
+			release := t.admitTriggerMutationLocked(name, tr.IsSystem, tr.Timing)
 			defer release()
 			copy(t.Triggers[i:], t.Triggers[i+1:])
 			clear(t.Triggers[len(t.Triggers)-1:])

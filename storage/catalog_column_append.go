@@ -211,6 +211,11 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 		panic("nullable append requires native generation identity")
 	}
 
+	for _, entry := range tx.publicForeignAmendments() {
+		if a := entry.column; a != nil && a.table == t && a.drop != nil {
+			panic("column append cannot join retirement on the same endpoint")
+		}
+	}
 	observed := t.showColumnsSnapshot.Load()
 	base := changes.views.Load().tables[t]
 	if base == nil {

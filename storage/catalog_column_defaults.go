@@ -32,6 +32,7 @@ type catalogStoredColumnAmendment struct {
 	propertyChange       *catalogColumnPropertyChange
 	appendDeclaration    *catalogColumnAppend
 	rename               *catalogColumnRename
+	drop                 *catalogColumnDrop
 	nameMetadataOnly     bool
 	table                *table
 	columns              []*column
@@ -505,7 +506,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 			statementInput(amendment.slot.table)
 		}
 		if amendment := entry.column; amendment != nil {
-			if amendment.rename != nil {
+			if amendment.rename != nil || amendment.drop != nil {
 				blocked[amendment.table] = struct{}{}
 			}
 			if amendment.appendDeclaration != nil {
@@ -529,7 +530,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 			} else {
 				writers[amendment.table] = struct{}{}
 			}
-			if amendment.declaration != nil || amendment.appendDeclaration != nil || amendment.rename != nil {
+			if amendment.declaration != nil || amendment.appendDeclaration != nil || amendment.rename != nil || amendment.drop != nil {
 				guarded[amendment.table] = true
 			}
 		}
@@ -574,6 +575,17 @@ func replaceStoredColumnMetadata(t *table, base *tableShowColumnsSnapshot, colum
 			bytes += uint(cap(names.declarations))*uint(unsafe.Sizeof((*column)(nil))) + uint(len(names.exact)+len(names.folded))*uint(unsafe.Sizeof(tableColumnName{}))
 			return result, bytes + scm.ComputeSize(result.value) + scm.ComputeSize(result.plannerValue) + scm.ComputeSize(result.metadata.declarations)
 		}
+	}
+	if len(columns) < len(base.metadata.columnNames.declarations) {
+		names := t.buildColumnNamesSnapshot(columns, public)
+		result := t.buildShowColumnsSnapshot(base.rowEstimate, names)
+		result.metadata.catalogVersion, result.metadata.catalogPrevious = base.metadata.catalogVersion, base.metadata.catalogPrevious
+		result.metadata.statistics = base.metadata.statistics
+		result.metadata.constraints, result.metadata.storageConstraints, result.metadata.foreignByID = base.nativeConstraints(), base.nativeConstraints(), base.metadata.foreignByID
+		result.metadata.declarations = buildTableDeclarations(result.metadata.columnRows, result.metadata.constraints)
+		bytes := uint(unsafe.Sizeof(*result)) + uint(unsafe.Sizeof(*result.metadata)) + uint(unsafe.Sizeof(*names)) + names.initialBytes
+		bytes += uint(cap(names.declarations))*uint(unsafe.Sizeof((*column)(nil))) + uint(len(names.exact)+len(names.folded))*uint(unsafe.Sizeof(tableColumnName{}))
+		return result, bytes + scm.ComputeSize(result.value) + scm.ComputeSize(result.plannerValue) + scm.ComputeSize(result.metadata.declarations)
 	}
 	if len(columns) != len(base.metadata.columnNames.declarations) {
 		// Preserve earlier private key/default/type descriptions on the prefix;
@@ -651,9 +663,12 @@ func storedColumnBytes(c *column) uint {
 
 func (tx *TxContext) publicColumnDefaultDeclarations() []catalogColumnDefaultDeclaration {
 	latest := make(map[string]catalogColumnDefaultDeclaration)
+	retiring := tx.columnRetirementTables(tx.publicForeignAmendments())
 	for _, entry := range tx.publicForeignAmendments() {
-		if amendment := entry.column; amendment != nil && amendment.rename == nil && !amendment.nameMetadataOnly && amendment.declaration == nil && amendment.propertyRemoval == nil && amendment.propertyChange == nil && amendment.appendDeclaration == nil && !tx.ownsTableDrop(amendment.table) {
-			latest[amendment.defaultDeclaration.Table+"\x00"+amendment.defaultDeclaration.Column] = amendment.defaultDeclaration
+		if amendment := entry.column; amendment != nil && amendment.rename == nil && amendment.drop == nil && !amendment.nameMetadataOnly && amendment.declaration == nil && amendment.propertyRemoval == nil && amendment.propertyChange == nil && amendment.appendDeclaration == nil && !tx.ownsTableDrop(amendment.table) {
+			if !retiring[amendment.table] {
+				latest[amendment.defaultDeclaration.Table+"\x00"+amendment.defaultDeclaration.Column] = amendment.defaultDeclaration
+			}
 		}
 	}
 	result := make([]catalogColumnDefaultDeclaration, 0, len(latest))
@@ -694,6 +709,9 @@ func publicStoredColumnInputs(history []catalogDeclarationAmendment) map[*table]
 			name := amendment.defaultDeclaration.Column
 			if amendment.rename != nil {
 				name = amendment.rename.Storage
+			}
+			if amendment.drop != nil {
+				name = amendment.drop.Storage
 			}
 			if amendment.appendDeclaration != nil {
 				name = amendment.appendDeclaration.Name
@@ -758,7 +776,7 @@ func (changes *publicCatalogChanges) validateColumnDefaultsLocked() error {
 	}
 	latest := make(map[string]*catalogStoredColumnAmendment)
 	for _, entry := range *history {
-		if amendment := entry.column; amendment != nil && amendment.rename == nil && !amendment.nameMetadataOnly && amendment.declaration == nil && amendment.propertyRemoval == nil && amendment.propertyChange == nil && amendment.appendDeclaration == nil {
+		if amendment := entry.column; amendment != nil && amendment.rename == nil && amendment.drop == nil && !amendment.nameMetadataOnly && amendment.declaration == nil && amendment.propertyRemoval == nil && amendment.propertyChange == nil && amendment.appendDeclaration == nil {
 			if changes.db.tables.Get(amendment.defaultDeclaration.Table) != amendment.table || amendment.table.RuntimeIdentity != amendment.defaultDeclaration.Identity {
 				return fmt.Errorf("default declaration endpoint generation was replaced")
 			}

@@ -806,6 +806,7 @@ func (tx *TxContext) validatePublicDeclarations(db *database) error {
 type publicForeignEndpoint struct {
 	table                *table
 	columns              []*column
+	retiredColumns       map[string]bool
 	keys                 []uniqueKey
 	keyChanged           bool
 	keyBaselineBytes     uint
@@ -1093,10 +1094,21 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 		if input := columnInputs[endpoint.table]; input.columns != nil {
 			var columnBytes uint
 			endpoint.columns = input.columns
+			if history := changes.owner.catalogAmendments.Load(); history != nil {
+				for _, entry := range *history {
+					if a := entry.column; a != nil && a.table == endpoint.table && a.drop != nil {
+						if endpoint.retiredColumns == nil {
+							endpoint.retiredColumns = maps.Clone(endpoint.table.DroppedColumns)
+						}
+						endpoint.retiredColumns[a.drop.Storage] = true
+					}
+				}
+			}
 			endpoint.snapshot, columnBytes = replaceStoredColumnMetadata(endpoint.table, endpoint.snapshot, input.columns, nil)
 			snapshotBytes += columnBytes
 			publication.columnPayloadBytes += input.payloadBytes
 		}
+		bytes += columnRetirementMapBytes(endpoint.retiredColumns)
 		bytes += uint(unsafe.Sizeof(*endpoint)) + uint(cap(endpoint.foreign))*uint(unsafe.Sizeof(foreignKey{})) + uint(cap(endpoint.keys))*uint(unsafe.Sizeof(uniqueKey{})) + uint(cap(endpoint.checks)+cap(endpoint.checkDrops))*uint(unsafe.Sizeof((*checkDeclaration)(nil))) + uint(cap(endpoint.foreignDrops))*uint(unsafe.Sizeof(catalogForeignDeclaration{})) + snapshotBytes
 	}
 	bytes += publication.projectNameMetadata()
@@ -1120,6 +1132,10 @@ func (publication *publicForeignPublication) apply() {
 				endpoint.table.invalidateSourceTriggerBindings()
 			}
 			endpoint.table.Columns = endpoint.columns
+			if endpoint.retiredColumns != nil {
+				endpoint.table.DroppedColumns = endpoint.retiredColumns
+				publication.changes.memory.publicationBytes.Add(^uint64(columnRetirementMapBytes(endpoint.retiredColumns) - 1))
+			}
 			endpoint.table.columnNamesSnapshot.Store(endpoint.snapshot.metadata.columnNames)
 		}
 		for _, declaration := range endpoint.foreignDrops {
@@ -1211,6 +1227,7 @@ func (publication *publicForeignPublication) retirePrevious() {
 		}
 		endpoint.snapshot = nil
 		endpoint.columns = nil
+		endpoint.retiredColumns = nil
 		endpoint.keys = nil
 		endpoint.foreign = nil
 		endpoint.checks = nil

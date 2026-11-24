@@ -542,6 +542,9 @@ func (tx *TxContext) prepareCatalogDecision() error {
 	if record.hasValidatedDeclarations() {
 		record.Format = 26
 	}
+	if record.hasColumnRetirements() {
+		record.Format = 28
+	}
 	encoded := encodeCatalogDecision(record)
 	db.schemalock.Unlock()
 	frozen, err := decodeCatalogDecision(encoded)

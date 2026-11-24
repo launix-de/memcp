@@ -2221,7 +2221,7 @@ func (t *table) installComputeDependencyTrigger(trigger TriggerDescription) {
 	finalizeTriggerCompilation(&trigger)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	release := t.admitTriggerMutationLocked(trigger.Name, trigger.IsSystem)
+	release := t.admitTriggerMutationLocked(trigger.Name, trigger.IsSystem, trigger.Timing)
 	defer release()
 	for i := range t.Triggers {
 		if t.Triggers[i].Name == trigger.Name {

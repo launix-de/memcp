@@ -14,19 +14,22 @@ import "github.com/launix-de/memcp/scm"
 // Keys and their FK consumers share one ordered inert declaration program.
 // A recipe is not a second catalog, row payload or independently accepted Tx.
 type catalogNativeDeclaration struct {
-	Operation   string                       `json:"operation"`
-	Key         *catalogKeyDeclaration       `json:"key,omitempty"`
-	Foreign     *catalogForeignDeclaration   `json:"foreign,omitempty"`
-	Property    *catalogColumnPropertyChange `json:"column_property,omitempty"`
-	Rename      *catalogColumnRename         `json:"column_rename,omitempty"`
-	TableRename *catalogTableRename          `json:"table_rename,omitempty"`
-	Declaration *catalogColumnDeclaration    `json:"column_declaration,omitempty"`
+	Operation   string                           `json:"operation"`
+	Key         *catalogKeyDeclaration           `json:"key,omitempty"`
+	Foreign     *catalogForeignDeclaration       `json:"foreign,omitempty"`
+	Property    *catalogColumnPropertyChange     `json:"column_property,omitempty"`
+	Rename      *catalogColumnRename             `json:"column_rename,omitempty"`
+	TableRename *catalogTableRename              `json:"table_rename,omitempty"`
+	Declaration *catalogColumnDeclaration        `json:"column_declaration,omitempty"`
+	Drop        *catalogColumnDrop               `json:"column_drop,omitempty"`
+	Default     *catalogColumnDefaultDeclaration `json:"column_default,omitempty"`
 }
 
 func (tx *TxContext) publicNativeDeclarations(history []catalogDeclarationAmendment) []catalogNativeDeclaration {
 	var result []catalogNativeDeclaration
 	properties := tx.hasColumnPropertyClaims(history)
 	orderedColumns := tx.validatedDeclarationTables(history)
+	retiring := tx.columnRetirementTables(history)
 	// Pending state transitions belong to this same amendment history. Freeze
 	// each addition's accepted validation fact once, including its matching DROP;
 	// recovery never publishes a transient pending state or a second projection.
@@ -46,6 +49,14 @@ func (tx *TxContext) publicNativeDeclarations(history []catalogDeclarationAmendm
 	for _, entry := range history {
 		if a := entry.column; a != nil && a.declaration != nil && orderedColumns[a.table] && !tx.ownsTableDrop(a.table) {
 			result = append(result, catalogNativeDeclaration{Operation: "column_declaration", Declaration: a.declaration})
+		}
+		if a := entry.column; a != nil && !tx.ownsTableDrop(a.table) {
+			if a.drop != nil {
+				result = append(result, catalogNativeDeclaration{Operation: "column_drop", Drop: a.drop})
+			} else if retiring[a.table] && a.rename == nil && !a.nameMetadataOnly && a.declaration == nil && a.propertyRemoval == nil && a.propertyChange == nil && a.appendDeclaration == nil {
+				d := a.defaultDeclaration
+				result = append(result, catalogNativeDeclaration{Operation: "column_default", Default: &d})
+			}
 		}
 		if a := entry.tableRename; a != nil && !tx.ownsTableDrop(a.table) {
 			result = append(result, catalogNativeDeclaration{Operation: "table_rename", TableRename: a.declaration})
@@ -160,7 +171,31 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 		if action.Declaration != nil && action.Operation != "column_declaration" {
 			panic("stored declaration payload on a different native action")
 		}
+		if action.Drop != nil && action.Operation != "column_drop" || action.Default != nil && action.Operation != "column_default" {
+			panic("column retirement payload on another native action")
+		}
 		switch action.Operation {
+		case "column_drop":
+			if action.Drop == nil || action.Default != nil || action.Declaration != nil || action.Rename != nil || action.TableRename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
+				panic("invalid native column retirement action")
+			}
+			t := db.tables.Get(action.Drop.Table)
+			_, columns := db.projectColumnDrop(action.Drop, p.propertyColumns[t], p)
+			p.propertyColumns[t] = columns
+		case "column_default":
+			if action.Default == nil || action.Drop != nil || action.Declaration != nil || action.Rename != nil || action.TableRename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
+				panic("invalid native ordered default action")
+			}
+			d := action.Default
+			t := db.tables.Get(d.Table)
+			if t == nil || t.RuntimeIdentity != d.Identity || !t.committedAt(db.catalogView().version) {
+				panic("ordered default endpoint generation was replaced")
+			}
+			columns := p.propertyColumns[t]
+			if columns == nil {
+				columns = t.columnDeclarations()
+			}
+			p.propertyColumns[t] = projectOrderedColumnDefault(d, t, columns)
 		case "column_declaration":
 			if domain != catalogNativeCurrent || action.Declaration == nil || action.Rename != nil || action.TableRename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
 				panic("invalid native stored declaration action")
@@ -328,6 +363,19 @@ func (db *database) recoverNativeDeclarations(actions []catalogNativeDeclaration
 	db.projectNativeDeclarations(actions, nil, domain, scope)
 	for _, action := range actions {
 		switch action.Operation {
+		case "column_drop":
+			d := action.Drop
+			t := db.tables.Get(d.Table)
+			t.Columns = append(append([]*column(nil), t.Columns[:d.Ordinal]...), t.Columns[d.Ordinal+1:]...)
+			if t.DroppedColumns == nil {
+				t.DroppedColumns = make(map[string]bool)
+			}
+			t.DroppedColumns[d.Storage] = true
+			db.initializeRecoveryColumnMetadata(t)
+		case "column_default":
+			t := db.tables.Get(action.Default.Table)
+			t.Columns = projectOrderedColumnDefault(action.Default, t, t.Columns)
+			db.initializeRecoveryColumnMetadata(t)
 		case "column_declaration":
 			// Whole-decision projection above has already checked ordered native
 			// dependencies; replay only installs its attested immutable header.
@@ -402,6 +450,7 @@ func validateNativeDeclarationShape(actions []catalogNativeDeclaration) error {
 	propertyCurrent := make(map[[3]string]propertyState)
 	renameCurrent := make(map[[2]string]*catalogColumnRename)
 	tableCurrent := make(map[string]*catalogTableRename)
+	retiredColumns := make(map[[2]string]bool)
 	orderedTypes := false
 	for _, action := range actions {
 		orderedTypes = orderedTypes || action.Declaration != nil
@@ -422,6 +471,29 @@ func validateNativeDeclarationShape(actions []catalogNativeDeclaration) error {
 		return true
 	}
 	for _, action := range actions {
+		var identity, physical string
+		switch {
+		case action.Drop != nil:
+			identity, physical = action.Drop.Identity, action.Drop.Storage
+		case action.Default != nil:
+			identity, physical = action.Default.Identity, action.Default.Column
+		case action.Declaration != nil:
+			identity, physical = action.Declaration.Identity, action.Declaration.Column
+		case action.Rename != nil:
+			identity, physical = action.Rename.Identity, action.Rename.Storage
+		case action.Property != nil:
+			identity, physical = action.Property.Identity, action.Property.Column
+		}
+		if identity != "" && retiredColumns[[2]string{identity, physical}] {
+			return fmt.Errorf("native action refers to a retired stored column")
+		}
+		if action.Drop != nil {
+			retiredColumns[[2]string{identity, physical}] = true
+		}
+
+		if action.Drop != nil && action.Operation != "column_drop" || action.Default != nil && action.Operation != "column_default" {
+			return fmt.Errorf("column retirement payload on another native action")
+		}
 		if action.TableRename != nil && action.Operation != "table_rename" {
 			return fmt.Errorf("table rename payload on a different native action")
 		}
@@ -432,6 +504,30 @@ func validateNativeDeclarationShape(actions []catalogNativeDeclaration) error {
 			return fmt.Errorf("stored declaration payload on a different native action")
 		}
 		switch action.Operation {
+		case "column_drop":
+			if action.Drop == nil || action.Default != nil || action.Declaration != nil || action.Rename != nil || action.TableRename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
+				return fmt.Errorf("invalid native column retirement action")
+			}
+			if err := validateColumnDropShape(action.Drop); err != nil {
+				return err
+			}
+			if !attestColumn(action.Drop.Identity, action.Drop.Storage, action.Drop.Expected) {
+				return fmt.Errorf("column retirement lost its ordered declaration predecessor")
+			}
+		case "column_default":
+			if action.Default == nil || action.Drop != nil || action.Declaration != nil || action.Rename != nil || action.TableRename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
+				return fmt.Errorf("invalid native ordered default action")
+			}
+			d := action.Default
+			if !validName(d.Table) || !validIdentity(d.Identity) || !validName(d.Column) || !utf8.ValidString(d.Name) || !utf8.ValidString(d.Expression) {
+				return fmt.Errorf("invalid native ordered default declaration")
+			}
+			if d.Deferred && (!d.Value.IsNil() || d.Expression == "") {
+				return fmt.Errorf("invalid native deferred ordered default")
+			}
+			if err := validateColumnInitialScalar(d.Value); err != nil {
+				return err
+			}
 		case "column_declaration":
 			if action.Declaration == nil || action.Rename != nil || action.TableRename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
 				return fmt.Errorf("invalid native stored declaration action")

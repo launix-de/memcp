@@ -1062,7 +1062,7 @@ and logical producer exports use the same name for both coordinates. */
 	(define declaration (find (sql_write_column_declarations database name planning_session tx)
 		(lambda (declaration) ((if ignorecase equal?? equal?) (declaration "Field") column)) nil))
 	(if declaration (list 'altertable (list 'table database false name false 'tx)
-		(if ifexists "drop_if_exists" "drop") (sql_column_storage_name declaration))
+		(if ifexists "drop_if_exists" "drop") (sql_column_storage_name declaration) 'tx)
 		ifexists true (error "DROP column does not exist: " column)))))
 /* INSERT collision callbacks use native old/NEW column arguments. Translate
 their already typed references once while constructing the callback, retaining
