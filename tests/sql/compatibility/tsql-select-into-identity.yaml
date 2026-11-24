@@ -413,11 +413,14 @@ test_cases:
      (run s "BEGIN TRAN")
      (run s "UPDATE identity_into_other SET value=71 WHERE id=7")
      (define original (s "__memcp_tx"))
-     (define lexical (tsql_scope_session s '() nil false))
-     (define scoped (tsql_select_into_population_session lexical (list target "id" 7)))
+     (define scoped (tsql_select_into_population_session s (list target "id" 7)))
+     (define run_copy (lambda (text)
+      (with_query_request s nil 0 text "acid" (lambda (statement)
+       (tsql_statement_call statement scoped text false (lambda (tx)
+        (tsql_execute_statement tx "memcp-tests" text scoped (lambda (_row) true) (lambda fields true))))))))
      (define outcome (try (lambda () (begin
       (define rejected (try (lambda () (begin
-       (run scoped "INSERT identity_into_guard(id,value) VALUES(8,80),(1,10)") false))
+       (run_copy "INSERT identity_into_guard(id,value) VALUES(8,80),(1,10)") false))
        (lambda (cause) (if (strlike (string (failure_value cause)) "%copied identity values below the inherited seed%") true
         (error cause)))))
       (list true (and rejected (identical? original (s "__memcp_tx"))
