@@ -6780,8 +6780,17 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(tsql_assignment_value (tsql_finalize_sources value "query" cte_bindings '())
 				(nth declarations index) (source_schema source) policy planning_session tx))))))
 		(define query (tsql_inline_values_query columns rows))
+		/* The insertion packet consumes its exact projection before physical
+		binding. Export the syntax-known columns instead of a deferred star. */
+		(define query (if (query_block? query) query
+			(make_query_block (source_schema source)
+				(list (list "__tsql_values_input" (source_schema source) query false nil nil))
+				(merge (map columns (lambda (column) (list column
+					(list 'sql_compile_column 'tsql_compile_column
+						(list 'get_column "__tsql_values_input" false column false))))))
+				true nil nil nil nil nil '() '() '())))
 		(define query (tsql_finalize_sources
-			(if (query_block? query) query (tsql_query_from_source query)) "query" '() '()))
+			query "query" '() '()))
 		(make_query_block (qb_schema query) (qb_sources query) (qb_fields query) (qb_where query)
 			(qb_group query) (qb_having query) (qb_order query) limit (qb_offset query)
 			(qb_hidden query) (qb_stages query)
