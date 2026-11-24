@@ -537,6 +537,23 @@ test_cases:
       (empty_list? (logical_relation_free_column_refs (list 'table-function ref '() '("value")))))
   expect:
     result: false
+- name: Membership truth reads retain the nullable carrier owner
+  scm: |-
+    (empty_list? (logical_relation_free_column_refs
+      (list 'membership_truth 7 "unknown_caller" "value")))
+  expect:
+    result: false
+- name: A producer-owned membership truth carrier is lexically closed
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        '("columns" (("Field" "id")))))
+      (define input (make_query_block "unused" (list source)
+        (list "value" (list 'membership_truth 7 "local" "id"))
+        true '() nil '() nil nil '() '() '()))
+      (empty_list? (logical_relation_free_column_refs input)))
+  expect:
+    result: true
 cleanup:
 - sql: DROP TABLE aum_bridge
 - sql: DROP TABLE aum_assignments

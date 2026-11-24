@@ -3984,6 +3984,10 @@ compile-only fact catalogs are not executable column reads. */
 			(if (bound node scopes) '() (list node))
 			((quote get_column) alias alias_ci column column_ci)
 			(visit (list 'get_column alias alias_ci column column_ci) scopes)
+			((symbol membership_truth) probe owner column)
+			(visit (list probe (list 'get_column owner false column false)) scopes)
+			((quote membership_truth) probe owner column)
+			(visit (list 'membership_truth probe owner column) scopes)
 			((symbol quote) _datum) '()
 			((symbol query-block) _database sources fields condition grouping having ordering limit offset hidden stages _facts)
 			(begin
