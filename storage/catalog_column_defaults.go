@@ -199,15 +199,18 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 		var propertyChange *catalogColumnPropertyChange
 		result := scm.NewBool(true)
 		if columnDeclarationOperation(operation) {
-			if !value.IsSlice() || len(value.Slice()) != 2 && (operation != "validated_declaration" || len(value.Slice()) != 3) {
+			if !value.IsSlice() || len(value.Slice()) != 2 && (operation != "validated_declaration" || len(value.Slice()) < 3 || len(value.Slice()) > 4) {
 				panic("declaration ALTER requires new and expected declarations")
 			}
 			projection := scm.NewNil()
-			if len(value.Slice()) == 3 {
+			if len(value.Slice()) >= 3 {
 				projection = value.Slice()[2]
-				if !previous.OnUpdate.IsNil() {
+				if !projection.IsNil() && !previous.OnUpdate.IsNil() {
 					panic("column value projection requires an unchanged scalar input recipe")
 				}
+			}
+			if len(value.Slice()) == 4 {
+				requireExpectedStoredColumnInput(previous, value.Slice()[3])
 			}
 			after, before := decodeStoredColumnType(value.Slice()[0]), decodeStoredColumnType(value.Slice()[1])
 			actual := storedColumnTypeOf(previous)

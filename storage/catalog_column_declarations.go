@@ -202,6 +202,24 @@ func sameStoredScalar(before, after scm.Scmer) bool {
 	return beforePointer == afterPointer && beforeBits == afterBits
 }
 
+// A caller may attest the exact input recipe it inspected before requesting a
+// declaration. Compare under the existing endpoint lease and amendment mutex,
+// not against the caller's earlier metadata read. This transient witness is
+// neither a SQL DEFAULT policy nor part of the accepted journal format.
+func requireExpectedStoredColumnInput(previous *column, expected scm.Scmer) {
+	if !expected.IsSlice() || len(expected.Slice()) != 4 {
+		panic("column input recipe requires value, expression, name and deferred flag")
+	}
+	parts := expected.Slice()
+	if !parts[1].IsString() || !parts[2].IsString() || !parts[3].IsBool() {
+		panic("invalid expected column input recipe")
+	}
+	if !sameStoredScalar(previous.Default, parts[0]) || previous.DefaultExpression != parts[1].String() ||
+		previous.DefaultName != parts[2].String() || previous.DefaultDeferred != parts[3].Bool() {
+		panic(declarationValidationViolation("value-preserving-declaration", previous.Name, "column declaration lost its expected input recipe"))
+	}
+}
+
 func requireStoredScalarIdentity(target *column, value scm.Scmer) {
 	converted := value
 	if target.sanitizer != nil {

@@ -860,6 +860,11 @@ This frontend rule applies before selecting either native declaration profile. *
 			(not (equal? (coalesceNil (previous "DefaultName") "") ""))
 			(not (equal? (coalesceNil (previous "DefaultExpression") "") ""))))
 		(error "ALTER COLUMN datatype change requires dropping its DEFAULT definition") true)))
+/* The native declaration must attest this SAME recipe after acquiring its
+endpoint lease. A concurrent DEFAULT edit leaves the type tuple unchanged. */
+(define tsql_column_input_recipe (lambda (previous)
+	(list (previous "Default") (coalesceNil (previous "DefaultExpression") "")
+		(coalesceNil (previous "DefaultName") "") (coalesceNil (previous "DefaultDeferred") false))))
 /* The native input recipe check separately rejects opaque ON UPDATE callbacks.
 Unlike an assignment CAST, this proof never truncates or replaces the value. */
 (define tsql_column_value_projection (lambda (type dimensions collation) (begin
@@ -7242,9 +7247,11 @@ that context explicitly; stored views refuse this scalar before publication. */
 						"validated_declaration"
 						(error "ALTER COLUMN requires native validation or conversion")))
 					(define declaration (list (list type dimensions nullable collation) (tsql_column_declaration_tuple previous)))
-					(define value (if (tsql_character_column_transition? previous type dimensions collation)
+					(define value (if (not (equal? (toUpper (previous "RawType")) type))
 						(list 'list (list 'quote (car declaration)) (list 'quote (cadr declaration))
-							(tsql_column_value_projection type dimensions collation))
+							(if (tsql_character_column_transition? previous type dimensions collation)
+								(tsql_column_value_projection type dimensions collation) nil)
+							(list 'quote (tsql_column_input_recipe previous)))
 						(list 'quote declaration)))
 					(list (quote !begin) (list (quote altercolumn) (list (quote table) database false name false (quote tx))
 						(sql_column_storage_name previous) operation

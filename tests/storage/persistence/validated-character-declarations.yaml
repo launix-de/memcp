@@ -6,6 +6,7 @@ metadata:
   requires_tds: true
   description: Guarded value projections validate character declarations in their original native transaction
 setup:
+- sql: DROP TABLE IF EXISTS projection_temporal_input
 - sql: DROP TABLE IF EXISTS projection_bound_temporal
 - sql: DROP TABLE IF EXISTS projection_nondefault
 - sql: DROP TABLE IF EXISTS projection_bound_default
@@ -32,6 +33,7 @@ setup:
 - sql: CREATE TABLE projection_nondefault(value VARCHAR(10) COLLATE latin1_general_ci NULL)
 - sql: CREATE TABLE projection_bound_temporal(value SMALLDATETIME NULL CONSTRAINT DF_projection_bound_temporal DEFAULT
     NULL)
+- sql: CREATE TABLE projection_temporal_input(value SMALLDATETIME NULL)
 test_cases:
 - name: Seven national text changes preserve original transaction savepoint values and observer metadata
   tds:
@@ -565,6 +567,80 @@ test_cases:
         rows: 1
         data:
         - value: null
+- name: Foreign ADD DEFAULT invalidates a stale character input recipe before the projection runs
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root")
+     (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+     (define marker (table "memcp-tests" false "projection_marker" false tx))
+     (insert marker '("id" "value") (list (list 99 123)) '() nil false nil tx)
+     (define target (table "memcp-tests" false "projection_loss" false tx))
+     (define previous (show target "column" "value" true tx))
+     (define collation (coalesceNil (previous "Collation") ""))
+     (define before (list (previous "RawType") (coalesceNil (previous "Dimensions") '()) (previous "Null") collation))
+     (define recipe (tsql_column_input_recipe previous))
+     (define calls (newsession)) (calls "called" false)
+     (define projection (lambda (value) (begin (calls "called" true) value)))
+     (define foreign (newsession)) (foreign "username" "root") (tx_begin_acid foreign)
+     (altercolumn target "value" "add_default" (list "q" "" "DF_projection_recipe_character" false) (foreign "__memcp_tx"))
+     (tx_commit foreign)
+     (define rejected (try (lambda () (begin
+      (altercolumn target "value" "validated_declaration" (list (list "NVARCHAR" '(2) true collation) before projection recipe) tx)
+      false)) (lambda (cause) (if (strlike (string (failure_value cause)) "%column declaration lost its expected input recipe%") true (error cause)))))
+     (define current (show target "column" "value" true tx))
+     (define foreign_default (show target "column" "value" true))
+     (define local_value (scan tx marker '() '() '("id") (lambda (id) (equal? id 99)) '("value") (lambda (sum value) (+ sum value)) 0 +))
+     (define outside_value (scan nil marker '() '() '("id") (lambda (id) (equal? id 99)) '("value") (lambda (sum value) (+ sum value)) 0 +))
+     (define active (and (equal? (tx_state tx) "active") (identical? tx (owner "__memcp_tx"))))
+     (tx_rollback owner)
+     (define restored (show target "column" "value" true))
+     (altercolumn target "value" "drop_default" nil)
+     (and rejected active (not (calls "called"))
+      (equal? local_value 123) (equal? outside_value 0)
+      (equal? (current "RawType") "VARCHAR") (equal? (restored "RawType") "VARCHAR")
+      (equal? (current "DefaultName") "DF_projection_recipe_character") (equal? (foreign_default "DefaultName") "DF_projection_recipe_character")
+      (equal? (restored "DefaultName") "DF_projection_recipe_character")
+      (equal? (current "Default") "q") (equal? (restored "Default") "q")
+      (equal? (scan nil marker '() '() '("id") (lambda (id) (equal? id 99)) '("value") (lambda (sum value) (+ sum value)) 0 +) 0)))
+  expect:
+    result: true
+- name: Foreign named DEFAULT NULL invalidates a stale temporal input recipe even without a projection
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root")
+     (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+     (define marker (table "memcp-tests" false "projection_marker" false tx))
+     (insert marker '("id" "value") (list (list 99 123)) '() nil false nil tx)
+     (define target (table "memcp-tests" false "projection_temporal_input" false tx))
+     (define previous (show target "column" "value" true tx))
+     (define collation (coalesceNil (previous "Collation") ""))
+     (define before (list (previous "RawType") (coalesceNil (previous "Dimensions") '()) (previous "Null") collation))
+     (define recipe (tsql_column_input_recipe previous))
+     (define calls (newsession)) (calls "called" false)
+     (define projection nil)
+     (define foreign (newsession)) (foreign "username" "root") (tx_begin_acid foreign)
+     (altercolumn target "value" "add_default" (list nil "" "DF_projection_recipe_temporal" false) (foreign "__memcp_tx"))
+     (tx_commit foreign)
+     (define rejected (try (lambda () (begin
+      (altercolumn target "value" "validated_declaration" (list (list "DATETIME" '() true collation) before projection recipe) tx)
+      false)) (lambda (cause) (if (strlike (string (failure_value cause)) "%column declaration lost its expected input recipe%") true (error cause)))))
+     (define current (show target "column" "value" true tx))
+     (define foreign_default (show target "column" "value" true))
+     (define local_value (scan tx marker '() '() '("id") (lambda (id) (equal? id 99)) '("value") (lambda (sum value) (+ sum value)) 0 +))
+     (define outside_value (scan nil marker '() '() '("id") (lambda (id) (equal? id 99)) '("value") (lambda (sum value) (+ sum value)) 0 +))
+     (define active (and (equal? (tx_state tx) "active") (identical? tx (owner "__memcp_tx"))))
+     (tx_rollback owner)
+     (define restored (show target "column" "value" true))
+     (altercolumn target "value" "drop_default" nil)
+     (and rejected active (not (calls "called"))
+      (equal? local_value 123) (equal? outside_value 0)
+      (equal? (current "RawType") "SMALLDATETIME") (equal? (restored "RawType") "SMALLDATETIME")
+      (equal? (current "DefaultName") "DF_projection_recipe_temporal") (equal? (foreign_default "DefaultName") "DF_projection_recipe_temporal")
+      (equal? (restored "DefaultName") "DF_projection_recipe_temporal")
+      (equal? (current "Default") nil) (equal? (restored "Default") nil)
+      (equal? (scan nil marker '() '() '("id") (lambda (id) (equal? id 99)) '("value") (lambda (sum value) (+ sum value)) 0 +) 0)))
+  expect:
+    result: true
 - name: Cross-type ALTER without COLLATE selects the database default comparison policy
   noncritical: true
   tds:
@@ -591,3 +667,4 @@ cleanup:
 - sql: DROP TABLE IF EXISTS projection_bound_default
 - sql: DROP TABLE IF EXISTS projection_nondefault
 - sql: DROP TABLE IF EXISTS projection_bound_temporal
+- sql: DROP TABLE IF EXISTS projection_temporal_input

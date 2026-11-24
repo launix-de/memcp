@@ -3388,7 +3388,7 @@ func Init(en scm.Env) {
 				{Kind: "table", Label: "table"},
 				{Kind: "string", Label: "column", Description: "name of the column"},
 				{Kind: "string", Label: "operation", Description: "one of drop|type|dimensions|null|default|default_expression|default_declaration|add_default|drop_default|collation|auto_increment|comment|properties|drop_property|claim_property|temp|declaration|validated_declaration"},
-				{Kind: "any", Label: "parameter", Description: "operation value; validated_declaration accepts [new, expected] stored declarations and an optional third one-value projection procedure that must preserve every native scalar"},
+				{Kind: "any", Label: "parameter", Description: "operation value; validated_declaration accepts [new, expected] declarations, an optional third one-value projection preserving native scalars, and an optional fourth expected [default value, expression, name, deferred flag] recipe"},
 				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
