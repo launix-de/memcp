@@ -190,6 +190,8 @@ instead retain their existing actual transaction across both operations. */
 	(if temporary (tsql_temporary_check_name name)
 		(sql_private_relation? name) (error "private SQL relation names cannot be created directly") true)
 	(if (and trigger (not temporary)) (error "persistent SELECT INTO is unsupported inside a statement trigger") true)
+	(if (and (session "__tsql_insert_exec") (not temporary))
+		(error "persistent SELECT INTO is unsupported inside INSERT EXEC") true)
 	(if (and temporary (find (tsql_temporary_local_bindings scope tx) (lambda (binding)
 		(and (equal?? (car binding) name)
 			(not (and (> (count binding) 3) (equal? (nth binding 3) "trigger_temporary"))))) nil))

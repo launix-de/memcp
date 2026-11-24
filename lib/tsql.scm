@@ -912,8 +912,9 @@ its ordinary grammar still validates declarations and input expressions. */
 	(tsql_describe_statement tx schema text (tds_bind_declarations schema declarations) session))))
 
 /* INSERT EXEC borrows one native statement transaction across its procedure.
-DDL and transaction boundaries cannot join that statement's atomic write set.
-Classify with the SQL lexer, so leading comments never bypass this guard. */
+Public DDL and transaction boundaries retain their separate owner. The full
+statement parser admits local temporary CREATE/DROP through the existing scoped
+schema journal; the lexer guard below retains every other unsafe boundary. */
 (define tsql_insert_exec_leaf_kind (parser '((* ";")
 	(define keyword (regex "[A-Za-z]+" false false))
 	(regex "(?s).*" false false)) (toUpper keyword)
@@ -1086,7 +1087,7 @@ admit another statement through the aborted-transaction recovery capability. */
 	retry after an uncertain durable decision. Ordinary leaves validate below. */
 	(session "__tsql_native_transaction_state" (tx_state tx))
 	(if (if (session "__tsql_insert_exec")
-		(has? '("CREATE" "ALTER" "DROP" "TRUNCATE" "BACKUP" "RESTORE" "USE" "BEGIN" "COMMIT" "ROLLBACK")
+		(has? '("ALTER" "TRUNCATE" "BACKUP" "RESTORE" "USE" "BEGIN" "COMMIT" "ROLLBACK")
 			(tsql_insert_exec_leaf_kind text)) false)
 		(error "DDL and transaction control are unsupported inside INSERT EXEC") true)
 	/* Expose the active scope's scalar value through the ordinary session binding.
@@ -1107,10 +1108,11 @@ admit another statement through the aborted-transaction recovery capability. */
 	(define arithabort (tsql_arithabort session))
 	(define concat_null (tsql_concat_null_yields_null session))
 	(define rowcount_active (> (coalesceNil (session "__tsql_rowcount_limit") 0) 0))
+	(define insert_exec (if (session "__tsql_insert_exec") true false))
 	(define temporary_scope (tsql_temporary_scope session))
 	(define temporary_bindings (tsql_temporary_visible temporary_scope tx))
 	(session "__tsql_temporary_bindings" temporary_bindings)
-	(define cache_scope (json_encode (list username (session "__tsql_principal_id") declarations local_relations import_target import_source temporary_bindings quoted ansi warnings arithabort concat_null rowcount_active)))
+	(define cache_scope (json_encode (list username (session "__tsql_principal_id") declarations local_relations import_target import_source temporary_bindings quoted ansi warnings arithabort concat_null rowcount_active insert_exec)))
 	/* The cached dispatcher retains this parser for future misses. Close its
 	declaration/import/name and lexical snapshots here, before embedding it as a literal;
 	its creation frame also owns the current session, transaction and outputs. */
@@ -1125,6 +1127,7 @@ admit another statement through the aborted-transaction recovery capability. */
 		(planning "__tsql_arithabort" arithabort)
 		(planning "__tsql_concat_null_yields_null" concat_null)
 		(planning "__tsql_rowcount_active" rowcount_active)
+		(planning "__tsql_insert_exec" insert_exec)
 		(planning "__tsql_temporary_bindings" temporary_bindings)
 		(planning "__tsql_database_access_requirements" '())
 		(define formula (parse_tsql database text policy planning tx))

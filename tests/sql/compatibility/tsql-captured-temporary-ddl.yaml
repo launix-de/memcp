@@ -1,0 +1,202 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/create-table-transact-sql#temporary-tables
+# https://learn.microsoft.com/sql/t-sql/statements/insert-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Captured procedures retain native temporary schema and their original transaction
+setup:
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_rows
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_select
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_drop_all
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_child
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_parent
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_dynamic
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_replace
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_failure
+  - sql: DROP TABLE IF EXISTS captured_temp_target
+  - sql: DROP TABLE IF EXISTS captured_temp_seed
+  - sql: DROP TABLE IF EXISTS captured_temp_audit
+  - sql: CREATE TABLE captured_temp_target(id INT,amount INT)
+  - sql: CREATE TABLE captured_temp_seed(id INT PRIMARY KEY,amount INT)
+  - sql: INSERT captured_temp_seed VALUES(1,2),(2,NULL)
+  - sql: CREATE TABLE captured_temp_audit(id INT PRIMARY KEY)
+  - sql: |
+      CREATE PROCEDURE captured_temp_rows @shift INT=0 AS BEGIN
+        /* outer /* nested */ declaration */ CREATE TABLE #work(id INT PRIMARY KEY,amount INT);
+        INSERT #work VALUES(1,2),(2,NULL);
+        SELECT id+@shift AS id,amount FROM #work ORDER BY id;
+        DROP TABLE #work;
+      END
+  - sql: |
+      CREATE PROCEDURE captured_temp_select AS BEGIN
+        SELECT id,amount INTO #work FROM captured_temp_seed;
+        SELECT id,amount FROM #work ORDER BY id;
+      END
+  - sql: |
+      CREATE PROCEDURE captured_temp_drop_all AS BEGIN
+        CREATE TABLE #first(id INT);
+        CREATE TABLE #second(id INT);
+        INSERT #first VALUES(1);
+        INSERT #second VALUES(2);
+        SELECT (SELECT MAX(id) FROM #first)+(SELECT MAX(id) FROM #second) AS id,
+          CAST(NULL AS INT) AS amount;
+        DROP TABLE #first,#second;
+      END
+  - sql: |
+      CREATE PROCEDURE captured_temp_child AS BEGIN
+        CREATE TABLE #work(id INT,amount INT);
+        INSERT #work VALUES(8,NULL);
+        SELECT id,amount FROM #work;
+        DROP TABLE #work;
+      END
+  - sql: |
+      CREATE PROCEDURE captured_temp_parent AS BEGIN
+        CREATE TABLE #work(id INT,amount INT);
+        INSERT #work VALUES(7,3);
+        EXEC captured_temp_child;
+        SELECT id,amount FROM #work;
+      END
+  - sql: |
+      CREATE PROCEDURE captured_temp_dynamic AS BEGIN
+        EXEC(N'CREATE TABLE #dynamic_work(id INT,amount INT);
+          INSERT #dynamic_work VALUES(9,NULL);
+          SELECT id,amount FROM #dynamic_work;
+          DROP TABLE #dynamic_work;');
+      END
+  - sql: |
+      CREATE PROCEDURE captured_temp_replace AS BEGIN
+        DROP TABLE #retained;
+        CREATE TABLE #retained(label NVARCHAR(12));
+        INSERT #retained VALUES(N'private');
+        SELECT 70 AS id,9 AS amount;
+      END
+  - sql: |
+      CREATE PROCEDURE captured_temp_failure AS BEGIN
+        CREATE TABLE #failed_work(id INT,amount INT);
+        INSERT #failed_work VALUES(31,4);
+        INSERT captured_temp_audit VALUES(31);
+        SELECT id,amount FROM #failed_work;
+        THROW 50001,N'captured source failed',1;
+      END
+test_cases:
+  - name: Captured source creates reads and drops its native temporary relation
+    session_id: captured-temp-create
+    setup:
+      - sql: DELETE FROM captured_temp_target
+    sql: |
+      INSERT captured_temp_target EXEC captured_temp_rows;
+      SELECT id,amount FROM captured_temp_target ORDER BY id;
+    expect: {rows: 2,data: [{id: 1,amount: 2},{id: 2,amount: null}]}
+  - name: Completed source schema remains outside its caller namespace
+    session_id: captured-temp-create
+    sql: SELECT OBJECT_ID(N'tempdb..#work') AS source_id
+    expect: {rows: 1,data: [{source_id: null}]}
+  - name: Repeated captured invocations use fresh module generations
+    setup:
+      - sql: DELETE FROM captured_temp_target
+    sql: |
+      INSERT captured_temp_target EXEC captured_temp_rows 10;
+      INSERT captured_temp_target EXEC captured_temp_rows 20;
+      SELECT id,amount FROM captured_temp_target ORDER BY id;
+    expect:
+      rows: 4
+      data: [{id: 11,amount: 2},{id: 12,amount: null},{id: 21,amount: 2},{id: 22,amount: null}]
+  - name: Captured SELECT INTO uses its module scoped declaration owner
+    setup:
+      - sql: DELETE FROM captured_temp_target
+    sql: |
+      INSERT captured_temp_target EXEC captured_temp_select;
+      SELECT id,amount FROM captured_temp_target ORDER BY id;
+    expect: {rows: 2,data: [{id: 1,amount: 2},{id: 2,amount: null}]}
+  - name: Every temporary DROP target retains its own lifetime
+    setup:
+      - sql: DELETE FROM captured_temp_target
+    sql: |
+      INSERT captured_temp_target EXEC captured_temp_drop_all;
+      SELECT id,amount FROM captured_temp_target;
+    expect: {rows: 1,data: [{id: 3,amount: null}]}
+  - name: Nested source modules shadow temporary names without replacing their parent
+    setup:
+      - sql: DELETE FROM captured_temp_target
+    sql: |
+      INSERT captured_temp_target EXEC captured_temp_parent;
+      SELECT id,amount FROM captured_temp_target ORDER BY id;
+    expect: {rows: 2,data: [{id: 7,amount: 3},{id: 8,amount: null}]}
+  - name: Dynamic source SQL retains the same captured statement and private temporary scope
+    setup:
+      - sql: DELETE FROM captured_temp_target
+    sql: |
+      INSERT captured_temp_target EXEC captured_temp_dynamic;
+      SELECT id,amount FROM captured_temp_target;
+    expect: {rows: 1,data: [{id: 9,amount: null}]}
+  - name: Captured temporary schema joins the original transaction without ending it
+    session_id: captured-temp-rollback
+    setup:
+      - sql: DELETE FROM captured_temp_target
+      - sql: BEGIN TRANSACTION
+    sql: |
+      INSERT captured_temp_target EXEC captured_temp_rows;
+      SELECT COUNT(*) AS n,SUM(amount) AS amount,@@TRANCOUNT AS depth FROM captured_temp_target;
+    expect: {rows: 1,data: [{n: 2,amount: 2,depth: 1}]}
+  - name: Caller rollback removes captured rows after module schema has closed
+    session_id: captured-temp-rollback
+    sql: |
+      ROLLBACK TRANSACTION;
+      SELECT COUNT(*) AS n,@@TRANCOUNT AS depth FROM captured_temp_target;
+    expect: {rows: 1,data: [{n: 0,depth: 0}]}
+  - name: Caller savepoint restores inherited temporary schema and prior row work
+    session_id: captured-temp-savepoint
+    setup:
+      - sql: DELETE FROM captured_temp_target
+    sql: |
+      CREATE TABLE #retained(id INT PRIMARY KEY);
+      INSERT #retained VALUES(4),(7);
+      BEGIN TRANSACTION;
+      INSERT captured_temp_target VALUES(99,5);
+      SAVE TRANSACTION before_capture;
+      INSERT captured_temp_target EXEC captured_temp_replace;
+      ROLLBACK TRANSACTION before_capture;
+      SELECT (SELECT COUNT(*) FROM captured_temp_target) AS n,
+        (SELECT SUM(amount) FROM captured_temp_target) AS amount,
+        (SELECT COUNT(*) FROM #retained) AS retained_n,
+        (SELECT SUM(id) FROM #retained) AS retained_sum,@@TRANCOUNT AS depth;
+    expect: {rows: 1,data: [{n: 1,amount: 5,retained_n: 2,retained_sum: 11,depth: 1}]}
+    cleanup:
+      - sql: ROLLBACK TRANSACTION
+      - sql: "DROP TABLE #retained"
+  - name: Late source failure restores capture and source effects while preserving caller work
+    session_id: captured-temp-failure
+    setup:
+      - sql: DELETE FROM captured_temp_target
+      - sql: DELETE FROM captured_temp_audit
+    sql: |
+      BEGIN TRANSACTION;
+      INSERT captured_temp_target VALUES(99,5);
+      DECLARE @caught INT=0;
+      BEGIN TRY
+        INSERT captured_temp_target EXEC captured_temp_failure;
+      END TRY
+      BEGIN CATCH
+        SET @caught=1;
+      END CATCH;
+      SELECT @caught AS caught,(SELECT COUNT(*) FROM captured_temp_target) AS n,
+        (SELECT SUM(amount) FROM captured_temp_target) AS amount,
+        (SELECT COUNT(*) FROM captured_temp_audit) AS audit_n,
+        OBJECT_ID(N'tempdb..#failed_work') AS source_id,@@TRANCOUNT AS depth;
+    expect: {rows: 1,data: [{caught: 1,n: 1,amount: 5,audit_n: 0,source_id: null,depth: 1}]}
+    cleanup:
+      - sql: ROLLBACK TRANSACTION
+cleanup:
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_failure
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_replace
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_dynamic
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_parent
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_child
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_drop_all
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_select
+  - sql: DROP PROCEDURE IF EXISTS captured_temp_rows
+  - sql: DROP TABLE IF EXISTS captured_temp_audit
+  - sql: DROP TABLE IF EXISTS captured_temp_seed
+  - sql: DROP TABLE IF EXISTS captured_temp_target

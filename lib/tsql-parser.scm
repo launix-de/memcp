@@ -7065,6 +7065,10 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(? (define location tsql_index_location))
 		(? (define textimage tsql_textimage_location))
 	) (lambda () (begin
+			(if (frontend_options "__tsql_insert_exec") (begin
+				(if (and (tsql_temporary_name? name) (nil? schema2)) true
+					(error "persistent or qualified DDL is unsupported inside INSERT EXEC"))
+				(tsql_temporary_check_name name)) true)
 			(if policy (policy (tsql_qualifier_database schema2 schema frontend_options) name true) true)
 			(require_action (tsql_qualifier_database schema2 schema frontend_options) name "CREATE TABLE")
 			/* Native FK endpoints share the CREATE target database. Preserve the
@@ -7091,6 +7095,32 @@ that context explicitly; stored views refuse this scalar before publication. */
 					target_database name (cons (quote list) (map columns tsql_identity_native_column))
 					(tsql_identity_table_options columns) (if ifnotexists true false) (quote tx) (quote session)))
 				(tsql_declaration_formula create)))))))
+	(define tsql_drop_table (parser '(tsql_keyword_drop tsql_keyword_table
+		(define ifexists (? tsql_keyword_if tsql_keyword_exists))
+		(define targets (+ (parser '((? (define schema2 tsql_schema_identifier))
+			(define name tsql_identifier)) (list schema2 name)) ",")))
+		(lambda () (begin
+			(if (frontend_options "__tsql_insert_exec")
+				(map targets (lambda (target) (begin
+					(if (tsql_temporary_name? (cadr target)) true
+						(error "persistent DDL is unsupported inside INSERT EXEC"))
+					(tsql_temporary_check_name (cadr target))))) true)
+			(tsql_declaration_formula (cons (quote !begin) (map targets (lambda (target) (begin
+				(define schema2 (car target))
+				(define name (cadr target))
+				(define database (tsql_qualifier_database schema2 schema frontend_options))
+				/* Preserve source order: a referencing table must precede its
+				referenced table. Each target retains ordinary policy and lifetime. */
+				(if (tsql_temporary_name? name) (begin
+					(tsql_temporary_check_name name)
+					(if policy (policy database name true) true)
+					(require_action database name "ALTER")
+					(list (quote tsql_drop_temporary) name (if ifexists true false) (quote session) (quote tx)))
+					(begin
+						(if policy (policy database name true) true)
+						(require_action database name "ALTER")
+						(list (quote tsql_drop_table) database name (if ifexists true false)
+							(quote tx)))))))))))))
 	(define tsql_rebuild_table (parser '(
 		tsql_keyword_alter tsql_keyword_table
 		(? (define schema2 tsql_schema_identifier)) (define name tsql_identifier)
@@ -7425,26 +7455,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(require_action name true "CONTROL"))
 				(list (quote tsql_drop_database) (list (quote session) "__memcp_tx")
 					name (if ifexists true false) (quote session)))))
-		(parser '(tsql_keyword_drop tsql_keyword_table
-			(define ifexists (? tsql_keyword_if tsql_keyword_exists))
-			(define targets (+ (parser '((? (define schema2 tsql_schema_identifier))
-				(define name tsql_identifier)) (list schema2 name)) ",")))
-			(lambda () (tsql_declaration_formula (cons (quote !begin) (map targets (lambda (target) (begin
-				(define schema2 (car target))
-				(define name (cadr target))
-				(define database (tsql_qualifier_database schema2 schema frontend_options))
-				/* Preserve source order: a referencing table must precede its
-				referenced table. Each target retains ordinary policy and lifetime. */
-				(if (tsql_temporary_name? name) (begin
-					(tsql_temporary_check_name name)
-					(if policy (policy database name true) true)
-					(require_action database name "ALTER")
-					(list (quote tsql_drop_temporary) name (if ifexists true false) (quote session) (quote tx)))
-					(begin
-						(if policy (policy database name true) true)
-						(require_action database name "ALTER")
-						(list (quote tsql_drop_table) database name (if ifexists true false)
-							(quote tx)))))))))))
+		tsql_drop_table
 		(parser '(tsql_keyword_drop tsql_keyword_view
 			(define ifexists (? tsql_keyword_if tsql_keyword_exists))
 			(? (define schema2 tsql_schema_identifier)) (define name tsql_identifier))
@@ -7873,7 +7884,14 @@ that context explicitly; stored views refuse this scalar before publication. */
 
 			(script_parser s))
 		(begin
-			(define command ((parser '((* ";") (define command command_parser) (* ";")) command "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\\x{0009}-\\x{000D}\\x{0085}\\p{Z}]+)+") s))
+			/* A captured source may change only parsed local temporary declarations.
+			Keep every other CREATE/DROP alternative outside this invocation before
+			its semantic action. The full ordinary grammar still validates each leaf. */
+			(define admitted_commands (if (frontend_options "__tsql_insert_exec")
+				(parser (or tsql_create_table tsql_drop_table
+					(not command_parser tsql_keyword_create tsql_keyword_drop tsql_keyword_alter
+						tsql_keyword_truncate tsql_keyword_use tsql_keyword_begin tsql_keyword_commit tsql_keyword_rollback))) command_parser))
+			(define command ((parser '((* ";") (define command admitted_commands) (* ";")) command "^(?:/\\*(?s:.*?)\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\\x{0009}-\\x{000D}\\x{0085}\\p{Z}]+)+") s))
 			(if compile_only (map (frontend_options "__tsql_compile_missing_parameters") (lambda (spelling)
 				(tsql_raise_error 137 (concat "Must declare the scalar variable @" spelling) 2))) true)
 			(if (string? command) command (command))))
