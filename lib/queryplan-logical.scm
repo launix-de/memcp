@@ -3962,23 +3962,82 @@ without separately proving two-valued semantics. */
 				(equal? (count (qb_fields branch)) 2))))
 		true)))
 
-/* A candidate relation has no caller partition. Its complete producer must
-therefore be closed, including retained relations and declared nested-stage
-domains. Pending unnesting provenance also owns ancestor reads which can have
-disappeared from the rewritten immediate branch syntax. Correlated inputs keep
-the ordinary per-branch Neumann rewrite and its complete D relation. */
-(define in_union_candidate_scope_closed? (lambda (inner outer_sources pending_info)
+/* Collect free SQL columns against the producer's own lexical scopes, not a
+possibly incomplete caller catalog. Nested sources shadow enclosing producers;
+retained group stages publish their free inputs through D. Quoted values and
+compile-only fact catalogs are not executable column reads. */
+(define logical_relation_free_column_refs (lambda (relation) (begin
+	(define bound (lambda (reference scopes)
+		(match scopes
+			(cons sources outer) (begin
+				(define alias (nth reference 1))
+				(define owner (if (nil? alias)
+					(find sources (lambda (source)
+						(not (nil? (binding_column_name (binding_source_columns source)
+							(nth reference 3) (nth reference 4))))) nil)
+					(source_for_alias sources nil alias (nth reference 2))))
+				(or (not (nil? owner)) (bound reference outer)))
+			_ false)))
+	(define visit (lambda (node scopes)
+		(match node
+			((symbol get_column) _alias _alias_ci _column _column_ci)
+			(if (bound node scopes) '() (list node))
+			((quote get_column) alias alias_ci column column_ci)
+			(visit (list 'get_column alias alias_ci column column_ci) scopes)
+			((symbol quote) _datum) '()
+			((symbol query-block) _database sources fields condition grouping having ordering limit offset hidden stages _facts)
+			(begin
+				(define visible (cons sources scopes))
+				(merge (list
+					(visit (merge (list (extract_assoc fields (lambda (_title expr) expr))
+						(extract_assoc hidden (lambda (_title expr) expr))
+						(list condition having limit offset) grouping (map ordering car))) visible)
+					(merge (map sources (lambda (source)
+						(merge (list (visit (source_join_expr source) visible)
+							(visit (source_relation source) visible))))))
+					(merge (map stages (lambda (stage) (visit stage visible)))))))
+			((symbol union-block) _mode branches _ordering limit offset _facts)
+			/* UNION ORDER has only its bound output namespace; ordinary SQL
+			binding rejects caller columns there. Windows remain semantic data. */
+			(merge (list (merge (map branches (lambda (branch) (visit branch scopes))))
+				(visit (list limit offset) scopes)))
+			((symbol group-stage) _id _input domain _keys _aggregates _having _output _order _limit _offset _facts)
+			(visit domain scopes)
+			((symbol literal-rows) _columns _rows) '()
+			((symbol parameter-rows) _columns rows _mode) (visit rows scopes)
+			((symbol table-function) producer arguments _columns)
+			(visit (list producer arguments) scopes)
+			(cons head tail)
+			(if (or (orc_stage? node) (window_stage? node))
+				(begin
+					(define source (os_source node))
+					(define visible (cons (list source) scopes))
+					(merge (list (visit (source_relation source) visible)
+						/* Sorting and partitioning are normally bound column names,
+						but they still belong to the semantic input contract. Window
+						facts also retain the executable pre-filter and offset. */
+						(visit (list (source_join_expr source) (os_sortcols node)
+							(os_sortdirs node) (os_partitioncount node) (os_mapcols node)
+							(os_mapfn node) (os_reducefn node) (os_reduceinit node)
+							(os_facts node)) visible))))
+				(merge (cons (visit head scopes) (map tail (lambda (item) (visit item scopes))))))
+			_ '())))
+	(visit relation '()))))
+
+/* A global candidate has no caller partition. Both the actual lexical free
+reads and retained ancestor provenance must certify that empty D contract. */
+(define in_union_candidate_scope_closed? (lambda (inner pending_info)
 	(and (or (nil? pending_info)
 		(and (empty_list? (btw2025_info_accessing pending_info))
 			(empty_list? (btw2025_info_accessing_after_simple pending_info))))
-		(empty_list? (btw2025_relation_outer_column_refs inner outer_sources)))))
+		(empty_list? (logical_relation_free_column_refs inner)))))
 
 (define in_union_candidate_supported? (lambda (inner outer_sources pending_info)
 	(and (union_block? inner)
 		(or (equal? (union_mode inner) (quote all))
 			(or (equal? (union_mode inner) (quote distinct))
 				(equal? (union_mode inner) (quote union_distinct))))
-		(in_union_candidate_scope_closed? inner outer_sources pending_info)
+		(in_union_candidate_scope_closed? inner pending_info)
 		(reduce (union_branches inner) (lambda (ok branch)
 			(and ok
 				(and (exists_inner_supported? branch)
@@ -4654,8 +4713,12 @@ row producer publishes every real group; only the outer scalar stage owns
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
+			/* A nullable membership proxy can be replaced by the caller's
+			actual D coordinate in the published keys. Consume that same export
+			contract here; the discarded proxy cannot impose NULL rejection on
+			a preserved caller label. Real SQL equalities remain inside the input. */
 			(make_stage_binding_join_condition stage_alias key_names
-				(correlation_inner_keys inner_default lookup_pairs) lookup_keys) nil))
+				keys lookup_keys) nil))
 		(define output_exprs (mapIndex values_for_stage (lambda (i value_for_stage) (begin
 			(define stored (scalar_once_value_expr stage_input stage_alias
 				(scalar_once_descriptor value_for_stage order_for_inner (qb_offset inner))))

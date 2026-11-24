@@ -355,6 +355,188 @@ test_cases:
     - id: 10
       member: true
       nonmember: false
+- name: PostgreSQL retains distant UNION alternatives through its shared planner
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=7 AND a.tenant_id=p.tenant_id
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      visible_label: alpha
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: null
+    - id: 9
+      visible_label: gamma
+    - id: 10
+      visible_label: alpha
+  syntax: postgresql
+- name: TSQL retains distant UNION alternatives through its shared planner
+  sql: |-
+    SELECT p.id,
+      (SELECT TOP (1)
+        (SELECT TOP (1) r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=7 AND a.tenant_id=p.tenant_id
+         ))
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      visible_label: alpha
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: null
+    - id: 9
+      visible_label: gamma
+    - id: 10
+      visible_label: alpha
+  syntax: tsql
+- name: A lexical closure check detects an unknown caller without any outer catalog
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        '("columns" (("Field" "id")))))
+      (define ref (list 'get_column "local" false "id" false))
+      (define input (make_query_block "unused" (list source)
+        (list "value" (list 'get_column "unknown_caller" false "id" false)) true '() nil '() nil nil '() '() '()))
+      (empty_list? (logical_relation_free_column_refs input)))
+  expect:
+    result: false
+- name: Quoted user data never becomes an executable free caller read
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        '("columns" (("Field" "id")))))
+      (define ref (list 'get_column "local" false "id" false))
+      (define input (make_query_block "unused" (list source)
+        (list "value" (list 'quote (list 'get_column "unknown_caller" false "id" false))) true '() nil '() nil nil '() '() '()))
+      (empty_list? (logical_relation_free_column_refs input)))
+  expect:
+    result: true
+- name: Unqualified columns resolve through producer-owned declarations
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        '("columns" (("Field" "id")))))
+      (define ref (list 'get_column "local" false "id" false))
+      (define input (make_query_block "unused" (list source)
+        (list "value" (list 'get_column nil false "id" false)) true '() nil '() nil nil '() '() '()))
+      (empty_list? (logical_relation_free_column_refs input)))
+  expect:
+    result: true
+- name: The first retained stage domain coordinate still belongs to its caller
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        '("columns" (("Field" "id")))))
+      (define ref (list 'get_column "local" false "id" false))
+      (define stage (make_group_stage "scoped" source
+        (list (list 'get_column "unknown_caller" false "id" false) ref)
+        (list ref) (list '(1 + 0)) true '() '() nil nil '()))
+      (define input (make_query_block "unused" (list source) (list "value" ref)
+        true '() nil '() nil nil '() (list stage) '()))
+      (empty_list? (logical_relation_free_column_refs input)))
+  expect:
+    result: false
+- name: An internally bound stage domain does not invent an external caller
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        '("columns" (("Field" "id")))))
+      (define ref (list 'get_column "local" false "id" false))
+      (define stage (make_group_stage "scoped" source (list ref)
+        (list ref) (list '(1 + 0)) true '() '() nil nil '()))
+      (define input (make_query_block "unused" (list source) (list "value" ref)
+        true '() nil '() nil nil '() (list stage) '()))
+      (empty_list? (logical_relation_free_column_refs input)))
+  expect:
+    result: true
+- name: Window prefilters retain caller dependencies
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        '("columns" (("Field" "id")))))
+      (define ref (list 'get_column "unknown_caller" false "id" false))
+      (empty_list? (logical_relation_free_column_refs (make_window_stage "window" source "value" '("id") '(false) 0
+        '("id") '(lambda (x) x) '+ 0 (list (list 'condition ref))))))
+  expect:
+    result: false
+- name: Window ordering retains caller dependencies
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        '("columns" (("Field" "id")))))
+      (define ref (list 'get_column "unknown_caller" false "id" false))
+      (empty_list? (logical_relation_free_column_refs (make_window_stage "window" source "value" (list ref) '(false) 0
+        '("id") '(lambda (x) x) '+ 0 '()))))
+  expect:
+    result: false
+- name: ORC mapping retains caller dependencies
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        '("columns" (("Field" "id")))))
+      (define ref (list 'get_column "unknown_caller" false "id" false))
+      (empty_list? (logical_relation_free_column_refs (make_orc_stage "orc" source "value" '("id") '(false) 0
+        '("id") ref '+ 0))))
+  expect:
+    result: false
+- name: Table function arguments retain caller dependencies
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        '("columns" (("Field" "id")))))
+      (define ref (list 'get_column "unknown_caller" false "id" false))
+      (empty_list? (logical_relation_free_column_refs (list 'table-function "array" (list ref) '("value")))))
+  expect:
+    result: false
+- name: Callable table function producers retain caller dependencies
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        '("columns" (("Field" "id")))))
+      (define ref (list 'get_column "unknown_caller" false "id" false))
+      (empty_list? (logical_relation_free_column_refs (list 'table-function ref '() '("value")))))
+  expect:
+    result: false
 cleanup:
 - sql: DROP TABLE aum_bridge
 - sql: DROP TABLE aum_assignments
