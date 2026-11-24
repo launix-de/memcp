@@ -7805,17 +7805,22 @@ Only a direct column of the preserved base input is a reusable witness. */
 	(define base (car (qb_sources inner)))
 	(define alias (source_alias src))
 	(define declared (derived_projection_presence base alias false))
-	(define condition (rewrite_derived_ref alias (qb_fields inner) (source_join_expr src)))
 	(define witness (if (or declared (source_outer? base)) nil
-		(reduce (split_and_terms condition) (lambda (found term)
+		(reduce (split_and_terms (source_join_expr src)) (lambda (found term)
 			(if found found
 				(match term
 					((symbol equal??) left right)
-					(find (list left right) (lambda (operand)
+					(find (map (list left right) (lambda (operand)
 						(match operand
 							((symbol get_column) owner _ci _column false)
-							(equal? owner (source_alias base))
-							_ false)) nil)
+							(if (equal? owner alias)
+								(begin
+									(define projected (rewrite_derived_ref alias (qb_fields inner) operand))
+									(match projected
+										((symbol get_column) input _input_ci _input_column false)
+										(if (equal? input (source_alias base)) projected nil)
+										_ nil)) nil)
+							_ nil))) (lambda (column) (not (nil? column))) nil)
 					_ nil))) nil)))
 	(if declared declared
 		witness (requalify_single_source_expr (source_alias base) alias witness)

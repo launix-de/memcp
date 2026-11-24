@@ -493,6 +493,54 @@ test_cases:
       marker: null
       payload: null
       allowed: null
+- name: 'mysql: An enclosing alias cannot attest the presence of a shadowed inner input'
+  syntax: mysql
+  sql: SELECT r.id,d.marker FROM (SELECT id,COALESCE(k,-1) AS k FROM dpw_left) r LEFT JOIN (SELECT COALESCE(r.k,-1) AS k,17 AS marker FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=r.k ORDER BY r.id,d.marker
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+    - id: 1
+      marker: 17
+    - id: 2
+      marker: null
+    - id: 3
+      marker: 17
+    - id: 4
+      marker: null
+- name: 'psql: An enclosing alias cannot attest the presence of a shadowed inner input'
+  syntax: psql
+  sql: SELECT r.id,d.marker FROM (SELECT id,COALESCE(k,-1) AS k FROM dpw_left) r LEFT JOIN (SELECT COALESCE(r.k,-1) AS k,17 AS marker FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=r.k ORDER BY r.id,d.marker
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+    - id: 1
+      marker: 17
+    - id: 2
+      marker: null
+    - id: 3
+      marker: 17
+    - id: 4
+      marker: null
+- name: 'tsql: An enclosing alias cannot attest the presence of a shadowed inner input'
+  syntax: tsql
+  sql: SELECT r.id,d.marker FROM (SELECT id,COALESCE(k,-1) AS k FROM dpw_left) r LEFT JOIN (SELECT COALESCE(r.k,-1) AS k,17 AS marker FROM dpw_right r WHERE r.k IS NULL OR r.k<>9) d ON d.k=r.k ORDER BY r.id,d.marker
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      marker: 17
+    - id: 1
+      marker: 17
+    - id: 2
+      marker: null
+    - id: 3
+      marker: 17
+    - id: 4
+      marker: null
 cleanup:
 - sql: DROP TABLE IF EXISTS dpw_rule
 - sql: DROP TABLE IF EXISTS dpw_right
