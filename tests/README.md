@@ -127,8 +127,9 @@ completed rows and informational messages before a later failure are verified.
 `sql/compatibility/tsql-print-messages.yaml` covers PRINT, informational RAISERROR,
 multiple resultsets, transaction state and database ENVCHANGE on error. HTTP
 streams carry notices as comments rather than relational result rows.
-Unsupported frontend features retain explicit rejection tests; implemented
-regressions are critical.
+Valid SQL that is not implemented retains its correct result expectation with
+`noncritical: true`. Invalid SQL and forbidden operations retain rejection
+assertions; implemented regressions are critical.
 
 `sql/compatibility/tsql-server-properties.yaml` covers the isolated server-property
 profile: `Edition` identifies MemCP; `InstanceDefaultDataPath` and
@@ -156,14 +157,15 @@ permission, impersonation, registry, process or host operation consults it.
 Unsupported recovery and resource modes fail explicitly. Database DROP/recreation
 retires the previous frontend state.
 
-`sql/compatibility/tsql-row-guid-declarations.yaml` covers CREATE TABLE
-ROWGUIDCOL as immutable column declaration metadata, restricted to one direct
-UNIQUEIDENTIFIER column per table. It introduces no default, uniqueness or
-nullability constraint. Native `show` exposes generic scalar `Properties`; the
-T-SQL metadata wrapper derives `IsRowGuidCol`. Marked ALTER ADD, `$ROWGUID` and
-COLUMNPROPERTY remain explicitly unsupported pending atomic declaration or
-logical binding support. Permanent CREATE inside an explicit transaction is
-rejected natively until transactional catalog publication exists.
+`sql/compatibility/tsql-row-guid-declarations.yaml` covers CREATE TABLE and
+ALTER ADD ROWGUIDCOL as native column declaration metadata, restricted to one
+direct UNIQUEIDENTIFIER column per table. The marker introduces no default,
+uniqueness or nullability constraint. Native `show` exposes generic scalar
+`Properties`; the T-SQL metadata wrapper derives `IsRowGuidCol`. Supported
+declarations retain the original transaction, including historical-row
+initialization, savepoints and rollback. `$ROWGUID` and COLUMNPROPERTY still
+require their own logical binding/catalog support and remain positive
+noncritical specifications.
 
 `sql/compatibility/tsql-virtual-filesystem.yaml` covers the frontend-owned
 virtual filesystem interface. `xp_fileexist` and `SERVERPROPERTY` share the
