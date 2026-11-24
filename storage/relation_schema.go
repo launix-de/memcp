@@ -284,7 +284,7 @@ func (tx *transactionState) finishRelationSchema(keep int, commit bool) {
 			continue
 		}
 		if db := GetDatabase(table.schema.Name); db == table.schema {
-			dropTableIdentity(db.Name, table.Name, true, table)
+			dropTableIdentity(db.Name, table.Name, true, table, nil)
 		}
 		table.creator.Store(nil)
 		if lifetime := table.relationLifetime; lifetime != nil {

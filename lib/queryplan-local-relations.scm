@@ -384,12 +384,12 @@ Callbacks capture ordinary native table handles, not the lifetime capability. */
 		(lower_relational_iteration_program (gs_input stage))))
 	(list (list 'lambda (list scope)
 		(list (list 'lambda (list outcome)
-			(list 'begin (list 'close_relation_scope scope)
+			(list 'begin (list 'close_relation_scope scope tx)
 				(list 'if (list 'car outcome) (list 'cadr outcome) (list 'error (list 'cadr outcome)))))
 			(list 'try (list 'lambda '() (list 'list true program))
 				(list 'lambda (list '__local_relation_failure)
 					(list 'list false '__local_relation_failure)))))
-		(list 'new_relation_scope (list 'newsession))))))
+		(list 'new_relation_scope (physical_query_session_symbol))))))
 
 /* The input is the previous one-row state LEFT JOIN the INSERT query. Its
 explicit presence column separates zero input rows from a real nullable row.

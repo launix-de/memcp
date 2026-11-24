@@ -2123,7 +2123,7 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto|readOperatorOwned)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto|readOperatorOwned, t.t)
 			defer ReleaseColumnReader(cReaders[i])
 			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
 		}
@@ -2407,7 +2407,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned, t.t)
 			defer ReleaseColumnReader(cReaders[i])
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
@@ -2756,7 +2756,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned, t.t)
 			defer ReleaseColumnReader(cReaders[i])
 			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
 		}

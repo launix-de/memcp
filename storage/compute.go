@@ -67,7 +67,7 @@ func projectionColumnReadHints(col ColumnStorage, rows int, tx *TxContext) Colum
 // Do not strip runtime overlays here: generic scan/read paths must still see
 // user-visible values (for example OverlayBlob must dereference its hash marker
 // back to the persisted blob payload after restart).
-func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked bool, hints ColumnReadHints) ColumnReader {
+func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked bool, hints ColumnReadHints, source *table) ColumnReader {
 	operatorOwned := hints&readOperatorOwned != 0
 	hints &^= readOperatorOwned
 	if provider, ok := col.(TxColumnReaderProvider); ok {
@@ -86,7 +86,7 @@ func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked boo
 	// encodings may own an immutable private workspace; GC carries its values,
 	// so a row-bound point caller must not append a statement release per probe.
 	if leased, ok := reader.(interface{ release() }); ok && !operatorOwned && hints != ReadCompressed && tx != nil && tx.queryActive.Load() {
-		if !tx.retainQueryReader(leased.release) {
+		if !tx.retainQueryReader(leased.release, source) {
 			leased.release()
 			return col.GetCachedReader(ReadCompressed)
 		}

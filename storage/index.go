@@ -152,7 +152,7 @@ func (g colGetter) persistentValue(recid uint32, tx *TxContext) scm.Scmer {
 	if g.source != nil {
 		// Index construction already owns the shard lock. Preserve that
 		// capability and the caller's visibility for computed source readers.
-		reader := newCachedColumnReaderTx(g.source, tx, true, ReadCompressed)
+		reader := newCachedColumnReaderTx(g.source, tx, true, ReadCompressed, nil)
 		defer ReleaseColumnReader(reader)
 		value = reader.GetValue(recid)
 	} else {
@@ -405,7 +405,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 				cs := s.t.getColumnStorageRLocked(mc, tx)
 				mapSources[j] = cs
 				deltaSlots[j] = s.deltaReaderSlot(mc, cs)
-				mapColReaders[j] = newCachedColumnReaderTx(cs, tx, true, ReadAuto|readOperatorOwned)
+				mapColReaders[j] = newCachedColumnReaderTx(cs, tx, true, ReadAuto|readOperatorOwned, s.t.t)
 				if usesInitialColumn(input, mc) {
 					deltaSlots[j] = -1
 					ReleaseColumnReader(mapColReaders[j])
@@ -422,7 +422,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 			if !s.columnIsSorted(i) {
 				hints = ReadCompressed
 			}
-			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true, hints|readOperatorOwned), source: cs, deltaSlot: s.deltaReaderSlot(col, cs)}
+			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true, hints|readOperatorOwned, s.t.t), source: cs, deltaSlot: s.deltaReaderSlot(col, cs)}
 			if usesInitialColumn(input, col) {
 				getters[i].deltaSlot = -1
 				ReleaseColumnReader(getters[i].raw)
@@ -1449,7 +1449,7 @@ func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext) {
 			// decode. Keep this lease through sorting and failure cleanup, never
 			// retain the decoded reader in the published index getters.
 			if g.source != nil {
-				reader := newCachedColumnReaderTx(g.source, tx, true, ReadDecoded)
+				reader := newCachedColumnReaderTx(g.source, tx, true, ReadDecoded, s.t.t)
 				defer ReleaseColumnReader(reader)
 				g.raw = reader
 			}
@@ -2000,7 +2000,7 @@ func (s *StorageIndex) bindRowMatchers(tx *TxContext, bounds scanAccess, indexBo
 			if alignedWithIndex && colIdx < len(cols) {
 				reader = cols[colIdx].raw
 			} else if _, mapFn := bounds.boundaryMap(colIdx); !isScanPseudoColName(column) && mapFn.IsNil() {
-				reader = newCachedColumnReaderTx(s.t.getColumnStorageRLocked(column, tx), tx, true, ReadCompressed)
+				reader = newCachedColumnReaderTx(s.t.getColumnStorageRLocked(column, tx), tx, true, ReadCompressed, nil)
 			}
 			hook = analyzer.Deploy(IndexDeployContext{
 				MainCount: s.t.main_count,
@@ -2041,7 +2041,7 @@ func (s *StorageIndex) bindColdRangeMatcher(tx *TxContext, bounds scanAccess, in
 	// iterate owns these readers until the synchronous matcher has finished.
 	for col := 0; col < cmpCols; col++ {
 		if s.columnIsSorted(col) && cols[col].source != nil {
-			reader := newCachedColumnReaderTx(cols[col].source, tx, true, ReadDecoded)
+			reader := newCachedColumnReaderTx(cols[col].source, tx, true, ReadDecoded, s.t.t)
 			ReleaseColumnReader(cols[col].raw)
 			cols[col].raw = reader
 		}

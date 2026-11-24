@@ -59,7 +59,7 @@ func TestQueryCleanupJoinsAllWorkBeforeReleasingReaders(t *testing.T) {
 			t.Error("physical reader released before all work joined")
 		}
 		joined++
-	})
+	}, nil)
 	tx.RetainQueryWork(func() { joined++; panic("output failed") })
 	tx.RetainQueryWork(func() { joined++ })
 	var failure any

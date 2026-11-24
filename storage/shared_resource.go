@@ -64,12 +64,7 @@ func (access WriteAccess) Release() {
 
 func (access ReadAccess) Release() {
 	if access.relation != nil {
-		defer func() {
-			access.relation.mu.Lock()
-			access.relation.active--
-			access.relation.cond.Broadcast()
-			access.relation.mu.Unlock()
-		}()
+		defer access.relation.endUse()
 	}
 	if access.mutation != nil {
 		access.mutation.Release()

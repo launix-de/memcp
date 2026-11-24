@@ -47,6 +47,17 @@ func withTableMutation(targets []*table, descriptor nativeMutationDescriptor, pa
 // The data-owner selector above supplies one actual native transaction. This
 // owner keeps the existing write admission, statement Undo and callback ABI.
 func withNativeTableMutation(targets []*table, descriptor nativeMutationDescriptor, parent *TxContext, session, producer scm.Scmer) scm.Scmer {
+	var callerInputs map[*relationScope]bool
+	for _, target := range targets {
+		if scope := target.callerRelationScope(); scope != nil && !callerInputs[scope] {
+			leave := target.beginCallerInput(parent)
+			defer leave()
+			if callerInputs == nil {
+				callerInputs = make(map[*relationScope]bool)
+			}
+			callerInputs[scope] = true
+		}
+	}
 	checked := parent != nil && parent.mutationOperation != nil
 	checked = checked || parent != nil && parent.relationData != nil && nativeMutationDataOwner(targets) != nil
 	var declarationSource *publicCatalogViews
@@ -89,6 +100,10 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 			validateIndependentDataTarget(target)
 		}
 		checked = checked || target.hasCheckConstraints.Load() || target.statementTriggerEvents.Load() != 0
+		// Lexical caller data is retired before its public transaction ends.
+		// Its SQL mutation callbacks therefore need the existing producer/frame
+		// owner, rather than a raw grant retained until the public decision.
+		checked = checked || parent != nil && target.callerRelationScope() != nil
 		// Synchronous callbacks can reach a checked/statement-triggered target
 		// that is not named by this producer. Own the native savepoint BEFORE the
 		// first outer write, not only when that later target happens to open one.
@@ -155,6 +170,9 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 	operation, err := newNativeMutationBinding(parent, session)
 	if err != nil {
 		panic(err)
+	}
+	if len(callerInputs) != 0 {
+		operation.callerInputs.Store(&callerInputs)
 	}
 	return operation.runProducer(func(binding *TxContext) scm.Scmer {
 		if operation.undoOwner == nil {

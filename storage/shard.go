@@ -1606,8 +1606,12 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 		eventWriter, event, assignments = currentTx.mutationOperation.eventWriter(t)
 		exactUpdate = event == nativeMutationUpdate
 	}
-	update := t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, nil, currentTx, uniqueGuard, eventWriter, declarations, input, initializedColumns, exactUpdate, assignments)
+	update := t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, nil, currentTx, uniqueGuard, eventWriter, declarations, input, initializedColumns, exactUpdate, assignments, true)
 	return func(a ...scm.Scmer) scm.Scmer {
+		if scope := t.t.callerRelationScope(); scope != nil && !t.t.callerInputBorrowed(currentTx) {
+			leave := scope.beginDataUse(currentTx)
+			defer leave()
+		}
 		if currentTx != nil && currentTx.mutationOperation != nil {
 			leave := currentTx.mutationOperation.borrowMutation(currentTx)
 			defer func() {
@@ -1632,7 +1636,7 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 			}
 			if guard != nil {
 				defer guard.release()
-				return t.UpdateFunctionBatch(current, withTrigger, alreadyLocked, nil, nil, currentTx, guard, eventWriter, declarations, input, initializedColumns, exactUpdate, assignments)(a...)
+				return t.UpdateFunctionBatch(current, withTrigger, alreadyLocked, nil, nil, currentTx, guard, eventWriter, declarations, input, initializedColumns, exactUpdate, assignments, true)(a...)
 			}
 		}
 		return update(a...)
@@ -1653,7 +1657,7 @@ func isRuntimeComputedColumn(colDesc *column) bool {
 	return len(colDesc.OrcSortCols) > 0 || !colDesc.Computor.IsNil() || len(colDesc.ComputorInputCols) > 0
 }
 
-func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, eventWriter *nativeMutationEventWriter, declarations []*column, input *nativeMutationInput, initializedColumns *nativeColumnInitialInput, exactUpdate bool, assignments nativeMutationAssignments) func(...scm.Scmer) scm.Scmer {
+func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, eventWriter *nativeMutationEventWriter, declarations []*column, input *nativeMutationInput, initializedColumns *nativeColumnInitialInput, exactUpdate bool, assignments nativeMutationAssignments, borrowedScope bool) func(...scm.Scmer) scm.Scmer {
 	identityName := ""
 	for _, declaration := range declarations {
 		if declaration.AutoIncrement {
@@ -1673,6 +1677,12 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 	}
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
+		if scope := t.t.callerRelationScope(); scope != nil && !borrowedScope && !t.t.callerInputBorrowed(currentTx) {
+			// Only a legacy or unmatched native invocation needs this borrow.
+			// Normal admitted SQL batches keep their exact producer input.
+			leave := scope.beginDataUse(currentTx)
+			defer leave()
+		}
 		hasUpdateTriggers, hasDeleteTriggers := boundUpdateTriggers, boundDeleteTriggers
 		if input == nil {
 			// Legacy raw callbacks can outlive their original scan. Preserve
@@ -2622,7 +2632,7 @@ func (t *storageShard) ColumnReaderTx(tx *TxContext, col string, alreadyLocked b
 	} else {
 		cstorage = t.getColumnStorageOrPanic(col, writeLocked, tx)
 	}
-	reader := newCachedColumnReaderTx(cstorage, tx, alreadyLocked || writeLocked, hints)
+	reader := newCachedColumnReaderTx(cstorage, tx, alreadyLocked || writeLocked, hints, t.t)
 	_, computed := cstorage.(*StorageComputeProxy)
 	return &shardColumnReader{shard: t, main: reader, column: col, computed: computed, input: t.initializedColumnInput(tx)}
 }
@@ -2804,7 +2814,7 @@ func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, ma
 
 	for i, colName := range cols {
 		mainCol := t.getColumnStorageOrPanic(colName, alreadyLocked, currentTx)
-		mainReader := newCachedColumnReaderTx(mainCol, currentTx, false, ReadAuto|readOperatorOwned)
+		mainReader := newCachedColumnReaderTx(mainCol, currentTx, false, ReadAuto|readOperatorOwned, t.t)
 		mr.mainCols[i] = mainCol
 		mr.mainBulkReaders[i] = mainReader
 		mr.mainValueFuncs[i] = compiledColumnGetValue(mainReader)
@@ -3253,14 +3263,14 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 		if needsMutationMetadata && mr.isUpdate[i] {
 			getter := func(id uint32, batchid uint32) scm.Scmer {
 				borrowedLock := mr.shardWriteLocked && (mr.currentTx == nil || mr.currentTx.mutationOperation == nil)
-				return mr.bindMutationCallback(mr.shard.UpdateFunctionBatch(id, true, borrowedLock, mr.deleteBatch, &mr.deletedRows, mr.currentTx, mr.uniqueGuard, mr.eventWriter, mr.mutationColumns, mr.mutationInput, mr.columnInput, mr.exactUpdate, mr.assignments))
+				return mr.bindMutationCallback(mr.shard.UpdateFunctionBatch(id, true, borrowedLock, mr.deleteBatch, &mr.deletedRows, mr.currentTx, mr.uniqueGuard, mr.eventWriter, mr.mutationColumns, mr.mutationInput, mr.columnInput, mr.exactUpdate, mr.assignments, false))
 			}
 			mr.mainGetters[i] = getter
 			mr.deltaGetters[i] = getter
 			continue
 		}
 		mainCol := mr.mainCols[i]
-		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx, false, ReadAuto|readOperatorOwned)
+		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx, false, ReadAuto|readOperatorOwned, t.t)
 		mr.mainBulkReaders[i] = mainReader
 		mr.mainMultiFuncs[i] = compiledColumnGetValueMulti(mainReader)
 		colName := mr.colNames[i]
@@ -3313,7 +3323,7 @@ func (m *ShardMapReducer) prepareProjectionReaders(rows int) {
 		if _, ready := m.mainBulkReaders[i].(interface{ release() }); ready {
 			continue
 		}
-		reader := newCachedColumnReaderTx(col, m.currentTx, false, ReadDecoded)
+		reader := newCachedColumnReaderTx(col, m.currentTx, false, ReadDecoded, m.shard.t)
 		m.mainBulkReaders[i] = reader
 		if i < len(m.mainValueFuncs) {
 			m.mainValueFuncs[i] = compiledColumnGetValue(reader)

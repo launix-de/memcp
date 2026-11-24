@@ -3990,6 +3990,9 @@ func Init(en scm.Env) {
 			if len(a) > 2 {
 				tx = scmerToTxContext(a[2])
 			}
+			if finishInput := t.beginCallerInput(tx); finishInput != nil {
+				defer finishInput()
+			}
 			releaseAdmission := t.admitNativeWrite(tx)
 			defer releaseAdmission()
 			finishReservation := tx.admitAllocatorReservation()

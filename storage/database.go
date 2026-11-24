@@ -1777,6 +1777,13 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 				incomplete.Store(true)
 				return // another rebuild/repartition is in progress
 			}
+			// A lexical owner can retire an identity between the early directory
+			// check and this physical claim. Never publish into that dead scope.
+			if db.tables.Get(t.Name) != t || t.callerRelationScope() != nil && t.relationLifetime.schemaClosed.Load() {
+				t.maintenanceMu.Unlock()
+				incomplete.Store(true)
+				return
+			}
 			t.mu.Lock() // table lock
 			tableLocked = true
 			t.maintenanceKind = 1
@@ -2859,12 +2866,12 @@ func registerCreatedTable(t *table) {
 }
 
 func DropTable(schema, name string, ifexists bool) {
-	dropTableIdentity(schema, name, ifexists, nil)
+	dropTableIdentity(schema, name, ifexists, nil, nil)
 }
 
 // An owned relation can only retire its exact native identity. Reusing its name
 // after explicit DROP must not grant a stale scope authority over a replacement.
-func dropTableIdentity(schema, name string, ifexists bool, expected *table) {
+func dropTableIdentity(schema, name string, ifexists bool, expected *table, retirement *relationCallerRetirement) {
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("Database " + schema + " does not exist")
@@ -2879,6 +2886,23 @@ func dropTableIdentity(schema, name string, ifexists bool, expected *table) {
 		}
 	}()
 	db.ensureLoaded()
+	var releaseMaintenance func()
+	if retirement != nil {
+		if expected == nil || expected.relationLifetime == nil || expected.ScopedSchema {
+			panic("scoped physical retirement requires its exact native identity")
+		}
+		// Match storage migration: database lifecycle precedes table maintenance.
+		// Original journal pins are already detached, so repartition can finish.
+		expected.maintenanceMu.Lock()
+		locked := true
+		releaseMaintenance = func() {
+			if locked {
+				locked = false
+				expected.maintenanceMu.Unlock()
+			}
+		}
+		defer releaseMaintenance()
+	}
 	db.schemalock.Lock()
 	t := db.tables.Get(name)
 	if expected == nil {
@@ -2894,6 +2918,9 @@ func dropTableIdentity(schema, name string, ifexists bool, expected *table) {
 			return // silentfail
 		}
 		panic("Table " + schema + "." + name + " does not exist")
+	}
+	if retirement != nil {
+		retirement.pruneProjections([]*table{t})
 	}
 	// An actual scoped-generation or lexical MEMORY owner may retire its own
 	// result after row Undo, including one allocated in a protected namespace.
@@ -2980,6 +3007,9 @@ func dropTableIdentity(schema, name string, ifexists bool, expected *table) {
 	// lifecycle locks. Cascading drops may perform DDL in this database again.
 	schemaAccess.Release()
 	schemaAccess = WriteAccess{}
+	if releaseMaintenance != nil {
+		releaseMaintenance()
+	}
 	t.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 }
 

@@ -602,7 +602,7 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned, t.t)
 			defer ReleaseColumnReader(cReaders[i])
 			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
 			// This existing physical carrier contract marks readers whose batch
@@ -1464,7 +1464,7 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 			continue
 		}
 		ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto, t.t)
 		defer ReleaseColumnReader(cReaders[i])
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
@@ -1553,7 +1553,7 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 			continue
 		}
 		ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto, t.t)
 		defer ReleaseColumnReader(cReaders[i])
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
@@ -1730,7 +1730,7 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto, t.t)
 			defer ReleaseColumnReader(cReaders[i])
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))

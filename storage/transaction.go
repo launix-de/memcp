@@ -261,7 +261,7 @@ type TxContext struct {
 	queryMu             sync.Mutex         // serializes statements which reuse this transaction object
 	queryColumns        map[*column]*table // statement cache leases, protected by mu
 	queryWorkReleases   []func()           // joins precede every reader/column release
-	queryReaderReleases []func()           // reader and cache-carrier leases, protected by mu
+	queryReaderReleases []queryReaderLease // reader and cache-carrier leases, protected by mu
 	// remoteBindings freezes session inputs once per statement, only on cold
 	// remote dispatch. endStatement drops it after all shard workers finish.
 	remoteBindings   atomic.Pointer[scm.SerializationContext]
@@ -287,6 +287,11 @@ type TxContext struct {
 	// Operation-local execution bindings share the actual producer's scheduling
 	// budget. Copying a fresh GOMAXPROCS budget per nested producer would widen it.
 	fanoutOwner *TxContext
+}
+
+type queryReaderLease struct {
+	source  *table
+	release func()
 }
 
 // NewTxContext creates a new active transaction context with the given mode.
@@ -558,18 +563,18 @@ func (tx *TxContext) retainQueryTable(t *table) bool {
 	if !t.acquireCacheUse() {
 		return false
 	}
-	tx.queryReaderReleases = append(tx.queryReaderReleases, t.releaseCacheUse)
+	tx.queryReaderReleases = append(tx.queryReaderReleases, queryReaderLease{t, t.releaseCacheUse})
 	return true
 }
 
 // retainQueryReader registers a physical lease released after invocation work.
-func (tx *TxContext) retainQueryReader(release func()) bool {
+func (tx *TxContext) retainQueryReader(release func(), source *table) bool {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	if !tx.queryActive.Load() {
 		return false
 	}
-	tx.queryReaderReleases = append(tx.queryReaderReleases, release)
+	tx.queryReaderReleases = append(tx.queryReaderReleases, queryReaderLease{source, release})
 	return true
 }
 
@@ -620,7 +625,7 @@ func (tx *TxContext) endStatement() {
 		releaseOwned(join)
 	}
 	for _, release := range readers {
-		releaseOwned(release)
+		releaseOwned(release.release)
 	}
 	for c, t := range columns {
 		t.releaseColumnCacheUse(c)
@@ -714,6 +719,12 @@ func (tx *TxContext) getOrCreateShardTxLocked(shard *storageShard) *storageShard
 // Failed enlistment has no mutation effects. Remove its empty overlay through
 // the same publication owner before releasing its native generation pin.
 func (state *transactionState) discardUnenlistedShardLocked(shard *storageShard, participant *storageShardTransaction) {
+	state.releaseShardTransactionLocked(shard, participant)
+}
+
+// Caller owns state.mu and the lifecycle that made this exact participant
+// obsolete. Public row journals otherwise stay registered until decision.
+func (state *transactionState) releaseShardTransactionLocked(shard *storageShard, participant *storageShardTransaction) {
 	directory := state.shards.Load()
 	if directory == nil {
 		return

@@ -217,7 +217,7 @@ func recMapReadTarget(currentTx *TxContext, target recMapTarget, columns []strin
 		// This explicitly row-bound fallback must not admit or lease a decoded
 		// dictionary in each outer probe. Prepared selected-domain consumers
 		// use the existing batch mapper below instead.
-		readers[i] = newCachedColumnReaderTx(storages[i], currentTx, false, ReadCompressed)
+		readers[i] = newCachedColumnReaderTx(storages[i], currentTx, false, ReadCompressed, nil)
 	}
 	if !skipShardReadLock {
 		target.shard.mu.RLock()
@@ -290,7 +290,7 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 			readers := make([]ColumnReader, len(columns))
 			for i, column := range columns {
 				storages[i] = shard.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
-				readers[i] = newCachedColumnReaderTx(storages[i], currentTx, false, projectionColumnReadHints(storages[i], len(positions), currentTx))
+				readers[i] = newCachedColumnReaderTx(storages[i], currentTx, false, projectionColumnReadHints(storages[i], len(positions), currentTx), shard.t)
 			}
 			if !skipShardReadLock {
 				shard.mu.RLock()
@@ -913,8 +913,15 @@ func (r *recMap) orderRecSet(currentTx *TxContext, sortSides, sortColumns []stri
 	if limit == 0 || r.count == 0 {
 		return result
 	}
-	currentTx, finishData := r.source.readDataContext(currentTx)
-	defer finishData()
+	inputs := make(map[*table]*TxContext, 2)
+	for _, source := range []*table{r.source, r.target} {
+		if _, bound := inputs[source]; bound {
+			continue
+		}
+		dataTx, finishData := source.readDataContext(currentTx)
+		inputs[source] = dataTx
+		defer finishData()
+	}
 	rows := make([]recMapOrderRow, 0, r.count)
 	for partIndex := range r.shards {
 		part := &r.shards[partIndex]
@@ -923,7 +930,7 @@ func (r *recMap) orderRecSet(currentTx *TxContext, sortSides, sortColumns []stri
 				sourceRecID: recid, target: part.targets[rowIndex], values: make([]scm.Scmer, len(sortColumns))})
 		}
 	}
-	fillRecMapOrderValues(currentTx, rows, sortSides, sortColumns)
+	fillRecMapOrderValues(inputs, rows, sortSides, sortColumns)
 	less := make([]func(scm.Scmer, scm.Scmer) bool, len(sortDirections))
 	for i, relation := range sortDirections {
 		less[i] = scm.OrderRelationLess(relation)
@@ -978,7 +985,7 @@ func (r *recMap) orderRecSet(currentTx *TxContext, sortSides, sortColumns []stri
 	return result
 }
 
-func fillRecMapOrderValues(currentTx *TxContext, rows []recMapOrderRow, sides, columns []string) {
+func fillRecMapOrderValues(inputs map[*table]*TxContext, rows []recMapOrderRow, sides, columns []string) {
 	for column, side := range sides {
 		groups := make(map[*storageShard][]int)
 		for rowIndex := range rows {
@@ -994,8 +1001,10 @@ func fillRecMapOrderValues(currentTx *TxContext, rows []recMapOrderRow, sides, c
 		}
 		for shard, indexes := range groups {
 			func() {
-				currentTx, finishData := shard.t.readDataContext(currentTx)
-				defer finishData()
+				currentTx, bound := inputs[shard.t]
+				if !bound {
+					panic("ordered mapping lost its admitted source input")
+				}
 				release := shard.acquireSnapshotRead(currentTx)
 				defer release.Release()
 				shard.ensureLoaded()
@@ -1007,7 +1016,7 @@ func fillRecMapOrderValues(currentTx *TxContext, rows []recMapOrderRow, sides, c
 				if currentTx != nil && currentTx.queryActive.Load() {
 					hints = ReadDecoded
 				}
-				reader := newCachedColumnReaderTx(storage, currentTx, false, hints)
+				reader := newCachedColumnReaderTx(storage, currentTx, false, hints, shard.t)
 				if !skipLock {
 					shard.mu.RLock()
 					defer shard.mu.RUnlock()
@@ -1301,7 +1310,7 @@ func (r *recSet) collectRecMapRows(currentTx *TxContext, sourceKeyCols []string,
 			readers := make([]ColumnReader, len(allCols))
 			for i, column := range allCols {
 				columns[i] = shard.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
-				readers[i] = newCachedColumnReaderTx(columns[i], currentTx, false, projectionColumnReadHints(columns[i], int(part.count), currentTx))
+				readers[i] = newCachedColumnReaderTx(columns[i], currentTx, false, projectionColumnReadHints(columns[i], int(part.count), currentTx), shard.t)
 			}
 			if !skipShardReadLock {
 				shard.mu.RLock()

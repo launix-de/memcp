@@ -417,7 +417,7 @@ func TestMaterializedComputedReaderPreparesOutputOnly(t *testing.T) {
 	proxy := &StorageComputeProxy{shard: shard, main: main, count: 2, compressed: true,
 		inputCols: []string{"label"}, delta: make(map[uint32]scm.Scmer),
 		computor: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })}
-	reader := newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned)
+	reader := newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned, nil)
 	if input.ReadCount() != 0 {
 		t.Fatal("materialized output prepared an unused input instead of its actual main")
 	}
@@ -480,7 +480,7 @@ func TestComputedReaderSetupFailureReleasesEarlierChildren(t *testing.T) {
 	index := &StorageIndex{t: shard, Cols: []string{".mapped"}, ColMapCols: [][]string{{"first", "second"}},
 		ColMapFn: []scm.Scmer{scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })}}
 	for _, prepare := range []func(){
-		func() { newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned) },
+		func() { newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned, nil) },
 		func() {
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
@@ -522,7 +522,7 @@ func TestMaterializedReaderRepairPreservesExistingShardRead(t *testing.T) {
 	tx.querySeq.Store(19)
 	tx.queryActive.Store(true)
 	shard.mu.RLock()
-	reader := newCachedColumnReaderTx(proxy, tx, true, ReadDecoded|readOperatorOwned)
+	reader := newCachedColumnReaderTx(proxy, tx, true, ReadDecoded|readOperatorOwned, nil)
 	writerDone := make(chan struct{})
 	go func() {
 		shard.mu.Lock()

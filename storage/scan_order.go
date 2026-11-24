@@ -1099,6 +1099,9 @@ func recSetHooksCoverCondition(bounds scanAccess, backingTable *table, condition
 // directions, offset/limit and the neutral value are shared.
 func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) scm.Scmer {
 	for index := range tables {
+		if tables[index].dataBound {
+			continue
+		}
 		var finishData func()
 		input := tables[index].backingTable()
 		if scanMutates(tables[index].callbackCols) {
@@ -1889,13 +1892,17 @@ func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopolog
 }
 
 func (t *table) scanOrderSingle(currentTx *TxContext, spec scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols, offset, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) (scm.Scmer, bool) {
-	var finishData func()
-	if scanMutates(spec.callbackCols) {
-		currentTx, finishData = t.writeDataContext(currentTx)
+	if !spec.dataBound {
+		var finishData func()
+		if scanMutates(spec.callbackCols) {
+			currentTx, finishData = t.writeDataContext(currentTx)
+		} else {
+			currentTx, finishData = t.readDataContext(currentTx)
+		}
+		defer finishData()
 	} else {
-		currentTx, finishData = t.readDataContext(currentTx)
+		currentTx = spec.dataTx
 	}
-	defer finishData()
 	if scanMutates(spec.callbackCols) {
 		release := t.admitNativeMutationCallbacks(currentTx)
 		defer release()
@@ -1976,6 +1983,7 @@ func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessV
 		return t.scanOrderFirst(currentTx, accessSchema, accessValues, conditionCols, condition, callbackCols, mapReduce, neutral, notFoundValue, producerInput)
 	}
 	spec := scanOrderTableSpec{
+		dataTx: currentTx, dataBound: true,
 		producerInput:   producerInput,
 		table:           t,
 		conditionCols:   conditionCols,
@@ -2002,14 +2010,7 @@ func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessV
 // preserves the scan operator contract while avoiding the queues, channels,
 // and global merge needed by the general ordered multi-shard implementation.
 func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer, producerInput *nativeMutationInput) scm.Scmer {
-	var finishData func()
-	if scanMutates(callbackCols) {
-		currentTx, finishData = t.writeDataContext(currentTx)
-	} else {
-		currentTx, finishData = t.readDataContext(currentTx)
-	}
-	defer finishData()
-
+	// scan_order owns this exact source input throughout the specialization.
 	if contributionMutationColumns(callbackCols) {
 		t.beginContributionMutation()
 		defer t.endContributionMutation()
@@ -2245,7 +2246,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 				continue
 			}
 			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned, t.t)
 			defer ReleaseColumnReader(cReaders[i])
 			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
 			reader := ColumnReader(ccols[i])
@@ -2261,7 +2262,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 	aMultiFuncs := make([]scm.JITStorageGetValueMultiFunc, len(acceptCols))
 	for i, column := range acceptCols {
 		acols[i] = t.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
-		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx, false, ReadAuto|readOperatorOwned)
+		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx, false, ReadAuto|readOperatorOwned, t.t)
 		defer ReleaseColumnReader(aReaders[i])
 		aNeedsCachedReader[i] = columnReaderRequiresBinding(acols[i], aReaders[i])
 		reader := ColumnReader(acols[i])

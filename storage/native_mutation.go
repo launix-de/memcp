@@ -11,7 +11,8 @@ import "github.com/launix-de/memcp/scm"
 // transaction registry or a row-reader usage counter. The eventual producer
 // factory must establish the binding and all target rights before exposing it.
 type nativeMutationOperation struct {
-	columnInitializer *nativeColumnInitializer // exact construction authority; no DML event/effect
+	callerInputs      atomic.Pointer[map[*relationScope]bool] // exact immutable input lifetimes, never SQL names
+	columnInitializer *nativeColumnInitializer                // exact construction authority; no DML event/effect
 	closeMu           sync.Mutex
 	mu                sync.Mutex
 	changed           *sync.Cond
@@ -342,6 +343,7 @@ func (operation *nativeMutationOperation) release() {
 	state.mutationOperations--
 	operation.invocation.declarationInput.release()
 	operation.invocation.declarationInput = nil
+	operation.callerInputs.Store(nil)
 	operation.invocation = nil
 	operation.state = nil
 	operation.undoOwner = nil

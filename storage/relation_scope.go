@@ -14,18 +14,20 @@ import (
 // stays in the connection/controller; queries and table serialization use the
 // existing native table catalog and coherence resources.
 type relationScope struct {
-	mu             sync.Mutex
-	closeMu        sync.Mutex
-	cond           *sync.Cond
-	owner          *relationScopeOwner
-	parent         *relationScope
-	closing        bool
-	active         int
-	tables         map[*table]struct{}
-	children       []*relationScope
-	dataPolicy     relationDataPolicy
-	dataWriter     atomic.Bool
-	dataOperations map[*relationDataOperation]struct{}
+	mu               sync.Mutex
+	closeMu          sync.Mutex
+	cond             *sync.Cond
+	owner            *relationScopeOwner
+	parent           *relationScope
+	closing          bool
+	active           int
+	dataInputs       map[*transactionState]int // actual coarse inputs, never row readers
+	tables           map[*table]struct{}
+	children         []*relationScope
+	dataPolicy       relationDataPolicy
+	dataWriter       atomic.Bool
+	dataOperations   map[*relationDataOperation]struct{}
+	callerRetirement *relationCallerRetirement // closeMu owns a retryable detached lexical cleanup
 
 	transactionalSchema bool
 	schemaSlots         atomic.Pointer[relationSchemaSlots]
@@ -66,6 +68,10 @@ func relationScopeOwnerFor(session scm.Scmer) *relationScopeOwner {
 // operator/shard acquisition. The SAME close barrier seals admission before
 // waiting; no row loop registers and no closing thread holds a shard lock.
 func (scope *relationScope) beginUse() func() {
+	scope.acquireUse()
+	return scope.endUse
+}
+func (scope *relationScope) acquireUse() {
 	scope.mu.Lock()
 	if scope.closing {
 		scope.mu.Unlock()
@@ -73,7 +79,67 @@ func (scope *relationScope) beginUse() func() {
 	}
 	scope.active++
 	scope.mu.Unlock()
-	return func() { scope.mu.Lock(); scope.active--; scope.cond.Broadcast(); scope.mu.Unlock() }
+}
+func (scope *relationScope) endUse() {
+	scope.mu.Lock()
+	scope.active--
+	scope.cond.Broadcast()
+	scope.mu.Unlock()
+}
+
+// A caller-aware input uses the same lifetime owner, once per operator. Its
+// original state identifies self-close without borrowing public row decisions.
+func (scope *relationScope) beginDataUse(tx *TxContext) func() {
+	var state *transactionState
+	if tx != nil {
+		state = tx.transactionState
+	}
+	scope.mu.Lock()
+	if scope.closing {
+		scope.mu.Unlock()
+		panic("relation scope is closed")
+	}
+	scope.active++
+	if state != nil {
+		if scope.dataInputs == nil {
+			scope.dataInputs = make(map[*transactionState]int)
+		}
+		scope.dataInputs[state]++
+	}
+	scope.mu.Unlock()
+	return func() {
+		scope.mu.Lock()
+		scope.active--
+		if state != nil {
+			scope.dataInputs[state]--
+			if scope.dataInputs[state] == 0 {
+				delete(scope.dataInputs, state)
+			}
+			if len(scope.dataInputs) == 0 {
+				scope.dataInputs = nil
+			}
+		}
+		scope.cond.Broadcast()
+		scope.mu.Unlock()
+	}
+}
+
+// Inspect the existing scope tree without holding one scope while taking
+// another. A child callback must reject closing an ancestor before closeMu too.
+func (scope *relationScope) hasCallerInput(state *transactionState) bool {
+	scope.mu.Lock()
+	active := scope.dataInputs[state] != 0
+	children := append([]*relationScope(nil), scope.children...)
+	scope.mu.Unlock()
+	if active {
+		return true
+	}
+	for _, child := range children {
+		if child.hasCallerInput(state) {
+			return true
+		}
+	}
+	return false
 }
 func (scope *relationScope) adopt(table *table) {
 	scope.mu.Lock()
@@ -100,9 +166,23 @@ func (scope *relationScope) Close() error {
 }
 
 func (scope *relationScope) close() {
+	scope.closeWithCaller(nil)
+}
+
+func (scope *relationScope) closeWithCaller(caller *TxContext) {
+	if caller != nil {
+		scope.validateCallerRetirement(caller)
+	}
 	scope.closeMu.Lock()
 	defer scope.closeMu.Unlock()
+	if caller != nil && scope.hasCallerInput(caller.transactionState) {
+		panic("caller scope retirement requires completed native inputs")
+	}
 	scope.mu.Lock()
+	if caller != nil && scope.dataInputs[caller.transactionState] != 0 {
+		scope.mu.Unlock()
+		panic("caller scope retirement requires completed native inputs")
+	}
 	scope.closing = true
 	scope.schemaClosed.Store(true)
 	if scope.dataPolicy == relationIndependentData && scope.active != 0 {
@@ -132,7 +212,7 @@ func (scope *relationScope) close() {
 		return true
 	}
 	for i := len(children) - 1; i >= 0; i-- {
-		attempt(children[i].close)
+		attempt(func() { children[i].closeWithCaller(caller) })
 	}
 	// Private data decisions retire before native maintenance drops their
 	// identities. Their source transaction is a distinct borrowed authority.
@@ -148,12 +228,19 @@ func (scope *relationScope) close() {
 		}
 		return
 	}
+	if scope.callerRetirement != nil {
+		if !attempt(scope.finishCallerRetirement) {
+			panic(first)
+		}
+	} else if caller != nil && !attempt(func() { scope.retireCallerData(caller, tables) }) {
+		panic(first)
+	}
 	for _, table := range tables {
 		if attempt(func() {
 			// A database or same-named relation may have been explicitly replaced.
 			// The closed capability can only retire its original live incarnation.
 			if db := GetDatabase(table.schema.Name); db == table.schema {
-				dropTableIdentity(db.Name, table.Name, true, table)
+				dropTableIdentity(db.Name, table.Name, true, table, scope.callerRetirement)
 			}
 		}) {
 			scope.mu.Lock()
@@ -167,6 +254,7 @@ func (scope *relationScope) close() {
 	// A retained closed capability must not retain the retired MEMORY rows
 	// through its former slot catalog. Pending decisions return before this point.
 	scope.schemaSlots.Store(nil)
+	scope.callerRetirement = nil
 	// Closed module/reset scopes do not accumulate on a pooled connection.
 	scope.owner.mu.Lock()
 	for i, owned := range scope.owner.scopes {
@@ -360,7 +448,14 @@ func initRelationScopes(en *scm.Env) {
 		return scm.NewAny(newRelationScope(relationScopeOwnerFor(a[0]), parent, policy, transactionalSchema))
 	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Description: "creates an opaque native relation lifetime owned by a connection session; independent MEMORY data uses separate native statement decisions; transactional scopes enlist lexical schema generations in the actual caller decision", Params: []*scm.TypeDescriptor{{Kind: "func", Label: "session"}, {Kind: "any", Label: "parent", Optional: true}, {Kind: "string", Label: "profile", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
 	scm.Declare(en, &scm.Declaration{Name: "close_relation_scope", Fn: func(a ...scm.Scmer) scm.Scmer {
-		relationScopeFromValue(a[0]).close()
+		if len(a) < 1 || len(a) > 2 {
+			panic("close_relation_scope requires scope and optional original caller")
+		}
+		var caller *TxContext
+		if len(a) > 1 {
+			caller = scmerToTxContext(a[1])
+		}
+		relationScopeFromValue(a[0]).closeWithCaller(caller)
 		return scm.NewBool(true)
-	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Description: "closes a native relation scope and retires only its owned native identities; repeat calls are safe", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "scope"}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
+	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Description: "closes a native relation scope and retires only its owned native identities; an optional original caller retires completed ordinary scoped MEMORY journals without deciding its public transaction", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "scope"}, {Kind: "any", Label: "caller", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
 }

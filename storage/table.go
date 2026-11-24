@@ -1740,7 +1740,14 @@ func (t *table) resolvePendingRepartitionSourceDeletes() {
 //   - if the table became partitioned while waiting, no new immediate repartition starts
 //   - otherwise maintenanceKind is set to 2 under maintenanceMu before returning
 func (t *table) beginManualRepartition() bool {
+	if scope := t.callerRelationScope(); scope != nil && scope.schemaClosed.Load() {
+		return false
+	}
 	t.maintenanceMu.Lock()
+	if scope := t.callerRelationScope(); scope != nil && scope.schemaClosed.Load() {
+		t.maintenanceMu.Unlock()
+		return false
+	}
 	t.mu.Lock()
 	if t.ShardMode != ShardModeFree {
 		t.mu.Unlock()

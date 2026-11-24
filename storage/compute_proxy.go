@@ -317,7 +317,7 @@ func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext, alreadyLocked boo
 		// A complete main supplies these values; preparing its inputs would
 		// decode unrelated dictionaries. Missing later rows keep native repair.
 		reader.mainSource = main
-		reader.mainReader = newCachedColumnReaderTx(main, tx, alreadyLocked, hints)
+		reader.mainReader = newCachedColumnReaderTx(main, tx, alreadyLocked, hints, p.shard.t)
 	} else {
 		// Partial/lazy inputs have no established consumption extent. Preserve
 		// their original optional cache reuse, carrying only operator ownership.
@@ -621,7 +621,7 @@ func (p *StorageComputeProxy) getValueRLocked(_ *TxContext, idx uint32) scm.Scme
 			continue
 		}
 		if idx < p.shard.main_count {
-			values[i] = newCachedColumnReaderTx(cs, nil, true, ReadCompressed).GetValue(idx)
+			values[i] = newCachedColumnReaderTx(cs, nil, true, ReadCompressed, nil).GetValue(idx)
 			continue
 		}
 		deltaIndex := int(idx - p.shard.main_count)
@@ -715,7 +715,7 @@ func (p *StorageComputeProxy) Compress(_ *TxContext) {
 	startDeltaRows := p.shard.plannerDeltaRows.Load()
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
-		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col, false, nil), nil, false, ReadCompressed)
+		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col, false, nil), nil, false, ReadCompressed, nil)
 	}
 
 	// Computors may populate a dependency cache. Its maintenance triggers are

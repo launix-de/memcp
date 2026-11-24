@@ -277,6 +277,13 @@ func (scope *relationScope) retireDataOperations() {
 // private relation. Nested native inputs reuse it; ordinary source callbacks
 // keep their original lexical caller context and public transaction snapshot.
 func (t *table) readDataContext(tx *TxContext) (*TxContext, func()) {
+	finishScope := t.beginCallerInput(tx)
+	scopeTransferred := false
+	defer func() {
+		if !scopeTransferred && finishScope != nil {
+			finishScope()
+		}
+	}()
 	read, finish := t.readDataOwner(tx)
 	ready := false
 	defer func() {
@@ -288,6 +295,11 @@ func (t *table) readDataContext(tx *TxContext) (*TxContext, func()) {
 	t.enterPendingCatalogData(read, nil)
 	t.recordSerializableRead(read)
 	ready = true
+	if finishScope != nil {
+		dataFinish := finish
+		finish = func() { defer finishScope(); dataFinish() }
+	}
+	scopeTransferred = true
 	return read, finish
 }
 
@@ -356,6 +368,13 @@ func (t *table) readDataOwner(tx *TxContext) (*TxContext, func()) {
 }
 
 func (t *table) writeDataContext(tx *TxContext) (*TxContext, func()) {
+	finishScope := t.beginCallerInput(tx)
+	scopeTransferred := false
+	defer func() {
+		if !scopeTransferred && finishScope != nil {
+			finishScope()
+		}
+	}()
 	write, finish := t.writeDataOwner(tx)
 	ready := false
 	defer func() {
@@ -366,6 +385,11 @@ func (t *table) writeDataContext(tx *TxContext) (*TxContext, func()) {
 	t.requireCatalogDataVisibility(write)
 	t.enterPendingCatalogData(write, nil)
 	ready = true
+	if finishScope != nil {
+		dataFinish := finish
+		finish = func() { defer finishScope(); dataFinish() }
+	}
+	scopeTransferred = true
 	return write, finish
 }
 
@@ -409,6 +433,16 @@ func (t *table) writeDataOwner(tx *TxContext) (*TxContext, func()) {
 // Other inputs retain writeDataContext's ordinary operator admission, including
 // its sealed-view rejection for an escaped or unmatched binding.
 func (t *table) insertDataContext(tx *TxContext) (*TxContext, func()) {
+	// The actual outer native producer already retains this lexical input.
+	// Reuse it for streaming rows instead of admitting a scope per sink call.
+	if tx != nil && tx.mutationOperation != nil && tx.relationData == nil {
+		if t.callerInputBorrowed(tx) {
+			// Pure routing only. Insert's existing borrowMutation joins this
+			// exact invocation before catalog admission, defaults or row effects.
+			return tx, releaseNoRelationData
+		}
+	}
+
 	if tx != nil && tx.relationData != nil {
 		if inputs := tx.relationData.insertInputs.Load(); inputs != nil {
 			if data := inputs.targets[t]; data != nil {
