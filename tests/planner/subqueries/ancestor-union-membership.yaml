@@ -496,7 +496,7 @@ test_cases:
         (list "columns" (list (list "Field" "id")))))
       (define ref (list 'get_column "unknown_caller" false "id" false))
       (empty_list? (logical_relation_free_column_refs (make_window_stage "window" source "value" '("id") '(false) 0
-        '("id") '(lambda (x) x) '+ 0 (list (list 'condition ref))))))
+        '("id") (lambda (x) x) '+ 0 (list (list 'condition ref))))))
   expect:
     result: false
 - name: Window ordering retains caller dependencies
@@ -506,7 +506,7 @@ test_cases:
         (list "columns" (list (list "Field" "id")))))
       (define ref (list 'get_column "unknown_caller" false "id" false))
       (empty_list? (logical_relation_free_column_refs (make_window_stage "window" source "value" (list ref) '(false) 0
-        '("id") '(lambda (x) x) '+ 0 '()))))
+        '("id") (lambda (x) x) '+ 0 '()))))
   expect:
     result: false
 - name: ORC mapping retains caller dependencies
