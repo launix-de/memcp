@@ -12597,7 +12597,9 @@ once rather than walking position/relation lists on every comparison. */
 
 (define lower_union_all_ordered_materialized (lambda (block titles width order_positions)
 	(begin
-		(define id (concat "__union_materialized_" (fnv_hash (serialize block))))
+		/* These bindings belong to the generated lexical scope. Planning facts
+		may contain invocation-owned transactions and must not be serialized. */
+		(define id "__union_materialized")
 		(define rows (symbol (concat id "_rows")))
 		(define emit (symbol (concat id "_emit")))
 		(define collect_lock (symbol (concat id "_collect_lock")))
