@@ -3830,7 +3830,7 @@ func (t *table) appendFreeShardDurably(currentTx *TxContext, topology *tableShar
 		}
 	}()
 	if r := activeReplication(t.schema); r != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable() {
-		if r.cluster != nil && !r.cluster.tryAcquire(scanQueryContext(currentTx, r.cluster.ctx), mosiResource{Database: t.schema.Name}, mosi.M) {
+		if r.cluster != nil && r.resourceCell(mosiResource{Database: t.schema.Name}).ownstate.Phase() != mosi.M {
 			// Existing lanes remain valid while another statement retains the
 			// declarations. A physical split may wait for a later insertion.
 			return t.topology.Load(), nil
@@ -3838,8 +3838,13 @@ func (t *table) appendFreeShardDurably(currentTx *TxContext, topology *tableShar
 		// Adding a lane changes the database's shard directory. Invalidate
 		// shared schema copies before publication, without affecting ordinary
 		// INSERTs which can use an existing lane.
-		access := t.schema.GetWrite(currentTx)
-		defer access.Release()
+		_, release, acquired := r.writeResource(mosiResource{Database: t.schema.Name}, currentTx, false)
+		if !acquired {
+			// A peer may start recalling M after the opportunistic preflight.
+			// Never join that flight while this insertion retains its S proof.
+			return t.topology.Load(), nil
+		}
+		defer release()
 		if t.schema.tables.Get(t.Name) != t {
 			panic("replication schema changed; retry statement")
 		}

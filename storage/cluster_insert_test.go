@@ -193,6 +193,19 @@ func TestClusterInsertKeepsLocalLaneBeforeForeignNewest(t *testing.T) {
 	if cluster.manager.shardCell(foreign).ownstate.Phase() == mosi.M {
 		t.Fatal("routing claimed foreign permission")
 	}
+	// A full local lane is still the overflow target when schema M is absent.
+	// The newest foreign lane must not turn this into an allocation/retry loop.
+	local.plannerDeltaRows.Store(uint64(Settings.ShardSize))
+	schema := cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name})
+	before := schema.ownstate.Phase()
+	shard, release, next := tbl.routeFreeInsert(nil, tbl.activeTopology(), 1)
+	if shard != local || release == nil || next != tbl.activeTopology() {
+		t.Fatal("full local lane was not retained as the overflow target")
+	}
+	release()
+	if schema.ownstate.Phase() != before {
+		t.Fatal("overflow routing started a schema acquisition")
+	}
 }
 
 func TestClusterAppendImportRetainsLiveShardAndCounter(t *testing.T) {

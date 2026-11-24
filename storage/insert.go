@@ -771,12 +771,18 @@ func (t *table) routeFreeInsert(currentTx *TxContext, topology *tableShardTopolo
 		return nil, nil, next
 	}
 	if candidate == nil {
-		if !t.localInsertShard(source) {
-			// Maintenance must never make the overflow fallback steal a foreign
-			// writer. Retry allocation after its existing owner releases it.
-			runtime.Gosched()
-			return nil, nil, nil
+		// The newest directory entry can belong to another peer. Prefer a
+		// retained local lane even when all of its target-size slots are used;
+		// size is a split target, not permission to wait for schema recall.
+		for _, shard := range writers {
+			if t.localInsertShard(shard) {
+				source = shard
+				break
+			}
 		}
+		// With no local lane, reserve the existing generation and acquire its
+		// ordinary native shard writer during UNIQUE preflight. Retrying schema
+		// allocation cannot progress while this statement retains schema S.
 		candidate = source
 	}
 	release, _ := reserveInsertRows(candidate, rows, Settings.ShardSize, true, -1)
