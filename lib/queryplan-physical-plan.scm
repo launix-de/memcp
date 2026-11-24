@@ -13148,6 +13148,131 @@ The native RecSet owns deduplication; no SQL primary key is required. */
 				(list '+ '__delete_acc (list 'if (list '$update) 1 0)))
 			0 '+ false))))
 
+/* Every payload branch returns one complete fixed-width assignment tuple.
+The native target callback executes once after that source reduction finishes. */
+(define lower_target_payload_update_scan (lambda (block target condition needed_exprs choice)
+	(begin
+		(define alias (source_alias target))
+		(define columns (cons "$update" (merge_unique (map needed_exprs
+			(lambda (expression) (extract_columns_for_alias target expression))))))
+		(define filters (extract_columns_for_alias target condition))
+		(compile_scan_plan 'scan (physical_query_tx_symbol) (source_table_expr target)
+			(quoted_runtime_list filters)
+			(list 'lambda (map filters (lambda (name) (scan_callback_symbol_for_alias alias name)))
+				(lower_column_expr_for_join (qb_sources block) (source_alias (car (qb_sources block))) condition))
+			(quoted_runtime_list columns)
+			(list 'lambda (cons '__joined_update_acc (map columns (lambda (name) (scan_callback_symbol_for_alias alias name))))
+				(list (list 'lambda (list '__joined_update_first)
+					(list 'if (list 'nil? '__joined_update_first) '__joined_update_acc
+						(list '+ '__joined_update_acc (dml_update_count_expr block
+							(list (scan_callback_symbol_for_alias alias "$update") '__joined_update_first))))) choice))
+			0 '+ false))))
+
+(define mutation_join_leaf_alias (lambda (tree)
+	(match tree
+		((symbol join-leaf) alias) alias
+		((symbol join-leaf) alias _predicates) alias
+		_ nil)))
+
+/* Only these selected target-first shapes lose a bound leaf without losing
+an outer boundary: T LEFT S, (T INNER D) LEFT S, T INNER (D LEFT S).
+The optional mandatory D must retain its published 0:1 lookup proof from T. */
+(define outer_update_target_profile (lambda (tree alias)
+	(match tree
+		((symbol join-node) kind left right predicates)
+		(if (equal? kind 'left-outer)
+			(if (nil? (mutation_join_leaf_alias right)) nil
+				(equal?? (mutation_join_leaf_alias left) alias)
+				(list nil true true)
+				(match left
+					((symbol join-node) inner target driver inner_predicates)
+					(if (and (equal? inner 'inner) (equal?? (mutation_join_leaf_alias target) alias)
+						(not (nil? (mutation_join_leaf_alias driver))))
+						(list (mutation_join_leaf_alias driver) false
+							(join_optimizer_node_condition (join_optimizer_tree_predicates left))) nil)
+					_ nil))
+			(and (equal? kind 'inner) (equal?? (mutation_join_leaf_alias left) alias))
+			(match right
+				((symbol join-node) outer driver nullable _outer_predicates)
+				(if (and (equal? outer 'left-outer) (not (nil? (mutation_join_leaf_alias driver)))
+					(not (nil? (mutation_join_leaf_alias nullable))))
+					(list (mutation_join_leaf_alias driver) false
+						(combine_where (join_optimizer_node_condition predicates)
+							(combine_where (join_optimizer_node_condition (join_optimizer_leaf_predicates left))
+								(join_optimizer_node_condition (join_optimizer_leaf_predicates driver))))) nil)
+				_ nil)
+			nil)
+		_ nil)))
+
+/* Keep ON inside the original nullable source, and WHERE in the ordinary
+join reducer. A real ON row rejected by WHERE is not an unmatched NULL row.
+The existing parallel native scans merge at most one complete payload tuple;
+no row bag, new storage capability or source ordering is introduced. */
+(define lower_target_outer_update (lambda (block target tree stages)
+	(begin
+		(define sources (qb_sources block))
+		(define alias (source_alias target))
+		(define profile (outer_update_target_profile tree alias))
+		(define facts (qb_facts block))
+		(if (or (nil? profile) (empty_list? (coalesceNil (qb_fields block) '()))
+			(source_outer? target) (not (equal?? (join_optimizer_tree_first_alias tree) alias))
+			(not (equal? (count sources) (if (nil? (car profile)) 2 3)))
+			(not (prejoin_sources_distinct? sources))
+			(not (reduce sources (lambda (native source) (and native (source_is_native_table? source))) true))
+			(not (empty_list? stages)) (not (empty_list? (qb_stages block)))
+			(not (empty_list? (query_block_stage_catalog block)))
+			(not (empty_list? (coalesceNil (query_block_lowering_catalog block) '())))
+			(not (empty_list? (query_block_probe_expr_stages block)))
+			(not (empty_list? (qb_order block)))) nil
+			(begin
+				(define default_alias (source_alias (car sources)))
+				(define planning (qassoc_get facts 'mutation_planning_session (planner_context_session facts)))
+				(define driver (if (nil? (car profile)) nil (join_optimizer_source_by_alias sources (car profile))))
+				(if (and driver (or (source_outer? driver)
+					(not (source_is_unique_lookup_from_sources? sources default_alias (list target) driver '()
+						(nth profile 2) planning true (qassoc_get facts 'comparison-contracts '()))))) nil
+					(begin
+						(define condition (dml_preserve_driver_membership_probe (source_schema target)
+							(combine_where (coalesceNil (qb_where block) true)
+								(join_optimizer_node_condition (join_optimizer_tree_predicates tree)))))
+						(define access (combine_where_terms (source_join_exprs sources) condition))
+						(define other_aliases (filter (source_aliases sources) (lambda (other) (not (equal?? other alias)))))
+						(define bindings (filter (split_and_terms access) (lambda (term)
+							(and (or (not (nil? (equality_term_operands term))) (not (nil? (null_safe_equality_operands term))))
+								(expr_refs_alias? default_alias alias term) (expr_refs_any_alias? default_alias other_aliases term)))))
+						(define bound_columns (merge_unique (map bindings (lambda (term)
+							(extract_columns_for_join_alias sources default_alias alias term)))))
+						(if (not (reduce (extract_assoc (dml_storage_assignments target (qb_fields block)) (lambda (name _expression) name))
+							(lambda (stable name) (and stable (not (contains? bound_columns name)))) true)) nil
+							(begin
+								(define remaining_sources (filter sources (lambda (source) (not (equal?? (source_alias source) alias)))))
+								(define parts (physical_partition_condition default_alias target remaining_sources condition))
+								(define remaining (join_optimizer_tree_without_aliases tree (list alias)))
+								(define where (condition_without_join_tree_predicates (nth parts 2) remaining))
+								(define expressions (dml_assignment_exprs (qb_fields block)))
+								(define needed (merge (list (list condition) expressions (source_join_exprs sources))))
+								(define payload (cons 'list (map_assoc (dml_storage_assignments target (qb_fields block))
+									(lambda (_name expression) (lower_column_expr_for_join sources default_alias expression)))))
+								/* Select source values before evaluating assignments. An unchosen
+								row must not evaluate a volatile or failing assignment formula. */
+								(define params (merge (map remaining_sources (lambda (source)
+									(map (merge_unique (map expressions (lambda (expression)
+										(extract_columns_for_alias source expression))))
+										(lambda (column) (scan_callback_symbol_for_alias (source_alias source) column)))))))
+								(define selected_row (cons 'list (cons true params)))
+								(define mode (list 'reduce (scalar_once_reduce_first) nil (scalar_once_reduce_first)))
+								(define probe (join_scan_probe_context tree sources nil stages (planner_context_session facts) (planner_context_tx facts)))
+								(define terminal (lambda (predicate row _order)
+									(if (equal? (coalesceNil predicate true) true) row
+										(list 'if (lower_column_expr_for_join sources default_alias predicate) row (join_scan_skip_expr mode)))))
+								(define raw_choice (build_join_tree_scan_using_recipe
+									(qb_schema block) sources remaining '() default_alias needed where selected_row '() 0 -1 false
+									(join_column_recipe sources default_alias needed) stages mode probe nil terminal (cadr profile) facts))
+								(define choice (list (list 'lambda (list '__joined_source_row)
+									(list 'if (list 'nil? '__joined_source_row) nil
+										(list 'apply (list 'lambda params payload) (list 'cdr '__joined_source_row)))) raw_choice))
+								(lower_target_payload_update_scan block target (car parts) needed choice))))))))))
+
 /* UPDATE consumes one effect per target identity, even when its FROM join
 admits several source rows. A selected target-driven two-leaf INNER tree can
 read its first complete source tuple before invoking that target's writer.
@@ -13200,16 +13325,11 @@ identity/payload carrier. No unique key or byte-wise equality is inferred. */
 					(lambda (stable name) (and stable (not (contains? bound_columns name)))) true)) nil
 					(begin
 						(define expressions (dml_assignment_exprs columns))
-						(define target_columns (cons "$update" (merge_unique (map (cons condition expressions)
-							(lambda (expression) (extract_columns_for_alias target expression))))))
-						(define target_filter_columns (extract_columns_for_alias target target_condition))
 						(define filter_columns (extract_columns_for_alias source source_condition))
 						(define source_columns (merge_unique (map expressions
 							(lambda (expression) (extract_columns_for_alias source expression)))))
 						(define value (cons 'list (map_assoc (dml_storage_assignments target columns) (lambda (_name expression)
 							(lower_column_expr_for_join sources default_alias expression)))))
-						(define selected '__joined_update_first)
-						(define acc '__joined_update_acc)
 						(define choice (compile_scan_plan 'scan_order (physical_query_tx_symbol) (source_table_expr source)
 							(quoted_runtime_list filter_columns)
 							(list 'lambda (map filter_columns (lambda (name) (scan_callback_symbol_for_alias (source_alias source) name)))
@@ -13219,17 +13339,7 @@ identity/payload carrier. No unique key or byte-wise equality is inferred. */
 							(list 'lambda (cons '__joined_source_acc (map source_columns
 								(lambda (name) (scan_callback_symbol_for_alias (source_alias source) name)))) value)
 							nil false))
-						(compile_scan_plan 'scan (physical_query_tx_symbol) (source_table_expr target)
-							(quoted_runtime_list target_filter_columns)
-							(list 'lambda (map target_filter_columns (lambda (name) (scan_callback_symbol_for_alias alias name)))
-								(lower_column_expr_for_join sources default_alias target_condition))
-							(quoted_runtime_list target_columns)
-							(list 'lambda (cons acc (map target_columns (lambda (name) (scan_callback_symbol_for_alias alias name))))
-								(list (list 'lambda (list selected)
-									(list 'if (list 'nil? selected) acc
-										(list '+ acc (dml_update_count_expr block
-											(list (scan_callback_symbol_for_alias alias "$update") selected))))) choice))
-							0 '+ false))))))))
+						(lower_target_payload_update_scan block target target_condition (cons condition expressions) choice))))))))
 
 (define lower_multi_source_dml_query_block (lambda (block target_schema target_tbl stages)
 	(begin
@@ -13280,6 +13390,7 @@ identity/payload carrier. No unique key or byte-wise equality is inferred. */
 		its unsafe nonempty counterpart. Name/type binding already ran above. */
 		(if (not proven_sources)
 			(coalesceNil (lower_target_first_update block target_src scan_plan stages)
+				(lower_target_outer_update block target_src scan_plan stages)
 				(list (quote if)
 					(compile_scan_plan (quote scan_exists) (physical_query_tx_symbol)
 						(source_table_expr target_src) '(list) (list (quote lambda) '() true))

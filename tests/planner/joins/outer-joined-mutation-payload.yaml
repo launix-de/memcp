@@ -1,0 +1,707 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Duplicate UPDATE FROM source choice is intentionally unordered; complete tuple and effect oracles remain exact.
+metadata:
+  isolated: true
+  description: Outer joined mutations preserve ON and WHERE while choosing one complete tuple per target
+setup:
+- sql: DROP TRIGGER IF EXISTS outer_update_observer
+- sql: DROP TABLE IF EXISTS outer_update_audit
+- sql: DROP TABLE IF EXISTS outer_update_source
+- sql: DROP TABLE IF EXISTS outer_update_driver
+- sql: DROP TABLE IF EXISTS outer_update_target
+- sql: CREATE TABLE outer_update_target(id INT PRIMARY KEY,amount INT,marker INT)
+- sql: CREATE TABLE outer_update_driver(id INT PRIMARY KEY)
+- sql: CREATE TABLE outer_update_source(id INT,amount INT,marker INT,keep_row INT)
+- sql: CREATE TABLE outer_update_audit(id INT,amount INT,marker INT)
+- sql: INSERT outer_update_target VALUES(1,-1,-1),(2,-1,-1),(3,-1,-1),(4,-1,-1),(5,-1,-1)
+- sql: INSERT outer_update_driver VALUES(1),(2),(3),(4),(5)
+- sql: INSERT outer_update_source VALUES(1,10,100,1),(1,11,110,1),(2,NULL,200,1),(4,40,400,0),(5,50,500,1)
+- sql: CREATE TRIGGER outer_update_observer AFTER UPDATE ON outer_update_target FOR EACH ROW BEGIN INSERT INTO outer_update_audit
+    VALUES(NEW.id,NEW.amount,NEW.marker); END
+- sql: DROP TRIGGER IF EXISTS outer_composite_observer
+- sql: DROP TABLE IF EXISTS outer_composite_driver
+- sql: DROP TABLE IF EXISTS outer_composite_target
+- sql: CREATE TABLE outer_composite_target(id INT PRIMARY KEY,slot INT,amount INT,marker INT)
+- sql: CREATE TABLE outer_composite_driver(id INT,slot INT,UNIQUE(id,slot))
+- sql: INSERT outer_composite_target VALUES(1,NULL,-1,-1),(2,10,-1,-1),(3,20,-1,-1)
+- sql: INSERT outer_composite_driver VALUES(1,NULL),(1,NULL),(2,10),(3,20)
+- sql: CREATE TRIGGER outer_composite_observer AFTER UPDATE ON outer_composite_target FOR EACH ROW BEGIN INSERT
+    INTO outer_update_audit VALUES(NEW.id,NEW.amount,NEW.marker); END
+test_cases:
+- name: mysql Duplicate matches choose one coherent tuple and unmatched targets get NULL
+  syntax: mysql
+  setup:
+  - sql: UPDATE outer_update_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  - sql: UPDATE outer_update_source SET keep_row=1 WHERE id=1
+  steps:
+  - sql: |-
+      UPDATE outer_update_target t LEFT JOIN outer_update_source s ON s.id=t.id
+      SET t.amount=s.amount,t.marker=s.marker
+    expect:
+      affected_rows: 5
+  - sql: |-
+      SELECT t.id,CASE WHEN t.id=1 AND ((t.amount=10 AND t.marker=100) OR (t.amount=11 AND t.marker=110)) THEN 1 WHEN t.id=2 AND ((t.amount IS NULL AND t.marker=200)) THEN 1 WHEN t.id=3 AND ((t.amount IS NULL AND t.marker IS NULL)) THEN 1 WHEN t.id=4 AND ((t.amount=40 AND t.marker=400)) THEN 1 WHEN t.id=5 AND ((t.amount=50 AND t.marker=500)) THEN 1 ELSE 0 END AS tuple_ok,
+        COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_update_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 4
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 5
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+- name: mysql WHERE filters real ON matches before one target effect and cannot create a NULL match
+  syntax: mysql
+  setup:
+  - sql: UPDATE outer_update_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  - sql: UPDATE outer_update_source SET keep_row=1 WHERE id=1
+  - sql: UPDATE outer_update_source SET keep_row=0 WHERE id=1 AND amount=10
+  steps:
+  - sql: |-
+      UPDATE outer_update_target t LEFT JOIN outer_update_source s ON s.id=t.id
+      SET t.amount=s.amount,t.marker=s.marker
+      WHERE (s.keep_row=1 OR s.id IS NULL)
+    expect:
+      affected_rows: 4
+  - sql: |-
+      SELECT t.id,CASE WHEN t.id=1 AND ((t.amount=11 AND t.marker=110)) THEN 1 WHEN t.id=2 AND ((t.amount IS NULL AND t.marker=200)) THEN 1 WHEN t.id=3 AND ((t.amount IS NULL AND t.marker IS NULL)) THEN 1 WHEN t.id=4 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=5 AND ((t.amount=50 AND t.marker=500)) THEN 1 ELSE 0 END AS tuple_ok,
+        COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_update_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 4
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 5
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+- name: mysql Only true unmatched rows pass the post-join NULL predicate
+  syntax: mysql
+  setup:
+  - sql: UPDATE outer_update_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  - sql: UPDATE outer_update_source SET keep_row=1 WHERE id=1
+  steps:
+  - sql: |-
+      UPDATE outer_update_target t LEFT JOIN outer_update_source s ON s.id=t.id
+      SET t.amount=COALESCE(s.amount,99),t.marker=COALESCE(s.marker,999)
+      WHERE s.id IS NULL
+    expect:
+      affected_rows: 1
+  - sql: |-
+      SELECT t.id,CASE WHEN t.id=1 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=2 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=3 AND ((t.amount=99 AND t.marker=999)) THEN 1 WHEN t.id=4 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=5 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 ELSE 0 END AS tuple_ok,
+        COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_update_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 4
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 5
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+- name: tsql Duplicate matches choose one coherent tuple and unmatched targets get NULL
+  syntax: tsql
+  setup:
+  - sql: UPDATE outer_update_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  - sql: UPDATE outer_update_source SET keep_row=1 WHERE id=1
+  steps:
+  - sql: |-
+      UPDATE t SET amount=s.amount,marker=s.marker
+      FROM outer_update_source s RIGHT OUTER JOIN outer_update_target t ON s.id=t.id
+    expect:
+      affected_rows: 5
+  - sql: |-
+      SELECT t.id,CASE WHEN t.id=1 AND ((t.amount=10 AND t.marker=100) OR (t.amount=11 AND t.marker=110)) THEN 1 WHEN t.id=2 AND ((t.amount IS NULL AND t.marker=200)) THEN 1 WHEN t.id=3 AND ((t.amount IS NULL AND t.marker IS NULL)) THEN 1 WHEN t.id=4 AND ((t.amount=40 AND t.marker=400)) THEN 1 WHEN t.id=5 AND ((t.amount=50 AND t.marker=500)) THEN 1 ELSE 0 END AS tuple_ok,
+        COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_update_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 4
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 5
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+- name: tsql WHERE filters real ON matches before one target effect and cannot create a NULL match
+  syntax: tsql
+  setup:
+  - sql: UPDATE outer_update_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  - sql: UPDATE outer_update_source SET keep_row=1 WHERE id=1
+  - sql: UPDATE outer_update_source SET keep_row=0 WHERE id=1 AND amount=10
+  steps:
+  - sql: |-
+      UPDATE t SET amount=s.amount,marker=s.marker
+      FROM outer_update_source s RIGHT OUTER JOIN outer_update_target t ON s.id=t.id
+      WHERE (s.keep_row=1 OR s.id IS NULL)
+    expect:
+      affected_rows: 4
+  - sql: |-
+      SELECT t.id,CASE WHEN t.id=1 AND ((t.amount=11 AND t.marker=110)) THEN 1 WHEN t.id=2 AND ((t.amount IS NULL AND t.marker=200)) THEN 1 WHEN t.id=3 AND ((t.amount IS NULL AND t.marker IS NULL)) THEN 1 WHEN t.id=4 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=5 AND ((t.amount=50 AND t.marker=500)) THEN 1 ELSE 0 END AS tuple_ok,
+        COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_update_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 4
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 5
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+- name: tsql Only true unmatched rows pass the post-join NULL predicate
+  syntax: tsql
+  setup:
+  - sql: UPDATE outer_update_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  - sql: UPDATE outer_update_source SET keep_row=1 WHERE id=1
+  steps:
+  - sql: |-
+      UPDATE t SET amount=COALESCE(s.amount,99),marker=COALESCE(s.marker,999)
+      FROM outer_update_source s RIGHT OUTER JOIN outer_update_target t ON s.id=t.id
+      WHERE s.id IS NULL
+    expect:
+      affected_rows: 1
+  - sql: |-
+      SELECT t.id,CASE WHEN t.id=1 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=2 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=3 AND ((t.amount=99 AND t.marker=999)) THEN 1 WHEN t.id=4 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=5 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 ELSE 0 END AS tuple_ok,
+        COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_update_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 4
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 5
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+- name: postgresql Duplicate matches choose one coherent tuple and unmatched targets get NULL
+  syntax: postgresql
+  setup:
+  - sql: UPDATE outer_update_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  - sql: UPDATE outer_update_source SET keep_row=1 WHERE id=1
+  steps:
+  - sql: |-
+      UPDATE outer_update_target AS t SET amount=s.amount,marker=s.marker
+      FROM outer_update_driver d LEFT JOIN outer_update_source s ON s.id=d.id
+      WHERE t.id=d.id
+    expect:
+      affected_rows: 5
+  - sql: |-
+      SELECT t.id,CASE WHEN t.id=1 AND ((t.amount=10 AND t.marker=100) OR (t.amount=11 AND t.marker=110)) THEN 1 WHEN t.id=2 AND ((t.amount IS NULL AND t.marker=200)) THEN 1 WHEN t.id=3 AND ((t.amount IS NULL AND t.marker IS NULL)) THEN 1 WHEN t.id=4 AND ((t.amount=40 AND t.marker=400)) THEN 1 WHEN t.id=5 AND ((t.amount=50 AND t.marker=500)) THEN 1 ELSE 0 END AS tuple_ok,
+        COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_update_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 4
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 5
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+- name: postgresql WHERE filters real ON matches before one target effect and cannot create a NULL match
+  syntax: postgresql
+  setup:
+  - sql: UPDATE outer_update_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  - sql: UPDATE outer_update_source SET keep_row=1 WHERE id=1
+  - sql: UPDATE outer_update_source SET keep_row=0 WHERE id=1 AND amount=10
+  steps:
+  - sql: |-
+      UPDATE outer_update_target AS t SET amount=s.amount,marker=s.marker
+      FROM outer_update_driver d LEFT JOIN outer_update_source s ON s.id=d.id
+      WHERE t.id=d.id AND (s.keep_row=1 OR s.id IS NULL)
+    expect:
+      affected_rows: 4
+  - sql: |-
+      SELECT t.id,CASE WHEN t.id=1 AND ((t.amount=11 AND t.marker=110)) THEN 1 WHEN t.id=2 AND ((t.amount IS NULL AND t.marker=200)) THEN 1 WHEN t.id=3 AND ((t.amount IS NULL AND t.marker IS NULL)) THEN 1 WHEN t.id=4 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=5 AND ((t.amount=50 AND t.marker=500)) THEN 1 ELSE 0 END AS tuple_ok,
+        COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_update_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 4
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 5
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+- name: postgresql Only true unmatched rows pass the post-join NULL predicate
+  syntax: postgresql
+  setup:
+  - sql: UPDATE outer_update_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  - sql: UPDATE outer_update_source SET keep_row=1 WHERE id=1
+  steps:
+  - sql: |-
+      UPDATE outer_update_target AS t SET amount=COALESCE(s.amount,99),marker=COALESCE(s.marker,999)
+      FROM outer_update_driver d LEFT JOIN outer_update_source s ON s.id=d.id
+      WHERE t.id=d.id AND s.id IS NULL
+    expect:
+      affected_rows: 1
+  - sql: |-
+      SELECT t.id,CASE WHEN t.id=1 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=2 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=3 AND ((t.amount=99 AND t.marker=999)) THEN 1 WHEN t.id=4 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=5 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 ELSE 0 END AS tuple_ok,
+        COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_update_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 4
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 5
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+- name: mysql A missing mandatory unique driver produces no target effect
+  syntax: mysql
+  setup:
+  - sql: UPDATE outer_update_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  - sql: UPDATE outer_update_source SET keep_row=1 WHERE id=1
+  - sql: DELETE FROM outer_update_driver WHERE id=3
+  steps:
+  - sql: |-
+      UPDATE outer_update_target t JOIN outer_update_driver d ON t.id=d.id
+      LEFT JOIN outer_update_source s ON s.id=d.id
+      SET t.amount=s.amount,t.marker=s.marker
+    expect:
+      affected_rows: 4
+  - sql: |-
+      SELECT t.id,CASE WHEN t.id=1 AND ((t.amount=10 AND t.marker=100) OR (t.amount=11 AND t.marker=110)) THEN 1 WHEN t.id=2 AND ((t.amount IS NULL AND t.marker=200)) THEN 1 WHEN t.id=3 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=4 AND ((t.amount=40 AND t.marker=400)) THEN 1 WHEN t.id=5 AND ((t.amount=50 AND t.marker=500)) THEN 1 ELSE 0 END AS tuple_ok,
+        COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_update_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 4
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 5
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+  cleanup:
+  - sql: INSERT INTO outer_update_driver VALUES(3)
+- name: tsql A missing mandatory unique driver produces no target effect
+  syntax: tsql
+  setup:
+  - sql: UPDATE outer_update_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  - sql: UPDATE outer_update_source SET keep_row=1 WHERE id=1
+  - sql: DELETE FROM outer_update_driver WHERE id=3
+  steps:
+  - sql: |-
+      UPDATE t SET amount=s.amount,marker=s.marker
+      FROM outer_update_target t INNER JOIN outer_update_driver d ON t.id=d.id
+      LEFT JOIN outer_update_source s ON s.id=d.id
+    expect:
+      affected_rows: 4
+  - sql: |-
+      SELECT t.id,CASE WHEN t.id=1 AND ((t.amount=10 AND t.marker=100) OR (t.amount=11 AND t.marker=110)) THEN 1 WHEN t.id=2 AND ((t.amount IS NULL AND t.marker=200)) THEN 1 WHEN t.id=3 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=4 AND ((t.amount=40 AND t.marker=400)) THEN 1 WHEN t.id=5 AND ((t.amount=50 AND t.marker=500)) THEN 1 ELSE 0 END AS tuple_ok,
+        COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_update_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 4
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 5
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+  cleanup:
+  - sql: INSERT INTO outer_update_driver VALUES(3)
+- name: postgresql A missing mandatory unique driver produces no target effect
+  syntax: postgresql
+  setup:
+  - sql: UPDATE outer_update_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  - sql: UPDATE outer_update_source SET keep_row=1 WHERE id=1
+  - sql: DELETE FROM outer_update_driver WHERE id=3
+  steps:
+  - sql: |-
+      UPDATE outer_update_target AS t SET amount=s.amount,marker=s.marker
+      FROM outer_update_driver d LEFT JOIN outer_update_source s ON s.id=d.id
+      WHERE t.id=d.id
+    expect:
+      affected_rows: 4
+  - sql: |-
+      SELECT t.id,CASE WHEN t.id=1 AND ((t.amount=10 AND t.marker=100) OR (t.amount=11 AND t.marker=110)) THEN 1 WHEN t.id=2 AND ((t.amount IS NULL AND t.marker=200)) THEN 1 WHEN t.id=3 AND ((t.amount=-1 AND t.marker=-1)) THEN 1 WHEN t.id=4 AND ((t.amount=40 AND t.marker=400)) THEN 1 WHEN t.id=5 AND ((t.amount=50 AND t.marker=500)) THEN 1 ELSE 0 END AS tuple_ok,
+        COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_update_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 5
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 4
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 5
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+  cleanup:
+  - sql: INSERT INTO outer_update_driver VALUES(3)
+- name: mysql Strict composite lookup cannot match duplicate NULL driver keys
+  syntax: mysql
+  setup:
+  - sql: UPDATE outer_composite_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  steps:
+  - sql: |-
+      UPDATE outer_composite_target t JOIN outer_composite_driver d ON t.id=d.id AND t.slot=d.slot
+      LEFT JOIN outer_update_source s ON s.id=d.id
+      SET t.amount=s.amount,t.marker=s.marker
+    expect:
+      affected_rows: 2
+  - sql: |-
+      SELECT t.id,CASE
+        WHEN t.id=1 AND t.amount=-1 AND t.marker=-1 THEN 1
+        WHEN t.id=2 AND t.amount IS NULL AND t.marker=200 THEN 1
+        WHEN t.id=3 AND t.amount IS NULL AND t.marker IS NULL THEN 1
+        ELSE 0 END AS tuple_ok,COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_composite_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+- name: tsql Strict composite lookup cannot match duplicate NULL driver keys
+  syntax: tsql
+  setup:
+  - sql: UPDATE outer_composite_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  steps:
+  - sql: |-
+      UPDATE t SET amount=s.amount,marker=s.marker
+      FROM outer_composite_target t INNER JOIN outer_composite_driver d ON t.id=d.id AND t.slot=d.slot
+      LEFT JOIN outer_update_source s ON s.id=d.id
+    expect:
+      affected_rows: 2
+  - sql: |-
+      SELECT t.id,CASE
+        WHEN t.id=1 AND t.amount=-1 AND t.marker=-1 THEN 1
+        WHEN t.id=2 AND t.amount IS NULL AND t.marker=200 THEN 1
+        WHEN t.id=3 AND t.amount IS NULL AND t.marker IS NULL THEN 1
+        ELSE 0 END AS tuple_ok,COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_composite_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+- name: postgresql Strict composite lookup cannot match duplicate NULL driver keys
+  syntax: postgresql
+  setup:
+  - sql: UPDATE outer_composite_target SET amount=-1,marker=-1
+  - sql: DELETE FROM outer_update_audit
+  steps:
+  - sql: |-
+      UPDATE outer_composite_target AS t SET amount=s.amount,marker=s.marker
+      FROM outer_composite_driver d LEFT JOIN outer_update_source s ON s.id=d.id
+      WHERE t.id=d.id AND t.slot=d.slot
+    expect:
+      affected_rows: 2
+  - sql: |-
+      SELECT t.id,CASE
+        WHEN t.id=1 AND t.amount=-1 AND t.marker=-1 THEN 1
+        WHEN t.id=2 AND t.amount IS NULL AND t.marker=200 THEN 1
+        WHEN t.id=3 AND t.amount IS NULL AND t.marker IS NULL THEN 1
+        ELSE 0 END AS tuple_ok,COUNT(a.id) AS audit_rows,
+        SUM(CASE WHEN a.id IS NOT NULL
+          AND (a.amount=t.amount OR (a.amount IS NULL AND t.amount IS NULL))
+          AND (a.marker=t.marker OR (a.marker IS NULL AND t.marker IS NULL))
+          THEN 1 ELSE 0 END) AS audit_tuple_ok
+      FROM outer_composite_target t LEFT JOIN outer_update_audit a ON t.id=a.id
+      GROUP BY t.id,t.amount,t.marker ORDER BY t.id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        tuple_ok: 1
+        audit_rows: 0
+        audit_tuple_ok: 0
+      - id: 2
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+      - id: 3
+        tuple_ok: 1
+        audit_rows: 1
+        audit_tuple_ok: 1
+cleanup:
+- sql: DROP TRIGGER IF EXISTS outer_composite_observer
+- sql: DROP TABLE IF EXISTS outer_composite_driver
+- sql: DROP TABLE IF EXISTS outer_composite_target
+- sql: DROP TRIGGER IF EXISTS outer_update_observer
+- sql: DROP TABLE IF EXISTS outer_update_audit
+- sql: DROP TABLE IF EXISTS outer_update_source
+- sql: DROP TABLE IF EXISTS outer_update_driver
+- sql: DROP TABLE IF EXISTS outer_update_target
