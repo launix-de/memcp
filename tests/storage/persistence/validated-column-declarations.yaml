@@ -60,48 +60,79 @@ test_cases:
       sql: ALTER TABLE validated_widen_child ADD CONSTRAINT FK_validated_widen FOREIGN KEY(id,stamp) REFERENCES validated_widen_parent(id,stamp)
         ON UPDATE CASCADE ON DELETE CASCADE
     - connection: owner
-      sql: SELECT TYPE_NAME(system_type_id) AS declared_type,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent')
-        AND name=N'stamp'
-      expect: &id004
+      sql: SELECT max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent') AND name=N'stamp'
+      expect:
         rows: 1
         data:
-        - declared_type: datetime
-          max_length: 8
+        - max_length: 8
+    - connection: owner
+      sql: SELECT TOP 0 stamp AS observed FROM validated_widen_parent
+      expect:
+        rows: 0
+        column_types:
+        - name: observed
+          type: DATETIME
+          nullable: false
     - connection: owner
       sql: SELECT id,CONVERT(VARCHAR(19),stamp,120) AS stamp,value FROM validated_widen_parent ORDER BY id
       expect:
         rows: 1
         data:
-        - &id001
-          id: 1
+        - id: 1
           stamp: '2024-01-02 03:04:00'
           value: 10
     - connection: observer
-      sql: SELECT TYPE_NAME(system_type_id) AS declared_type,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent')
-        AND name=N'stamp'
-      expect: &id002
+      sql: SELECT max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent') AND name=N'stamp'
+      expect:
         rows: 1
         data:
-        - declared_type: smalldatetime
-          max_length: 4
+        - max_length: 4
+    - connection: observer
+      sql: SELECT TOP 0 stamp AS observed FROM validated_widen_parent
+      expect:
+        rows: 0
+        column_types:
+        - name: observed
+          type: SMALLDATETIME
+          nullable: false
     - connection: observer
       sql: SELECT id,CONVERT(VARCHAR(19),stamp,120) AS stamp,value FROM validated_widen_parent ORDER BY id
-      expect: &id003
+      expect:
         rows: 2
         data:
-        - *id001
+        - id: 1
+          stamp: '2024-01-02 03:04:00'
+          value: 10
         - id: 2
           stamp: '2024-02-03 04:05:00'
           value: 20
     - connection: owner
       sql: ROLLBACK TRAN before_widen
     - connection: owner
-      sql: SELECT TYPE_NAME(system_type_id) AS declared_type,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent')
-        AND name=N'stamp'
-      expect: *id002
+      sql: SELECT max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent') AND name=N'stamp'
+      expect:
+        rows: 1
+        data:
+        - max_length: 4
+    - connection: owner
+      sql: SELECT TOP 0 stamp AS observed FROM validated_widen_parent
+      expect:
+        rows: 0
+        column_types:
+        - name: observed
+          type: SMALLDATETIME
+          nullable: false
     - connection: owner
       sql: SELECT id,CONVERT(VARCHAR(19),stamp,120) AS stamp,value FROM validated_widen_parent ORDER BY id
-      expect: *id003
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          stamp: '2024-01-02 03:04:00'
+          value: 10
+        - id: 2
+          stamp: '2024-02-03 04:05:00'
+          value: 20
     - connection: owner
       sql: SELECT value,@@TRANCOUNT AS depth FROM validated_widen_marker WHERE id=1
       expect:
@@ -153,7 +184,7 @@ test_cases:
       sql: UPDATE validated_widen_parent SET recorded='2024-01-02T03:04:05.007' WHERE id=1
     - connection: owner
       sql: SELECT id,CONVERT(VARCHAR(30),recorded,121) AS stamp,value FROM validated_widen_parent ORDER BY id
-      expect: &id005
+      expect:
         rows: 2
         data:
         - id: 1
@@ -163,21 +194,57 @@ test_cases:
           stamp: '2024-02-03 04:05:00.000'
           value: 20
     - connection: observer
-      sql: SELECT TYPE_NAME(system_type_id) AS declared_type,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent')
-        AND name=N'stamp'
-      expect: *id002
+      sql: SELECT max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent') AND name=N'stamp'
+      expect:
+        rows: 1
+        data:
+        - max_length: 4
+    - connection: observer
+      sql: SELECT TOP 0 stamp AS observed FROM validated_widen_parent
+      expect:
+        rows: 0
+        column_types:
+        - name: observed
+          type: SMALLDATETIME
+          nullable: false
     - connection: observer
       sql: SELECT id,CONVERT(VARCHAR(19),stamp,120) AS stamp,value FROM validated_widen_parent ORDER BY id
-      expect: *id003
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          stamp: '2024-01-02 03:04:00'
+          value: 10
+        - id: 2
+          stamp: '2024-02-03 04:05:00'
+          value: 20
     - connection: owner
       sql: COMMIT TRAN
     - connection: observer
-      sql: SELECT TYPE_NAME(system_type_id) AS declared_type,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent')
-        AND name=N'recorded'
-      expect: *id004
+      sql: SELECT max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent') AND name=N'recorded'
+      expect:
+        rows: 1
+        data:
+        - max_length: 8
+    - connection: observer
+      sql: SELECT TOP 0 recorded AS observed FROM validated_widen_parent
+      expect:
+        rows: 0
+        column_types:
+        - name: observed
+          type: DATETIME
+          nullable: false
     - connection: observer
       sql: SELECT id,CONVERT(VARCHAR(30),recorded,121) AS stamp,value FROM validated_widen_parent ORDER BY id
-      expect: *id005
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          stamp: '2024-01-02 03:04:05.007'
+          value: 10
+        - id: 2
+          stamp: '2024-02-03 04:05:00.000'
+          value: 20
     - connection: owner
       sql: INSERT validated_widen_counter(value) VALUES(2); SELECT id,value FROM validated_widen_counter ORDER BY
         value
@@ -201,7 +268,15 @@ test_cases:
   action: restart
 - name: Recovery preserves descriptor type and fractional parent values
   sql: SELECT id,CONVERT(VARCHAR(30),recorded,121) AS stamp,value FROM validated_widen_parent ORDER BY id
-  expect: *id005
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      stamp: '2024-01-02 03:04:05.007'
+      value: 10
+    - id: 2
+      stamp: '2024-02-03 04:05:00.000'
+      value: 20
 - name: Recovery preserves matching child values and reconstructed foreign columns
   sql: SELECT id,CONVERT(VARCHAR(30),recorded,121) AS stamp,part,value FROM validated_widen_child ORDER BY id
   expect:
@@ -216,9 +291,20 @@ test_cases:
       part: 1
       value: 200
 - name: Recovery retains native type and width instead of the predecessor alias
-  sql: SELECT TYPE_NAME(system_type_id) AS declared_type,max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent')
-    AND name=N'recorded'
-  expect: *id004
+  tds:
+    statements:
+    - sql: SELECT max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'validated_widen_parent') AND name=N'recorded'
+      expect:
+        rows: 1
+        data:
+        - max_length: 8
+    - sql: SELECT TOP 0 recorded AS observed FROM validated_widen_parent
+      expect:
+        rows: 0
+        column_types:
+        - name: observed
+          type: DATETIME
+          nullable: false
 - name: Recovery retains the composed allocator epoch and subsequent reservations
   sql: INSERT validated_widen_counter(value) VALUES(3); SELECT id,value FROM validated_widen_counter ORDER BY value
   expect:
@@ -236,7 +322,15 @@ test_cases:
     error: true
 - name: Failed duplicate insertion retains every acknowledged value
   sql: SELECT id,CONVERT(VARCHAR(30),recorded,121) AS stamp,value FROM validated_widen_parent ORDER BY id
-  expect: *id005
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      stamp: '2024-01-02 03:04:05.007'
+      value: 10
+    - id: 2
+      stamp: '2024-02-03 04:05:00.000'
+      value: 20
 - name: A native value-changing declaration fails before effects and preserves the caller transaction
   scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(tx_begin_acid owner) (define tx (owner\
     \ \"__memcp_tx\"))\n\t(define marker (table \"memcp-tests\" false \"validated_widen_marker\" false tx))\n\t(insert\
