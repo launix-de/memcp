@@ -515,6 +515,11 @@ test_cases:
     - 1
 - name: Direct identity copies preserve negative IDs generated after a source reseed
   noncritical: true
+  setup:
+  - sql: DROP TABLE IF EXISTS identity_into_reseed_source
+  - sql: CREATE TABLE identity_into_reseed_source(id INT IDENTITY(7,1) NOT NULL,value INT)
+  cleanup:
+  - sql: DROP TABLE identity_into_reseed_source
   scm: |-
     (begin
      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
@@ -525,10 +530,9 @@ test_cases:
       (out "row"))))
      (run "BEGIN TRAN")
      (define outcome (try (lambda () (begin
-      (run "CREATE TABLE #identity_low_source(id INT IDENTITY(7,1) NOT NULL,value INT)")
-      (run "DBCC CHECKIDENT (N'#identity_low_source',RESEED,-5)")
-      (run "INSERT #identity_low_source(value) VALUES(10),(20)")
-      (run "SELECT id,value INTO #identity_low_copy FROM #identity_low_source")
+      (run "DBCC CHECKIDENT (N'identity_into_reseed_source',RESEED,-5)")
+      (run "INSERT identity_into_reseed_source(value) VALUES(10),(20)")
+      (run "SELECT id,value INTO #identity_low_copy FROM identity_into_reseed_source")
       (define tx (s "__memcp_tx"))
       (define binding (tsql_resolve_relation "memcp-tests" "#identity_low_copy" s tx))
       (define target (tsql_native_relation_handle (car binding) (cadr binding) tx))
@@ -553,6 +557,7 @@ test_cases:
     - '7'
     - 1
 cleanup:
+- sql: DROP TABLE IF EXISTS identity_into_reseed_source
 - sql: DROP VIEW IF EXISTS identity_into_nullable_view
 - sql: DROP TABLE IF EXISTS identity_into_nullable_source
 - sql: DROP TABLE IF EXISTS identity_into_guard

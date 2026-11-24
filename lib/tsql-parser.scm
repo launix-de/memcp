@@ -2879,7 +2879,7 @@ copy bound and retains its existing value semantics. Never pre-scan the source. 
 (define tsql_validate_explicit_identity (lambda (value copy_minimum)
 	(if (nil? value) (error "IDENTITY cannot be assigned NULL")
 		(if copy_minimum (< value copy_minimum) false)
-		(error "SELECT INTO copied identity values below the inherited seed are not supported") true)))
+		(tsql_raise_error 50000 "SELECT INTO copied identity values below the inherited seed are not supported" 1) true)))
 /* Only compile-time declarations choose identity policy and value bounds.
 The statement binds one native handle before either its source or allocator;
 parallel SELECT sinks borrow it without session-setting probes per row. */
