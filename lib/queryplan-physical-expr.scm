@@ -7391,7 +7391,10 @@ cost. Building additional state (snapshot contributions) waits for a later call.
 		(if (union_block? input)
 			(qassoc_get (union_facts input) (quote alias) "__union")
 			(if (query_block? input)
-				(source_alias (car (qb_sources input)))
+				/* A FROM-less producer owns one implicit row, but no source
+				alias. Its bound expressions keep the ordinary nil default. */
+				(if (empty_list? (qb_sources input)) nil
+					(source_alias (car (qb_sources input))))
 				(source_alias input))))))
 
 (define group_stage_input_name (lambda (stage)

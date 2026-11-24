@@ -690,6 +690,35 @@ test_cases:
       preserved_rows: 4
       matching_rows: 4
       matched_total: 5001
+- name: A FROM-less nested presence projection keeps its implicit row without inventing
+    a source alias
+  sql: |-
+    SELECT p.id, COALESCE((SELECT EXISTS(
+      SELECT TRUE FROM aum_assignments a WHERE a.actor_id=999 LIMIT 1
+    )),FALSE) AS global_can_view FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      global_can_view: false
+    - id: 2
+      global_can_view: false
+    - id: 3
+      global_can_view: false
+    - id: 4
+      global_can_view: false
+    - id: 5
+      global_can_view: false
+    - id: 6
+      global_can_view: false
+    - id: 7
+      global_can_view: false
+    - id: 8
+      global_can_view: false
+    - id: 9
+      global_can_view: false
+    - id: 10
+      global_can_view: false
 cleanup:
 - sql: DROP TABLE aum_bridge
 - sql: DROP TABLE aum_assignments
