@@ -4034,6 +4034,9 @@ reads and retained ancestor provenance must certify that empty D contract. */
 	(and (or (nil? pending_info)
 		(and (empty_list? (btw2025_info_accessing pending_info))
 			(empty_list? (btw2025_info_accessing_after_simple pending_info))))
+		/* Candidate stages publish empty D, so session and iteration values
+		must use ordinary decorrelation and its existing explicit domain keys. */
+		(empty_list? (query_expr_session_reads inner))
 		(empty_list? (logical_relation_free_column_refs inner)))))
 
 (define in_union_candidate_supported? (lambda (inner outer_sources pending_info)

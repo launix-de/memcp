@@ -554,6 +554,86 @@ test_cases:
       (empty_list? (logical_relation_free_column_refs input)))
   expect:
     result: true
+- name: Session-only UNION membership observes actor 7 without any caller column
+  session_id: aum_global_actor_session
+  setup:
+  - sql: SET @aum_global_actor=7
+  sql: |-
+    SELECT r.id, r.id IN (
+      SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=@aum_global_actor
+      UNION
+      SELECT a.reference_id FROM aum_assignments a
+      WHERE a.actor_id=@aum_global_actor AND a.allowed=TRUE
+    ) AS matches FROM aum_references r ORDER BY r.id
+  expect:
+    rows: 4
+    data:
+    - id: 1000
+      matches: true
+    - id: 1001
+      matches: true
+    - id: 2000
+      matches: null
+    - id: 3000
+      matches: true
+- name: Session-only UNION membership observes actor 8 without any caller column
+  session_id: aum_global_actor_session
+  setup:
+  - sql: SET @aum_global_actor=8
+  sql: |-
+    SELECT r.id, r.id IN (
+      SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=@aum_global_actor
+      UNION
+      SELECT a.reference_id FROM aum_assignments a
+      WHERE a.actor_id=@aum_global_actor AND a.allowed=TRUE
+    ) AS matches FROM aum_references r ORDER BY r.id
+  expect:
+    rows: 4
+    data:
+    - id: 1000
+      matches: false
+    - id: 1001
+      matches: false
+    - id: 2000
+      matches: true
+    - id: 3000
+      matches: false
+- name: Session-only UNION membership observes actor NULL without any caller column
+  session_id: aum_global_actor_session
+  setup:
+  - sql: SET @aum_global_actor=NULL
+  sql: |-
+    SELECT r.id, r.id IN (
+      SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=@aum_global_actor
+      UNION
+      SELECT a.reference_id FROM aum_assignments a
+      WHERE a.actor_id=@aum_global_actor AND a.allowed=TRUE
+    ) AS matches FROM aum_references r ORDER BY r.id
+  expect:
+    rows: 4
+    data:
+    - id: 1000
+      matches: false
+    - id: 1001
+      matches: false
+    - id: 2000
+      matches: false
+    - id: 3000
+      matches: false
+- name: A session-only producer cannot certify an empty candidate domain
+  scm: |-
+    (in_union_candidate_scope_closed?
+      (make_query_block "unused" '() (list "value" (list 'session "actor"))
+        true '() nil '() nil nil '() '() '()) nil)
+  expect:
+    result: false
+- name: The transaction capability is not a semantic session coordinate
+  scm: |-
+    (in_union_candidate_scope_closed?
+      (make_query_block "unused" '() (list "value" (list 'session "__memcp_tx"))
+        true '() nil '() nil nil '() '() '()) nil)
+  expect:
+    result: true
 cleanup:
 - sql: DROP TABLE aum_bridge
 - sql: DROP TABLE aum_assignments
