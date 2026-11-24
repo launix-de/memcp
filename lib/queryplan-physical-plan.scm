@@ -13228,9 +13228,18 @@ no row bag, new storage capability or source ordering is introduced. */
 				(define default_alias (source_alias (car sources)))
 				(define planning (qassoc_get facts 'mutation_planning_session (planner_context_session facts)))
 				(define driver (if (nil? (car profile)) nil (join_optimizer_source_by_alias sources (car profile))))
+				/* A mandatory T/D equality can remain in WHERE instead of the tree.
+				Consume only strict local conjuncts for this proof; nullable S predicates
+				and OR remain outside it. The execution WHERE is preserved below. */
+				(define driver_condition (if (nil? driver) true
+					(lookup_probe_condition_from_sources sources default_alias (list target) driver
+						(combine_where (nth profile 2) (combine_where_terms
+							(filter (split_and_terms (car (physical_partition_condition default_alias driver
+								(filter sources (lambda (source) (not (contains? (list alias (source_alias driver)) (source_alias source)))))
+								(qb_where block)))) (lambda (term) (not (nil? (equality_term_operands term))))) true)))))
 				(if (and driver (or (source_outer? driver)
 					(not (source_is_unique_lookup_from_sources? sources default_alias (list target) driver '()
-						(nth profile 2) planning true (qassoc_get facts 'comparison-contracts '()))))) nil
+						driver_condition planning true (qassoc_get facts 'comparison-contracts '()))))) nil
 					(begin
 						(define condition (dml_preserve_driver_membership_probe (source_schema target)
 							(combine_where (coalesceNil (qb_where block) true)
