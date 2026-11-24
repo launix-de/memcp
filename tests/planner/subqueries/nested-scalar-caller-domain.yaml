@@ -330,3 +330,28 @@ test_cases:
         (reduce child_reads (lambda (valid ref) (and valid (expression_equal? ref coordinate))) true)))
   expect:
     result: true
+- name: Ordinary caller binding preserves canonical reuse while real contribution work retains ownership
+  scm: |
+    (begin
+      (define source (list "local" "memcp-tests" "nsl_target" false true nil))
+      (define coordinate (list 'get_column "caller" false "middle_id" false))
+      (define facts (list (list 'lookup-keys (list coordinate)) (list 'retained-contract 17)))
+      (define plain (make_group_stage "ordinary-caller" source (list coordinate) (list coordinate)
+        '() nil '() '() nil nil facts))
+      (define inherited (group_stage_with_facts plain
+        (qassoc_set facts 'contribution_probe true)))
+      (define stages (list plain inherited))
+      (define ordinary (scalar_aggregate_probe_catalog stages nil nil))
+      (define owned (lambda (catalog)
+        (reduce catalog (lambda (valid stage)
+          (and valid (qassoc_get (gs_facts stage) 'contribution_probe false)
+            (equal? (qassoc_get (gs_facts stage) 'retained-contract nil) 17)
+            (expression_equal? (gs_domain stage) (list coordinate)))) true)))
+      (and (expression_equal? ordinary stages)
+        (not (qassoc_get (gs_facts (car ordinary)) 'contribution_probe false))
+        (qassoc_get (gs_facts (cadr ordinary)) 'contribution_probe false)
+        (reduce '(full delta direct fresh) (lambda (valid mode)
+          (and valid (owned (scalar_aggregate_probe_catalog stages mode nil)))) true)
+        (owned (scalar_aggregate_probe_catalog stages nil '(property-witness)))))
+  expect:
+    result: true

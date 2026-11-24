@@ -1005,6 +1005,18 @@ output coordinate or aggregate. Explicit transactions still use the producer. */
 			(list (quote lambda) '() coordinates) (physical_query_tx_symbol) sources producer))))
 
 
+/* Contribution producers deliberately own their transition's scalar work.
+Caller binding alone does not have that lifecycle: ordinary probes retain the
+existing costed dependency choices and query-scope memoization. Inherited
+contribution ownership remains intact when a nested caller is ordinary. */
+(define scalar_aggregate_probe_catalog (lambda (stages contribution_mode property_cover)
+	(map stages (lambda (candidate)
+		(if (and (group_stage? candidate)
+			(or (not (nil? contribution_mode)) (not (nil? property_cover))))
+			(group_stage_with_facts candidate
+				(qassoc_set (gs_facts candidate) 'contribution_probe true))
+			candidate)))))
+
 /* Aggregate probes have the same explicit invocation-domain boundary as
 scalar-first probes. Bind caller values before lowering residual predicates or
 preparing nested stages; no free caller SQL column may enter an inner program. */
@@ -1041,9 +1053,8 @@ preparing nested stages; no free caller SQL column may enter an inner program. *
 				Its candidate keys restrict work; the original filter stays residual. */
 				(define property_cover (qassoc_get (gs_facts stage) (quote invariant-property-cover) nil))
 				(define property_cover (if (invariant_property_cover_selected? all_stages stage property_cover) property_cover nil))
-				(define probe_catalog (map all_stages (lambda (candidate)
-					(if (group_stage? candidate) (group_stage_with_facts candidate
-						(qassoc_set (gs_facts candidate) (quote contribution_probe) true)) candidate))))
+				(define probe_catalog
+					(scalar_aggregate_probe_catalog all_stages contribution_mode property_cover))
 				/* An invocation-only source is consumed before domain predicates are
 				built. Its exported key becomes an already bound outer coordinate,
 				not an inner SQL comparison against a possibly NULL-bearing tuple. */
