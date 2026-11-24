@@ -78,9 +78,12 @@ func (tx *TxContext) stageCatalogSource(db *database, definition *ProcedureDescr
 	if tx.State != TxActive || tx.decisionStarted {
 		panic("source declaration requires an active native transaction")
 	}
-	if tx.coordinator != nil || tx.catalogIntents.Load() != nil {
-		panic("source declarations cannot join a private or distributed catalog transaction")
+	if tx.coordinator != nil {
+		panic("source declarations cannot join a distributed catalog transaction")
 	}
+	// Private table intents join through the common declaration owner below.
+	// It attests their original transaction, database and generation before
+	// sources enter the same amendment history and durable decision.
 	if name == "" || !utf8.ValidString(name) {
 		panic("source declaration requires a nonempty UTF-8 name")
 	}

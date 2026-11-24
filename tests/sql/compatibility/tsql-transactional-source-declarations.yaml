@@ -406,3 +406,169 @@ test_cases:
         rows: 1
         data:
         - value: 42
+- name: Private table rows and dynamic source replacement publish through one original
+    transaction
+  setup:
+  - sql: DROP PROCEDURE IF EXISTS source_tds_joint
+  - sql: DROP TABLE IF EXISTS source_tds_joint_rows
+  - sql: CREATE PROCEDURE dbo.source_tds_joint AS SELECT 81 AS value
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE source_tds_parent SET id=id WHERE id=1
+    - connection: owner
+      sql: CREATE TABLE source_tds_joint_rows(id INT PRIMARY KEY)
+    - connection: owner
+      sql: INSERT source_tds_joint_rows VALUES(82)
+    - connection: owner
+      sql: EXEC sp_executesql N'ALTER PROCEDURE dbo.source_tds_joint AS SELECT 82
+        AS value'
+    - connection: owner
+      sql: EXEC dbo.source_tds_joint
+      expect:
+        rows: 1
+        data:
+        - value: 82
+    - connection: owner
+      sql: SELECT id FROM source_tds_joint_rows
+      expect:
+        rows: 1
+        data:
+        - id: 82
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - depth: 1
+    - connection: observer
+      sql: EXEC dbo.source_tds_joint
+      expect:
+        rows: 1
+        data:
+        - value: 81
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'dbo.source_tds_joint_rows',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: EXEC dbo.source_tds_joint
+      expect:
+        rows: 1
+        data:
+        - value: 82
+    - connection: observer
+      sql: SELECT id FROM source_tds_joint_rows
+      expect:
+        rows: 1
+        data:
+        - id: 82
+- name: Private table and source replacements rewind independently to the same savepoint
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE TABLE source_tds_joint_save(id INT PRIMARY KEY)
+    - connection: owner
+      sql: INSERT source_tds_joint_save VALUES(91)
+    - connection: owner
+      sql: SAVE TRANSACTION joint_boundary
+    - connection: owner
+      sql: ALTER PROCEDURE dbo.source_tds_joint AS SELECT 92 AS value
+    - connection: owner
+      sql: CREATE TABLE source_tds_joint_discard(id INT)
+    - connection: owner
+      sql: ROLLBACK TRANSACTION joint_boundary
+    - connection: owner
+      sql: EXEC dbo.source_tds_joint
+      expect:
+        rows: 1
+        data:
+        - value: 82
+    - connection: owner
+      sql: SELECT id FROM source_tds_joint_save
+      expect:
+        rows: 1
+        data:
+        - id: 91
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'dbo.source_tds_joint_discard',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null
+    - connection: owner
+      sql: ALTER PROCEDURE dbo.source_tds_joint AS SELECT 93 AS value
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: EXEC dbo.source_tds_joint
+      expect:
+        rows: 1
+        data:
+        - value: 93
+    - connection: observer
+      sql: SELECT id FROM source_tds_joint_save
+      expect:
+        rows: 1
+        data:
+        - id: 91
+- name: Whole rollback discards private rows and restores the previous source
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE TABLE source_tds_joint_abort(id INT)
+    - connection: owner
+      sql: INSERT source_tds_joint_abort VALUES(101)
+    - connection: owner
+      sql: ALTER PROCEDURE dbo.source_tds_joint AS SELECT 101 AS value
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: EXEC dbo.source_tds_joint
+      expect:
+        rows: 1
+        data:
+        - value: 93
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'dbo.source_tds_joint_abort',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null
+- name: Joint table and source decisions survive a server restart
+  action: restart
+- name: Recovered joint declarations retain committed rows and executable source
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC dbo.source_tds_joint
+      expect:
+        rows: 1
+        data:
+        - value: 93
+    - connection: owner
+      sql: SELECT id FROM source_tds_joint_rows
+      expect:
+        rows: 1
+        data:
+        - id: 82
+    - connection: owner
+      sql: SELECT id FROM source_tds_joint_save
+      expect:
+        rows: 1
+        data:
+        - id: 91
+  cleanup:
+  - sql: DROP PROCEDURE IF EXISTS source_tds_joint
+  - sql: DROP TABLE IF EXISTS source_tds_joint_rows
+  - sql: DROP TABLE IF EXISTS source_tds_joint_save
