@@ -311,7 +311,7 @@ test_cases:
                 (list) nil false (list "id")) (list 1)
               (list "id") (lambda (id) (equal? id 1))
               (list "value") (lambda (acc value) (if (nil? value) 11 22))
-              nil coalesceNil false)))
+              nil (lambda (left right) (coalesceNil left right)) false)))
         true)
     expect: {result: true}
 
