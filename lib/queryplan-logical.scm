@@ -3930,24 +3930,30 @@ without separately proving two-valued semantics. */
 			(if (not (in_union_single_column? inner))
 				(neumann_fail "untangle_query" "IN UNION subquery branches must expose exactly one column")
 				(begin
-					(define truth_mode (string? (if (>= (count args) 4) (nth args 3) false)))
+					(define where_mode (if (>= (count args) 4) (nth args 3) false))
+					(define truth_mode (string? where_mode))
+					(define negate (if (>= (count args) 3) (nth args 2) false))
 					(define pending_info (if (>= (count args) 5) (nth args 4) nil))
 					(define candidate_supported (in_union_candidate_supported? inner (nth args 0) pending_info))
 					(define canonical_supported (in_union_truth_canonical_supported? inner (nth args 0) pending_info))
-					(if (and (not (if (>= (count args) 3) (nth args 2) false))
+					(if (and (not negate)
 						(and candidate_supported (or (not truth_mode) (not canonical_supported))))
 						(make_in_union_candidate_stage_rewrite probe inner args)
 						(begin
-							/* Unsupported complex branches keep their semantic barrier.
-							Only simple membership relations become the OR cloud. */
-							(define branch_args (if (and truth_mode (not canonical_supported))
-								(list (nth args 0) (nth args 1) false true
-									(if (>= (count args) 5) (nth args 4) nil))
+							/* The UNION alternatives own one WHERE disjunction. Making
+							each branch a mandatory semijoin would require every branch
+							to match, turning that disjunction into an intersection.
+							Expose each branch's truth through its nullable helper, then
+							let the completed OR select rows. Scalar and NOT IN callers
+							retain their full three-valued membership contracts. */
+							(define branch_args (if (and (not negate) where_mode
+								(not (single_source? (union_branches inner))))
+								(list (nth args 0) (nth args 1) false "truth" pending_info)
 								args))
 							(combine_in_union_results
 								(map (union_branches inner) (lambda (branch)
 									(make_in_stage_rewrite probe branch branch_args)))
-								(if (>= (count args) 3) (nth args 2) false))))))))))
+								negate)))))))))
 
 (define in_union_single_column? (lambda (inner)
 	(reduce (union_branches inner) (lambda (ok branch)
