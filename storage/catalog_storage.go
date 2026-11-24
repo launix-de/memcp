@@ -529,8 +529,8 @@ func (db *database) loadCatalogDocument(root *catalogRoot, snapshot bool) (docum
 	if len(rows[catalogDatabases]) != 1 {
 		return nil, fmt.Errorf("catalog of %s lacks its database declaration", db.Name)
 	}
-	revision = catalogDefinitionRevision(&rows)
-	db.catalog.revision.Store(&revision)
+	acceptedRevision := catalogDefinitionRevision(&rows)
+	db.catalog.revision.Store(&acceptedRevision)
 	document = catalogDocumentFromRows(db.Name, &rows)
 	if snapshot {
 		for _, shard := range committed {

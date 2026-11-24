@@ -2405,7 +2405,30 @@ func TestCatalogWalSurvivesRestartAndDecisionCompaction(t *testing.T) {
 			publishCatalogShards(db.Name, &db.catalog.live)
 			cold.closeTransactionLog()
 		}()
-		cold.ensureLoaded()
+		func() {
+			// Metadata guards may read the published scalar while cold loading
+			// replays catalog WAL. Their snapshots must remain immutable.
+			started, stop := make(chan struct{}), make(chan struct{})
+			done := make(chan uint64, 1)
+			go func() {
+				var observed uint64
+				close(started)
+				for {
+					select {
+					case <-stop:
+						done <- observed
+						return
+					default:
+						if revision := cold.catalog.revision.Load(); revision != nil {
+							observed += uint64(len(*revision))
+						}
+					}
+				}
+			}()
+			<-started
+			defer func() { close(stop); <-done }()
+			cold.ensureLoaded()
+		}()
 		loaded := cold.GetTable(tbl.Name)
 		comment := scm.Apply(loaded.ShowColumn("payload", false), scm.NewString("Comment"))
 		if !scm.Equal(comment, scm.NewString("durable catalog WAL")) {
