@@ -1,0 +1,129 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Private CREATE and existing public column amendments share the original native decision
+setup:
+- sql: DROP TABLE IF EXISTS mixed_column_unaccepted
+- sql: DROP TABLE IF EXISTS mixed_column_rejected
+- sql: DROP TABLE IF EXISTS mixed_column_discarded
+- sql: DROP TABLE IF EXISTS mixed_column_created
+- sql: DROP TABLE IF EXISTS mixed_column_existing
+- sql: DROP TABLE IF EXISTS mixed_column_progress
+- sql: CREATE TABLE mixed_column_progress(id INT PRIMARY KEY,value INT)
+- sql: INSERT mixed_column_progress VALUES(1,0)
+- sql: CREATE TABLE mixed_column_existing(id INT PRIMARY KEY,value VARCHAR(27) NULL CONSTRAINT DF_mixed_column DEFAULT('base'))
+- sql: INSERT mixed_column_existing VALUES(1,'original')
+test_cases:
+- name: An unrelated private CREATE does not veto a public widening or replace its savepoint
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: UPDATE mixed_column_progress SET value=1 WHERE id=1}
+    - {connection: owner,sql: "CREATE TABLE mixed_column_created(id INT PRIMARY KEY,value VARCHAR(20) NOT NULL DEFAULT('new'))"}
+    - {connection: owner,sql: INSERT mixed_column_created(id) VALUES(11)}
+    - {connection: owner,sql: SAVE TRANSACTION after_create}
+    - {connection: owner,sql: ALTER TABLE mixed_column_existing ALTER COLUMN value VARCHAR(70) NULL}
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'mixed_column_existing',N'value') AS width,@@TRANCOUNT AS depth
+      expect: {rows: 1,data: [{width: 70,depth: 1}]}
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'mixed_column_existing',N'value') AS width,OBJECT_ID(N'mixed_column_created',N'U') AS private_table
+      expect: {rows: 1,data: [{width: 27,private_table: null}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION after_create}
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'mixed_column_existing',N'value') AS width,@@TRANCOUNT AS depth
+      expect: {rows: 1,data: [{width: 27,depth: 1}]}
+    - connection: owner
+      sql: SELECT id,value FROM mixed_column_created
+      expect: {rows: 1,data: [{id: 11,value: new}]}
+    - {connection: owner,sql: ALTER TABLE mixed_column_existing ALTER COLUMN value VARCHAR(70) NULL}
+    - {connection: owner,sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'mixed_column_existing',N'value') AS width
+      expect: {rows: 1,data: [{width: 70}]}
+    - connection: observer
+      sql: SELECT id,value FROM mixed_column_created
+      expect: {rows: 1,data: [{id: 11,value: new}]}
+- name: Widening preserves the existing default for later ordinary row admission
+  sql: INSERT mixed_column_existing(id) VALUES(2)
+  expect: {rows: 1,data: [{affected_rows: 1}]}
+- name: Default and layout rollback do not accept the accompanying private table or earlier data
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: UPDATE mixed_column_progress SET value=2 WHERE id=1}
+    - {connection: owner,sql: CREATE TABLE mixed_column_discarded(id INT PRIMARY KEY)}
+    - {connection: owner,sql: ALTER TABLE mixed_column_existing ALTER COLUMN value VARCHAR(90) NULL}
+    - {connection: owner,sql: ALTER TABLE mixed_column_existing DROP CONSTRAINT DF_mixed_column}
+    - {connection: owner,sql: ALTER TABLE mixed_column_existing ADD CONSTRAINT DF_mixed_rollback DEFAULT('rolled') FOR value}
+    - {connection: owner,sql: INSERT mixed_column_existing(id) VALUES(3)}
+    - connection: owner
+      sql: SELECT id,value,@@TRANCOUNT AS depth FROM mixed_column_existing ORDER BY id
+      expect: {rows: 3,data: [{id: 1,value: original,depth: 1},{id: 2,value: base,depth: 1},{id: 3,value: rolled,depth: 1}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'mixed_column_existing',N'value') AS width,OBJECT_ID(N'mixed_column_discarded',N'U') AS private_table
+      expect: {rows: 1,data: [{width: 70,private_table: null}]}
+    - connection: observer
+      sql: SELECT id,value FROM mixed_column_existing ORDER BY id
+      expect: {rows: 2,data: [{id: 1,value: original},{id: 2,value: base}]}
+    - connection: observer
+      sql: SELECT id,value FROM mixed_column_progress
+      expect: {rows: 1,data: [{id: 1,value: 1}]}
+- name: A rejected declaration still preserves the original private generation until rollback
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: CREATE TABLE mixed_column_rejected(id INT PRIMARY KEY)}
+    - connection: owner
+      sql: ALTER TABLE mixed_column_existing ALTER COLUMN value VARCHAR(1) NULL
+      expect: {error: true}
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'mixed_column_existing',N'value') AS width,@@TRANCOUNT AS depth
+      expect: {rows: 1,data: [{width: 70,depth: 1}]}
+    - connection: owner
+      sql: SELECT id FROM mixed_column_rejected
+      expect: {rows: 0}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+- name: A crash before acceptance cannot publish either the private table or the public declaration
+  steps:
+  - sql: BEGIN TRANSACTION
+    session_id: mixed_column_crash
+  - sql: UPDATE mixed_column_progress SET value=3 WHERE id=1
+    session_id: mixed_column_crash
+  - sql: CREATE TABLE mixed_column_unaccepted(id INT PRIMARY KEY)
+    session_id: mixed_column_crash
+  - sql: ALTER TABLE mixed_column_existing ALTER COLUMN value VARCHAR(120) NULL
+    session_id: mixed_column_crash
+  - sql: SELECT COL_LENGTH(N'mixed_column_existing',N'value') AS width,@@TRANCOUNT AS depth
+    session_id: mixed_column_crash
+    expect: {rows: 1,data: [{width: 120,depth: 1}]}
+  - scm: (crash)
+    expect: {interrupted_ok: true}
+- name: The accepted joint decision and original data recover together
+  action: restart
+- name: Recovery retains the committed width and excludes all unaccepted names
+  sql: SELECT COL_LENGTH(N'mixed_column_existing',N'value') AS width,OBJECT_ID(N'mixed_column_discarded',N'U') AS discarded,OBJECT_ID(N'mixed_column_rejected',N'U') AS rejected,OBJECT_ID(N'mixed_column_unaccepted',N'U') AS unaccepted
+  expect: {rows: 1,data: [{width: 70,discarded: null,rejected: null,unaccepted: null}]}
+- name: Recovery retains the committed constructor rows and default
+  sql: SELECT id,value FROM mixed_column_created ORDER BY id
+  expect: {rows: 1,data: [{id: 11,value: new}]}
+- name: Recovery excludes both rolled-back data writes
+  sql: SELECT id,value FROM mixed_column_progress
+  expect: {rows: 1,data: [{id: 1,value: 1}]}
+- name: The public default still generates the original value after recovery
+  sql: INSERT mixed_column_existing(id) VALUES(4)
+  expect: {rows: 1,data: [{affected_rows: 1}]}
+- name: Recovered public rows retain every accepted value and no rolled-back row
+  sql: SELECT id,value FROM mixed_column_existing ORDER BY id
+  expect: {rows: 3,data: [{id: 1,value: original},{id: 2,value: base},{id: 4,value: base}]}
+cleanup:
+- sql: DROP TABLE IF EXISTS mixed_column_unaccepted
+- sql: DROP TABLE IF EXISTS mixed_column_rejected
+- sql: DROP TABLE IF EXISTS mixed_column_discarded
+- sql: DROP TABLE IF EXISTS mixed_column_created
+- sql: DROP TABLE IF EXISTS mixed_column_existing
+- sql: DROP TABLE IF EXISTS mixed_column_progress

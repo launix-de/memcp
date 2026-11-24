@@ -6,9 +6,9 @@ package storage
 import "fmt"
 import "maps"
 import "sort"
+import "unsafe"
 import "context"
 import "strings"
-import "unsafe"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 
@@ -75,7 +75,7 @@ func (tx *TxContext) alterPublicStoredColumn(t *table, name, operation string, v
 			panic(failure)
 		}
 	}()
-	if tx.State != TxActive || tx.decisionStarted || tx.coordinator != nil || tx.catalogIntents.Load() != nil || activeReplication(t.schema) != nil {
+	if tx.State != TxActive || tx.decisionStarted || tx.coordinator != nil || activeReplication(t.schema) != nil {
 		panic("default declaration requires a local public catalog transaction")
 	}
 	if (!columnDefaultOperation(operation) && !columnDeclarationOperation(operation) && operation != "drop_property" && operation != "claim_property") || t.Ephemeral || t.isEphemeralQueryTable() {
@@ -87,6 +87,8 @@ func (tx *TxContext) alterPublicStoredColumn(t *table, name, operation string, v
 	if columnDeclarationOperation(operation) {
 		kind = catalogColumnKind
 	}
+	// The shared declaration owner verifies any original private CREATE
+	// generations and records them with this public amendment in one decision.
 	tx.stagePublicCatalogDeclaration(t.schema, kind, nil, func(changes *publicCatalogChanges) bool {
 		result = changes.stageStoredColumn(tx, t, name, operation, value)
 		return scm.ToBool(result)
