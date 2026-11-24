@@ -1,0 +1,448 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: DBCC identity correction uses original transaction allocator epochs and signed reservations
+setup:
+- sql: DROP TABLE IF EXISTS reseed_fresh
+- sql: DROP TABLE IF EXISTS reseed_deleted
+- sql: DROP TABLE IF EXISTS reseed_signed
+- sql: DROP TABLE IF EXISTS reseed_minimum
+- sql: DROP TABLE IF EXISTS reseed_rollback
+- sql: DROP TABLE IF EXISTS reseed_savepoint
+- sql: DROP TABLE IF EXISTS reseed_range
+- sql: DROP TABLE IF EXISTS reseed_source
+- sql: DROP TABLE IF EXISTS reseed_copy
+- sql: DROP TABLE IF EXISTS reseed_visibility
+- sql: DROP TABLE IF EXISTS reseed_committed
+- sql: DROP TABLE IF EXISTS reseed_aborted
+- sql: DROP TABLE IF EXISTS reseed_exhausted
+- sql: DROP TABLE IF EXISTS reseed_unpublished
+- sql: DROP TABLE IF EXISTS reseed_unpublished_source
+- sql: DROP TABLE IF EXISTS reseed_maintenance
+test_cases:
+- name: Fresh explicit reseed uses the new value without changing the original seed
+  sql: 'CREATE TABLE reseed_fresh(id BIGINT IDENTITY(7,1),v INT);
+
+    DBCC CHECKIDENT(N''[dbo].[reseed_fresh]'',RESEED,20) WITH NO_INFOMSGS;
+
+    SELECT IDENT_CURRENT(N''reseed_fresh'') AS before_insert;
+
+    '
+  expect:
+    rows: 1
+    data:
+    - before_insert: 20
+- name: Fresh reseeded table generates that same value and then increments
+  sql: INSERT reseed_fresh(v) VALUES(1),(2); SELECT id,v FROM reseed_fresh ORDER BY v
+  expect:
+    rows: 2
+    data:
+    - id: 20
+      v: 1
+    - id: 21
+      v: 2
+- name: A populated table resumes after an explicit reseed supplied through a batch variable
+  sql: 'DECLARE @seed BIGINT=40;
+
+    IF @seed IS NOT NULL DBCC CHECKIDENT(reseed_fresh,RESEED,@seed);
+
+    INSERT reseed_fresh(v) VALUES(3); SELECT id,v FROM reseed_fresh ORDER BY v'
+  expect:
+    rows: 3
+    data:
+    - id: 20
+      v: 1
+    - id: 21
+      v: 2
+    - id: 41
+      v: 3
+- name: NORESEED reports without changing the allocator
+  sql: 'DBCC CHECKIDENT(''dbo.reseed_fresh'',NORESEED) WITH NO_INFOMSGS;
+
+    SELECT IDENT_CURRENT(''reseed_fresh'') AS current_value'
+  expect:
+    rows: 1
+    data:
+    - current_value: 41
+- name: Explicit lower reseed does not rewrite existing rows
+  sql: 'DBCC CHECKIDENT(reseed_fresh,RESEED,5) WITH NO_INFOMSGS;
+
+    SELECT IDENT_CURRENT(''reseed_fresh'') AS current_value,MAX(id) AS maximum FROM reseed_fresh'
+  expect:
+    rows: 1
+    data:
+    - current_value: 5
+      maximum: 41
+- name: Default correction restores the maximum stored identity
+  sql: 'DBCC CHECKIDENT(reseed_fresh) WITH NO_INFOMSGS;
+
+    INSERT reseed_fresh(v) VALUES(4); SELECT id,v FROM reseed_fresh ORDER BY v'
+  expect:
+    rows: 4
+    data:
+    - id: 20
+      v: 1
+    - id: 21
+      v: 2
+    - id: 41
+      v: 3
+    - id: 42
+      v: 4
+- name: Automatic correction never lowers an allocator above all stored values
+  sql: 'DBCC CHECKIDENT(reseed_fresh,RESEED,+90) WITH NO_INFOMSGS;
+
+    DBCC CHECKIDENT(reseed_fresh,RESEED) WITH NO_INFOMSGS;
+
+    SELECT IDENT_CURRENT(''reseed_fresh'') AS current_value'
+  expect:
+    rows: 1
+    data:
+    - current_value: 90
+- name: DELETE preserves the already used identity branch
+  sql: 'CREATE TABLE reseed_deleted(id INT IDENTITY,v INT);
+
+    INSERT reseed_deleted(v) VALUES(1); DELETE reseed_deleted;
+
+    DBCC CHECKIDENT(reseed_deleted,RESEED,10) WITH NO_INFOMSGS;
+
+    INSERT reseed_deleted(v) VALUES(2); SELECT id,v FROM reseed_deleted'
+  expect:
+    rows: 1
+    data:
+    - id: 11
+      v: 2
+- name: Fresh zero and negative resets remain signed exact generated values
+  sql: 'CREATE TABLE reseed_signed(id BIGINT IDENTITY,v INT);
+
+    DBCC CHECKIDENT(reseed_signed,RESEED,-2) WITH NO_INFOMSGS;
+
+    INSERT reseed_signed(v) VALUES(1),(2),(3);
+
+    SELECT id,v FROM reseed_signed ORDER BY v'
+  expect:
+    rows: 3
+    data:
+    - id: -2
+      v: 1
+    - id: -1
+      v: 2
+    - id: 0
+      v: 3
+- name: Signed minimum is generated exactly without unsigned base arithmetic
+  sql: 'CREATE TABLE reseed_minimum(id BIGINT IDENTITY,v INT);
+
+    DBCC CHECKIDENT(reseed_minimum,RESEED,-9223372036854775808) WITH NO_INFOMSGS;
+
+    INSERT reseed_minimum(v) VALUES(1),(2); SELECT id,v FROM reseed_minimum ORDER BY v'
+  expect:
+    rows: 2
+    data:
+    - id: -9223372036854775808
+      v: 1
+    - id: -9223372036854775807
+      v: 2
+- name: Rollback restores the prior selected allocator instead of merging highwater values
+  sql: 'CREATE TABLE reseed_rollback(id INT IDENTITY,v INT);
+
+    INSERT reseed_rollback(v) VALUES(1);
+
+    BEGIN TRAN; DBCC CHECKIDENT(reseed_rollback,RESEED,80) WITH NO_INFOMSGS;
+
+    INSERT reseed_rollback(v) VALUES(2); ROLLBACK TRAN;
+
+    INSERT reseed_rollback(v) VALUES(3); SELECT id,v FROM reseed_rollback ORDER BY v'
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      v: 1
+    - id: 2
+      v: 3
+- name: Savepoint rollback selects the preceding reset branch
+  sql: 'CREATE TABLE reseed_savepoint(id INT IDENTITY,v INT);
+
+    INSERT reseed_savepoint(v) VALUES(1);
+
+    BEGIN TRAN; DBCC CHECKIDENT(reseed_savepoint,RESEED,10) WITH NO_INFOMSGS;
+
+    SAVE TRAN before_second;
+
+    DBCC CHECKIDENT(reseed_savepoint,RESEED,20) WITH NO_INFOMSGS;
+
+    ROLLBACK TRAN before_second;
+
+    INSERT reseed_savepoint(v) VALUES(2); COMMIT TRAN;
+
+    SELECT id,v FROM reseed_savepoint ORDER BY v'
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      v: 1
+    - id: 11
+      v: 2
+- name: Reserving within the surviving epoch remains consumed after row rollback
+  sql: 'CREATE TABLE reseed_range(id INT IDENTITY,v INT);
+
+    INSERT reseed_range(v) VALUES(1);
+
+    BEGIN TRAN; DBCC CHECKIDENT(reseed_range,RESEED,10) WITH NO_INFOMSGS;
+
+    SAVE TRAN before_insert; INSERT reseed_range(v) VALUES(2);
+
+    ROLLBACK TRAN before_insert; INSERT reseed_range(v) VALUES(3); COMMIT TRAN;
+
+    SELECT id,v FROM reseed_range ORDER BY v'
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      v: 1
+    - id: 12
+      v: 3
+- name: Recovery copy resumes the original identity after explicit copy and table rename
+  sql: 'CREATE TABLE reseed_source(id BIGINT IDENTITY,v INT);
+
+    INSERT reseed_source(v) VALUES(1),(2);
+
+    CREATE TABLE reseed_copy(id BIGINT IDENTITY,v INT);
+
+    BEGIN TRAN;
+
+    SET IDENTITY_INSERT reseed_copy ON;
+
+    INSERT reseed_copy(id,v) SELECT id,v FROM reseed_source;
+
+    SET IDENTITY_INSERT reseed_copy OFF;
+
+    DECLARE @idVal BIGINT;
+
+    SELECT @idVal=IDENT_CURRENT(N''[dbo].[reseed_source]'');
+
+    IF @idVal IS NOT NULL DBCC CHECKIDENT(N''[dbo].[reseed_copy]'',RESEED,@idVal);
+
+    DROP TABLE reseed_source;
+
+    EXEC sp_rename N''dbo.reseed_copy'',N''reseed_source'',N''OBJECT'';
+
+    COMMIT TRAN;
+
+    INSERT reseed_source(v) VALUES(3); SELECT id,v FROM reseed_source ORDER BY id'
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      v: 1
+    - id: 2
+      v: 2
+    - id: 3
+      v: 3
+- name: An original transaction can copy reseed and publish its own newly declared table
+  sql: 'CREATE TABLE reseed_unpublished_source(id INT IDENTITY,v INT);
+
+    INSERT reseed_unpublished_source(v) VALUES(1),(2);
+
+    BEGIN TRAN;
+
+    CREATE TABLE reseed_unpublished(id INT IDENTITY,v INT);
+
+    SET IDENTITY_INSERT reseed_unpublished ON;
+
+    INSERT reseed_unpublished(id,v) SELECT id,v FROM reseed_unpublished_source;
+
+    SET IDENTITY_INSERT reseed_unpublished OFF;
+
+    DECLARE @idVal BIGINT;
+
+    SELECT @idVal=IDENT_CURRENT(''reseed_unpublished_source'');
+
+    IF @idVal IS NOT NULL DBCC CHECKIDENT(''dbo.reseed_unpublished'',RESEED,@idVal);
+
+    DROP TABLE reseed_unpublished_source;
+
+    EXEC sp_rename N''dbo.reseed_unpublished'',N''reseed_unpublished_source'',N''OBJECT'';
+
+    COMMIT TRAN;
+
+    INSERT reseed_unpublished_source(v) VALUES(3); SELECT id,v FROM reseed_unpublished_source ORDER BY v'
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      v: 1
+    - id: 2
+      v: 2
+    - id: 3
+      v: 3
+- name: Native advancement shared with the MySQL frontend follows a negative reset
+  steps:
+  - sql: CREATE TABLE reseed_maintenance(id BIGINT IDENTITY,v INT); DBCC CHECKIDENT(reseed_maintenance,RESEED,-9) WITH NO_INFOMSGS;
+      INSERT reseed_maintenance(v) VALUES(1)
+  - scm: (eval (parse_sql "memcp-tests" "ALTER TABLE reseed_maintenance AUTO_INCREMENT=1" nil))
+  - sql: INSERT reseed_maintenance(v) VALUES(2); SELECT id,v FROM reseed_maintenance ORDER BY v
+    expect:
+      rows: 2
+      data:
+      - id: -9
+        v: 1
+      - id: 1
+        v: 2
+- name: An uncommitted reset stays private to its original TDS transaction
+  tds:
+    statements:
+    - connection: owner
+      sql: CREATE TABLE reseed_visibility(id INT IDENTITY,v INT); INSERT reseed_visibility(v) VALUES(1)
+    - connection: owner
+      sql: BEGIN TRAN; DBCC CHECKIDENT(reseed_visibility,RESEED,50) WITH NO_INFOMSGS
+    - connection: owner
+      sql: SELECT IDENT_CURRENT('reseed_visibility') AS current_value
+      expect:
+        rows: 1
+        data:
+        - current_value: 50
+    - connection: observer
+      sql: SELECT IDENT_CURRENT('reseed_visibility') AS current_value
+      expect:
+        rows: 1
+        data:
+        - current_value: 1
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: INSERT reseed_visibility(v) VALUES(2); SELECT id,v FROM reseed_visibility ORDER BY v
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          v: 1
+        - id: 51
+          v: 2
+- name: The highest signed value is generated once and later generation fails without wrapping
+  sql: 'CREATE TABLE reseed_exhausted(id BIGINT IDENTITY,v INT);
+
+    DBCC CHECKIDENT(reseed_exhausted,RESEED,9223372036854775807) WITH NO_INFOMSGS;
+
+    INSERT reseed_exhausted(v) VALUES(1);
+
+    BEGIN TRY INSERT reseed_exhausted(v) VALUES(2); END TRY
+
+    BEGIN CATCH SELECT id,v FROM reseed_exhausted; END CATCH'
+  expect:
+    rows: 1
+    data:
+    - id: 9223372036854775807
+      v: 1
+- name: Commit selects a lower signed epoch before crash while an aborted reset stays invisible
+  sql: 'CREATE TABLE reseed_committed(id BIGINT IDENTITY,v INT);
+
+    CREATE TABLE reseed_aborted(id INT IDENTITY,v INT);
+
+    INSERT reseed_committed(v) VALUES(1); INSERT reseed_aborted(v) VALUES(1);
+
+    BEGIN TRAN; DBCC CHECKIDENT(reseed_committed,RESEED,-9) WITH NO_INFOMSGS;
+
+    INSERT reseed_committed(v) VALUES(2); COMMIT TRAN;
+
+    BEGIN TRAN; DBCC CHECKIDENT(reseed_aborted,RESEED,500) WITH NO_INFOMSGS;
+
+    INSERT reseed_aborted(v) VALUES(2); ROLLBACK TRAN;
+
+    SELECT IDENT_CURRENT(''reseed_committed'') AS committed_current,IDENT_CURRENT(''reseed_aborted'') AS aborted_current'
+  expect:
+    rows: 1
+    data:
+    - committed_current: -8
+      aborted_current: 1
+- name: Crash after acknowledged original transaction decisions
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart with accepted and aborted allocator epochs
+  action: restart
+- name: Recovery preserves the selected signed branch and its next reservation
+  sql: 'INSERT reseed_committed(v) VALUES(3); INSERT reseed_aborted(v) VALUES(3);
+
+    SELECT id,v FROM reseed_committed ORDER BY v'
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      v: 1
+    - id: -8
+      v: 2
+    - id: -7
+      v: 3
+- name: Recovery cannot select the aborted high epoch
+  sql: SELECT id,v FROM reseed_aborted ORDER BY v
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      v: 1
+    - id: 2
+      v: 3
+- name: Later epoch reservations survive another crash after checkpoint lag
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart after postpublication signed reservation
+  action: restart
+- name: Older highwater cannot override a restored negative epoch
+  sql: INSERT reseed_committed(v) VALUES(4); SELECT id,v FROM reseed_committed ORDER BY v
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      v: 1
+    - id: -8
+      v: 2
+    - id: -7
+      v: 3
+    - id: -6
+      v: 4
+- name: Renamed recovery generation remains selected after crash
+  sql: INSERT reseed_source(v) VALUES(4); SELECT id,v FROM reseed_source ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      v: 1
+    - id: 2
+      v: 2
+    - id: 3
+      v: 3
+    - id: 4
+      v: 4
+- name: A reset on an originally private renamed table survives its accepted decision
+  sql: INSERT reseed_unpublished_source(v) VALUES(4); SELECT id,v FROM reseed_unpublished_source ORDER BY v
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      v: 1
+    - id: 2
+      v: 2
+    - id: 3
+      v: 3
+    - id: 4
+      v: 4
+cleanup:
+- sql: DROP TABLE IF EXISTS reseed_fresh
+- sql: DROP TABLE IF EXISTS reseed_deleted
+- sql: DROP TABLE IF EXISTS reseed_signed
+- sql: DROP TABLE IF EXISTS reseed_minimum
+- sql: DROP TABLE IF EXISTS reseed_rollback
+- sql: DROP TABLE IF EXISTS reseed_savepoint
+- sql: DROP TABLE IF EXISTS reseed_range
+- sql: DROP TABLE IF EXISTS reseed_source
+- sql: DROP TABLE IF EXISTS reseed_copy
+- sql: DROP TABLE IF EXISTS reseed_visibility
+- sql: DROP TABLE IF EXISTS reseed_committed
+- sql: DROP TABLE IF EXISTS reseed_aborted
+- sql: DROP TABLE IF EXISTS reseed_exhausted
+- sql: DROP TABLE IF EXISTS reseed_unpublished
+- sql: DROP TABLE IF EXISTS reseed_unpublished_source
+- sql: DROP TABLE IF EXISTS reseed_maintenance

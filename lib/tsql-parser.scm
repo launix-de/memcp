@@ -7261,7 +7261,25 @@ that context explicitly; stored views refuse this scalar before publication. */
 	(define tsql_save (parser '((atom "SAVE" true)
 		(or tsql_keyword_tran tsql_keyword_transaction) (define name tsql_transaction_name))
 		(lambda () (list 'tsql_save_transaction 'session 'tx (tsql_transaction_name_formula name true)))))
+	/* Share DBCC syntax between ordinary leaves and captured script leaves.
+	The latter defer evaluation until earlier declarations and assignments run. */
+	(define tsql_checkident_command (parser '(
+		(define dbcc tsql_keyword_dbcc)
+		(define checkident tsql_keyword_checkident) "("
+		(define target (or tsql_string (parser (define name (capture
+			(parser (+ tsql_identifier ".") true))) (car name))))
+		(? "," (define mode (or
+			(parser tsql_keyword_noreseed "NORESEED")
+			(parser '(tsql_keyword_reseed
+				(? "," (define seed (capture (or tsql_int tsql_variable_name
+					(parser '("+" tsql_int) true)))))) (list "RESEED" (if seed (car seed) nil))))))
+		")" (? tsql_keyword_with (define quiet tsql_keyword_no_infomsgs)))
+		(list target (if (list? mode) (car mode) (coalesceNil mode "RESEED"))
+			(if (list? mode) (cadr mode) nil) (if quiet true false))))
 	(define p (parser (or
+		(parser (define command tsql_checkident_command) (lambda ()
+			(if compile_only (tsql_command_binding 'checkident command '())
+				(list 'tsql_checkident (list 'quote command) 'session 'tx))))
 		tsql_cte_mutation
 		(parser (define query tsql_root_select) (lambda () (tsql_build_select_plan query)))
 		(parser '(tsql_keyword_explain tsql_keyword_ir (define query tsql_root_select)) (lambda () (if compile_only (tsql_compile_query_binding (tsql_finalize_sources query "query" '() '()) policy planning_session tx) (explain_queryplan_ir (tsql_expand_select_query query)))))

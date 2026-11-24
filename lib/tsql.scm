@@ -3,6 +3,7 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 
 (import "tsql-parser.scm")
 (import "tsql-transaction-options.scm")
+(import "tsql-checkident.scm")
 /* Session encoding is announced before the client serializes ANSI parameters. */
 (define tsql_session_collation (hex2bin "0904d00034"))
 (define tsql_queryplan_cache (newcachemap))

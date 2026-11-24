@@ -301,3 +301,13 @@ Their values preserve the grammar's declared spelling. */
 (define tsql_keyword_xml (tsql_keyword_parser "XML"))
 (define tsql_keyword_auto (tsql_keyword_parser "AUTO"))
 (define tsql_keyword_rowcount (tsql_keyword_parser "ROWCOUNT"))
+
+(define tsql_keyword_dbcc (tsql_keyword_parser "DBCC"))
+
+(define tsql_keyword_checkident (tsql_keyword_parser "CHECKIDENT"))
+
+(define tsql_keyword_noreseed (tsql_keyword_parser "NORESEED"))
+
+(define tsql_keyword_reseed (tsql_keyword_parser "RESEED"))
+
+(define tsql_keyword_no_infomsgs (tsql_keyword_parser "NO_INFOMSGS"))

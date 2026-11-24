@@ -1292,7 +1292,8 @@ observation through a gratuitous system.views scan. */
 					(if (or (nil? identity) (not (equal? identity (observation "table_uuid"))))
 						(error "IDENT_CURRENT allocator generation is unavailable") true)
 					(define issued (observation "issued"))
-					(define current (if (nil? issued) nil
+					(define current (if (not (nil? (observation "current"))) (observation "current")
+						(nil? issued) nil
 						(not issued) (observation "start")
 						(observation "high_allocated") (observation "high") nil))
 					(if (nil? current)
