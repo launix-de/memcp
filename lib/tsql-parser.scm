@@ -6378,7 +6378,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 							(lambda (facts entry) (qassoc_set facts (car entry) (cadr entry))) (qb_facts query)))
 					(if (or describe compile_only) (tsql_describe_dml query)
 						(tsql_build_dml_plan (source_relation target) (source_alias target) query
-							planning_session tx (tsql_arithmetic_enabled frontend_options))))))))))
+							policy planning_session tx (tsql_arithmetic_enabled frontend_options))))))))))
 
 	(define tsql_delete (parser '(
 		tsql_keyword_delete
@@ -6411,7 +6411,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(if (or describe compile_only) (tsql_describe_dml (tsql_write_query source_query target
 					(list "__prepare" (list (quote sql_type_expr) 1 "INT" nil))))
 					(tsql_build_dml_plan (source_relation target) (source_alias target)
-						(tsql_write_query source_query target nil) planning_session tx (tsql_arithmetic_enabled frontend_options)))))))))
+						(tsql_write_query source_query target nil) policy planning_session tx (tsql_arithmetic_enabled frontend_options)))))))))
 
 
 	(define tsql_truncate (parser '(
@@ -6602,10 +6602,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 	A planning factory must never survive into EXPLAIN as executable row code. */
 	(define tsql_expand_select_query (lambda (query) (begin
 		(define bound_query (tsql_finalize_sources query "query" '() '()))
-		(define expanded (tsql_bind_column_compilers (sql_expand_views bound_query policy planning_session tx) (tsql_column_compiler planning_session)))
-		(tsql_bind_computed_profile (tsql_bind_column_compilers
-			(tsql_expand_relational_scalar_calls expanded '() policy planning_session tx)
-			(tsql_column_compiler planning_session)) planning_session tx (tsql_arithmetic_enabled frontend_options)))))
+		(tsql_bind_computed_profile
+			(tsql_prepare_query_relations bound_query policy planning_session tx)
+			planning_session tx (tsql_arithmetic_enabled frontend_options)))))
 	(define tsql_build_select_plan (lambda (query) (begin
 		(define xml_mode (tsql_for_xml_mode query))
 		(define xml_alias (if xml_mode (tsql_for_xml_alias query) nil))

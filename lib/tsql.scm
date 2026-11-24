@@ -289,8 +289,19 @@ profile supplies its error boundary at the ordinary relational expression. */
 	(cons head arguments) (cons (tsql_computed_policy_formula head enabled)
 		(map arguments (lambda (child) (tsql_computed_policy_formula child enabled))))
 	_ formula)))
-(define tsql_build_dml_plan (lambda (name alias query planning_session tx enabled) (begin
-	(define query (tsql_bind_column_compilers query (tsql_column_compiler planning_session)))
+/* Dialect factories become ordinary logical relations before either SELECT
+or mutation planning. The shared planner receives the same fields, predicates
+and stages; only its final consumer differs. */
+(define tsql_prepare_query_relations (lambda (query policy planning_session tx)
+	(begin
+		(define expanded (tsql_bind_column_compilers
+			(sql_expand_views query policy planning_session tx)
+			(tsql_column_compiler planning_session)))
+		(tsql_bind_column_compilers
+			(tsql_expand_relational_scalar_calls expanded '() policy planning_session tx)
+			(tsql_column_compiler planning_session)))))
+(define tsql_build_dml_plan (lambda (name alias query policy planning_session tx enabled) (begin
+	(define query (tsql_prepare_query_relations query policy planning_session tx))
 	(define query (make_query_block (qb_schema query) (qb_sources query) (qb_fields query) (qb_where query)
 		(qb_group query) (qb_having query) (qb_order query) (qb_limit query) (qb_offset query)
 		(qb_hidden query) (qb_stages query) (qassoc_set (qb_facts query) 'dml_count_matched true)))
