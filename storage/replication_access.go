@@ -514,7 +514,7 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext,
 		owner = tx.transactionState
 		if resource.Shard == "" {
 			if lease := tx.schemaLease(databases.Get(resource.Database)); lease != nil && lease.write {
-				readProof = lease.reader
+				readProof = lease.reader.Load()
 			}
 		}
 	}

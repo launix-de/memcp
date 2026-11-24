@@ -35,6 +35,7 @@ import "unicode/utf8"
 import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage/mosi"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
 // TagTable is the custom Scmer tag for *table pointers.
@@ -3829,6 +3830,11 @@ func (t *table) appendFreeShardDurably(currentTx *TxContext, topology *tableShar
 		}
 	}()
 	if r := activeReplication(t.schema); r != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable() {
+		if r.cluster != nil && !r.cluster.tryAcquire(scanQueryContext(currentTx, r.cluster.ctx), mosiResource{Database: t.schema.Name}, mosi.M) {
+			// Existing lanes remain valid while another statement retains the
+			// declarations. A physical split may wait for a later insertion.
+			return t.topology.Load(), nil
+		}
 		// Adding a lane changes the database's shard directory. Invalidate
 		// shared schema copies before publication, without affecting ordinary
 		// INSERTs which can use an existing lane.

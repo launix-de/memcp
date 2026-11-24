@@ -1110,7 +1110,7 @@ func Init(en scm.Env) {
 			func() {
 				db.schemalock.Lock()
 				defer db.schemalock.Unlock()
-				tx.markSchemaDirty(db)
+				tx.markExternalSchemaDirty(db)
 			}()
 			return scm.NewBool(true)
 		},

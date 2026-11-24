@@ -54,12 +54,12 @@ func clusterScanSupported(tx *TxContext) bool {
 	return tx.Mode == TxCursorStability || tx.Mode == TxACID
 }
 func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext, mutation bool, origins ...*storageShard) {
-	if tx.hasSchemaWriter(shard.authorityDatabase()) {
-		return
-	}
 	// Existing local snapshots retain all native transaction modes. Only a
 	// genuinely remote task needs a supported remote visibility contract.
 	if shard.state() != COLD || !clusterScanSupported(tx) {
+		return
+	}
+	if tx.hasSchemaWriter(shard.authorityDatabase()) {
 		return
 	}
 	// A job executes its subscans here while this node has room. Native GetRead

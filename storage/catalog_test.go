@@ -781,6 +781,7 @@ func TestCatalogReplicaExportRetainsSystemFilesAcrossCheckpoint(t *testing.T) {
 		t.Fatal("catalog export did not retain both logical and physical storage owners")
 	}
 	tbl.CreateColumn(nil, "new_definition", "INT", nil, nil)
+	db.save(nil, nil) // force a physical checkpoint while the prior export lives
 	if db.catalog.live[catalogColumns].uuid == source.uuid {
 		t.Fatal("fixture did not checkpoint a new catalog generation")
 	}
@@ -1019,6 +1020,7 @@ func TestCatalogCleanupRetainsPinnedGeneration(t *testing.T) {
 	CreateDatabase("catalog-generation-other", false)
 	defer DropDatabase("catalog-generation-other", true)
 	tbl.CreateColumn(nil, "later", "INT", nil, nil)
+	db.save(nil, nil) // compact while the old topology still has its reader
 	if db.catalog.live[catalogColumns].uuid == old.uuid {
 		t.Fatal("DDL did not publish a new queryable catalog generation")
 	}
@@ -1393,6 +1395,47 @@ func TestSchemaDefinitionScopeExcludesConflictingDDL(t *testing.T) {
 	if len(tbl.Columns) != 3 {
 		t.Fatal("accepted DDL did not publish its definition")
 	}
+}
+
+func TestParkedSchemaDefinitionAllowsMosiHandoverAndRenewsAuthority(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "schema-parked-mosi", 1)
+	db := tbl.schema
+	r := replicaRecoveryFixture()
+	r.schemaShards(db, r.id, true)
+	cell := r.resourceCell(mosiResource{Database: db.Name})
+	cell.ownstate.Initialize(mosi.M)
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	tx := NewTxContext(TxACID)
+	defer tx.Rollback()
+	tx.readSchema(db)
+	if handover := cell.ownstate.TryHandover(cell.writesDrained, true); handover != nil {
+		handover.Release()
+		t.Fatal("active statement relinquished schema authority")
+	}
+	tx.endStatement()
+	handover := cell.ownstate.TryHandover(cell.writesDrained, true)
+	if handover == nil {
+		t.Fatal("parked transaction blocked physical schema handover")
+	}
+	handover.Release()
+	if db.definitionMu.TryLock() {
+		db.definitionMu.Unlock()
+		t.Fatal("parking released the transaction's local definition")
+	}
+	tx.readSchema(db)
+	if handover := cell.ownstate.TryHandover(cell.writesDrained, true); handover != nil {
+		handover.Release()
+		t.Fatal("resumed statement did not renew MOSI authority")
+	}
+	tx.endStatement()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if !db.definitionMu.TryLock() {
+		t.Fatal("commit retained the local definition")
+	}
+	db.definitionMu.Unlock()
 }
 
 func TestSchemaProjectionFollowsOriginalTransaction(t *testing.T) {
@@ -1849,6 +1892,7 @@ func TestCatalogStableNativeIdentity(t *testing.T) {
 func TestCatalogVersionTwoUpgradesMissingNativeIdentity(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "catalog-v2-native-identity", 1)
 	db := tbl.schema
+	db.save(nil, nil) // the predecessor fixture has no format-3 mutation WAL
 	var document map[string]json.RawMessage
 	if err := json.Unmarshal(db.persistence.ReadSchema(), &document); err != nil {
 		t.Fatal(err)
@@ -1874,7 +1918,7 @@ func TestCatalogVersionTwoUpgradesMissingNativeIdentity(t *testing.T) {
 	}
 	cold.save(nil, nil)
 	upgraded := readCatalogRoot(cold.persistence.ReadSchema())
-	if upgraded.Version != 3 || upgraded.Shards["tables"] == previous {
+	if upgraded.Version != catalogFormatVersion || upgraded.Shards["tables"] == previous {
 		t.Fatal("v3 root reused a base without the introduced native column")
 	}
 	restored := newDatabase()
@@ -2052,6 +2096,7 @@ func TestCatalogCheckpointPreservesNativeAuthority(t *testing.T) {
 	resource := previous.replicationResource()
 	historical := append([]byte(nil), db.persistence.ReadSchema()...)
 	tbl.CreateColumn(nil, "added", "INT", nil, nil)
+	db.save(nil, nil) // explicitly compact the accepted catalog WAL
 	current := db.catalog.live[catalogColumns]
 	if previous.uuid == current.uuid {
 		t.Fatal("checkpoint did not create a new catalog generation")
@@ -2093,6 +2138,7 @@ func (engine *catalogNamespaceBarrier) SyncNamespace() {
 func TestCatalogNamespaceDurabilityPrecedesTenantRoot(t *testing.T) {
 	tbl, engine := createDurabilityTestTable(t, "catalog-system-namespace-durability", 0)
 	db, home := tbl.schema, catalogBackendDatabase()
+	db.save(nil, nil) // the completed bases have not opened their first WAL yet
 	previous := append([]byte(nil), engine.ReadSchema()...)
 	physical := home.persistence
 	counting := &countingSchemaWritePersistence{PersistenceEngine: engine}
@@ -2132,8 +2178,9 @@ func TestCatalogNamespaceDurabilityPrecedesTenantRoot(t *testing.T) {
 		}
 	}
 	tbl.CreateColumn(nil, "after_barrier", "INT", nil, nil)
-	// SAFE catalog WAL namespace barriers precede the completed-file barrier.
-	if barrier.calls != 4 || counting.calls.Load() != 1 {
+	// First-use SAFE WALs for the table and column bases need namespace
+	// barriers, including retrying the failed table-WAL namespace admission.
+	if barrier.calls != 3 || counting.calls.Load() != 1 {
 		t.Fatalf("retry did not durably order the native namespace before its tenant root: barriers=%d roots=%d", barrier.calls, counting.calls.Load())
 	}
 	var accepted database
@@ -2335,5 +2382,106 @@ func TestCatalogScopedEditsPreserveUnrelatedDefinitions(t *testing.T) {
 	_, rows := catalogShardRecords(nil, db.catalog.live[catalogColumns], catalogRelationColumns(catalogColumns), []string{tbl.Name})
 	if len(rows) != 2 {
 		t.Fatalf("scoped add/drop left %d columns, want 2", len(rows))
+	}
+}
+
+func TestCatalogWalSurvivesRestartAndDecisionCompaction(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-wal-decision-compaction", 1)
+	db := tbl.schema
+	db.save(nil, nil)
+	base := db.catalog.live[catalogColumns].uuid
+	_, expected := catalogShardRecords(nil, tbl.ActiveShards()[0], []string{"id", "payload"}, nil)
+	tbl.AlterColumn(nil, "payload", "comment", scm.NewString("durable catalog WAL"))
+	if db.catalog.live[catalogColumns].uuid != base {
+		t.Fatal("one metadata edit recompressed its complete catalog base")
+	}
+	checkCold := func() {
+		t.Helper()
+		cold := newDatabase()
+		cold.Name, cold.persistence, cold.srState = db.Name, db.persistence, COLD
+		databases.Set(db.Name, cold)
+		defer func() {
+			databases.Set(db.Name, db)
+			publishCatalogShards(db.Name, &db.catalog.live)
+			cold.closeTransactionLog()
+		}()
+		cold.ensureLoaded()
+		loaded := cold.GetTable(tbl.Name)
+		comment := scm.Apply(loaded.ShowColumn("payload", false), scm.NewString("Comment"))
+		if !scm.Equal(comment, scm.NewString("durable catalog WAL")) {
+			t.Fatal("cold catalog lost its accepted metadata")
+		}
+		_, actual := catalogShardRecords(nil, loaded.ActiveShards()[0], []string{"id", "payload"}, nil)
+		if len(actual) != len(expected) {
+			t.Fatal("restart changed user row count")
+		}
+		for i, row := range expected {
+			if !scm.Equal(scm.NewSlice(row), scm.NewSlice(actual[i])) {
+				t.Fatal("restart changed user values")
+			}
+		}
+	}
+	checkCold()
+	if errors, complete := rebuildDatabaseAndCompact(db, true, false, false); len(errors) != 0 || !complete {
+		t.Fatalf("physical checkpoint/decision compaction failed: %v, complete=%v", errors, complete)
+	}
+	if db.catalog.live[catalogColumns].uuid == base || len(db.catalog.live[catalogColumns].deltaRows()) != 0 {
+		t.Fatal("decision-log compaction did not seal the catalog WAL first")
+	}
+	checkCold()
+}
+
+func TestCatalogCommentTouchesOnlyItsRelation(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-comment-write-scope", 0)
+	tbl.schema.save(nil, nil)
+	tx := NewTxContext(TxACID)
+	defer tx.Rollback()
+	tbl.AlterColumn(tx, "payload", "comment", scm.NewString("changed"))
+	tx.prepareSchemaCommit()
+	var relations []string
+	tx.touchedShards.Range(func(key, _ any) bool {
+		relations = append(relations, key.(*storageShard).t.Name)
+		return true
+	})
+	sort.Strings(relations)
+	if !reflect.DeepEqual(relations, []string{"columns"}) {
+		t.Fatalf("one column comment changed unrelated catalog relations: %v", relations)
+	}
+}
+
+func TestCatalogDeclarationEpochIgnoresPhysicalStateAndRowOrder(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "catalog-derived-declaration-epoch", 0)
+	rows := tbl.schema.catalogRowsLocked(nil)
+	before := catalogDefinitionRevision(&rows)
+	for relation := range rows {
+		for i, j := 0, len(rows[relation])-1; i < j; i, j = i+1, j-1 {
+			rows[relation][i], rows[relation][j] = rows[relation][j], rows[relation][i]
+		}
+	}
+	for i, field := range catalogRelations[catalogTables].columns() {
+		if field.key == "Auto_increment" {
+			rows[catalogTables][0][i] = scm.NewInt(999)
+		}
+		if field.key == "Shards" {
+			rows[catalogTables][0][i] = scm.NewSlice([]scm.Scmer{scm.NewString(uuid.NewString())})
+		}
+	}
+	if actual := catalogDefinitionRevision(&rows); actual != before {
+		t.Fatal("physical checkpoint or row ordering changed the declaration epoch")
+	}
+	for i, field := range catalogRelations[catalogColumns].columns() {
+		if field.key != "Comment" {
+			continue
+		}
+		previous := rows[catalogColumns][0][i]
+		rows[catalogColumns][0][i] = scm.NewString("new declaration")
+		if catalogDefinitionRevision(&rows) == before {
+			t.Fatal("column declaration did not change its epoch")
+		}
+		rows[catalogColumns][0][i] = previous
+	}
+	rows[catalogDatabases][0][1] = scm.NewString("frontend-owned-definition")
+	if catalogDefinitionRevision(&rows) == before {
+		t.Fatal("frontend-owned declaration did not change its epoch")
 	}
 }

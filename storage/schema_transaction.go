@@ -13,6 +13,103 @@ import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
 
+// Definition admission stops new transactions before a writer waits. Existing
+// physical maintenance may still nest a read capability while finishing its
+// checkpoint; unlike sync.RWMutex, a queued writer must not block that nesting.
+// This lock is used only at transaction/maintenance boundaries, never per row.
+type definitionMutex struct {
+	mu      sync.Mutex
+	readers int
+	writer  bool
+	changed chan struct{}
+}
+
+func (m *definitionMutex) waitLocked() <-chan struct{} {
+	if m.changed == nil {
+		m.changed = make(chan struct{})
+	}
+	return m.changed
+}
+
+func (m *definitionMutex) notifyLocked() {
+	if m.changed != nil {
+		close(m.changed)
+		m.changed = nil
+	}
+}
+
+func (m *definitionMutex) RLock() {
+	m.mu.Lock()
+	for m.writer {
+		wait := m.waitLocked()
+		m.mu.Unlock()
+		<-wait
+		m.mu.Lock()
+	}
+	m.readers++
+	m.mu.Unlock()
+}
+
+func (m *definitionMutex) TryRLock() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.writer {
+		return false
+	}
+	m.readers++
+	return true
+}
+
+func (m *definitionMutex) RUnlock() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.readers == 0 {
+		panic("definition read released without ownership")
+	}
+	m.readers--
+	if m.readers == 0 {
+		m.notifyLocked()
+	}
+}
+
+func (m *definitionMutex) TryLock() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.writer || m.readers != 0 {
+		return false
+	}
+	m.writer = true
+	return true
+}
+
+func (m *definitionMutex) LockContext(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for m.writer || m.readers != 0 {
+		wait := m.waitLocked()
+		m.mu.Unlock()
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			m.mu.Lock()
+			return ctx.Err()
+		}
+		m.mu.Lock()
+	}
+	m.writer = true
+	return nil
+}
+
+func (m *definitionMutex) Unlock() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.writer {
+		panic("definition write released without ownership")
+	}
+	m.writer = false
+	m.notifyLocked()
+}
+
 // Definition leases belong to the actual transaction, rather than a parser or
 // reusable executor. Getters still read immutable metadata without locks; one
 // lease protects the definitions used by a complete transaction.
@@ -22,7 +119,7 @@ type schemaLease struct {
 	access          WriteAccess
 	dirty           bool
 	previousPending bool
-	reader          *mosi.ReadLease
+	reader          atomic.Pointer[mosi.ReadLease]
 	readLocked      bool
 }
 
@@ -37,6 +134,7 @@ type transactionSchemas struct {
 // explicit context always retains the caller's original transaction.
 func schemaAutocommit(body func(*TxContext)) {
 	tx := NewTxContext(TxACID)
+	tx.autoCommit = true
 	defer func() {
 		if tx.State == TxActive && !tx.decisionStarted {
 			tx.Rollback()
@@ -78,6 +176,7 @@ func (tx *TxContext) readSchema(db *database) {
 	}
 	scope := &tx.schemas
 	if leases := scope.leases.Load(); leases != nil && (*leases)[db] != nil {
+		tx.refreshSchemaAuthority((*leases)[db])
 		return
 	}
 	scope.mu.Lock()
@@ -98,7 +197,13 @@ func (tx *TxContext) readSchema(db *database) {
 			panic("schema access conflicts with another schema transaction; retry transaction")
 		}
 		db.readAuthority(tx)
-		db.definitionAdmission.Lock()
+		if writer {
+			if !db.definitionAdmission.TryLock() {
+				panic("schema access conflicts with pending definition admission; retry transaction")
+			}
+		} else {
+			db.definitionAdmission.Lock()
+		}
 		if writer {
 			if !db.definitionMu.TryRLock() {
 				db.definitionAdmission.Unlock()
@@ -133,8 +238,65 @@ func (tx *TxContext) readSchema(db *database) {
 	if previous != nil {
 		maps.Copy(next, *previous)
 	}
-	next[db] = &schemaLease{db: db, reader: reader, readLocked: true}
+	lease := &schemaLease{db: db, readLocked: true}
+	lease.reader.Store(reader)
+	next[db] = lease
 	scope.leases.Store(&next)
+}
+
+// A parked transaction retains its local definition, not MOSI authority over
+// physical topology. Renew the shared authority for each executing statement
+// and for the decision. Changed incoming definitions must exclude that local
+// projection before publication; an incompatible parked transaction aborts.
+func (tx *TxContext) refreshSchemaAuthority(lease *schemaLease) {
+	if lease.write || tx.coordinator != nil || lease.reader.Load() != nil {
+		return
+	}
+	r := activeReplication(lease.db)
+	if r == nil || !validReplicaDatabase(lease.db.Name) {
+		return
+	}
+	tx.schemas.mu.Lock()
+	defer tx.schemas.mu.Unlock()
+	if lease.reader.Load() != nil {
+		return
+	}
+	for {
+		lease.db.readAuthority(tx)
+		reader, wait := r.resourceCell(mosiResource{Database: lease.db.Name}).ownstate.TryRetainRead()
+		if reader != nil {
+			lease.reader.Store(reader)
+			return
+		}
+		if wait != nil {
+			ctx := scanQueryContext(tx, context.Background())
+			select {
+			case <-wait:
+			case <-ctx.Done():
+				panic(ctx.Err())
+			}
+		}
+	}
+}
+
+func (tx *TxContext) releaseStatementSchemaAuthority() {
+	tx.schemas.mu.Lock()
+	defer tx.schemas.mu.Unlock()
+	if leases := tx.schemas.leases.Load(); leases != nil {
+		for _, lease := range *leases {
+			if !lease.write {
+				lease.reader.Swap(nil).Release()
+			}
+		}
+	}
+}
+
+func (tx *TxContext) refreshSchemaAuthorities() {
+	if leases := tx.schemas.leases.Load(); leases != nil {
+		for _, lease := range *leases {
+			tx.refreshSchemaAuthority(lease)
+		}
+	}
 }
 
 func (tx *TxContext) schemaLease(db *database) *schemaLease {
@@ -170,7 +332,7 @@ func (tx *TxContext) releaseRemoteSchemaReads() {
 			if lease.readLocked {
 				lease.db.definitionMu.RUnlock()
 			}
-			lease.reader.Release()
+			lease.reader.Swap(nil).Release()
 		}
 	}
 }
@@ -203,6 +365,7 @@ func (tx *TxContext) writeSchema(db *database) {
 	if tx.coordinator != nil {
 		panic("logical schema changes must execute on the original transaction coordinator")
 	}
+	tx.readSchema(db)
 	scope := &tx.schemas
 	scope.mu.Lock()
 	defer scope.mu.Unlock()
@@ -214,9 +377,24 @@ func (tx *TxContext) writeSchema(db *database) {
 	if lease != nil && lease.write {
 		return
 	}
+	waitable := tx.autoCommit && (previous == nil || len(*previous) <= 1) && tx.shards.Load() == nil && tx.readViews.Load() == nil
+	if waitable && lease != nil {
+		// A fresh declaration has no earlier row effects. Relinquish its
+		// compile-time read before joining the writer queue: another queued
+		// declaration must never wait for a reader which is itself upgrading.
+		if lease.readLocked {
+			db.definitionMu.RUnlock()
+			lease.readLocked = false
+		}
+		lease.reader.Swap(nil).Release()
+	}
 	// Do not wait for another transaction while retaining row/UNIQUE rights.
 	// A conflicting reader makes this schema change retryable as a whole.
-	db.definitionAdmission.Lock()
+	if waitable {
+		db.definitionAdmission.Lock()
+	} else if !db.definitionAdmission.TryLock() {
+		panic("schema change conflicts with pending definition admission; retry transaction")
+	}
 	if lease != nil && lease.readLocked {
 		db.definitionMu.RUnlock()
 		lease.readLocked = false
@@ -227,25 +405,36 @@ func (tx *TxContext) writeSchema(db *database) {
 	}
 	// Keep a retained shared proof until admission succeeds or rollback ends.
 	// Another DDL must not validate this transaction's uncommitted CS values.
-	if !db.definitionMu.TryLock() {
+	acquired := db.definitionMu.TryLock()
+	var waitError error
+	// A fresh autocommit declaration holds no data/generation rights which
+	// another reader or maintenance operation might need before it can finish.
+	// Wait there; a mixed script or explicit transaction must instead retry.
+	if !acquired && waitable {
+		waitError = db.definitionMu.LockContext(scanQueryContext(tx, context.Background()))
+		acquired = waitError == nil
+	}
+	if !acquired {
 		if lease != nil && !lease.readLocked {
 			db.definitionMu.RLock()
 			lease.readLocked = true
 		}
 		db.definitionAdmission.Unlock()
+		if waitError != nil {
+			panic(waitError)
+		}
 		panic("schema change conflicts with another transaction; retry transaction")
 	}
 	db.definitionAdmission.Unlock()
 	next = maps.Clone(next)
 	write := &schemaLease{db: db, write: true, previousPending: db.schemaExportPending.Load()}
 	if lease != nil {
-		write.reader = lease.reader
+		write.reader.Store(lease.reader.Swap(nil))
 	}
 	next[db] = write
 	scope.leases.Store(&next)
 	write.access = db.GetWrite(tx)
-	write.reader.Release()
-	write.reader = nil
+	write.reader.Swap(nil).Release()
 	if !db.catalog.rootReady.Load() {
 		// Migrate only accepted definitions before staging any DDL. Earlier
 		// data work keeps its original transaction, snapshot and journals.
@@ -275,14 +464,19 @@ func (tx *TxContext) markSchemaDirty(db *database) {
 	db.catalog.revision.Store(&revision)
 	db.schemaExportPending.Store(true)
 	tx.schemas.mu.Unlock()
-	// Definition revisions are catalog data and join the same native decision.
-	// Only their immutable scalar projection is used by planner guards.
+}
+
+// Frontends may own declarations stored in ordinary relations, such as SQL
+// views. Their explicit publication epoch joins those row changes in this same
+// transaction. Native catalog edits derive their epoch from the actual rows.
+func (tx *TxContext) markExternalSchemaDirty(db *database) {
+	tx.markSchemaDirty(db)
 	var rows catalogRows
 	_, rows[catalogDatabases] = catalogShardRecords(tx, db.catalog.live[catalogDatabases], catalogRelationColumns(catalogDatabases), nil)
 	if len(rows[catalogDatabases]) != 1 {
 		panic("schema revision requires one admitted database declaration")
 	}
-	rows[catalogDatabases][0][1] = scm.NewString(revision)
+	rows[catalogDatabases][0][1] = scm.NewString(*db.catalog.revision.Load())
 	db.editCatalogLocked(tx, &rows, 1<<catalogDatabases, nil)
 }
 
@@ -302,11 +496,32 @@ func (tx *TxContext) schemaWriters() []*database {
 
 func (tx *TxContext) prepareSchemaCommit() {
 	tx.prepareSchemaEngineChanges()
+	tables := make(map[*database][]*table)
+	seen := make(map[*table]bool)
+	add := func(t *table) {
+		if t != nil && !t.RuntimeOnly && !seen[t] {
+			seen[t] = true
+			tables[t.schema] = append(tables[t.schema], t)
+		}
+	}
+	tx.schemas.mu.Lock()
+	for _, before := range tx.schemas.undo {
+		add(before.table)
+	}
+	tx.schemas.mu.Unlock()
+	tx.mu.Lock()
+	for shard := range tx.shardTransactions() {
+		add(shard.t)
+	}
+	tx.mu.Unlock()
 	for _, db := range tx.schemaWriters() {
+		if len(tables[db]) == 0 {
+			continue
+		}
 		func() {
 			db.schemalock.Lock()
 			defer db.schemalock.Unlock()
-			db.checkpointCatalogLocked(tx)
+			db.checkpointCatalogLocked(tx, tables[db]...)
 		}()
 	}
 }
@@ -338,7 +553,7 @@ func (tx *TxContext) releaseSchemas() {
 			} else if lease.readLocked {
 				lease.db.definitionMu.RUnlock()
 			}
-			lease.reader.Release()
+			lease.reader.Swap(nil).Release()
 		}
 	}
 	scope.undo = nil

@@ -1124,6 +1124,16 @@ func (r *replicationManager) installSchema(source, name string, engine Persisten
 			return err
 		}
 	}
+	if native && db != nil {
+		current, incoming := db.catalog.revision.Load(), replacement.catalog.revision.Load()
+		changed := current == nil || incoming == nil || *current != *incoming
+		if changed {
+			if !db.definitionMu.TryLock() {
+				return fmt.Errorf("schema change conflicts with a retained transaction definition; retry transaction")
+			}
+			defer db.definitionMu.Unlock()
+		}
+	}
 	if db == nil {
 		databases.Set(name, replacement)
 		initial = nil

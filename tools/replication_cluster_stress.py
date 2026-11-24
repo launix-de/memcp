@@ -395,10 +395,10 @@ class Client(HttpClient):
             raise DrillFailure(f"missing scalar {column}: {statement}: {rows}")
         return int(rows[0][column])
 
-    def reject(self, statement, *, contains=None, status=None, database=None):
+    def reject(self, statement, *, contains=None, status=None, database=None, session=None):
         started = time.monotonic()
         try:
-            self.sql(statement, database)
+            self.sql(statement, database, session=session)
         except DrillFailure as error:
             if contains and contains not in str(error):
                 raise
@@ -1560,7 +1560,7 @@ def run_retained_generation(master, worker, args, journal):
         server.server_close()
         gate_thread.join(timeout=5)
 
-def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None):
+def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None, selected_cases=None):
     """SQL contracts, shared by the standalone oracle and real cluster processes.
 
     Collect every case failure before failing CI. Unsupported remote semantics
@@ -1572,6 +1572,8 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
     results = []
     missing = object()
     current = None
+    selected = set(selected_cases or [])
+    seen = set()
 
     def sql(node, statement, session=None, expected=missing):
         step = {"node": node.name, "sql": statement, "session": session}
@@ -1598,6 +1600,9 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
 
     def case(name, action):
         nonlocal current
+        seen.add(name)
+        if selected and name not in selected:
+            return
         current = {"scenario": "cluster-sql-context", "phase": phase, "name": name, "steps": []}
         try:
             action()
@@ -1812,6 +1817,38 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
                     eventually(lambda: status(stopped)["state"]["connected"] >= len(nodes) - 1,
                                "former owner did not rejoin after decision", timeout=60)
 
+    def changed_parked_definition(outcome):
+        if not status:
+            return
+        host, other = writer, nodes[2]
+        session = "cluster-parked-schema-change"
+        sql(host, "START ACID TRANSACTION", session)
+        added = False
+        try:
+            sql(host, "UPDATE context_items SET n=n+5 WHERE id=0", session)
+            sql(host, "SELECT id,n FROM context_items WHERE id<2 ORDER BY id", session,
+                [{"id": 0, "n": 15}, {"id": 1, "n": 20}])
+            sql(other, "ALTER TABLE context_items ADD COLUMN batch_flag INT DEFAULT 9")
+            added = True
+            if outcome == "COMMIT":
+                # A stale definition cannot accept the original data journal.
+                # The error must be terminal, while every peer remains live.
+                host.client.reject("COMMIT", status=500, session=session)
+                current["steps"].append({"node": host.name, "sql": "COMMIT", "session": session,
+                                         "expected_error_status": 500})
+            sql(host, "ROLLBACK", session)
+            for node in (host, other):
+                sql(node, "SELECT id,n,batch_flag FROM context_items WHERE id<2 ORDER BY id", None,
+                    [{"id": 0, "n": 10, "batch_flag": 9}, {"id": 1, "n": 20, "batch_flag": 9}])
+                sql(node, f"SELECT ordinal,name FROM system_schema.columns WHERE schema_name='{DATABASE}' "
+                          "AND table_name='context_items' ORDER BY ordinal", None,
+                    [{"ordinal": 0, "name": "id"}, {"ordinal": 1, "name": "n"},
+                     {"ordinal": 2, "name": "batch_flag"}])
+        finally:
+            sql(host, "ROLLBACK", session)
+            if added:
+                sql(other, "ALTER TABLE context_items DROP COLUMN batch_flag")
+
     case("literal-capture", lambda: scalar(coordinator,
          "SELECT SUM(41 + v0) AS total FROM big_items", total + 41 * count, remote=True))
     case("named-session-plain-sum", lambda: scalar(coordinator,
@@ -1834,8 +1871,12 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
         case("acid-single-shard-commit-after-mosi-handover", lambda: migrating_overlay("COMMIT", single=True))
         case("cs-overlay-live-mosi-rollback", lambda: migrating_overlay("ROLLBACK", single=True, begin="START TRANSACTION"))
         case("cs-commit-after-empty-owner-failure", lambda: migrating_overlay("COMMIT", True, begin="START TRANSACTION"))
+        case("catalog-change-allows-explicit-rollback", lambda: changed_parked_definition("ROLLBACK"))
+        case("catalog-change-rejects-stale-data-commit", lambda: changed_parked_definition("COMMIT"))
     # Last: this intentionally commits a different oracle into context_items.
     case("acid-commit-cache-coherence", lambda: overlay("START ACID TRANSACTION", "COMMIT"))
+    if status and selected - seen:
+        raise DrillFailure("unknown cluster context cases: " + ", ".join(sorted(selected - seen)))
     return results
 
 
@@ -2208,7 +2249,8 @@ def run_cluster_placement(args, artifacts, journal):
             source.sql("INSERT INTO context_items VALUES(0,10),(1,20),(2,30),(3,40),(4,50),(5,60),(6,70),(7,80)")
             source.scm(f'(partitiontable (table "{DATABASE}" false "context_items" false) (list (list "id" (list 2 4 6))))')
             standalone_contexts = run_cluster_sql_contexts(
-                [builder], reference, journal, directory / "standalone-contexts.json")
+                [builder], reference, journal, directory / "standalone-contexts.json",
+                selected_cases=args.cluster_context_case)
             # Restore the committed control fixture through normal SQL, then
             # seal its generations before sharing the backend with other nodes.
             source.sql("DELETE FROM context_items")
@@ -2358,7 +2400,8 @@ def run_cluster_placement(args, artifacts, journal):
             return
         if args.cluster_context_only:
             contexts = run_cluster_sql_contexts(nodes, reference, journal,
-                                                directory / "cluster-contexts.json", status)
+                                                directory / "cluster-contexts.json", status,
+                                                selected_cases=args.cluster_context_case)
             failed = [f"{case['phase']}/{case['name']}" for case in standalone_contexts + contexts
                       if case["status"] != "passed"]
             if failed:
@@ -2593,6 +2636,8 @@ def main():
                         help="run one plain-replication scenario without the complete stress sequence")
     parser.add_argument("--cluster-context-only", action="store_true",
                         help="run SQL session/transaction contracts against standalone and clustered processes")
+    parser.add_argument("--cluster-context-case", action="append",
+                        help="select a named context case for a focused reproduction; CI runs all cases by default")
     parser.add_argument("--cluster-inserts-only", action="store_true", help="run focused concurrent shared-storage INSERT scenario")
     parser.add_argument("--cluster-inserts-layout", choices=("free", "hash", "both"), default="both", help="select INSERT fixture layout (default: both)")
 
@@ -2699,6 +2744,8 @@ def main():
             replay.extend(("--cluster-inserts-only", "--cluster-inserts-layout", args.cluster_inserts_layout))
         if args.cluster_context_only:
             replay.append("--cluster-context-only")
+            for name in args.cluster_context_case or []:
+                replay.extend(("--cluster-context-case", name))
         elif args.cluster_only:
             replay.append("--cluster-only")
         if args.cluster_operators_only:

@@ -161,7 +161,7 @@ func TestAddedDefaultPreservesTransactionCommitAndRollback(t *testing.T) {
 			tx.Session = scm.NewSession()
 			scm.Apply(tx.Session, scm.NewString("__memcp_tx"), scm.NewAny(tx))
 			tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("pending")}}, nil, scm.NewNil(), false, nil, tx)
-			tbl.CreateColumn(nil, "flag", "INT", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false), scm.NewString("default"), scm.NewInt(3)})
+			tbl.CreateColumn(tx, "flag", "INT", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false), scm.NewString("default"), scm.NewInt(3)})
 			want := 1
 			if commit {
 				if err := tx.Commit(); err != nil {
@@ -171,8 +171,20 @@ func TestAddedDefaultPreservesTransactionCommitAndRollback(t *testing.T) {
 			} else {
 				tx.Rollback()
 			}
-			assertInitializedColumn(t, tbl, "flag", scm.NewInt(3), want)
-			assertInitializedColumn(t, reloadTableFromPersistence(t, "taddeddefaulttx", persistence), "flag", scm.NewInt(3), want)
+			for _, current := range []*table{tbl, reloadTableFromPersistence(t, "taddeddefaulttx", persistence)} {
+				if current.Count() != uint(want) {
+					t.Fatalf("visible rows = %d, want %d", current.Count(), want)
+				}
+				if commit {
+					assertInitializedColumn(t, current, "flag", scm.NewInt(3), want)
+				} else {
+					for _, c := range current.Columns {
+						if c.Name == "flag" {
+							t.Fatal("rollback retained the added column")
+						}
+					}
+				}
+			}
 		})
 	}
 }
@@ -192,7 +204,7 @@ func TestAddedDefaultNullableAdapterPolicy(t *testing.T) {
 	}
 }
 
-func TestAddedDefaultWaitsForExistingRebuildPublication(t *testing.T) {
+func TestAddedDefaultExcludesExistingRebuildPublication(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "taddeddefaultrebuild", 50)
 	blocking := &blockingColumnWritePersistence{
 		PersistenceEngine: persistence,
@@ -208,16 +220,31 @@ func TestAddedDefaultWaitsForExistingRebuildPublication(t *testing.T) {
 		defer func() { added <- recover() }()
 		tbl.CreateColumn(nil, "flag", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(8)})
 	}()
+	retry := false
 	select {
 	case failure := <-added:
-		close(blocking.release)
-		<-rebuilt
-		t.Fatalf("ADD bypassed in-progress rebuild publication: %v", failure)
+		if failure == nil || !strings.Contains(fmt.Sprint(failure), "schema change conflicts with another transaction") {
+			close(blocking.release)
+			<-rebuilt
+			t.Fatalf("ADD bypassed in-progress rebuild publication: %v", failure)
+		}
+		retry = true
+		for _, col := range tbl.Columns {
+			if col.Name == "flag" {
+				t.Error("rejected ADD published a column during rebuild")
+			}
+		}
 	case <-time.After(20 * time.Millisecond):
 	}
 	close(blocking.release)
 	if result := <-rebuilt; strings.Contains(result, "errors:") {
 		t.Fatal(result)
+	}
+	if retry {
+		go func() {
+			defer func() { added <- recover() }()
+			tbl.CreateColumn(nil, "flag", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(8)})
+		}()
 	}
 	select {
 	case failure := <-added:

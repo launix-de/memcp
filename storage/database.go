@@ -50,9 +50,9 @@ type database struct {
 	// schemalock protects only database-local schema membership and schema.json
 	// snapshots. It must never cover long rebuild/repartition/blob work. The
 	// lock order continues with table.ddlMu -> table.mu -> shard.mu.
-	schemalock          sync.RWMutex `json:"-"`
-	definitionMu        sync.RWMutex `json:"-"`
-	definitionAdmission sync.Mutex   `json:"-"`
+	schemalock          sync.RWMutex    `json:"-"`
+	definitionMu        definitionMutex `json:"-"`
+	definitionAdmission sync.Mutex      `json:"-"`
 	// Failed publication retains every old root. An uncertain native decision
 	// requires recovery before a later checkpoint may export RAM definitions.
 	schemaExportPending    atomic.Bool `json:"-"`
@@ -1272,7 +1272,10 @@ func (db *database) GetState() SharedState { return db.srState }
 // Schema authority is independent of its Go projection. Catalog-only readers
 // retain compatible definitions without materializing every runtime table.
 func (db *database) readAuthority(tx *TxContext) {
-	if db == systemSchemaDB || tx.schemaLease(db) != nil {
+	if db == systemSchemaDB {
+		return
+	}
+	if lease := tx.schemaLease(db); lease != nil && (lease.write || lease.reader.Load() != nil) {
 		return
 	}
 	if r := activeReplication(db); r != nil && validReplicaDatabase(db.Name) {

@@ -403,6 +403,46 @@ func catalogFingerprint(relation catalogRelationID, rows [][]scm.Scmer) [32]byte
 	return result
 }
 
+// This is a derived declaration epoch, computed only while loading/exporting
+// an entire catalog. Ordinary getters read its published scalar. Physical
+// generations and advisory statistics do not change SQL definitions; row order
+// is immaterial across compaction and peer transfers.
+func catalogDefinitionRevision(rows *catalogRows) string {
+	hash := sha256.New()
+	var length [8]byte
+	for relation, records := range rows {
+		fields := catalogRelations[relation].columns()
+		var selected []catalogField
+		var positions []int
+		for i, field := range fields {
+			switch field.key {
+			case "Shards", "PShards", "PDimensions", "ShardMode", "shard_forwards", "Auto_increment",
+				"planner_row_estimate", "key_frequencies", "filter_feedback", "PartitioningScore":
+				continue
+			}
+			selected = append(selected, field)
+			positions = append(positions, i)
+		}
+		values := make([]scm.Scmer, len(positions))
+		keys := make([][sha256.Size]byte, 0, len(records))
+		var key []byte
+		for _, row := range records {
+			for i, position := range positions {
+				values[i] = row[position]
+			}
+			key = appendCatalogRowKey(key[:0], selected, values)
+			keys = append(keys, sha256.Sum256(key))
+		}
+		slices.SortFunc(keys, func(a, b [sha256.Size]byte) int { return bytes.Compare(a[:], b[:]) })
+		binary.LittleEndian.PutUint64(length[:], uint64(len(keys)))
+		hash.Write(length[:])
+		for _, key := range keys {
+			hash.Write(key[:])
+		}
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil))
+}
+
 // readCatalogRoot extracts the catalog root of a schema.json, if any.
 func readCatalogRoot(data []byte) *catalogRoot {
 	var probe struct {
@@ -489,10 +529,7 @@ func (db *database) loadCatalogDocument(root *catalogRoot, snapshot bool) (docum
 	if len(rows[catalogDatabases]) != 1 {
 		return nil, fmt.Errorf("catalog of %s lacks its database declaration", db.Name)
 	}
-	revision = scm.String(rows[catalogDatabases][0][1])
-	if rows[catalogDatabases][0][1].IsNil() {
-		revision = ""
-	}
+	revision = catalogDefinitionRevision(&rows)
 	db.catalog.revision.Store(&revision)
 	document = catalogDocumentFromRows(db.Name, &rows)
 	if snapshot {
@@ -514,7 +551,7 @@ func (db *database) loadCatalogDocument(root *catalogRoot, snapshot bool) (docum
 // generation and returns the root naming the new generation. The caller holds
 // db.catalogMu and keeps it until the root has its place in the commit queue,
 // so roots reach disk in generation order.
-func (db *database) commitCatalog(rows *catalogRows, live [catalogRelationCount]*storageShard, durable bool) (*catalogRoot, uint64) {
+func (db *database) commitCatalog(rows *catalogRows, live [catalogRelationCount]*storageShard, durable, journaled bool) (*catalogRoot, uint64) {
 	state := &db.catalog
 	state.generation++
 	root := &catalogRoot{Version: catalogFormatVersion, Shards: make(map[string]string, catalogRelationCount), Forwards: make(map[string]string)}
@@ -524,6 +561,7 @@ func (db *database) commitCatalog(rows *catalogRows, live [catalogRelationCount]
 	for from, to := range state.forwards {
 		root.Forwards[from] = to
 	}
+	createdFiles := false
 	for i := range catalogRelations {
 		relation := catalogRelationID(i)
 		var manager *replicationManager
@@ -538,8 +576,23 @@ func (db *database) commitCatalog(rows *catalogRows, live [catalogRelationCount]
 		// publication would disagree with its already-forwarded MOSI resource.
 		historical := distributed && state.committed[i] != nil && manager.canonicalResource(state.committed[i].replicationResource()) != state.committed[i].replicationResource()
 		upgrade := (relation == catalogTables || relation == catalogDatabases) && state.committed[i] != nil && state.committed[i].catalogVersion < 3
-		if state.committed[i] == nil || state.committed[i].home() != catalogBackendDatabase() || fingerprint != state.committedFP[i] || historical || upgrade {
+		// An accepted native transaction already made its catalog WAL durable.
+		// Keep that ordinary base+WAL generation instead of recompressing every
+		// column after one metadata cell changes. Amortize compaction over a
+		// quarter of the base, with a small-table floor to avoid UUID churn.
+		keepJournal := false
+		dirtyBase := len(live[i].deltaRows()) != 0 || int(live[i].main_count) != len(rows[i])
+		if journaled && live[i] == state.committed[i] && !historical && !upgrade && live[i].home() == catalogBackendDatabase() {
+			shard := live[i]
+			delta := len(shard.deltaRows())
+			dead := int(shard.main_count) + delta - len(rows[i])
+			keepJournal = delta+dead < max(64, int(shard.main_count)/4)
+		}
+		// A standalone physical checkpoint also seals outstanding WAL content
+		// before its caller may compact the tenant's transaction decision log.
+		if state.committed[i] == nil || state.committed[i].home() != catalogBackendDatabase() || !keepJournal && fingerprint != state.committedFP[i] || !journaled && dirtyBase || historical || upgrade {
 			shard := buildDiskShard(db, relation, rows[i], durable)
+			createdFiles = true
 			if previous := state.committed[i]; previous != nil {
 				if distributed {
 					root.Forwards[previous.uuid.String()] = shard.uuid.String()
@@ -558,13 +611,16 @@ func (db *database) commitCatalog(rows *catalogRows, live [catalogRelationCount]
 			state.committed[i] = shard
 			state.committedFP[i] = fingerprint
 		}
+		if keepJournal {
+			state.committedFP[i] = fingerprint
+		}
 		root.Shards[catalogRelations[i].name] = state.committed[i].uuid.String()
 		if previous := live[i]; distributed && previous.uuid != state.committed[i].uuid {
 			root.Forwards[previous.uuid.String()] = state.committed[i].uuid.String()
 		}
 	}
 	state.forwards = root.Forwards
-	if durable {
+	if durable && createdFiles {
 		// These files belong to the system backend; syncing the tenant's
 		// schema.json directory cannot make their new entries durable.
 		catalogBackendDatabase().persistence.SyncNamespace()
@@ -741,6 +797,12 @@ func (db *database) editCatalogLocked(tx *TxContext, rows *catalogRows, relation
 		if len(inserts) > 0 {
 			shard.insertValues(columns, inserts, false, nil, nil, false, tx, nil, true)
 			relationChanged = true
+		}
+		// This batch invokes native update functions directly, without a scan
+		// reducer's Close. Deletion-only edits must join the same WAL barrier
+		// as inserts before the original transaction can accept its decision.
+		if relationChanged {
+			tx.RegisterTouchedShard(shard)
 		}
 		if !owned {
 			// A staged edit cannot publish a committed-definition fingerprint.
@@ -953,9 +1015,20 @@ func (db *database) editCatalogProcedureLocked(tx *TxContext, name string, propo
 // checkpointCatalogLocked updates only physical generations, advisory statistics
 // and the ID allocator. User declarations always come from the catalog tables.
 func (db *database) checkpointCatalogLocked(tx *TxContext, tables ...*table) {
+	var owners []string
+	if len(tables) != 0 {
+		for _, t := range tables {
+			if t != nil && t.schema == db && !t.RuntimeOnly {
+				owners = append(owners, t.Name)
+			}
+		}
+		if len(owners) == 0 {
+			return
+		}
+	}
 	var rows catalogRows
 	if shard := db.catalog.live[catalogTables]; shard != nil {
-		_, rows[catalogTables] = catalogShardRecords(tx, shard, catalogRelationColumns(catalogTables), nil)
+		_, rows[catalogTables] = catalogShardRecords(tx, shard, catalogRelationColumns(catalogTables), owners)
 	}
 	for _, row := range rows[catalogTables] {
 		t := db.tables.Get(catalogTableName(row))
@@ -1001,7 +1074,7 @@ func (db *database) checkpointCatalogLocked(tx *TxContext, tables ...*table) {
 			row[i] = catalogCell(field.kind, marshalCatalogValue(value))
 		}
 	}
-	db.editCatalogLocked(tx, &rows, 1<<catalogTables, nil)
+	db.editCatalogLocked(tx, &rows, 1<<catalogTables, owners)
 }
 
 // materializeCatalogTableLocked publishes a local runtime projection of the
@@ -1141,6 +1214,10 @@ func (db *database) commitSchemaLocked(tx *TxContext, durable bool, release func
 		readTx = nil // export accepted rows; the original decision is complete
 	}
 	rows := db.catalogRowsLocked(readTx)
+	if tx == nil || tx.State == TxCommitted {
+		revision := catalogDefinitionRevision(&rows)
+		db.catalog.revision.Store(&revision)
+	}
 	version := db.catalog.liveVersion.Load()
 	live := db.catalog.live
 	jsonbytes := catalogDocumentFromRows(db.Name, &rows)
@@ -1167,14 +1244,16 @@ func (db *database) commitSchemaLocked(tx *TxContext, durable bool, release func
 		// uncertain tenant decision barrier. Its data and catalog WALs already
 		// share this authority; make that authority durable before replacing
 		// their replayable catalog generation with an unconditional snapshot.
-		func() {
-			db.transactionMu.RLock()
-			defer db.transactionMu.RUnlock()
-			if db.transactionLog != nil {
-				db.transactionLog.Flush(durable)
-			}
-		}()
-		root, generation = db.commitCatalog(&rows, live, durable)
+		if tx == nil || tx.State != TxCommitted {
+			func() {
+				db.transactionMu.RLock()
+				defer db.transactionMu.RUnlock()
+				if db.transactionLog != nil {
+					db.transactionLog.Flush(durable)
+				}
+			}()
+		}
+		root, generation = db.commitCatalog(&rows, live, durable, tx != nil && tx.State == TxCommitted)
 		committed = db.catalog.committed
 		jsonbytes = attachCatalogRoot(jsonbytes, root)
 	}()

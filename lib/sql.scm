@@ -622,7 +622,9 @@ user table merely to discard a newly constructed policy closure. */
 
 (define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session parameterize_literals tx)
 	(begin
-		(schema_read tx schema)
+		/* Relation policy, cached declaration guards and native accesses own
+		definition reads. Transaction recovery itself must not acquire a catalog:
+		ROLLBACK still works after a peer published incompatible declarations. */
 		(define explain_query (match (toUpper query)
 			(regex "^\\s*EXPLAIN\\b" _) true
 			_ false))

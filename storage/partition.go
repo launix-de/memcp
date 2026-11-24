@@ -913,6 +913,15 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 }
 
 func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maintenanceLease *RAMLease) {
+	definitionHeld := !t.isEphemeralQueryTable()
+	if definitionHeld {
+		t.schema.definitionMu.RLock()
+	}
+	defer func() {
+		if definitionHeld {
+			t.schema.definitionMu.RUnlock()
+		}
+	}()
 	// Safety-net: if somehow called directly without the flag being set.
 	if t.maintenanceKind == 2 && t.PShards != nil {
 		return
@@ -1542,6 +1551,9 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 	}
 
 	finishRetirement := func() {
+		if !t.isEphemeralQueryTable() {
+			defer t.schema.definitionMu.RUnlock()
+		}
 		// Every scan, insert, and transaction that selected the old immutable
 		// topology has now left it. No writer was stalled by that drain: old
 		// mutation pipelines kept forwarding into the published generation.
@@ -1597,6 +1609,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 		}
 	}
 
+	definitionHeld = false // retirement owns the capability through physical cleanup
 	select {
 	case <-oldTopology.drained:
 		finishRetirement()

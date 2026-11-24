@@ -472,6 +472,7 @@ func (tx *TxContext) endStatement() {
 	for c, t := range columns {
 		t.releaseColumnCacheUse(c)
 	}
+	tx.releaseStatementSchemaAuthority()
 	if failure != nil {
 		panic(failure)
 	}
@@ -1046,6 +1047,7 @@ func (tx *TxContext) commitLocked() (err error) {
 			}
 		}()
 		if !tx.decisionStarted {
+			tx.refreshSchemaAuthorities()
 			tx.prepareSchemaCommit()
 		}
 		prepared = true

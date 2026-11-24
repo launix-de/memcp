@@ -33,7 +33,7 @@ const systemSchemaName = "system_schema"
 
 // catalogFormatVersion is stored in the schema.json root. A reader accepts
 // every version up to its own; newer catalogs fall back to the legacy part.
-const catalogFormatVersion = 3
+const catalogFormatVersion = 4
 
 type catalogKind uint8
 
@@ -90,19 +90,18 @@ type catalogRelation struct {
 	name     string
 	identity []catalogField
 	fields   []catalogField
+	layout   []catalogField // immutable fixed definition, shared by every row
 }
 
 func (r *catalogRelation) columns() []catalogField {
-	result := []catalogField{{column: "schema_name", kind: catalogText}}
-	result = append(result, r.identity...)
-	return append(result, r.fields...)
+	return r.layout
 }
 
 var catalogRelations = func() [catalogRelationCount]catalogRelation {
 	text := func(name string) catalogField { return catalogField{column: name, kind: catalogText} }
 	ordinal := func(name string) catalogField { return catalogField{column: name, kind: catalogInt} }
 	owner := []catalogField{text("table_name"), ordinal("ordinal")}
-	return [catalogRelationCount]catalogRelation{
+	relations := [catalogRelationCount]catalogRelation{
 		catalogDatabases: {name: "databases", fields: []catalogField{{key: "revision", column: "revision", kind: catalogText, omitEmpty: true}}},
 		catalogTables: {name: "tables", fields: catalogRecordFields(reflect.TypeOf(persistedTable{}),
 			map[string]catalogKind{"Shards": catalogList, "PShards": catalogList},
@@ -117,6 +116,14 @@ var catalogRelations = func() [catalogRelationCount]catalogRelation {
 		catalogTriggers:   {name: "triggers", identity: owner, fields: catalogRecordFields(reflect.TypeOf(TriggerDescription{}), nil)},
 		catalogProcedures: {name: "procedures", identity: []catalogField{ordinal("ordinal")}, fields: catalogRecordFields(reflect.TypeOf(ProcedureDescription{}), nil)},
 	}
+	for i := range relations {
+		relation := &relations[i]
+		relation.layout = make([]catalogField, 0, 1+len(relation.identity)+len(relation.fields))
+		relation.layout = append(relation.layout, catalogField{column: "schema_name", kind: catalogText})
+		relation.layout = append(relation.layout, relation.identity...)
+		relation.layout = append(relation.layout, relation.fields...)
+	}
+	return relations
 }()
 
 // catalogRecordFields lists the JSON keys encoding/json writes for record,

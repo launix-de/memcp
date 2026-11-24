@@ -401,7 +401,10 @@ func (capture *liveShardTransfer) write(writer io.Writer) error {
 		for _, column := range shard.t.columnDeclarations() {
 			if !isRuntimeComputedColumn(column) && column.OrcMapReduceFn.IsNil() {
 				header.Columns = append(header.Columns, column.Name)
-				if shard.t.PersistencyMode == Safe || shard.t.PersistencyMode == Logged {
+				// Catalog columns live on the system backend, which need not be
+				// shared by cluster peers. Their transfer must carry the bytes even
+				// when the source has a completed SAFE column file.
+				if shard.catalogOwner == "" && (shard.t.PersistencyMode == Safe || shard.t.PersistencyMode == Logged) {
 					reader := shard.home().persistence.ReadColumn(shard.uuid.String(), column.Name)
 					missing, known := reader.(interface{ Missing() bool })
 					header.ColumnReferences[column.Name] = !known || !missing.Missing()
