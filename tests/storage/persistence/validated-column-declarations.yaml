@@ -192,6 +192,8 @@ test_cases:
   scm: '(crash)
 
 
+
+
     '
   expect:
     interrupted_ok: true
@@ -248,38 +250,62 @@ test_cases:
     \ tx marker '() '() '() (lambda () true) '(\"value\") (lambda (sum value) (+ sum value)) 0 +))\n\t(define foreign_sum\
     \ (scan nil marker '() '() '() (lambda () true) '(\"value\") (lambda (sum value) (+ sum value)) 0 +))\n\t(define\
     \ active (equal? (tx_state tx) \"active\"))\n\t(tx_rollback owner)\n\t(and rejected active (equal? (current \"\
-    RawType\") \"INT\") (equal? local_sum 130) (equal? foreign_sum 7)))\n\n"
+    RawType\") \"INT\") (equal? local_sum 130) (equal? foreign_sum 7)))\n\n\n\n"
   expect:
     result: true
-- name: A native ordered header barrier rejects a later independent default before effects
+- name: A default mutation preserves ordered declaration atomicity across admission profiles
   scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(tx_begin_acid owner) (define tx (owner\
     \ \"__memcp_tx\"))\n\t(define target (table \"memcp-tests\" false \"validated_widen_constants\" false tx))\n\t\
-    (define previous (show target \"column\" \"value\" true tx))\n\t(define collation (coalesceNil (previous \"Collation\"\
-    ) \"\"))\n\t(define before (list (previous \"RawType\") (coalesceNil (previous \"Dimensions\") '()) (previous\
-    \ \"Null\") collation))\n\t(altercolumn target \"value\" \"validated_declaration\" (list (list \"DATETIME\" '()\
-    \ false collation) before) tx)\n\t(define other (table \"memcp-tests\" false \"validated_widen_loss\" false tx))\n\
-    \t(define other_before (show other \"column\" \"value\" true tx))\n\t(define other_collation (coalesceNil (other_before\
-    \ \"Collation\") \"\"))\n\t(define other_shape (list (other_before \"RawType\") (coalesceNil (other_before \"\
-    Dimensions\") '()) (other_before \"Null\") other_collation))\n\t(altercolumn other \"value\" \"declaration\" (list\
-    \ (list \"INT\" '() true other_collation) other_shape) tx)\n\t(define rejected (try (lambda () (begin\n\t\t(altercolumn\
-    \ target \"value\" \"default\" (parse_date \"2024-01-02 03:04:00\") tx)\n\t\tfalse))\n\t\t(lambda (cause) (strlike\
-    \ (string (failure_value cause)) \"%require ordered default admission%\"))))\n\t(define current (show target \"\
-    column\" \"value\" true tx))\n\t(define active (equal? (tx_state tx) \"active\"))\n\t(tx_rollback owner)\n\t(define\
-    \ restored (show target \"column\" \"value\" true nil))\n\t(and rejected active (equal? (current \"RawType\")\
-    \ \"DATETIME\") (nil? (current \"Default\"))\n\t\t(equal? (restored \"RawType\") \"SMALLDATETIME\")))\n"
+    (define contract (lambda (metadata) (list (metadata \"RawType\")\n\t\t(coalesceNil (metadata \"Dimensions\") '())\
+    \ (metadata \"Null\") (coalesceNil (metadata \"Collation\") \"\"))))\n\t(define previous (show target \"column\"\
+    \ \"value\" true tx))\n\t(define collation (coalesceNil (previous \"Collation\") \"\"))\n\t(define before (list\
+    \ (previous \"RawType\") (coalesceNil (previous \"Dimensions\") '()) (previous \"Null\") collation))\n\t(altercolumn\
+    \ target \"value\" \"validated_declaration\" (list (list \"DATETIME\" '() false collation) before) tx)\n\t(define\
+    \ other (table \"memcp-tests\" false \"validated_widen_loss\" false tx))\n\t(define other_before (show other \"\
+    column\" \"value\" true tx))\n\t(define other_collation (coalesceNil (other_before \"Collation\") \"\"))\n\t(define\
+    \ other_shape (list (other_before \"RawType\") (coalesceNil (other_before \"Dimensions\") '()) (other_before \"\
+    Null\") other_collation))\n\t(altercolumn other \"value\" \"declaration\" (list (list \"INT\" '() true other_collation)\
+    \ other_shape) tx)\n\t(define requested (parse_date \"2024-01-02 03:04:00\"))\n\t(define accepted (try (lambda\
+    \ () (begin\n\t\t(altercolumn target \"value\" \"default\" requested tx)\n\t\ttrue))\n\t\t(lambda (cause) (if\
+    \ (strlike (string (failure_value cause)) \"%require ordered default admission%\")\n\t\t\tfalse (error cause)))))\n\
+    \t(define current (show target \"column\" \"value\" true tx))\n\t(define other_current (show other \"column\"\
+    \ \"value\" true tx))\n\t(define values_count (scan tx target '() '() '() (lambda () true) '() (lambda (count)\
+    \ (+ count 1)) 0 +))\n\t(define default_correct (if accepted\n\t\t(expression_equal? (date_parts (current \"Default\"\
+    )) (date_parts requested))\n\t\t(nil? (current \"Default\"))))\n\t(define active (and (equal? (tx_state tx) \"\
+    active\") (equal? (owner \"__memcp_tx\") tx)))\n\t(tx_rollback owner)\n\t(define restored (show target \"column\"\
+    \ \"value\" true nil))\n\t(define other_restored (show other \"column\" \"value\" true nil))\n\t(define restored_count\
+    \ (scan nil target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +))\n\t(and default_correct\
+    \ active (equal? values_count 0) (equal? restored_count 0)\n\t\t(expression_equal? (contract current) (list \"\
+    DATETIME\" '() false collation))\n\t\t(expression_equal? (contract other_current) (list \"INT\" '() true other_collation))\n\
+    \t\t(expression_equal? (contract restored) before)\n\t\t(expression_equal? (contract other_restored) other_shape)\n\
+    \t\t(nil? (restored \"Default\"))\n\t\t(equal? (current \"DefaultExpression\") \"\") (not (current \"DefaultDeferred\"\
+    ))\n\t\t(equal? (current \"DefaultName\") \"\"))))\n\n"
   expect:
     result: true
-- name: Native schema constants require a lossless carrier before descriptor replacement
-  scm: "(begin\n\t(define target (table \"memcp-tests\" false \"validated_widen_constants\" false nil))\n\t(altercolumn\
-    \ target \"value\" \"default\" (parse_date \"2024-01-02 03:04:00\"))\n\t(define owner (newsession)) (owner \"\
-    username\" \"root\")\n\t(tx_begin_acid owner) (define tx (owner \"__memcp_tx\"))\n\t(define previous (show target\
-    \ \"column\" \"value\" true tx))\n\t(define collation (coalesceNil (previous \"Collation\") \"\"))\n\t(define\
-    \ before (list (previous \"RawType\") (coalesceNil (previous \"Dimensions\") '()) (previous \"Null\") collation))\n\
-    \t(define rejected (try (lambda () (begin\n\t\t(altercolumn target \"value\" \"validated_declaration\" (list (list\
-    \ \"DATETIME\" '() false collation) before) tx)\n\t\tfalse))\n\t\t(lambda (cause) (strlike (string (failure_value\
-    \ cause)) \"%lossless native schema constant%\"))))\n\t(define current (show target \"column\" \"value\" true\
-    \ tx))\n\t(define active (equal? (tx_state tx) \"active\"))\n\t(tx_rollback owner)\n\t(and rejected active (equal?\
-    \ (current \"RawType\") \"SMALLDATETIME\")))\n\n"
+- name: Schema constant widening preserves values or rejects before effects
+  scm: "(begin\n\t(define target (table \"memcp-tests\" false \"validated_widen_constants\" false nil))\n\t(define\
+    \ contract (lambda (metadata) (list (metadata \"RawType\")\n\t\t(coalesceNil (metadata \"Dimensions\") '()) (metadata\
+    \ \"Null\") (coalesceNil (metadata \"Collation\") \"\"))))\n\t(define requested (parse_date \"2024-01-02 03:04:00\"\
+    ))\n\t(altercolumn target \"value\" \"default\" requested)\n\t(insert target '(\"value\") (list (list requested)))\n\
+    \t(define owner (newsession)) (owner \"username\" \"root\")\n\t(tx_begin_acid owner) (define tx (owner \"__memcp_tx\"\
+    ))\n\t(define previous (show target \"column\" \"value\" true tx))\n\t(define collation (coalesceNil (previous\
+    \ \"Collation\") \"\"))\n\t(define before (list (previous \"RawType\") (coalesceNil (previous \"Dimensions\")\
+    \ '()) (previous \"Null\") collation))\n\t(define accepted (try (lambda () (begin\n\t\t(altercolumn target \"\
+    value\" \"validated_declaration\" (list (list \"DATETIME\" '() false collation) before) tx)\n\t\ttrue))\n\t\t\
+    (lambda (cause) (if (strlike (string (failure_value cause)) \"%lossless native schema constant%\")\n\t\t\tfalse\
+    \ (error cause)))))\n\t(define current (show target \"column\" \"value\" true tx))\n\t(define values_count (scan\
+    \ tx target '() '() '() (lambda () true) '() (lambda (count) (+ count 1)) 0 +))\n\t(define values_correct (scan\
+    \ tx target '() '() '() (lambda () true) '(\"value\")\n\t\t(lambda (correct value) (and correct (expression_equal?\
+    \ (date_parts value) (date_parts requested))))\n\t\ttrue (lambda (left right) (and left right))))\n\t(define active\
+    \ (and (equal? (tx_state tx) \"active\") (equal? (owner \"__memcp_tx\") tx)))\n\t(tx_rollback owner)\n\t(define\
+    \ restored (show target \"column\" \"value\" true nil))\n\t(define restored_count (scan nil target '() '() '()\
+    \ (lambda () true) '() (lambda (count) (+ count 1)) 0 +))\n\t(define restored_values (scan nil target '() '()\
+    \ '() (lambda () true) '(\"value\")\n\t\t(lambda (correct value) (and correct (expression_equal? (date_parts value)\
+    \ (date_parts requested))))\n\t\ttrue (lambda (left right) (and left right))))\n\t(and active values_correct (equal?\
+    \ values_count 1)\n\t\t(expression_equal? (contract current) (if accepted (list \"DATETIME\" '() false collation)\
+    \ before))\n\t\t(expression_equal? (date_parts (current \"Default\")) (date_parts requested))\n\t\t(expression_equal?\
+    \ (contract restored) before)\n\t\t(equal? restored_count 1) restored_values\n\t\t(expression_equal? (date_parts\
+    \ (restored \"Default\")) (date_parts requested))))\n\n"
   expect:
     result: true
 cleanup:
