@@ -3379,6 +3379,12 @@ func Init(en scm.Env) {
 				}
 				return currentTx.alterPublicStoredColumn(t, scm.String(a[1]), scm.String(a[2]), a[3])
 			}
+			// A supplied public execution context owns its default change even for
+			// an implicit statement. A later declaration failure must roll back
+			// that same decision instead of leaving an immediate prefix behind.
+			if currentTx != nil && !t.Ephemeral && !t.ScopedSchema && t.PersistencyMode != Cache && columnDefaultOperation(scm.String(a[2])) {
+				return currentTx.alterPublicStoredColumn(t, scm.String(a[1]), scm.String(a[2]), a[3])
+			}
 			if currentTx != nil && !currentTx.autoCommit {
 				if columnDefaultOperation(scm.String(a[2])) || scm.String(a[2]) == "declaration" || scm.String(a[2]) == "drop_property" || scm.String(a[2]) == "claim_property" {
 					return currentTx.alterPublicStoredColumn(t, scm.String(a[1]), scm.String(a[2]), a[3])

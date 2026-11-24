@@ -343,6 +343,46 @@ test_cases:
       syntax: psql
       session_id: default-reuse-psql
 
+  - name: mysql rejected DROP preserves its implicit column default and complete rows
+    steps:
+    - sql: DROP TABLE IF EXISTS ddl_failed_default_drop
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+    - sql: CREATE TABLE ddl_failed_default_drop(id INT PRIMARY KEY,marker INT DEFAULT 7,CONSTRAINT uq_failed_default_drop UNIQUE(marker))
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+    - sql: INSERT INTO ddl_failed_default_drop VALUES(1,17),(2,19)
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+    - sql: ALTER TABLE ddl_failed_default_drop DROP COLUMN marker
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+      expect:
+        error: true
+    - sql: SELECT id,marker FROM ddl_failed_default_drop ORDER BY id
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+      expect:
+        rows: 2
+        data:
+        - {id: 1, marker: 17}
+        - {id: 2, marker: 19}
+    - sql: INSERT INTO ddl_failed_default_drop(id) VALUES(3)
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+    - sql: SELECT id,marker FROM ddl_failed_default_drop ORDER BY id
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+      expect:
+        rows: 3
+        data:
+        - {id: 1, marker: 17}
+        - {id: 2, marker: 19}
+        - {id: 3, marker: 7}
+    - sql: DROP TABLE ddl_failed_default_drop
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS adci_t"
   - sql: "DROP TABLE IF EXISTS ddl_reuse_mysql"
@@ -350,3 +390,4 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ddl_reuse_optional"
   - sql: "DROP TABLE IF EXISTS ddl_default_reuse_mysql"
   - sql: "DROP TABLE IF EXISTS ddl_default_reuse_psql"
+  - sql: "DROP TABLE IF EXISTS ddl_failed_default_drop"
