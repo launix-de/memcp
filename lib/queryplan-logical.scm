@@ -2492,13 +2492,16 @@ drifting on source-join pairs or residual outer references. */
 		(define term_pairs (filter (map terms (lambda (term)
 			(pair_fn inner_default inner_sources outer_sources term)))
 			(lambda (pair) (not (nil? pair)))))
-		/* ON extraction also respects this consumer's correlation boundary,
-		while retaining the existing source-specific equality eligibility. */
+		/* ON selects matches at a nullable boundary; it does not select the
+		preserved D rows. All consumers share the same existing boundary proof
+		before turning source equalities into mandatory lookup coordinates. */
+		(define source_pairs_admitted (and include_source_pairs
+			(correlation_source_pairs_admitted? inner)))
 		(define source_pair_fn (lambda (inner_default inner_sources outer_sources term)
-			(if (and include_source_pairs
+			(if (and source_pairs_admitted
 				(exists_correlation_pair inner_default inner_sources outer_sources term))
 				(pair_fn inner_default inner_sources outer_sources term) nil)))
-		(define source_pairs (if include_source_pairs
+		(define source_pairs (if source_pairs_admitted
 			(source_join_correlation_pairs inner_default inner_sources outer_sources inner_sources source_pair_fn)
 			'()))
 		(define range_bounds (filter (map terms (lambda (term)

@@ -634,6 +634,62 @@ test_cases:
         true '() nil '() nil nil '() '() '()) nil)
   expect:
     result: true
+- name: A nullable source ON match cannot replace a scalar caller domain
+  sql: |-
+    SELECT p.id,
+      (SELECT COUNT(*) FROM aum_items i
+       LEFT JOIN aum_assignments a ON a.actor_id=p.owner_id
+       WHERE i.parent_id=p.id) AS preserved_rows,
+      (SELECT COUNT(a.id) FROM aum_items i
+       LEFT JOIN aum_assignments a ON a.actor_id=p.owner_id
+       WHERE i.parent_id=p.id) AS matching_rows,
+      (SELECT COALESCE(SUM(a.reference_id),-1) FROM aum_items i
+       LEFT JOIN aum_assignments a ON a.actor_id=p.owner_id
+       WHERE i.parent_id=p.id) AS matched_total
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      preserved_rows: 2
+      matching_rows: 0
+      matched_total: -1
+    - id: 2
+      preserved_rows: 1
+      matching_rows: 0
+      matched_total: -1
+    - id: 3
+      preserved_rows: 1
+      matching_rows: 0
+      matched_total: -1
+    - id: 4
+      preserved_rows: 1
+      matching_rows: 0
+      matched_total: -1
+    - id: 5
+      preserved_rows: 0
+      matching_rows: 0
+      matched_total: -1
+    - id: 6
+      preserved_rows: 1
+      matching_rows: 0
+      matched_total: -1
+    - id: 7
+      preserved_rows: 1
+      matching_rows: 0
+      matched_total: -1
+    - id: 8
+      preserved_rows: 1
+      matching_rows: 0
+      matched_total: -1
+    - id: 9
+      preserved_rows: 1
+      matching_rows: 1
+      matched_total: 2000
+    - id: 10
+      preserved_rows: 4
+      matching_rows: 4
+      matched_total: 5001
 cleanup:
 - sql: DROP TABLE aum_bridge
 - sql: DROP TABLE aum_assignments
