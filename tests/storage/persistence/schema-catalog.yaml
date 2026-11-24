@@ -515,6 +515,65 @@ test_cases:
   - name: Restart cannot resurrect the predecessor aggregate
     sql: SELECT SUM(value) AS total FROM cat_aggregate_owner
     expect: {rows: 1, data: [{total: 9}]}
+  - name: Warm a joined aggregate before transactional lifecycle cleanup
+    sql: >-
+      SELECT p.id, p.value, SUM(a.value) AS total
+      FROM cat_tx_progress p LEFT JOIN cat_aggregate_owner a ON a.id = p.id
+      GROUP BY p.id, p.value ORDER BY p.id
+    expect: {rows: 2, data: [{id: 1, value: 32, total: null}, {id: 2, value: 22, total: 9}]}
+  - name: Begin a data and cascading cache declaration rollback
+    session_id: cat_lifecycle_owner
+    sql: START TRANSACTION
+  - name: Update the joined source in the original transaction
+    session_id: cat_lifecycle_owner
+    sql: UPDATE cat_aggregate_owner SET value = 55 WHERE id = 2
+    expect: {affected_rows: 1}
+  - name: The joined aggregate sees its original pending row update
+    session_id: cat_lifecycle_owner
+    sql: >-
+      SELECT p.id, p.value, SUM(a.value) AS total
+      FROM cat_tx_progress p LEFT JOIN cat_aggregate_owner a ON a.id = p.id
+      GROUP BY p.id, p.value ORDER BY p.id
+    expect: {rows: 2, data: [{id: 1, value: 32, total: null}, {id: 2, value: 22, total: 55}]}
+  - name: Drop the joined source and its derived caches in the same transaction
+    session_id: cat_lifecycle_owner
+    sql: DROP TABLE cat_aggregate_owner
+  - name: The pending catalog contains no dropped joined source
+    session_id: cat_lifecycle_owner
+    sql: SELECT name FROM system_schema.tables WHERE schema_name = 'memcp-tests' AND name = 'cat_aggregate_owner'
+    expect: {rows: 0, data: []}
+  - name: Roll back the row update and cascading declaration cleanup
+    session_id: cat_lifecycle_owner
+    sql: ROLLBACK
+  - name: Rollback restores the complete joined aggregate result
+    sql: >-
+      SELECT p.id, p.value, SUM(a.value) AS total
+      FROM cat_tx_progress p LEFT JOIN cat_aggregate_owner a ON a.id = p.id
+      GROUP BY p.id, p.value ORDER BY p.id
+    expect: {rows: 2, data: [{id: 1, value: 32, total: null}, {id: 2, value: 22, total: 9}]}
+  - name: An update script error rolls back joined data and cascading cleanup together
+    sql: |
+      UPDATE cat_aggregate_owner SET value = 88 WHERE id = 2;
+      DROP TABLE cat_aggregate_owner;
+      SELECT missing_native_catalog_column FROM cat_tx_progress;
+    expect: {error: true}
+  - name: The failed script restores the complete joined aggregate result
+    sql: >-
+      SELECT p.id, p.value, SUM(a.value) AS total
+      FROM cat_tx_progress p LEFT JOIN cat_aggregate_owner a ON a.id = p.id
+      GROUP BY p.id, p.value ORDER BY p.id
+    expect: {rows: 2, data: [{id: 1, value: 32, total: null}, {id: 2, value: 22, total: 9}]}
+  - name: Restart after rejecting explicit and failed cascading declaration cleanup
+    action: restart
+  - name: Restart preserves the restored joined source and rows
+    sql: >-
+      SELECT p.id, p.value, SUM(a.value) AS total
+      FROM cat_tx_progress p LEFT JOIN cat_aggregate_owner a ON a.id = p.id
+      GROUP BY p.id, p.value ORDER BY p.id
+    expect: {rows: 2, data: [{id: 1, value: 32, total: null}, {id: 2, value: 22, total: 9}]}
+  - name: Restart restores every column of the rolled-back joined source
+    sql: SELECT ordinal, name FROM system_schema.columns WHERE schema_name = 'memcp-tests' AND table_name = 'cat_aggregate_owner' ORDER BY ordinal
+    expect: {rows: 2, data: [{ordinal: 0, name: id}, {ordinal: 1, name: value}]}
 cleanup:
   - sql: DROP VIEW IF EXISTS cat_tx_view
   - sql: DROP TABLE IF EXISTS cat_aggregate_owner
