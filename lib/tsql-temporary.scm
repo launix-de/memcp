@@ -329,10 +329,10 @@ instead retain their existing actual transaction across both operations. */
 		(if identity (list handle (sql_column_storage_name identity) (identity_source "seed")) nil) identity_source))))
 (define tsql_run_select_into (lambda (name query definitions owner statement session) (begin
 	(define populate (lambda (tx input) (begin
-		(define source (nth input 2))
-		(if source (begin
-			(define binding (source "source"))
-			(if (identical? (source "handle") (tsql_native_relation_handle (car binding) (cadr binding) tx)) true
+		(define identity_input (nth input 2))
+		(if identity_input (begin
+			(define binding (identity_input "source"))
+			(if (identical? (identity_input "handle") (tsql_native_relation_handle (car binding) (cadr binding) tx)) true
 				(error "SELECT INTO source generation changed before population"))) true)
 		(tsql_execute_statement tx (session "schema") (car input)
 			(tsql_select_into_population_session session (cadr input)) (lambda (_row) true) (lambda args true)))))
