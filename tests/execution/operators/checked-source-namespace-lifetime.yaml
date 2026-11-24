@@ -47,7 +47,7 @@ setup:
     \ \"source\"))\n\t\t\t(define database (if (has? '(\"generated\" \"late-failure\") mode) \"system\" \"source_admission_other\"\
     ))\n\t\t\t(define name (show source \"name\"))\n\t\t\t(define state (tx_state (owner \"__memcp_tx\")))\n\t\t\
     \t(define own (summary (owner \"__memcp_tx\") public))\n\t\t\t(define observed (summary nil public))\n\t\t\t\
-    (define input (summary (owner \"__memcp_tx\") source))\n\t\t\t(tx_rollback owner)\n\t\t\t(if (events \"scope\"\
+    (define input (if (equal? mode \"closed-scope\") (try (lambda () (summary (owner \"__memcp_tx\") source)) (lambda (cause) (failure_value cause))) (summary (owner \"__memcp_tx\") source)))\n\t\t\t(tx_rollback owner)\n\t\t\t(if (events \"scope\"\
     ) (close_relation_scope (events \"scope\")) true)\n\t\t\t(define absent (nil? (table database false name false\
     \ nil)))\n\t\t\t(list result state own observed input (summary nil public) absent)))\n\t\t\t(lambda (cause)\
     \ (begin\n\t\t\t\t(if (owner \"transaction\") (tx_rollback owner) true)\n\t\t\t\t(if (events \"scope\") (close_relation_scope\
@@ -168,14 +168,13 @@ test_cases:
   scm: ((globalvars "__run_source_admission") "closed-scope")
   expect:
     result:
-    - native statement scratch belongs to another scope owner
+    - relation scope is closed
     - active
     - - 2
       - 8
     - - 1
       - 1
-    - - 0
-      - 0
+    - relation scope is closed
     - - 1
       - 1
     - true
