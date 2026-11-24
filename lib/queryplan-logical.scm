@@ -3931,8 +3931,9 @@ without separately proving two-valued semantics. */
 				(neumann_fail "untangle_query" "IN UNION subquery branches must expose exactly one column")
 				(begin
 					(define truth_mode (string? (if (>= (count args) 4) (nth args 3) false)))
-					(define candidate_supported (in_union_candidate_supported? inner (nth args 0)))
-					(define canonical_supported (in_union_truth_canonical_supported? inner (nth args 0)))
+					(define pending_info (if (>= (count args) 5) (nth args 4) nil))
+					(define candidate_supported (in_union_candidate_supported? inner (nth args 0) pending_info))
+					(define canonical_supported (in_union_truth_canonical_supported? inner (nth args 0) pending_info))
 					(if (and (not (if (>= (count args) 3) (nth args 2) false))
 						(and candidate_supported (or (not truth_mode) (not canonical_supported))))
 						(make_in_union_candidate_stage_rewrite probe inner args)
@@ -3955,11 +3956,23 @@ without separately proving two-valued semantics. */
 				(equal? (count (qb_fields branch)) 2))))
 		true)))
 
-(define in_union_candidate_supported? (lambda (inner outer_sources)
+/* A candidate relation has no caller partition. Its complete producer must
+therefore be closed, including retained relations and declared nested-stage
+domains. Pending unnesting provenance also owns ancestor reads which can have
+disappeared from the rewritten immediate branch syntax. Correlated inputs keep
+the ordinary per-branch Neumann rewrite and its complete D relation. */
+(define in_union_candidate_scope_closed? (lambda (inner outer_sources pending_info)
+	(and (or (nil? pending_info)
+		(and (empty_list? (btw2025_info_accessing pending_info))
+			(empty_list? (btw2025_info_accessing_after_simple pending_info))))
+		(empty_list? (btw2025_relation_outer_column_refs inner outer_sources)))))
+
+(define in_union_candidate_supported? (lambda (inner outer_sources pending_info)
 	(and (union_block? inner)
 		(or (equal? (union_mode inner) (quote all))
 			(or (equal? (union_mode inner) (quote distinct))
 				(equal? (union_mode inner) (quote union_distinct))))
+		(in_union_candidate_scope_closed? inner outer_sources pending_info)
 		(reduce (union_branches inner) (lambda (ok branch)
 			(and ok
 				(and (exists_inner_supported? branch)
@@ -3967,8 +3980,8 @@ without separately proving two-valued semantics. */
 						(empty_list? (btw2025_query_block_accessing_aliases branch outer_sources))))))
 			true))))
 
-(define in_union_truth_canonical_supported? (lambda (inner outer_sources)
-	(and (in_union_candidate_supported? inner outer_sources)
+(define in_union_truth_canonical_supported? (lambda (inner outer_sources pending_info)
+	(and (in_union_candidate_supported? inner outer_sources pending_info)
 		(reduce (union_branches inner) (lambda (ok branch)
 			(and ok
 				(and (single_source? (qb_sources branch))

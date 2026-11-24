@@ -1,0 +1,290 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Closed UNION candidates preserve all distant caller and session bindings
+setup:
+- sql: CREATE TABLE aum_callers(id INT PRIMARY KEY,owner_id INT,tenant_id INT)
+- sql: CREATE TABLE aum_items(id INT PRIMARY KEY,parent_id INT,reference_id INT)
+- sql: CREATE TABLE aum_references(id INT PRIMARY KEY,label VARCHAR(32))
+- sql: CREATE TABLE aum_assignments(id INT PRIMARY KEY,actor_id INT,tenant_id INT,reference_id INT,allowed BOOL)
+- sql: CREATE TABLE aum_bridge(item_id INT PRIMARY KEY,reference_id INT)
+- sql: INSERT INTO aum_callers VALUES(1,10,100),(2,20,200),(3,30,NULL),(4,40,100),(5,50,300),(6,10,100),(7,NULL,100),(8,10,NULL)
+- sql: INSERT INTO aum_items VALUES(11,1,1000),(12,1,1001),(21,2,2000),(31,3,3000),(41,4,NULL),(61,6,1000),(71,7,1000),(81,8,1000)
+- sql: INSERT INTO aum_references VALUES(1000,'alpha'),(1001,'beta'),(2000,'gamma'),(3000,'delta')
+- sql: INSERT INTO aum_assignments VALUES(1,7,100,1000,TRUE),(2,7,100,1001,FALSE),(3,8,200,2000,TRUE),(4,7,NULL,NULL,TRUE),(5,9,300,NULL,NULL),(6,7,NULL,3000,TRUE)
+- sql: INSERT INTO aum_bridge SELECT id,reference_id FROM aum_items
+test_cases:
+- name: Skip-level UNION membership retains all ancestor bindings and duplicate caller domains
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=7 AND a.tenant_id=p.tenant_id
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 8
+    data:
+    - id: 1
+      visible_label: alpha
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: null
+- name: A further scalar scope does not erase a distant caller domain
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT
+          (SELECT r.label FROM aum_references r
+           WHERE r.id=b.reference_id AND r.id IN (
+             SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+             UNION ALL
+             SELECT a.reference_id FROM aum_assignments a
+             WHERE a.actor_id=7 AND a.tenant_id=p.tenant_id
+           ) LIMIT 1)
+         FROM aum_bridge b WHERE b.item_id=i.id LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 8
+    data:
+    - id: 1
+      visible_label: alpha
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: null
+- name: A user nullable OR branch retains SQL truth and each caller reference
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=7 AND (a.tenant_id IS NULL OR a.tenant_id=p.tenant_id)
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 8
+    data:
+    - id: 1
+      visible_label: alpha
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: delta
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: null
+- name: A user branch filter is not replaced by mere UNION presence
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id AND a.allowed=TRUE
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=7 AND a.tenant_id=p.tenant_id AND a.allowed=TRUE
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id DESC LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 8
+    data:
+    - id: 1
+      visible_label: null
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: null
+- name: Local aliases shadow callers inside a genuinely closed UNION producer
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT p.reference_id FROM aum_assignments p WHERE p.actor_id=7 AND p.tenant_id=100
+           UNION ALL
+           SELECT p.reference_id FROM aum_assignments p
+           WHERE p.actor_id=8 AND p.tenant_id=200
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 8
+    data:
+    - id: 1
+      visible_label: alpha
+    - id: 2
+      visible_label: gamma
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: alpha
+- name: Current session actor 7 preserves every caller tuple
+  session_id: aum_actor_session
+  setup:
+  - sql: SET @aum_actor=7
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=@aum_actor AND a.tenant_id=p.tenant_id
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 8
+    data:
+    - id: 1
+      visible_label: alpha
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: null
+- name: Current session actor 8 preserves every caller tuple
+  session_id: aum_actor_session
+  setup:
+  - sql: SET @aum_actor=8
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=@aum_actor AND a.tenant_id=p.tenant_id
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 8
+    data:
+    - id: 1
+      visible_label: null
+    - id: 2
+      visible_label: gamma
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: null
+    - id: 7
+      visible_label: null
+    - id: 8
+      visible_label: null
+- name: Current session actor NULL preserves every caller tuple
+  session_id: aum_actor_session
+  setup:
+  - sql: SET @aum_actor=NULL
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=@aum_actor AND a.tenant_id=p.tenant_id
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 8
+    data:
+    - id: 1
+      visible_label: null
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: null
+    - id: 7
+      visible_label: null
+    - id: 8
+      visible_label: null
+cleanup:
+- sql: DROP TABLE aum_bridge
+- sql: DROP TABLE aum_assignments
+- sql: DROP TABLE aum_references
+- sql: DROP TABLE aum_items
+- sql: DROP TABLE aum_callers
