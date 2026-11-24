@@ -83,7 +83,7 @@ curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
       (regex "(?m)^Allowed nø of parameters: ([0-9]+)-([0-9]+)$" _ minimum maximum)
       (begin
         (define arity (simplify maximum))
-        (if (and (has? (quote (2 4 5)) arity) (<= (simplify minimum) arity)) arity
+        (if (and (has? (list 2 4 5) arity) (<= (simplify minimum) arity)) arity
           (error "unsupported declared predecessor table signature")))
       _ (error "missing predecessor table declaration signature")))
     (define fixture_table (lambda (database name) (begin
@@ -127,7 +127,7 @@ curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
       (regex "(?m)^Allowed nø of parameters: ([0-9]+)-([0-9]+)$" _ minimum maximum)
       (begin
         (define arity (simplify maximum))
-        (if (and (has? (quote (2 4 5)) arity) (<= (simplify minimum) arity)) arity
+        (if (and (has? (list 2 4 5) arity) (<= (simplify minimum) arity)) arity
           (error "unsupported declared predecessor table signature")))
       _ (error "missing predecessor table declaration signature")))
     (define fixture_table (lambda (database name) (begin
