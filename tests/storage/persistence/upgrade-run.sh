@@ -152,14 +152,25 @@ curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
     (define fixture_fk_timings (if fixture_native_fk_owner
       (list "before_insert" "before_update" "before_delete" "after_update")
       (json_decode "[\"\\u0000\",\"\\u0002\",\"\\u0004\",\"\\u0003\"]")))
+    /* Historical producers used either one BEFORE priority of -100 or +100;
+    CASCADE AFTER UPDATE has always used -100. Require a coherent native set. */
+    (define fixture_fk_before_priority (if fixture_native_fk_owner 100
+      (begin
+        (define header (find
+          (get_assoc (show "memcp-tests" "up_fk_abi_child" true) "triggers")
+          (lambda (header) (equal? (get_assoc header "name") "__fk_up_fk_abi_ref_child_insert")) nil))
+        (match (get_assoc header "priority")
+          -100 -100
+          100 100
+          _ (error "unsupported predecessor foreign callback priority")))))
     (define fixture_fk_headers (lambda (system) (begin
       (define endpoints (list
         (list "up_fk_abi_child" (list
-          (list "__fk_up_fk_abi_ref_child_insert" (nth fixture_fk_timings 0))
-          (list "__fk_up_fk_abi_ref_child_update" (nth fixture_fk_timings 1))))
+          (list "__fk_up_fk_abi_ref_child_insert" (nth fixture_fk_timings 0) fixture_fk_before_priority)
+          (list "__fk_up_fk_abi_ref_child_update" (nth fixture_fk_timings 1) fixture_fk_before_priority)))
         (list "up_fk_abi_parent" (list
-          (list "__fk_up_fk_abi_ref_parent_delete" (nth fixture_fk_timings 2))
-          (list "__fk_up_fk_abi_ref_parent_update" (nth fixture_fk_timings 3))))))
+          (list "__fk_up_fk_abi_ref_parent_delete" (nth fixture_fk_timings 2) fixture_fk_before_priority)
+          (list "__fk_up_fk_abi_ref_parent_update" (nth fixture_fk_timings 3) -100)))))
       (map endpoints (lambda (endpoint) (begin
         (define headers (get_assoc (show "memcp-tests" (nth endpoint 0) true) "triggers"))
         (define foreign_headers (filter headers (lambda (header)
@@ -178,7 +189,7 @@ curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
             (equal? (get_assoc header "timing") (nth role 1))
             (equal? (get_assoc header "system") system)
             (equal? (get_assoc header "hidden") (not system))
-            (equal? (get_assoc header "priority") (if system 100 0))))
+            (equal? (get_assoc header "priority") (if system (nth role 2) 0))))
             (error "inconsistent predecessor foreign callback producer"))
           true))))))
       true)))
