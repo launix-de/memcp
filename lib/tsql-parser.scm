@@ -7118,10 +7118,14 @@ that context explicitly; stored views refuse this scalar before publication. */
 			(parser '(tsql_keyword_add (? tsql_keyword_constraint (define key tsql_identifier))
 				tsql_keyword_primary tsql_keyword_key tsql_key_placement "(" (define columns tsql_key_columns) ")" tsql_key_layout)
 				(lambda (database name) (if compile_only (tsql_command_binding 'alter-table (list database name) '()) (begin
-					/* Nullable existing columns need native ALTER nullability support.
-					Reject this shape rather than adding a parallel validation scan. */
-					(if (reduce columns (lambda (valid column) (and valid
-						(not ((find (show (table database false name false tx)) (lambda (meta) (equal? (meta "Field") column))) "Null")))) true)
+					/* Read the same original transaction's declaration after preceding
+					ALTER COLUMN, including its private NOT NULL validation. Identifier
+					lookup belongs to the native declaration owner, not value equality. */
+					(define handle (table database false name false tx))
+					(if (reduce columns (lambda (valid column) (begin
+						(define declared (show handle "column" column true tx))
+						(if (nil? declared) (error "PRIMARY KEY column does not exist: " column) true)
+						(and valid (not (declared "Null"))))) true)
 						true (error "ADD PRIMARY KEY currently requires NOT NULL columns"))
 					(list (quote createkey) (list (quote table) database false name false (quote tx)) "PRIMARY" true
 						(cons (quote list) (sql_storage_column_names (tsql_write_declarations database name planning_session tx) columns true)) (quote tx)
