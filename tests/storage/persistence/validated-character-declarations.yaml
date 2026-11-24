@@ -434,7 +434,7 @@ test_cases:
      (define current (show target "column" "value" true tx))
      (define active (equal? (tx_state tx) "active"))
      (define values (scan tx target '() '() '() (lambda () true) '("value")
-      (lambda (values value) (append values value)) '() append))
+      (lambda (values value) (append values value)) '() (lambda (left right) (merge (list left right)))))
      (tx_rollback owner)
      (and rejected active (expression_equal? (current "Dimensions") '(2))
       (expression_equal? values '("😀"))
