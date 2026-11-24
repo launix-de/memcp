@@ -568,7 +568,7 @@ func TestCatalogCacheRebuildLeavesUnrelatedStatisticsUncheckpointed(t *testing.T
 		t.Fatal("query cache rebuild rewrote native definition partitions")
 	}
 	// The source's own checkpoint must still record its new statistics.
-	db.save(nil, source)
+	db.save(nil, nil, source)
 	after = readCatalogRoot(db.persistence.ReadSchema())
 	if after.Shards["tables"] == before.Shards["tables"] {
 		t.Fatal("source checkpoint lost its advisory statistics")
@@ -596,7 +596,7 @@ func TestCatalogRuntimeCacheRebuildDoesNotPublishLegacyMigration(t *testing.T) {
 		t.Fatal("physical query cache published a durable legacy catalog migration")
 	}
 	// A real source checkpoint still migrates and dual-writes the native root.
-	db.save(nil, loaded)
+	db.save(nil, nil, loaded)
 	if readCatalogRoot(engine.ReadSchema()) == nil {
 		t.Fatal("source checkpoint did not persist its native catalog")
 	}
@@ -866,7 +866,7 @@ func TestCatalogCheckpointCannotOverwriteDefinitionsFromRuntime(t *testing.T) {
 	// must export the admitted definition, rather than silently adopting this.
 	tbl.Comment = "runtime-only divergence"
 	tbl.Columns[1].Comment = "runtime column divergence"
-	db.save(nil)
+	db.save(nil, nil)
 	root := readCatalogRoot(db.persistence.ReadSchema())
 	if root == nil || root.Version != catalogFormatVersion {
 		t.Fatal("checkpoint did not preserve its catalog root")
@@ -961,7 +961,9 @@ func TestCatalogRoutingOpensOnlySelectedAnchor(t *testing.T) {
 	value := scm.NewString(db.Name)
 	access := runtimeScanAccess(analyzedBoundaries{{col: "schema_name", matcher: EqualMatcher,
 		lower: value, upper: value, lowerInclusive: true, upperInclusive: true}})
-	systemSchemaTables[catalogColumns].scanTopology(access)
+	tx := NewTxContext(TxACID)
+	defer tx.Rollback()
+	systemSchemaTables[catalogColumns].scanTopology(tx, access)
 	if selected.catalog.live[catalogColumns] == nil {
 		t.Fatal("selected catalog partition was not opened")
 	}
@@ -1470,6 +1472,80 @@ func TestSchemaProjectionFollowsOriginalTransaction(t *testing.T) {
 	}
 }
 
+func TestSchemaTransactionSurvivesPhysicalShardGrowth(t *testing.T) {
+	previousSize := Settings.ShardSize
+	Settings.ShardSize = 2
+	defer func() { Settings.ShardSize = previousSize }()
+	for _, mode := range []TxMode{TxACID, TxCursorStability} {
+		for _, commit := range []bool{false, true} {
+			t.Run(fmt.Sprintf("mode-%d-commit-%t", mode, commit), func(t *testing.T) {
+				tbl, _ := createDurabilityTestTable(t, "schema-growing-transaction", 1)
+				tx := NewTxContext(mode)
+				defer func() {
+					if tx.State == TxActive {
+						tx.Rollback()
+					}
+					tbl.maintenanceMu.Lock()
+					tbl.maintenanceMu.Unlock()
+				}()
+				tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("before-ddl")}}, nil, scm.NewNil(), false, nil, tx)
+				tbl.CreateColumn(tx, "added", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(7)})
+				tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(3), scm.NewString("after-ddl")}, {scm.NewInt(4), scm.NewString("after-ddl")}}, nil, scm.NewNil(), false, nil, tx)
+				if commit {
+					if err := tx.Commit(); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					tx.Rollback()
+				}
+				columns := []string{"id", "payload"}
+				want := 1
+				if commit {
+					columns, want = append(columns, "added"), 4
+				}
+				check := func(current *table) {
+					var rows [][]scm.Scmer
+					for _, shard := range current.ActiveShards() {
+						_, part := catalogShardRecords(nil, shard, columns, nil)
+						rows = append(rows, part...)
+					}
+					sort.Slice(rows, func(i, j int) bool { return scm.ToInt(rows[i][0]) < scm.ToInt(rows[j][0]) })
+					if len(rows) != want || len(current.Columns) != len(columns) {
+						t.Fatalf("growth lost the accepted transaction: rows=%v columns=%v", rows, current.Columns)
+					}
+					for i, row := range rows {
+						payload := "after-ddl"
+						if i == 0 {
+							payload = "row-00000001"
+						} else if i == 1 {
+							payload = "before-ddl"
+						}
+						expected := []scm.Scmer{scm.NewInt(int64(i + 1)), scm.NewString(payload)}
+						if commit {
+							expected = append(expected, scm.NewInt(7))
+						}
+						if !scm.Equal(scm.NewSlice(row), scm.NewSlice(expected)) {
+							t.Fatalf("growth recovered an incorrect value: got=%v want=%v", row, expected)
+						}
+					}
+				}
+				check(tbl)
+				db := tbl.schema
+				cold := newDatabase()
+				cold.Name, cold.persistence, cold.srState = db.Name, db.persistence, COLD
+				databases.Set(db.Name, cold)
+				defer func() {
+					databases.Set(db.Name, db)
+					publishCatalogShards(db.Name, &db.catalog.live)
+					cold.closeTransactionLog()
+				}()
+				cold.ensureLoaded()
+				check(cold.GetTable(tbl.Name))
+			})
+		}
+	}
+}
+
 func TestSchemaNamespaceFollowsOriginalTransaction(t *testing.T) {
 	for _, mode := range []TxMode{TxACID, TxCursorStability} {
 		for _, commit := range []bool{false, true} {
@@ -1796,7 +1872,7 @@ func TestCatalogVersionTwoUpgradesMissingNativeIdentity(t *testing.T) {
 	if !cold.GetTable(tbl.Name).NativeIdentity(nil).IsNil() {
 		t.Fatal("legacy catalog fabricated an incarnation or used the legacy JSON identity")
 	}
-	cold.save(nil)
+	cold.save(nil, nil)
 	upgraded := readCatalogRoot(cold.persistence.ReadSchema())
 	if upgraded.Version != 3 || upgraded.Shards["tables"] == previous {
 		t.Fatal("v3 root reused a base without the introduced native column")
@@ -1865,7 +1941,7 @@ func TestCatalogReadsTenantBackendRoot(t *testing.T) {
 	if restored.tables.Get(tbl.Name) == nil {
 		t.Fatal("tenant-backend catalog was not loaded")
 	}
-	restored.save(nil)
+	restored.save(nil, nil)
 	rewritten := readCatalogRoot(db.persistence.ReadSchema())
 	if rewritten == nil || rewritten.Version != catalogFormatVersion {
 		t.Fatal("legacy catalog root was not upgraded on save")
@@ -2043,14 +2119,22 @@ func TestCatalogNamespaceDurabilityPrecedesTenantRoot(t *testing.T) {
 	if barrier.calls != 1 || counting.calls.Load() != 0 || string(engine.ReadSchema()) != string(previous) {
 		t.Fatal("failed system namespace sync replaced the recoverable tenant root")
 	}
+	if len(tbl.Columns) != 2 {
+		t.Fatal("failed namespace admission retained the rejected RAM declaration")
+	}
+	_, rejected := catalogShardRecords(nil, db.catalog.live[catalogColumns], catalogRelationColumns(catalogColumns), []string{tbl.Name})
+	if len(rejected) != 2 {
+		t.Fatal("failed namespace admission retained the rejected catalog declaration")
+	}
 	barrier.before = func() {
 		if counting.calls.Load() != 0 {
 			t.Error("retry published its root before syncing the system namespace")
 		}
 	}
-	db.save(nil)
-	if barrier.calls != 2 || counting.calls.Load() != 1 {
-		t.Fatal("retry did not durably order the native namespace before its tenant root")
+	tbl.CreateColumn(nil, "after_barrier", "INT", nil, nil)
+	// SAFE catalog WAL namespace barriers precede the completed-file barrier.
+	if barrier.calls != 4 || counting.calls.Load() != 1 {
+		t.Fatalf("retry did not durably order the native namespace before its tenant root: barriers=%d roots=%d", barrier.calls, counting.calls.Load())
 	}
 	var accepted database
 	if err := json.Unmarshal(engine.ReadSchema(), &accepted); err != nil {
@@ -2110,7 +2194,7 @@ func TestCatalogCheckpointDoesNotReactivateHistoricalUUID(t *testing.T) {
 	if err := r.replaceCatalogShard(initial.replicationResource(), initial, successor); err != nil {
 		t.Fatal(err)
 	}
-	db.save(nil)
+	db.save(nil, nil)
 	current := cell.resolved().current.Load()
 	canonical := r.canonicalResource(initial.replicationResource())
 	if current.uuid.String() != canonical.Shard {

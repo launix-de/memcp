@@ -381,11 +381,12 @@ value; the wire descriptor and SQL declaration own the type independently. */
 /* Description binds names and expression contracts without physical planning
 or execution. A single mutation without OUTPUT has an empty result contract;
 its ordinary grammar still validates declarations and input expressions. */
-(define tds_describe (lambda (schema text declarations session) (begin
+(define tds_describe (lambda (schema text declarations session tx) (begin
+	(schema_read tx schema)
 	(define planning (newsession))
 	(planning "__tsql_parameter_declarations" (tds_bind_declarations schema declarations))
 	(planning "__tsql_describe" true)
-	(match (parse_tsql schema (tsql_statement_text text) (sql_policy (coalesceNil (session "username") "root")) planning nil)
+	(match (parse_tsql schema (tsql_statement_text text) (sql_policy (coalesceNil (session "username") "root")) planning tx)
 		((symbol quote) fields) fields
 		_ (error "unsupported T-SQL describe shape")))))
 
@@ -923,7 +924,7 @@ Only parameter-sized scalar tuples are collected; relational SQL stays native. *
 				(match (cadr argument) (cons _head _tail) (error "metadata parameters are input-only") _ true)
 				(list (car argument) (tsql_scalar_value (caller "schema") (cadr argument) caller tx "value" nil))))))
 			(tsql_execute_metadata (if (equal?? schema "sys") (caller "schema") schema)
-				name values (sql_policy (caller "username")) resultrow resultfields))))
+				name values (sql_policy (caller "username")) resultrow resultfields tx))))
 		(begin
 			((sql_policy (caller "username")) schema name false)
 			/* Retain one immutable definition and callable across argument binding. */
@@ -1008,10 +1009,10 @@ Descriptor types below are frontend contracts, including for empty results. */
 		(and (not (internal_column_name? name)) (tsql_metadata_match name pattern patterns)))))))
 /* View definitions stay in the existing system catalog. This transient answer
 joins object names only; native key procedures keep enumerating native tables. */
-(define tsql_metadata_relations (lambda (schema pattern patterns policy) (begin
+(define tsql_metadata_relations (lambda (schema pattern patterns policy tx) (begin
 	(define native (map (tsql_metadata_table_names schema pattern patterns policy)
 		(lambda (name) (list name "TABLE"))))
-	(define views (scan nil (table "system" false "views" false)
+	(define views (scan tx (table "system" false "views" false)
 			(list 369436175368192 (scan_boundary "equal" "database" 0 0 true true "" false))
 			(list schema) '("name") (lambda (name) (tsql_metadata_match name pattern patterns))
 			'("name") (lambda (acc name) (cons (list name "VIEW") acc))
@@ -1021,11 +1022,11 @@ joins object names only; native key procedures keep enumerating native tables. *
 /* Describe a logical view projection, never its rows. Native declarations can
 supply direct projection nullability and dimensions, but not a view default,
 identity, key or comment. Unknown expression widths must not become width one. */
-(define tsql_metadata_view_columns (lambda (schema name policy planning_session) (begin
+(define tsql_metadata_view_columns (lambda (schema name policy planning_session tx) (begin
 	(define query (tsql_describe_query
 		(make_query_block schema (list (list name schema name false nil))
 			(list "*" (list (quote get_column) nil false "*" false))
-			nil nil nil nil nil nil '() '() '()) policy planning_session))
+			nil nil nil nil nil nil '() '() '()) policy planning_session tx))
 	(define sources (qb_sources query))
 	(map (tsql_result_entries query true) (lambda (entry) (begin
 		(define expression (nth entry 1))
@@ -1253,13 +1254,13 @@ parameter contracts also need their binder before they can be advertised. */
 			"suggested_is_case_sensitive" 0 "suggested_is_fixed_length_clr_type" 0
 			"suggested_is_input" 1 "suggested_is_output" 0 "formal_parameter_name" nil
 			"suggested_tds_type_id" (wire "kind") "suggested_tds_length" (wire "size"))))))
-(define tsql_describe_parameters (lambda (schema text parameter_text policy) (begin
+(define tsql_describe_parameters (lambda (schema text parameter_text policy tx) (begin
 	(define declarations (tds_bind_declarations schema (coalesceNil parameter_text "")))
 	(define planning (newsession))
 	(planning "__tsql_parameter_declarations" declarations)
 	(planning "__tsql_parameter_analysis" true)
 	(planning "__tsql_describe" true)
-	(define query (match (parse_tsql schema text policy planning nil)
+	(define query (match (parse_tsql schema text policy planning tx)
 		((symbol quote) query) query _ (error "parameter description requires a single SELECT")))
 	(define analysis (tsql_parameter_candidates query '() declarations))
 	(define unknowns (reduce (car analysis) (lambda (entries parameter)
@@ -1280,12 +1281,12 @@ parameter contracts also need their binder before they can be advertised. */
 	(validation "__tsql_describe" true)
 	(validation "__tsql_parameter_declarations" (merge (list declarations
 		(map specifications (lambda (entry) (list (car entry) (cons (nth entry 2) (nth entry 3))))))))
-	(define checked (parse_tsql schema text policy validation nil))
+	(define checked (parse_tsql schema text policy validation tx))
 	(if (list? checked)
 		(map (produceN (count specifications)) (lambda (i) (tsql_parameter_description (nth specifications i) (+ i 1))))
 		(error "invalid inferred parameter statement")))))
 
-(define tsql_metadata_result (lambda (schema procedure arguments policy) (begin
+(define tsql_metadata_result (lambda (schema procedure arguments policy tx) (begin
 	(define procedure (toLower procedure))
 	(define procedure (if (and (>= (strlen procedure) 4) (equal? (substr procedure 0 4) "sys.")) (substr procedure 4) procedure))
 	(define names (match procedure
@@ -1306,6 +1307,7 @@ parameter contracts also need their binder before they can be advertised. */
 		(if (or (nil? (options key)) (equal?? schema (options key))) true
 			(error "metadata qualifier is not the current database"))))
 	(if policy (policy schema true false) true)
+	(schema_read tx schema)
 	(define owner (coalesceNil (options "table_owner") "dbo"))
 	(define version (coalesceNil (options "odbcver") 2))
 	(if (has? '(2 3) version) true (error "unsupported ODBC version"))
@@ -1315,7 +1317,7 @@ parameter contracts also need their binder before they can be advertised. */
 	(define result (match procedure
 		"sp_describe_undeclared_parameters" (begin
 			(if (nil? (options "tsql")) (error "parameter description requires statement text") true)
-			(define rows (tsql_describe_parameters schema (options "tsql") (options "params") policy))
+			(define rows (tsql_describe_parameters schema (options "tsql") (options "params") policy tx))
 			(list '("parameter_ordinal" "name" "suggested_system_type_id" "suggested_system_type_name"
 				"suggested_max_length" "suggested_precision" "suggested_scale" "suggested_user_type_id"
 				"suggested_user_type_database" "suggested_user_type_schema" "suggested_user_type_name"
@@ -1334,7 +1336,7 @@ parameter contracts also need their binder before they can be advertised. */
 				(map (split filter_type ",") (lambda (value) (toUpper (replace (strtrim value) "'" ""))))))
 			(define rows (if (tsql_metadata_match "dbo" owner true)
 				(map (filter (tsql_metadata_relations schema (options "table_name")
-					(not (equal? (coalesceNil (options "fusepattern") 1) 0)) policy)
+					(not (equal? (coalesceNil (options "fusepattern") 1) 0)) policy tx)
 					(lambda (relation) (has? types (cadr relation))))
 					(lambda (relation) (list "TABLE_QUALIFIER" schema "TABLE_OWNER" "dbo"
 						"TABLE_NAME" (car relation) "TABLE_TYPE" (cadr relation) "REMARKS" nil))) '()))
@@ -1342,10 +1344,10 @@ parameter contracts also need their binder before they can be advertised. */
 		"sp_columns" (begin
 			(if (nil? (options "table_name")) (error "sp_columns requires a table name") true)
 			(define rows (if (tsql_metadata_match "dbo" owner true)
-				(merge (map (tsql_metadata_relations schema (options "table_name") true policy) (lambda (relation) (begin
+				(merge (map (tsql_metadata_relations schema (options "table_name") true policy tx) (lambda (relation) (begin
 					(define name (car relation))
 					(define columns (map (if (equal? (cadr relation) "VIEW")
-						(tsql_metadata_view_columns schema name policy planning_session)
+						(tsql_metadata_view_columns schema name policy planning_session tx)
 						(filter (show (table schema false name false)) (lambda (column) (not (internal_column_name? (column "Field"))))))
 						(lambda (column) (tsql_effective_column column planning_session))))
 					(map (filter (produceN (count columns)) (lambda (i)
@@ -1425,8 +1427,8 @@ parameter contracts also need their binder before they can be advertised. */
 			(list '("PKTABLE_QUALIFIER" "PKTABLE_OWNER" "PKTABLE_NAME" "PKCOLUMN_NAME" "FKTABLE_QUALIFIER" "FKTABLE_OWNER" "FKTABLE_NAME" "FKCOLUMN_NAME" "KEY_SEQ" "UPDATE_RULE" "DELETE_RULE" "FK_NAME" "PK_NAME" "DEFERRABILITY")
 				'("KEY_SEQ" "UPDATE_RULE" "DELETE_RULE" "DEFERRABILITY") rows))))
 	(list "columns" (tsql_metadata_descriptors (car result) (cadr result)) "rows" (nth result 2)))))
-(define tsql_execute_metadata (lambda (schema procedure arguments policy resultrow resultfields) (begin
-	(define result (tsql_metadata_result schema procedure arguments policy))
+(define tsql_execute_metadata (lambda (schema procedure arguments policy resultrow resultfields tx) (begin
+	(define result (tsql_metadata_result schema procedure arguments policy tx))
 	(resultfields (map (result "columns") (lambda (column) (column "name"))) (result "columns"))
 	(map (result "rows") resultrow)
 	0)))
@@ -1479,20 +1481,21 @@ path as the other frontends. Wire actions are interpreted here, never in scm/. *
 		(if (session "__tsql_nocount")
 			(list "rows" (if (number? result) result 0) "no_count" true)
 			(if (number? result) (list "rows" result) nil)))
-	"describe" (tds_describe (payload "database") (payload "text") (payload "declarations") session)
-	"metadata" (begin
+	"describe" (sql_with_statement session state sequence "TDS describe" (lambda (tx)
+		(tds_describe (payload "database") (payload "text") (payload "declarations") session tx)))
+	"metadata" (sql_with_statement session state sequence "TDS metadata" (lambda (tx) (begin
 		(define arguments (map (payload "parameters") (lambda (parameter) (begin
 			(if (equal? (parameter "flags") 0) true (error "metadata output parameters are unsupported"))
 			(if (has? '(31 38 104 167 175 231 239) ((parameter "type") "kind")) true
 				(error "unsupported metadata argument wire type"))
 			(list (parameter "name") (parameter "value"))))))
-		(define result (tsql_metadata_result (session "schema") (payload "procedure") arguments (sql_policy (session "username"))))
+		(define result (tsql_metadata_result (session "schema") (payload "procedure") arguments (sql_policy (session "username")) tx))
 		(fields (result "columns"))
 		(map (result "rows") (lambda (values)
 			(row (map (result "columns") (lambda (column) (begin
 				(define value (values (column "name")))
 				(if (nil? value) nil (equal? (column "kind") 231) (string value) (intdiv value 1))))))))
-		(list "rows" (count (result "rows"))))
+		(list "rows" (count (result "rows"))))))
 	_ (error "unknown TDS frontend callback"))))
 /* The operator supplies files only at startup. The transport receives PEM
 values, and no certificate/key path enters frontend sessions or SQL metadata. */

@@ -1503,7 +1503,7 @@ func TestReplicationCheckpointRoutesBeforeActivePublication(t *testing.T) {
 	tbl.Shards = []*storageShard{successor}
 	tbl.publishSchemaTopology(ShardModeFree, tbl.Shards, tbl.PDimensions)
 	tbl.mu.Unlock()
-	tbl.schema.save(nil)
+	tbl.schema.save(nil, nil)
 	// Schema publication itself must establish the route, before capture can
 	// advertise it or another peer can declare an independent successor cell.
 	if r.lookupCell(r.shardResource(successor)) != cell || r.resourceKey(resource) != r.shardResource(successor).key() {

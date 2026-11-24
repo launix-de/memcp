@@ -4,17 +4,14 @@ SPDX-License-Identifier: GPL-3.0-or-later
 */
 package storage
 
-import (
-	"context"
-	"fmt"
-	"maps"
-	"sync"
-	"sync/atomic"
-
-	"github.com/google/uuid"
-	"github.com/launix-de/memcp/scm"
-	"github.com/launix-de/memcp/storage/mosi"
-)
+import "fmt"
+import "maps"
+import "sync"
+import "context"
+import "sync/atomic"
+import "github.com/google/uuid"
+import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage/mosi"
 
 // Definition leases belong to the actual transaction, rather than a parser or
 // reusable executor. Getters still read immutable metadata without locks; one
@@ -100,7 +97,7 @@ func (tx *TxContext) readSchema(db *database) {
 		if r := activeReplication(db); writer && r != nil && validReplicaDatabase(db.Name) && !r.resourceCell(mosiResource{Database: db.Name}).ownstate.ReadReady() {
 			panic("schema access conflicts with another schema transaction; retry transaction")
 		}
-		db.GetRead(tx)
+		db.readAuthority(tx)
 		db.definitionAdmission.Lock()
 		if writer {
 			if !db.definitionMu.TryRLock() {
@@ -358,12 +355,21 @@ func (tx *TxContext) claimSchemaMaintenance(t *table) {
 		return
 	}
 	if !t.maintenanceMu.TryLock() {
-		panic("engine change conflicts with table maintenance; retry transaction")
+		panic("schema change conflicts with table maintenance; retry transaction")
 	}
 	if tx.schemas.maintenance == nil {
 		tx.schemas.maintenance = make(map[*table]bool)
 	}
 	tx.schemas.maintenance[t] = true
+}
+
+func (tx *TxContext) ownsSchemaMaintenance(t *table) bool {
+	if tx == nil {
+		return false
+	}
+	tx.schemas.mu.Lock()
+	defer tx.schemas.mu.Unlock()
+	return tx.schemas.maintenance[t]
 }
 
 // All statements keep using their original physical transaction journals.
@@ -447,6 +453,7 @@ func (tx *TxContext) recordSchema(t *table, created bool) int {
 		return -1
 	}
 	tx.writeSchema(t.schema)
+	tx.claimSchemaMaintenance(t)
 	projection := schemaProjection{table: t, created: created, name: t.Name}
 	if !created {
 		t.schema.schemalock.Lock()

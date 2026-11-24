@@ -934,7 +934,7 @@ func scanTableReference(expr scm.Scmer) (tableRef, bool) {
 	}
 	if expr.IsSlice() {
 		items := expr.Slice()
-		if len(items) == 5 && callHeadIs(items[0], "table") {
+		if (len(items) == 5 || len(items) == 6) && callHeadIs(items[0], "table") {
 			schema, name := scm.String(items[1]), scm.String(items[3])
 			if items[2].Bool() || items[4].Bool() {
 				db := GetDatabase(schema, items[2].Bool())

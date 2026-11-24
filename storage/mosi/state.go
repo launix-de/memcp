@@ -525,8 +525,15 @@ func (state *State) TryWrite(owner any, continuation bool, readProof *ReadLease)
 		} else if current.handover != nil && (current.sealed || !continuation) {
 			return nil, current.handover.done
 		}
-		if current.readCount != 0 && (readProof == nil || readProof.released.Load() || readProof.state != state || readProof.group != current.readers || current.readCount != 1) {
-			return nil, current.readers.done
+		// A declaration upgrade must retain its exact sole read proof. Ordinary
+		// resource batches may publish compatible physical topology while local
+		// readers retain unchanged definitions; logical DDL separately owns the
+		// database's exclusive definition admission.
+		if readProof != nil && (readProof.released.Load() || readProof.state != state || readProof.group != current.readers || current.readCount != 1) {
+			if current.readers != nil {
+				return nil, current.readers.done
+			}
+			return nil, nil
 		}
 		next := *current
 		if next.writer == nil {

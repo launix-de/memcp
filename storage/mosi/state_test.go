@@ -28,6 +28,11 @@ func TestMosiDeclarationReadScope(t *testing.T) {
 		t.Fatal("readable declarations were not retained")
 	}
 	second, _ := state.TryRetainRead()
+	physical, wait := state.TryWrite(new(int), false, nil)
+	if physical == nil || wait != nil {
+		t.Fatal("compatible topology publication waited for unchanged declarations")
+	}
+	physical.Release()
 	if writer, wait := state.TryWrite(new(int), false, first); writer != nil || wait == nil {
 		t.Fatal("one reader upgraded while another transaction retained declarations")
 	}

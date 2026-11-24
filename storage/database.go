@@ -505,6 +505,10 @@ func RebuildTable(tbl *table, all bool, repartition bool) string {
 		// generation, blob store or schema.json to rebuild here.
 		return fmt.Sprint(time.Since(start))
 	}
+	if !tbl.isEphemeralQueryTable() {
+		tbl.schema.definitionMu.RLock()
+		defer tbl.schema.definitionMu.RUnlock()
+	}
 	tbl.schema.persistenceLifecycle.RLock()
 	defer tbl.schema.persistenceLifecycle.RUnlock()
 	result := tbl.schema.rebuildWithLifecycle(all, repartition, true, tbl)
@@ -515,14 +519,14 @@ func RebuildTable(tbl *table, all bool, repartition bool) string {
 	if len(errs) == 0 && !tbl.RuntimeOnly {
 		if err := func() (err error) {
 			defer func() { err = recoverAsError("save failed for database " + tbl.schema.Name) }()
-			tbl.schema.save(nil, tbl)
+			tbl.schema.save(nil, nil, tbl)
 			return nil
 		}(); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}
 	if len(errs) == 0 {
-		// tbl.schema.save(nil) committed all replacement UUIDs. Only this success
+		// tbl.schema.save(nil, nil) committed all replacement UUIDs. Only this success
 		// path may remove files belonging to the previous generation.
 		errs = append(errs, cleanupReplacedShardGenerations(result.replaced, "table "+tbl.schema.Name+"."+tbl.Name)...)
 	}
@@ -552,6 +556,8 @@ func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string 
 // complete distinguishes a full checkpoint from successful best-effort
 // maintenance which skipped a busy or cold table. Replication needs the former.
 func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, includeEphemeral bool) ([]string, bool) {
+	db.definitionMu.RLock()
+	defer db.definitionMu.RUnlock()
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	if replication.Load() != nil && GetDatabase(db.Name) != db {
@@ -575,12 +581,12 @@ func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, include
 	}
 	if err := func() (err error) {
 		defer func() { err = recoverAsError("save failed for database " + db.Name) }()
-		db.save(nil)
+		db.save(nil, nil)
 		return nil
 	}(); err != nil {
 		return []string{err.Error()}, false
 	}
-	// db.save(nil) committed all replacement UUIDs. A save failure returns above
+	// db.save(nil, nil) committed all replacement UUIDs. A save failure returns above
 	// and deliberately retains every old generation.
 	errs := cleanupReplacedShardGenerations(result.replaced, "database "+db.Name)
 	if len(errs) != 0 || !result.complete || !hasTransactions {
@@ -766,9 +772,19 @@ func (db *database) commitSchemaSnapshot(jsonbytes []byte, durable bool, release
 	}
 }
 
-func (db *database) save(counterOwner *replicaCell, tables ...*table) {
+func (db *database) save(tx *TxContext, counterOwner *replicaCell, tables ...*table) {
 	if db == systemSchemaDB {
 		return // fixed, never persisted
+	}
+	if tx.hasSchemaWriter(db) {
+		// Physical growth inside a pending DDL operation belongs to the same
+		// decision. Do not recursively acquire its definition lock or export
+		// the caller's unaccepted definitions through an autonomous checkpoint.
+		db.schemalock.Lock()
+		defer db.schemalock.Unlock()
+		db.checkpointCatalogLocked(tx, tables...)
+		tx.markSchemaDirty(db)
+		return
 	}
 	db.definitionMu.RLock()
 	defer db.definitionMu.RUnlock()
@@ -1252,13 +1268,12 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 
 // SharedResource impl for database
 func (db *database) GetState() SharedState { return db.srState }
-func (db *database) GetRead(tx *TxContext) ReadAccess {
-	if db == systemSchemaDB {
-		return ReadAccess{}
-	}
-	if tx.schemaLease(db) != nil {
-		db.ensureLoaded()
-		return ReadAccess{}
+
+// Schema authority is independent of its Go projection. Catalog-only readers
+// retain compatible definitions without materializing every runtime table.
+func (db *database) readAuthority(tx *TxContext) {
+	if db == systemSchemaDB || tx.schemaLease(db) != nil {
+		return
 	}
 	if r := activeReplication(db); r != nil && validReplicaDatabase(db.Name) {
 		resource := mosiResource{Database: db.Name}
@@ -1268,6 +1283,13 @@ func (db *database) GetRead(tx *TxContext) ReadAccess {
 		if !r.resourceCell(resource).ownstate.Phase().Readable() {
 			r.obtain(resource, mosi.S, replicationUser(tx), tx)
 		}
+	}
+}
+
+func (db *database) GetRead(tx *TxContext) ReadAccess {
+	db.readAuthority(tx)
+	if db == systemSchemaDB {
+		return ReadAccess{}
 	}
 	db.ensureLoaded()
 	return ReadAccess{}
@@ -1342,6 +1364,10 @@ func (db *database) ShowTables() scm.Scmer {
 }
 
 func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, only ...*table) rebuildDatabaseResult {
+	if len(only) != 1 || !only[0].isEphemeralQueryTable() {
+		db.definitionMu.RLock()
+		defer db.definitionMu.RUnlock()
+	}
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	return db.rebuildWithLifecycle(all, repartition, includeEphemeral, only...)
@@ -1627,7 +1653,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 			if durablePublication {
 				func() {
 					defer func() { publicationPanic = recover() }()
-					db.save(nil, t)
+					db.save(nil, nil, t)
 				}()
 			}
 			if publicationPanic != nil {
@@ -1782,7 +1808,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 	done.Wait()
 
 	// Return replaced shards to the caller (Rebuild) so it can delete their
-	// on-disk files AFTER db.save(nil) has written the new schema.json.
+	// on-disk files AFTER db.save(nil, nil) has written the new schema.json.
 	// Deleting old column files before saving the schema creates a window
 	// where a crash/kill leaves schema.json pointing at already-deleted UUIDs.
 	// Failed schema publication intentionally retains the old generation: it is
@@ -1843,7 +1869,7 @@ func CreateDatabase(schema string, ignoreexists bool /*, persistence Persistence
 	}
 
 	db.initializeEmptyCatalog()
-	db.save(nil)
+	db.save(nil, nil)
 	return true
 }
 
@@ -1898,7 +1924,7 @@ func CreateDatabaseWithBackend(schema string, ignoreexists bool, options map[str
 	}
 
 	db.initializeEmptyCatalog()
-	db.save(nil)
+	db.save(nil, nil)
 	return true
 }
 
@@ -2033,7 +2059,7 @@ func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool 
 	}
 
 	db.initializeEmptyCatalog()
-	db.save(nil)
+	db.save(nil, nil)
 	return true
 }
 

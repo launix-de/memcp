@@ -513,7 +513,7 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext,
 	if tx != nil {
 		owner = tx.transactionState
 		if resource.Shard == "" {
-			if lease := tx.schemaLease(databases.Get(resource.Database)); lease != nil {
+			if lease := tx.schemaLease(databases.Get(resource.Database)); lease != nil && lease.write {
 				readProof = lease.reader
 			}
 		}

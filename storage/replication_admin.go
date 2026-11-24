@@ -240,7 +240,7 @@ func (r *replicationManager) retire(id string) error {
 	// across this checkpoint, so a crash cannot reopen the pre-promotion UUIDs.
 	for name := range checkpoint {
 		if db := databases.Get(name); db != nil {
-			db.save(nil)
+			db.save(nil, nil)
 		}
 	}
 	for _, resource := range completed {

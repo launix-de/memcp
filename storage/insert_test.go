@@ -612,15 +612,15 @@ func TestInsertBalancedShardsSurviveWALReplay(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "tinsertbalancedrecovery", 0)
 	topology := tbl.pinActiveTopology()
 	defer func() { topology.releaseOperation() }()
-	first, releaseFirst, _ := tbl.routeFreeInsert(topology, 1)
+	first, releaseFirst, _ := tbl.routeFreeInsert(nil, topology, 1)
 	defer releaseFirst()
-	_, _, next := tbl.routeFreeInsert(topology, 1)
+	_, _, next := tbl.routeFreeInsert(nil, topology, 1)
 	if next == topology || next == nil {
 		t.Fatal("busy routing did not publish a writer lane")
 	}
 	topology.releaseOperation()
 	topology = tbl.pinActiveTopology()
-	second, releaseSecond, _ := tbl.routeFreeInsert(topology, 1)
+	second, releaseSecond, _ := tbl.routeFreeInsert(nil, topology, 1)
 	defer releaseSecond()
 	if first == second {
 		t.Fatal("writers share a shard")

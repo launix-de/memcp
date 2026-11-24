@@ -1502,7 +1502,7 @@ func publishCatalogDatabaseName(name string) {
 
 // scanTopology resolves only the selected database keys before pinning native
 // shard generations. All scan variants retain their existing access schema.
-func (t *table) scanTopology(access scanAccess) *tableShardTopology {
+func (t *table) scanTopology(tx *TxContext, access scanAccess) *tableShardTopology {
 	if !nativeCatalogRelation(t) {
 		return t.activeTopology()
 	}
@@ -1519,10 +1519,16 @@ func (t *table) scanTopology(access scanAccess) *tableShardTopology {
 		}
 	}
 	for i := minimum; i <= maximum; i++ {
+		// Ordinary metadata scans retain the logical tenant's effective
+		// definitions. Internal catalog checkpointing uses only the fixed
+		// system_schema layout and its native partition rights, so a sealed
+		// schema handover never waits for its own declaration admission.
+		db := databases.Get(dimension.Pivots[i].String())
+		tx.readSchema(db)
 		if topology.shards[i] != nil {
 			continue
 		}
-		if db := databases.Get(dimension.Pivots[i].String()); db != nil {
+		if db != nil {
 			db.bootstrapCatalog(nil)
 		}
 	}

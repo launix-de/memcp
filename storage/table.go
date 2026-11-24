@@ -3384,13 +3384,15 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 		// Overflow append also owns maintenanceMu before schema publication.
 		// Repartition may own it while waiting for ddlMu: relinquish only our
 		// local DDL ownership while waiting, then recheck below after reacquiring.
-		for !t.maintenanceMu.TryLock() {
-			t.ddlMu.Unlock()
-			t.maintenanceMu.Lock()
-			t.maintenanceMu.Unlock()
-			t.ddlMu.Lock()
+		if !queryTx.ownsSchemaMaintenance(t) {
+			for !t.maintenanceMu.TryLock() {
+				t.ddlMu.Unlock()
+				t.maintenanceMu.Lock()
+				t.maintenanceMu.Unlock()
+				t.ddlMu.Lock()
+			}
+			defer t.maintenanceMu.Unlock()
 		}
-		defer t.maintenanceMu.Unlock()
 		for _, shard := range t.ActiveShards() {
 			if shard != nil {
 				func() {
@@ -3811,12 +3813,26 @@ func (t *table) DropColumnIfExists(tx *TxContext, name string) bool {
 	return false
 }
 
-func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *storageShard, incoming uint, balance bool) (*tableShardTopology, *storageShard) {
+func (t *table) appendFreeShardDurably(currentTx *TxContext, topology *tableShardTopology, source *storageShard, incoming uint, balance bool) (*tableShardTopology, *storageShard) {
+	if currentTx.hasSchemaWriter(t.schema) {
+		// Pending DDL owns this table's maintenance boundary. The existing
+		// overflow route can keep rows in its live generation until acceptance.
+		return t.topology.Load(), nil
+	}
+	// Acquire before maintenanceMu or shard locks. The background rebuild
+	// inherits this capability, so DDL cannot overtake its final checkpoint.
+	t.schema.definitionMu.RLock()
+	definitionHeld := true
+	defer func() {
+		if definitionHeld {
+			t.schema.definitionMu.RUnlock()
+		}
+	}()
 	if r := activeReplication(t.schema); r != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable() {
 		// Adding a lane changes the database's shard directory. Invalidate
 		// shared schema copies before publication, without affecting ordinary
 		// INSERTs which can use an existing lane.
-		access := t.schema.GetWrite(nil)
+		access := t.schema.GetWrite(currentTx)
 		defer access.Release()
 		if t.schema.tables.Get(t.Name) != t {
 			panic("replication schema changed; retry statement")
@@ -3853,7 +3869,7 @@ func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *sto
 	var savePanic any
 	func() {
 		defer func() { savePanic = recover() }()
-		t.schema.save(nil, t)
+		t.schema.save(currentTx, nil, t)
 	}()
 	if savePanic != nil {
 		t.mu.Lock()
@@ -3887,7 +3903,11 @@ func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *sto
 		return published, newShard
 	}
 	t.overflowRebuilds.Add(1)
-	go t.finishOverflowRebuild(sourceIndex, source)
+	definitionHeld = false
+	go func() {
+		defer t.schema.definitionMu.RUnlock()
+		t.finishOverflowRebuild(sourceIndex, source)
+	}()
 	return published, newShard
 }
 
@@ -3933,7 +3953,7 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 	var savePanic any
 	func() {
 		defer func() { savePanic = recover() }()
-		t.schema.save(nil, t)
+		t.schema.save(nil, nil, t)
 	}()
 	if savePanic != nil {
 		t.mu.Lock()
@@ -4061,7 +4081,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 		// Helper to get or create a shard with capacity for n rows
 		getShardWithCapacity := func(n int64) (*storageShard, func()) {
 			for {
-				shard, release, next := t.routeFreeInsert(topology, n)
+				shard, release, next := t.routeFreeInsert(currentTx, topology, n)
 				if next == nil {
 					continue // reservation contention; keep the existing topology pin
 				}

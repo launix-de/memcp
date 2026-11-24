@@ -1449,7 +1449,7 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchem
 	for i := 0; i < executionAccess.len(); i++ {
 		t.AddPartitioningScore([]string{executionAccess.boundaryColumn(i)}, executionAccess.boundaryAnalyzer(i) != EqualMatcher)
 	}
-	if topology, shard, single := t.pinSingleShardForScan(executionAccess); single {
+	if topology, shard, single := t.pinSingleShardForScan(currentTx, executionAccess); single {
 		found, scanErr := runDirectSingleShardExists(currentTx, topology, shard, executionAccess, conditionCols, condition, ss, querySeq)
 		if scanErr.r != nil {
 			panic(scanErr)
@@ -1675,7 +1675,7 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	akkumulator := scm.ApplyOnce(neutral, nil)
 	hadValue := false
 	var scanErr scanError
-	if topology, shard, single := t.pinSingleShardForScan(executionAccess); single {
+	if topology, shard, single := t.pinSingleShardForScan(currentTx, executionAccess); single {
 		msg := runDirectSingleShardScan(currentTx, topology, shard, executionAccess, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, source, ss, querySeq)
 		if msg.err.r != nil {
 			scanErr = msg.err

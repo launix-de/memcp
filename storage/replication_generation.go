@@ -320,7 +320,7 @@ func (r *replicationManager) prepareResource(resource mosiResource) (content str
 				db.prepareReplicaCatalog()
 			}
 		}
-		db.save(nil)
+		db.save(nil, nil)
 		return r.schemaDigest(db.persistence.ReadSchema())
 	}
 	c := r.resourceCell(resource)

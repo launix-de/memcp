@@ -464,6 +464,33 @@ test_cases:
   - name: Restart retains only the accepted view definition and data
     sql: SELECT id, value FROM cat_tx_view ORDER BY id
     expect: {rows: 1, data: [{id: 1, value: 32}]}
+  - name: T-SQL data and relational catalog joins use the same pending definition
+    syntax: tsql
+    sql: |
+      BEGIN TRANSACTION;
+      UPDATE dbo.cat_tx_progress SET value = 45 WHERE id = 1;
+      ALTER TABLE dbo.cat_tx_progress ADD note INT DEFAULT 7;
+      SELECT id, value, note FROM dbo.cat_tx_progress ORDER BY id;
+      SELECT t.name AS table_name, c.ordinal, c.name AS column_name
+      FROM system_schema.tables t JOIN system_schema.[columns] c
+        ON c.schema_name = t.schema_name AND c.table_name = t.name
+      WHERE t.schema_name = 'memcp-tests' AND t.name = 'cat_tx_progress'
+      ORDER BY c.ordinal;
+      ROLLBACK TRANSACTION;
+    expect:
+      rows: 5
+      data:
+      - {id: 1, value: 45, note: 7}
+      - {id: 2, value: 22, note: 7}
+      - {table_name: cat_tx_progress, ordinal: 0, column_name: id}
+      - {table_name: cat_tx_progress, ordinal: 1, column_name: value}
+      - {table_name: cat_tx_progress, ordinal: 2, column_name: note}
+  - name: T-SQL rollback restores data seen by the other SQL frontend
+    sql: SELECT id, value FROM cat_tx_progress ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: 32}, {id: 2, value: 22}]}
+  - name: T-SQL rollback restores the authoritative column definitions
+    sql: SELECT ordinal, name FROM system_schema.columns WHERE schema_name = 'memcp-tests' AND table_name = 'cat_tx_progress' ORDER BY ordinal
+    expect: {rows: 2, data: [{ordinal: 0, name: id}, {ordinal: 1, name: value}]}
   - name: Create an aggregate source incarnation
     sql: CREATE TABLE cat_aggregate_owner (id INT PRIMARY KEY, value INT)
   - name: Populate the original aggregate source

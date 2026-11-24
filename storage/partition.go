@@ -302,9 +302,9 @@ func runSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shar
 // access resolves to exactly one shard. It deliberately avoids building the
 // relevant-shard slice used by the fanout path, allowing concrete scan kernels
 // to execute without an escaping callback frame.
-func (t *table) pinSingleShardForScan(access scanAccess) (*tableShardTopology, *storageShard, bool) {
+func (t *table) pinSingleShardForScan(currentTx *TxContext, access scanAccess) (*tableShardTopology, *storageShard, bool) {
 	for {
-		topology := t.scanTopology(access)
+		topology := t.scanTopology(currentTx, access)
 		shard, single := singleRelevantShard(topology.dimensions, access, topology.shards)
 		if !single {
 			return nil, nil, false
@@ -396,7 +396,7 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, p
 	// the whole shard-local scan pipeline to a remote holder; row readers must not
 	// perform another resource acquisition from inside the callback.
 	for {
-		topology := t.scanTopology(access)
+		topology := t.scanTopology(currentTx, access)
 		var relevant []*storageShard
 		if topology.mode == ShardModeFree {
 			relevant = topology.shards
@@ -1512,7 +1512,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 	var savePanic any
 	func() {
 		defer func() { savePanic = recover() }()
-		t.schema.save(nil, t)
+		t.schema.save(nil, nil, t)
 	}()
 	if savePanic != nil {
 		for i := len(oldshardsLocked) - 1; i >= 0; i-- {

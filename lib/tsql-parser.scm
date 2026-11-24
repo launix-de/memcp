@@ -1852,9 +1852,9 @@ caller's policy remains explicit through every nested view expansion. */
 		node)
 	(cons _head _tail) (begin (map node tsql_describe_sources) node)
 	_ node)))
-(define tsql_describe_query (lambda (query policy planning_session)
+(define tsql_describe_query (lambda (query policy planning_session tx)
 	(bind_query_names (tsql_describe_sources (tsql_bind_column_compilers
-		(sql_expand_views query policy nil) (tsql_column_compiler planning_session))) '())))
+		(sql_expand_views query policy tx) (tsql_column_compiler planning_session))) '())))
 /* Explicit wire descriptors come from the existing SQL expression metadata,
 never from the first row. Unknown expression types stay text in this first slice. */
 /* Width/scale originate in declaration syntax, never in the first output row.
@@ -3334,7 +3334,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		) (list op value)) empty true))
 	) (reduce terms tsql_fold_additive a)))
 	(define tsql_describe_dml (lambda (query) (begin
-		(define bound (tsql_describe_query query policy planning_session))
+		(define bound (tsql_describe_query query policy planning_session tx))
 		(define fields (tsql_result_columns bound parameters))
 		(if (list? fields) (list (quote quote) '()) (error "invalid prepared mutation contract")))))
 	(define tsql_build_select_plan (lambda (query) (begin
@@ -3344,7 +3344,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		Describe the original declared expressions so NULL folding cannot erase
 		their explicit widths or temporal precision. Analysis still consumes the
 		bound tree; neither path constructs or executes a physical plan. */
-		(define checked (if describe (tsql_describe_query expanded policy planning_session) expanded))
+		(define checked (if describe (tsql_describe_query expanded policy planning_session tx) expanded))
 		(define descriptors (tsql_result_columns expanded parameters))
 		(if analyze_parameters (list (quote quote) checked)
 			describe (list (quote quote) descriptors) (list (quote !begin)
@@ -3370,7 +3370,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
 			(error "INSERT column count does not match SELECT column count"))
 		(if describe (begin
-			(define checked (tsql_describe_query expanded policy planning_session))
+			(define checked (tsql_describe_query expanded policy planning_session tx))
 			/* Bind the source contract before accepting a pure prepared mutation. */
 			(define checked_fields (tsql_result_columns checked parameters))
 			(if (equal? (count checked_fields) (count declarations)) (list (quote quote) '())

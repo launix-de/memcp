@@ -378,7 +378,7 @@ func TestAddedDefaultSchemaDropsRetiredRecoveryExtents(t *testing.T) {
 	tbl.Shards = append(tbl.Shards, second)
 	tbl.publishTopologyLocked()
 	tbl.mu.Unlock()
-	tbl.schema.save(nil)
+	tbl.schema.save(nil, nil)
 	value := strings.Repeat("captured-default-payload", 100)
 	tbl.CreateColumn(nil, "captured", "VARCHAR", nil, []scm.Scmer{scm.NewString("default"), scm.NewString(value)})
 	encoded, err := json.Marshal(tbl)

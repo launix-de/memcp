@@ -982,7 +982,7 @@ func (s *storageShard) GetRead(currentTx *TxContext, mayDelegate bool) ReadAcces
 // acquisition may install a successor, but must never reinterpret those IDs.
 func (s *storageShard) getRead(currentTx *TxContext, options shardReadOptions) ReadAccess {
 	if !s.t.RuntimeOnly {
-		currentTx.readSchema(s.authorityDatabase())
+		currentTx.readSchema(s.t.schema)
 	}
 	definitionWriter := currentTx.hasSchemaWriter(s.authorityDatabase())
 	if definitionWriter {
@@ -1051,7 +1051,7 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 // wait; callers must release any earlier writers before trying the blocking path.
 func (s *storageShard) getWrite(currentTx *TxContext, blocking bool) (WriteAccess, bool) {
 	if !s.t.RuntimeOnly {
-		currentTx.readSchema(s.authorityDatabase())
+		currentTx.readSchema(s.t.schema)
 	}
 	if s.t.retired.Load() {
 		panic("table handle belongs to a rolled-back or dropped definition")

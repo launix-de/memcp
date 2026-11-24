@@ -717,7 +717,7 @@ func reserveInsertRows(shard *storageShard, rows int64, size uint, overflow bool
 	}
 }
 
-func (t *table) routeFreeInsert(topology *tableShardTopology, rows int64) (*storageShard, func(), *tableShardTopology) {
+func (t *table) routeFreeInsert(currentTx *TxContext, topology *tableShardTopology, rows int64) (*storageShard, func(), *tableShardTopology) {
 	if topology.mode != ShardModeFree || len(topology.shards) == 0 {
 		return nil, nil, topology
 	}
@@ -766,7 +766,7 @@ func (t *table) routeFreeInsert(topology *tableShardTopology, rows int64) (*stor
 	// already running, keep writing to the live generation instead of waiting
 	// behind its compression/schema I/O. Existing forwarding preserves handover.
 	source := topology.shards[len(topology.shards)-1]
-	next, _ := t.appendFreeShardDurably(topology, source, uint(rows), candidate != nil || !t.localInsertShard(source))
+	next, _ := t.appendFreeShardDurably(currentTx, topology, source, uint(rows), candidate != nil || !t.localInsertShard(source))
 	if next != nil && next != topology {
 		return nil, nil, next
 	}

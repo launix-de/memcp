@@ -125,7 +125,7 @@ func TestClusterWALReplayRecoversIntegerCounterWithoutAllocator(t *testing.T) {
 	c.AutoIncrement = true
 	c.UpdateSanitizer()
 	tbl.publishShowColumnsSnapshot(true)
-	tbl.schema.save(nil)
+	tbl.schema.save(nil, nil)
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 		{scm.NewInt(10000), scm.NewString("explicit")},
 		{scm.NewInt(10001), scm.NewString("explicit")},
@@ -183,7 +183,7 @@ func TestClusterInsertKeepsLocalLaneBeforeForeignNewest(t *testing.T) {
 	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
 	defer nodeScans.Store(oldService)
 	for i := 0; i < 10; i++ {
-		shard, release, next := tbl.routeFreeInsert(tbl.activeTopology(), 1)
+		shard, release, next := tbl.routeFreeInsert(nil, tbl.activeTopology(), 1)
 		if shard != local || next != tbl.activeTopology() {
 			t.Fatal("foreign newest displaced local writer")
 		}
@@ -549,7 +549,7 @@ func TestClusterCounterCheckpointDuringLocalSchemaUpgrade(t *testing.T) {
 	if action != mosi.Send || pending.Retained() != mosi.O {
 		t.Fatal("fixture did not start an O-to-M upgrade")
 	}
-	tbl.schema.save(cell)
+	tbl.schema.save(nil, cell)
 	if cell.ownstate.Snapshot() != pending || !r.directory.Records[resource.key()].Readers["reader"] {
 		t.Fatal("counter checkpoint completed the upgrade or revoked a reader")
 	}
@@ -575,7 +575,7 @@ func TestClusterCounterCheckpointDuringLocalSchemaUpgrade(t *testing.T) {
 			t.Errorf("non-owner checkpoint: expected ownership rejection, got %v", failure)
 		}
 	}()
-	tbl.schema.save(cell)
+	tbl.schema.save(nil, cell)
 }
 
 func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
