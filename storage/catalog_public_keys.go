@@ -47,7 +47,7 @@ func sameUniqueKey(a, b uniqueKey) bool {
 	return a.Id == b.Id && a.ConstraintName == b.ConstraintName && a.NullsNotDistinct == b.NullsNotDistinct && slices.Equal(a.Cols, b.Cols)
 }
 
-func validateCatalogKey(db *database, declaration catalogKeyDeclaration, views map[*table]*tableShowColumnsSnapshot, scope catalogForeignEndpointScope) *table {
+func validateCatalogKey(db *database, declaration catalogKeyDeclaration, views map[*table]*tableShowColumnsSnapshot, scope catalogForeignEndpointScope, projected map[*table][]*column) *table {
 	t := db.tables.Get(declaration.Table)
 	if t == nil || t.RuntimeIdentity != declaration.Identity || (!t.committedAt(db.catalogView().version) && !scope.owns(t)) {
 		panic("unique declaration endpoint generation was replaced")
@@ -65,7 +65,7 @@ func validateCatalogKey(db *database, declaration catalogKeyDeclaration, views m
 			panic("invalid unique declaration column")
 		}
 		seen[name] = true
-		column := catalogColumnInView(t, name, views)
+		column := catalogColumnInView(t, name, views, projected)
 		if column == nil {
 			panic("unknown unique declaration column: " + name)
 		}
@@ -152,7 +152,7 @@ func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation
 			}
 			key.Cols = append([]string(nil), key.Cols...)
 			declaration = catalogKeyDeclaration{t.Name, t.RuntimeIdentity, key}
-			validateCatalogKey(db, declaration, tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState})
+			validateCatalogKey(db, declaration, tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState}, nil)
 			if keyNameConflict(db, t, key, tx.publicUniqueKeys(), tx.publicForeignAmendments()) {
 				panic("declaration name already exists: " + key.Id)
 			}
@@ -170,7 +170,7 @@ func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation
 				return
 			}
 			declaration = catalogKeyDeclaration{t.Name, t.RuntimeIdentity, key}
-			validateCatalogKey(db, declaration, tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState})
+			validateCatalogKey(db, declaration, tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState}, nil)
 			keys = append([]uniqueKey(nil), current...)
 			keys = slices.Delete(keys, found, found+1)
 			if dependency := foreignKeyRequiresUnique(t, keys, tx.publicForeignAmendments()); dependency != "" {

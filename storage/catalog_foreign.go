@@ -458,7 +458,7 @@ func (state *publicCatalogChanges) validateStageLocked(tx *TxContext, child, par
 		}
 	}
 	views := tx.publicDeclarationViews()
-	validateCatalogForeign(db, declaration, tx.publicUniqueKeys(), views, catalogForeignEndpointScope{owner: tx.transactionState})
+	validateCatalogForeign(db, declaration, tx.publicUniqueKeys(), views, catalogForeignEndpointScope{owner: tx.transactionState}, nil)
 	fk := declaration.Foreign
 	if expected != nil {
 		expected.validate(child, parent, fk, views)
@@ -498,7 +498,7 @@ func validateExistingForeignRows(tx *TxContext, child *table, fk foreignKey, par
 		scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }), false)
 }
 
-func validateCatalogForeign(db *database, declaration catalogForeignDeclaration, keys map[*table][]uniqueKey, views map[*table]*tableShowColumnsSnapshot, scope catalogForeignEndpointScope) {
+func validateCatalogForeign(db *database, declaration catalogForeignDeclaration, keys map[*table][]uniqueKey, views map[*table]*tableShowColumnsSnapshot, scope catalogForeignEndpointScope, projected map[*table][]*column) {
 	fk := declaration.Foreign
 	child, parent := db.tables.Get(fk.Tbl1), db.tables.Get(fk.Tbl2)
 	if child == nil || parent == nil || child.schema != db || parent.schema != db || child.RuntimeIdentity != declaration.ChildIdentity || parent.RuntimeIdentity != declaration.ParentIdentity ||
@@ -525,7 +525,7 @@ func validateCatalogForeign(db *database, declaration catalogForeignDeclaration,
 				panic("duplicate foreign declaration column: " + name)
 			}
 			seen[name] = true
-			column := catalogColumnInView(t, name, views)
+			column := catalogColumnInView(t, name, views, projected)
 			if column == nil {
 				panic("unknown foreign declaration column: " + name)
 			}
@@ -930,7 +930,7 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 		}
 	}
 	for _, declaration := range declarations {
-		validateCatalogForeign(db, declaration, keyProjection, (&TxContext{transactionState: changes.owner}).publicDeclarationViews(), catalogForeignEndpointScope{owner: changes.owner})
+		validateCatalogForeign(db, declaration, keyProjection, (&TxContext{transactionState: changes.owner}).publicDeclarationViews(), catalogForeignEndpointScope{owner: changes.owner}, nil)
 		fk := declaration.Foreign
 		publication.foreignPayloadBytes += fk.payloadFootprint
 		child, parent := db.tables.Get(fk.Tbl1), db.tables.Get(fk.Tbl2)
@@ -1248,7 +1248,7 @@ func (publication *publicForeignPublication) retirePrevious() {
 // have their existing native back-references restored.
 func (db *database) recoverPublicForeignDeclarations(declarations []catalogForeignDeclaration, scope catalogForeignEndpointScope) {
 	for _, declaration := range declarations {
-		validateCatalogForeign(db, declaration, nil, nil, scope)
+		validateCatalogForeign(db, declaration, nil, nil, scope, nil)
 		fk := declaration.Foreign
 		child, parent := db.tables.Get(fk.Tbl1), db.tables.Get(fk.Tbl2)
 		child.Foreign = append(child.Foreign, fk)
@@ -1430,7 +1430,7 @@ func (expected *foreignDeclarationExpectations) validate(child, parent *table, f
 			if fact.name != names[i] {
 				panic("foreign expected column name does not match its declaration")
 			}
-			current := catalogColumnInView(t, fact.name, views)
+			current := catalogColumnInView(t, fact.name, views, nil)
 			if current == nil || current.Typ != fact.typ || current.Collation != fact.collation || current.AllowNull != fact.nullable || isRuntimeComputedColumn(current) != fact.computed || len(current.Typdimensions) != len(fact.dimensions) {
 				panic("foreign endpoint declaration changed before staging")
 			}

@@ -160,6 +160,24 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 		panic("invalid native declaration replay domain")
 	}
 	p := newCatalogNativeProjection(db)
+	// Final original-T views already omit a retired column. Native actions
+	// must instead validate their own predecessor: seed these endpoints from
+	// the published header and advance the same ordered column projection.
+	// Other endpoints retain their established view (including prior appends).
+	var retirementInputs map[*table][]*column
+	for _, action := range actions {
+		if d := action.Drop; d != nil {
+			t := db.tables.Get(d.Table)
+			if t == nil || t.RuntimeIdentity != d.Identity {
+				panic("column retirement predecessor generation was replaced")
+			}
+			p.propertyColumns[t] = t.columnDeclarations()
+			if retirementInputs == nil {
+				retirementInputs = make(map[*table][]*column)
+			}
+			retirementInputs[t] = p.propertyColumns[t]
+		}
+	}
 	added := make(map[catalogForeignIdentity]int)
 	for index, action := range actions {
 		if action.TableRename != nil && action.Operation != "table_rename" {
@@ -182,6 +200,9 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 			t := db.tables.Get(action.Drop.Table)
 			_, columns := db.projectColumnDrop(action.Drop, p.propertyColumns[t], p)
 			p.propertyColumns[t] = columns
+			if _, retiring := retirementInputs[t]; retiring {
+				retirementInputs[t] = columns
+			}
 		case "column_default":
 			if action.Default == nil || action.Drop != nil || action.Declaration != nil || action.Rename != nil || action.TableRename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
 				panic("invalid native ordered default action")
@@ -196,6 +217,9 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 				columns = t.columnDeclarations()
 			}
 			p.propertyColumns[t] = projectOrderedColumnDefault(d, t, columns)
+			if _, retiring := retirementInputs[t]; retiring {
+				retirementInputs[t] = p.propertyColumns[t]
+			}
 		case "column_declaration":
 			if domain != catalogNativeCurrent || action.Declaration == nil || action.Rename != nil || action.TableRename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
 				panic("invalid native stored declaration action")
@@ -203,6 +227,9 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 			t := db.tables.Get(action.Declaration.Table)
 			_, columns := db.projectStoredDeclaration(action.Declaration, p.propertyColumns[t], p)
 			p.propertyColumns[t] = columns
+			if _, retiring := retirementInputs[t]; retiring {
+				retirementInputs[t] = columns
+			}
 		case "table_rename":
 			if domain != catalogNativeCurrent || action.TableRename == nil || action.Rename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
 				panic("invalid native table rename action")
@@ -215,12 +242,15 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 			t := db.tables.Get(action.Rename.Table)
 			_, columns := db.projectColumnRename(action.Rename, p.propertyColumns[t])
 			p.propertyColumns[t] = columns
+			if _, retiring := retirementInputs[t]; retiring {
+				retirementInputs[t] = columns
+			}
 		case "foreign_add", "foreign_drop":
 			if action.Foreign == nil || action.Key != nil || action.Property != nil {
 				panic("invalid native foreign action")
 			}
 			d := *action.Foreign
-			validateCatalogForeign(db, d, p.keys, views, scope)
+			validateCatalogForeign(db, d, p.keys, views, scope, retirementInputs)
 			name := foreignIdentity(d)
 			current, exists := p.foreign[name]
 			if action.Operation == "foreign_drop" {
@@ -260,12 +290,15 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 			t := db.tables.Get(action.Property.Table)
 			_, columns := db.projectColumnPropertyChange(action.Property, action.Operation, p.propertyColumns[t])
 			p.propertyColumns[t] = columns
+			if _, retiring := retirementInputs[t]; retiring {
+				retirementInputs[t] = columns
+			}
 		case "key_add", "key_drop":
 			if action.Key == nil || action.Foreign != nil || action.Property != nil {
 				panic("invalid native unique action")
 			}
 			d := *action.Key
-			t := validateCatalogKey(db, d, views, scope)
+			t := validateCatalogKey(db, d, views, scope, retirementInputs)
 			keys := uniqueKeysInView(t, p.keys)
 			if action.Operation == "key_add" {
 				if nativeKeyNameConflict(db, t, d.Key, p.keys, p.foreign) {
@@ -410,10 +443,10 @@ func (db *database) recoverNativeDeclarations(actions []catalogNativeDeclaration
 			t.Columns = columns
 			db.initializeRecoveryColumnMetadata(t)
 		case "key_add":
-			t := validateCatalogKey(db, *action.Key, nil, scope)
+			t := validateCatalogKey(db, *action.Key, nil, scope, nil)
 			t.Unique = append(append([]uniqueKey(nil), t.Unique...), action.Key.Key)
 		case "key_drop":
-			t := validateCatalogKey(db, *action.Key, nil, scope)
+			t := validateCatalogKey(db, *action.Key, nil, scope, nil)
 			t.Unique = slices.DeleteFunc(t.Unique, func(key uniqueKey) bool { return sameUniqueKey(key, action.Key.Key) })
 		}
 	}

@@ -137,7 +137,7 @@ func declareUnpublishedKey(current *table, key uniqueKey) bool {
 			panic("duplicate unique declaration column: " + name)
 		}
 		seen[name] = true
-		if column := catalogColumnInView(current, name, nil); column == nil {
+		if column := catalogColumnInView(current, name, nil, nil); column == nil {
 			panic("unknown unique declaration column: " + name)
 		}
 	}

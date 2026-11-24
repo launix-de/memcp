@@ -57,15 +57,18 @@ func (tx *TxContext) publicDeclarationViews() map[*table]*tableShowColumnsSnapsh
 	return nil
 }
 
-func catalogColumnsInView(t *table, views map[*table]*tableShowColumnsSnapshot) []*column {
+func catalogColumnsInView(t *table, views map[*table]*tableShowColumnsSnapshot, projected map[*table][]*column) []*column {
+	if columns, selected := projected[t]; selected {
+		return columns
+	}
 	if snapshot := views[t]; snapshot != nil && snapshot.metadata.columnNames != nil {
 		return snapshot.metadata.columnNames.declarations
 	}
 	return t.columnDeclarations()
 }
 
-func catalogColumnInView(t *table, name string, views map[*table]*tableShowColumnsSnapshot) *column {
-	for _, c := range catalogColumnsInView(t, views) {
+func catalogColumnInView(t *table, name string, views map[*table]*tableShowColumnsSnapshot, projected map[*table][]*column) *column {
+	for _, c := range catalogColumnsInView(t, views, projected) {
 		if c.Name == name {
 			return c
 		}

@@ -98,7 +98,7 @@ func (changes *publicCatalogChanges) stageForeignDrop(tx *TxContext, child *tabl
 		if addition == nil {
 			validateCatalogForeignDrop(db, declaration, catalogForeignEndpointScope{owner: tx.transactionState})
 		} else {
-			validateCatalogForeign(db, declaration, tx.publicUniqueKeys(), tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState})
+			validateCatalogForeign(db, declaration, tx.publicUniqueKeys(), tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState}, nil)
 		}
 	}()
 	endpoints := foreignEndpointTables(child, parent)
@@ -142,7 +142,7 @@ func (changes *publicCatalogChanges) stageForeignDrop(tx *TxContext, child *tabl
 	if addition == nil {
 		validateCatalogForeignDrop(db, declaration, catalogForeignEndpointScope{owner: tx.transactionState})
 	} else {
-		validateCatalogForeign(db, declaration, tx.publicUniqueKeys(), tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState})
+		validateCatalogForeign(db, declaration, tx.publicUniqueKeys(), tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState}, nil)
 		if currentForeignAdditions(tx.publicForeignAmendments())[foreignIdentity(addition.declaration)] != addition {
 			panic("foreign removal pending predecessor changed")
 		}
@@ -307,7 +307,7 @@ func (t *table) reserveForeignDropProgram(transaction *transactionState, expecte
 }
 
 func validateCatalogForeignDrop(db *database, declaration catalogForeignDeclaration, scope catalogForeignEndpointScope) {
-	validateCatalogForeign(db, declaration, nil, nil, scope)
+	validateCatalogForeign(db, declaration, nil, nil, scope, nil)
 	fk := declaration.Foreign
 	for _, t := range foreignEndpointTables(db.tables.Get(fk.Tbl1), db.tables.Get(fk.Tbl2)) {
 		matched := false

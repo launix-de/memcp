@@ -736,7 +736,7 @@ func validateCatalogColumnDefault(db *database, declaration catalogColumnDefault
 	}
 	columns := t.Columns
 	if len(views) > 0 {
-		columns = catalogColumnsInView(t, views[0])
+		columns = catalogColumnsInView(t, views[0], nil)
 	}
 	for _, column := range columns {
 		if column.Name == declaration.Column {
