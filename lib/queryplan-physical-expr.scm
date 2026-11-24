@@ -1052,12 +1052,12 @@ preparing nested stages; no free caller SQL column may enter an inner program. *
 					(begin
 						(define dependency (source_stage_output_stage all_stages src))
 						(or (scoped_program_probe_stage? all_stages dependency)
-							/* A residual D coordinate belongs to this input's driver
-							row. Its scalar dependency cannot prepare an independent
-							carrier before that row binds the complete caller tuple. */
+							/* Only an actual free input coordinate requires the driver
+							row first. Already-bound D leaves historical alias facts;
+							closed producers retain their costed carrier alternatives. */
 							(and (group_stage? dependency)
 								(scalar_first_probe_supported? dependency)
-								(stage_has_residual_outer_refs? dependency)))))))
+								(not (empty_list? (scalar_probe_free_column_refs dependency)))))))))
 				(define contribution_sources (if (or (not (nil? property_cover)) (equal? contribution_mode (quote delta)) (equal? contribution_mode (quote fresh)))
 					(filter input_sources source_is_stage_output?) '()))
 				(define caller_sources (sources_without_probe_outputs input_sources

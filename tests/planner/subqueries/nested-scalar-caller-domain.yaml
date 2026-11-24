@@ -299,3 +299,34 @@ test_cases:
     )\n"
   expect:
     result: true
+- name: Stale aliases do not make a closed keyed producer require a driver row
+  scm: |
+    (begin
+      (define local (list "local" "memcp-tests" "nsl_target" false true nil))
+      (define caller (list "caller" "memcp-tests" "nsl_driver" false true nil))
+      (define coordinate (list 'get_column "caller" false "middle_id" false))
+      (define local_key (list 'get_column "local" false "id" false))
+      (define bound (list relational_iteration_parameter 'bound_coordinate))
+      (define domain (list coordinate bound))
+      (define aggregate (list (list (list 'get_column "local" false "final_id" false)
+        (scalar_once_reduce_first) nil)))
+      (define facts (list (list 'condition true) (list 'lookup-keys domain)
+        (list 'btw2025_domain domain) (list 'btw2025_accessing_after_simple '("old_period"))
+        (list 'null_semantics 'scalar) (list 'result_max_rows_per_partition 1)
+        (list 'partition_limit 1) (list 'on_overflow 'ignore)))
+      (define closed (make_group_stage "closed-keyed-input" local domain (list local_key bound)
+        aggregate nil '() '() nil nil facts))
+      (define input (make_query_block "memcp-tests" (list local) '()
+        (list 'equal?? local_key coordinate) '() nil '() nil nil '() '() '()))
+      (define child (make_group_stage "free-query-input" input domain domain
+        aggregate nil '() '() nil nil facts))
+      (define closed_reads (scalar_probe_free_column_refs closed))
+      (define child_reads (scalar_probe_free_column_refs child))
+      (and (scalar_first_probe_supported? closed) (scalar_first_probe_supported? child)
+        (scalar_probe_bindings_complete? closed (list caller))
+        (scalar_probe_bindings_complete? child (list caller))
+        (empty_list? closed_reads)
+        (not (empty_list? child_reads))
+        (reduce child_reads (lambda (valid ref) (and valid (expression_equal? ref coordinate))) true)))
+  expect:
+    result: true
