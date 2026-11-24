@@ -61,12 +61,13 @@ test_cases:
         /* Historical executable metadata is deliberately kept in the old ABI.
         This is stored frontend IR, not an old live table-interface caller. */
         (define historical (json_decode_scmer "[{\"symbol\":\"lambda\"},[],[{\"symbol\":\"tsql_declared_byte_length\"},[{\"symbol\":\"show\"},[{\"symbol\":\"table\"},\"memcp-tests\",\"NamePolicyMixed\"],\"column\",\"id\",false]]]"))
-        (create_sql_view nil "memcp-tests" "NamePolicyView" "tsql"
+        (with_autocommit (newsession) nil nil "restore historical view" (lambda (tx)
+        (create_sql_view tx "memcp-tests" "NamePolicyView" "tsql"
           "SELECT COL_LENGTH(N'NamePolicyMixed',N'id') AS value FROM NamePolicyMixed"
           (list (quote query-block) "memcp-tests"
             (list (list "source" "memcp-tests" "NamePolicyMixed" false nil))
             (list "value" (list (quote sql_type_expr) (list historical) "INT" nil))
-            true '() true nil nil nil '() '() '()) "error")
+            true '() true nil nil nil '() '() '()) "error")))
         true)
     expect: {result: true}
   - name: Restored view callbacks use the same native table lookup

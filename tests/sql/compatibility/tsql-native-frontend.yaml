@@ -2401,7 +2401,7 @@ test_cases:
         END AS value FROM portable_contract_input
     scm: |-
       (begin
-          (define ir (nth (sql_find_view "memcp-tests" "portable_contract_recipes") 2))
+          (define ir (nth (sql_find_view nil "memcp-tests" "portable_contract_recipes") 2))
           (and (not (regexp_test ir "NthLocalVar|lambda|\"var\""))
             (not (regexp_test (string (parse_tsql "memcp-tests" "SELECT * FROM portable_contract_recipes" nil (newsession) nil)) "sql_compile_expr|sql_compile_column|tsql_text_compiler"))))
     expect:
@@ -2424,7 +2424,7 @@ test_cases:
   - name: Rejected metadata scalar view is never published
     expect:
       result: true
-    scm: (nil? (sql_find_view "memcp-tests" "portable_metadata_scalar"))
+    scm: (nil? (sql_find_view nil "memcp-tests" "portable_metadata_scalar"))
   - name: Shared mysql consumer compiles stored frontend contracts
     setup:
     - sql: CREATE VIEW portable_shared_contract AS SELECT CAST(note AS NVARCHAR(3)) AS label,code+1 AS next_code FROM portable_contract_input
@@ -2610,7 +2610,7 @@ test_cases:
       error: true
       contains: does not exist
   - name: Portable view alter never publishes a missing definition
-    scm: (nil? (sql_find_view "memcp-tests" "portable_lifecycle_absent"))
+    scm: (nil? (sql_find_view nil "memcp-tests" "portable_lifecycle_absent"))
     expect:
       result: true
   - name: Portable view alter rejects invalid output aliases before publication
@@ -7408,7 +7408,7 @@ test_cases:
       error: true
       contains: COL_LENGTH in stored views requires a consuming compile policy
   - name: Rejected CTE metadata view leaves no definition
-    scm: (nil? (sql_find_view "memcp-tests" "cte_portable_metadata"))
+    scm: (nil? (sql_find_view nil "memcp-tests" "cte_portable_metadata"))
     expect:
       result: true
     cleanup:

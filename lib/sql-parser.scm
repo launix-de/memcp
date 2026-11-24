@@ -436,6 +436,9 @@ frontend expression contracts before publishing executable assignment code. */
 	/* Output: (lambda (OLD NEW session tx) ...) that can be applied by ExecuteTriggers */
 	/* Uses set_assoc approach: (set changed_rows (set_assoc changed_rows key value)) */
 	(define compile_trigger_body (lambda (schema timing body) (begin
+		/* The callback outlives CREATE TRIGGER's cached plan. Its DML guards
+		belong inside the callback, rather than the creator's guard dispatcher. */
+		(define planning_session (newsession))
 		(define params (list (symbol "OLD") (symbol "NEW") (symbol "session") (symbol "tx")))
 		(define is_after (or (equal? timing "after_insert") (equal? timing "after_update") (equal? timing "after_delete")))
 		(define changed_rows_sym (symbol "changed_rows"))
