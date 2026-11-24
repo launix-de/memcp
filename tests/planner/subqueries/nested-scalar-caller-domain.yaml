@@ -350,8 +350,8 @@ test_cases:
       (and (expression_equal? ordinary stages)
         (not (qassoc_get (gs_facts (car ordinary)) 'contribution_probe false))
         (qassoc_get (gs_facts (cadr ordinary)) 'contribution_probe false)
-        (reduce '(full delta direct fresh) (lambda (valid mode)
-          (and valid (owned (scalar_aggregate_probe_catalog stages mode nil)))) true)
-        (owned (scalar_aggregate_probe_catalog stages nil '(property-witness)))))
+        (reduce (list 'full 'delta 'direct 'fresh) (lambda (valid mode)
+          (and valid (not (nil? mode)) (owned (scalar_aggregate_probe_catalog stages mode nil)))) true)
+        (owned (scalar_aggregate_probe_catalog stages nil (list 'property-witness)))))
   expect:
     result: true
