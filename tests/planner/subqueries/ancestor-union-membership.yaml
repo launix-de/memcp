@@ -433,7 +433,7 @@ test_cases:
   scm: |-
     (begin
       (define source (list "local" "unused" "unused" false nil
-        '("columns" (("Field" "id")))))
+        (list "columns" (list (list "Field" "id")))))
       (define ref (list 'get_column "local" false "id" false))
       (define input (make_query_block "unused" (list source)
         (list "value" (list 'get_column "unknown_caller" false "id" false)) true '() nil '() nil nil '() '() '()))
@@ -444,7 +444,7 @@ test_cases:
   scm: |-
     (begin
       (define source (list "local" "unused" "unused" false nil
-        '("columns" (("Field" "id")))))
+        (list "columns" (list (list "Field" "id")))))
       (define ref (list 'get_column "local" false "id" false))
       (define input (make_query_block "unused" (list source)
         (list "value" (list 'quote (list 'get_column "unknown_caller" false "id" false))) true '() nil '() nil nil '() '() '()))
@@ -455,7 +455,7 @@ test_cases:
   scm: |-
     (begin
       (define source (list "local" "unused" "unused" false nil
-        '("columns" (("Field" "id")))))
+        (list "columns" (list (list "Field" "id")))))
       (define ref (list 'get_column "local" false "id" false))
       (define input (make_query_block "unused" (list source)
         (list "value" (list 'get_column nil false "id" false)) true '() nil '() nil nil '() '() '()))
@@ -466,7 +466,7 @@ test_cases:
   scm: |-
     (begin
       (define source (list "local" "unused" "unused" false nil
-        '("columns" (("Field" "id")))))
+        (list "columns" (list (list "Field" "id")))))
       (define ref (list 'get_column "local" false "id" false))
       (define stage (make_group_stage "scoped" source
         (list (list 'get_column "unknown_caller" false "id" false) ref)
@@ -480,7 +480,7 @@ test_cases:
   scm: |-
     (begin
       (define source (list "local" "unused" "unused" false nil
-        '("columns" (("Field" "id")))))
+        (list "columns" (list (list "Field" "id")))))
       (define ref (list 'get_column "local" false "id" false))
       (define stage (make_group_stage "scoped" source (list ref)
         (list ref) (list '(1 + 0)) true '() '() nil nil '()))
@@ -493,7 +493,7 @@ test_cases:
   scm: |-
     (begin
       (define source (list "local" "unused" "unused" false nil
-        '("columns" (("Field" "id")))))
+        (list "columns" (list (list "Field" "id")))))
       (define ref (list 'get_column "unknown_caller" false "id" false))
       (empty_list? (logical_relation_free_column_refs (make_window_stage "window" source "value" '("id") '(false) 0
         '("id") '(lambda (x) x) '+ 0 (list (list 'condition ref))))))
@@ -503,7 +503,7 @@ test_cases:
   scm: |-
     (begin
       (define source (list "local" "unused" "unused" false nil
-        '("columns" (("Field" "id")))))
+        (list "columns" (list (list "Field" "id")))))
       (define ref (list 'get_column "unknown_caller" false "id" false))
       (empty_list? (logical_relation_free_column_refs (make_window_stage "window" source "value" (list ref) '(false) 0
         '("id") '(lambda (x) x) '+ 0 '()))))
@@ -513,7 +513,7 @@ test_cases:
   scm: |-
     (begin
       (define source (list "local" "unused" "unused" false nil
-        '("columns" (("Field" "id")))))
+        (list "columns" (list (list "Field" "id")))))
       (define ref (list 'get_column "unknown_caller" false "id" false))
       (empty_list? (logical_relation_free_column_refs (make_orc_stage "orc" source "value" '("id") '(false) 0
         '("id") ref '+ 0))))
@@ -523,7 +523,7 @@ test_cases:
   scm: |-
     (begin
       (define source (list "local" "unused" "unused" false nil
-        '("columns" (("Field" "id")))))
+        (list "columns" (list (list "Field" "id")))))
       (define ref (list 'get_column "unknown_caller" false "id" false))
       (empty_list? (logical_relation_free_column_refs (list 'table-function "array" (list ref) '("value")))))
   expect:
@@ -532,7 +532,7 @@ test_cases:
   scm: |-
     (begin
       (define source (list "local" "unused" "unused" false nil
-        '("columns" (("Field" "id")))))
+        (list "columns" (list (list "Field" "id")))))
       (define ref (list 'get_column "unknown_caller" false "id" false))
       (empty_list? (logical_relation_free_column_refs (list 'table-function ref '() '("value")))))
   expect:
@@ -547,7 +547,7 @@ test_cases:
   scm: |-
     (begin
       (define source (list "local" "unused" "unused" false nil
-        '("columns" (("Field" "id")))))
+        (list "columns" (list (list "Field" "id")))))
       (define input (make_query_block "unused" (list source)
         (list "value" (list 'membership_truth 7 "local" "id"))
         true '() nil '() nil nil '() '() '()))
