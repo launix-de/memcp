@@ -189,18 +189,7 @@ func (changes *publicCatalogChanges) stageForeignDrop(tx *TxContext, child *tabl
 		amendment.retainedBytes += uint(len(program.trigger.Name))
 	}
 	if addition == nil {
-		for _, t := range endpoints {
-			for _, current := range t.Foreign {
-				if current.Id == declaration.Foreign.Id && current.Tbl1 == declaration.Foreign.Tbl1 && current.Tbl2 == declaration.Foreign.Tbl2 {
-					amendment.retiredBytes += current.payloadFootprint
-				}
-			}
-			for _, row := range t.showColumnsSnapshot.Load().metadata.constraints.Slice()[3].Slice() {
-				if foreignMetadataValue(row, "Id").String() == declaration.Foreign.Id && foreignMetadataValue(row, "OtherTable").String() == foreignDropOther(t, declaration.Foreign) {
-					amendment.retiredBytes += uint(cap(row.Slice())+cap(foreignMetadataValue(row, "LocalColumns").Slice())+cap(foreignMetadataValue(row, "OtherColumns").Slice())) * uint(unsafe.Sizeof(scm.Scmer{}))
-				}
-			}
-		}
+		amendment.retiredBytes = foreignDropRetiredBytes(endpoints, declaration.Foreign)
 	}
 	for _, t := range endpoints {
 		if _, exists := changes.baselines[t]; !exists {

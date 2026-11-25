@@ -11,11 +11,11 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
-// Only a not-yet-published addition can change state in this profile. Its
-// original endpoints remain leased and blocked for row mutation; unrelated
-// row participants do not invalidate that admission. Preparation still rejects
-// disabled/untrusted CHECK states. Pending FK state is frozen into the same
-// accepted native declaration, including absence of enforcement when disabled.
+// Pending FK/CHECK state belongs to its original unpublished addition.
+// Committed FKs use the same native history's exact retirement/redeclaration
+// owner; all endpoints stay leased through the original transaction decision.
+// CHECK transitions retain their pending-only profile. The accepted FK state
+// selects enforcement, including absence of programs when disabled.
 type catalogConstraintState struct {
 	addition *catalogForeignAmendment
 	check    *catalogCheckAmendment
@@ -39,17 +39,38 @@ func (tx *TxContext) stageConstraintState(child *table, names []string, all, ena
 	if tx == nil || tx.transactionState == nil {
 		panic("foreign state requires its active native declaration transaction")
 	}
-	// Resolve only already-owned pending constraints below. Their original
-	// endpoint leases survive this state change; no new enforcement is admitted.
 	finish := tx.beginCatalogConstruction(catalogValidationConstruction, nil, child)
-	defer finish()
+	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
 	if tx.State != TxActive || tx.decisionStarted || validate && !enabled {
 		panic("invalid native foreign state request")
 	}
 	changes := tx.publicCatalogChanges()
-	if changes == nil || changes.owner != tx.transactionState || changes.db != child.schema || tx.coordinator != nil {
-		panic("foreign state requires an owned pending declaration")
+	if changes == nil {
+		return tx.stagePublicCatalogDeclaration(child.schema, catalogForeignReplacementKind, nil, func(changes *publicCatalogChanges) bool {
+			return changes.stageConstraintState(tx, child, names, all, enabled, validate)
+		})
 	}
+	return changes.stageConstraintState(tx, child, names, all, enabled, validate)
+}
+
+func (changes *publicCatalogChanges) stageConstraintState(tx *TxContext, child *table, names []string, all, enabled, validate bool) bool {
+	if changes.owner != tx.transactionState || changes.db != child.schema || tx.coordinator != nil {
+		panic("foreign state requires its original native catalog owner")
+	}
+	// Resolve committed versus pending membership at the same existing header
+	// owner. The selected stage repeats the complete proof before any effects.
+	committed := func() bool {
+		changes.mu.Lock()
+		defer changes.mu.Unlock()
+		return changes.constraintStateHasCommittedLocked(tx, child, names, all)
+	}()
+	if committed {
+		return changes.stageCommittedForeignState(tx, child, names, all, enabled, validate)
+	}
+	return changes.stagePendingConstraintState(tx, child, names, all, enabled, validate)
+}
+
+func (changes *publicCatalogChanges) stagePendingConstraintState(tx *TxContext, child *table, names []string, all, enabled, validate bool) bool {
 	changes.mu.Lock()
 	defer changes.mu.Unlock()
 	defer changes.refreshMemoryLocked()

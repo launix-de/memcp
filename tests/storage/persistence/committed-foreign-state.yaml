@@ -1,0 +1,292 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Committed native foreign state uses exact original-T replacement history and real historical validation
+setup:
+  - sql: CREATE TABLE committed_state_parent(id INT PRIMARY KEY)
+  - sql: CREATE TABLE committed_state_child(id INT PRIMARY KEY,parent_id INT)
+  - sql: CREATE TABLE committed_state_marker(id INT PRIMARY KEY,value INT)
+  - sql: CREATE TABLE committed_state_legacy(id INT PRIMARY KEY,parent_id INT)
+  - sql: CREATE TABLE committed_state_mixed(id INT PRIMARY KEY,parent_id INT,value INT)
+  - sql: INSERT committed_state_parent VALUES(1),(2)
+  - sql: INSERT committed_state_child VALUES(10,1),(20,NULL)
+  - sql: INSERT committed_state_marker VALUES(1,0)
+  - sql: INSERT committed_state_legacy VALUES(50,999)
+  - sql: INSERT committed_state_mixed VALUES(60,1,1)
+  - sql: ALTER TABLE committed_state_child ADD CONSTRAINT FK_committed_state FOREIGN KEY(parent_id) REFERENCES committed_state_parent(id)
+  - sql: ALTER TABLE committed_state_mixed ADD CONSTRAINT FK_committed_mixed FOREIGN KEY(parent_id) REFERENCES committed_state_parent(id)
+  - sql: ALTER TABLE committed_state_mixed ADD CONSTRAINT CK_committed_mixed CHECK(value>0)
+  # The established immediate native API admits a legacy trusted header without
+  # scanning existing rows. This is a real predecessor, not a fabricated state.
+  - scm: (createforeignkey (table "memcp-tests" false "committed_state_legacy" false nil) "FK_committed_legacy" '("parent_id") (table "memcp-tests" false "committed_state_parent" false nil) '("id") "restrict" "restrict")
+cleanup:
+  - sql: DROP TABLE IF EXISTS committed_state_mixed
+  - sql: DROP TABLE IF EXISTS committed_state_legacy
+  - sql: DROP TABLE IF EXISTS committed_state_child
+  - sql: DROP TABLE IF EXISTS committed_state_parent
+  - sql: DROP TABLE IF EXISTS committed_state_marker
+test_cases:
+  - name: WITH CHECK CHECK joins earlier original work and rollback restores complete values
+    tds:
+      statements:
+        - {connection: owner, sql: BEGIN TRANSACTION}
+        - {connection: owner, sql: UPDATE committed_state_marker SET value=7 WHERE id=1}
+        - {connection: owner, sql: ALTER TABLE committed_state_child WITH CHECK CHECK CONSTRAINT FK_committed_state}
+        - connection: owner
+          sql: SELECT CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted,@@TRANCOUNT AS depth,(SELECT value FROM committed_state_marker WHERE id=1) AS value FROM sys.foreign_keys WHERE name=N'FK_committed_state'
+          expect: {rows: 1, data: [{disabled: 0, untrusted: 0, depth: 1, value: 7}]}
+        - {connection: owner, sql: ROLLBACK TRANSACTION}
+        - connection: observer
+          sql: SELECT id,parent_id FROM committed_state_child ORDER BY id
+          expect: {rows: 2, data: [{id: 10, parent_id: 1}, {id: 20, parent_id: null}]}
+        - connection: observer
+          sql: SELECT id,value FROM committed_state_marker
+          expect: {rows: 1, data: [{id: 1, value: 0}]}
+  - name: Trusted legacy metadata never substitutes for actual historical validation
+    scm: |
+      (begin
+        (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+        (define tx (owner "__memcp_tx"))
+        (try (lambda () (begin
+          (define child (table "memcp-tests" false "committed_state_legacy" false tx))
+          (define marker (table "memcp-tests" false "committed_state_marker" false tx))
+          (insert marker '("id" "value") (list (list 2 3)) '() nil false nil tx)
+          (define rejected (try (lambda () (begin (constraint_state child true true true tx owner) false))
+            (lambda (cause) (match (failure_value cause)
+              '("constraint-violation" "foreign" "FK_committed_legacy" _message) true
+              _ (error cause)))))
+          (insert marker '("id" "value") (list (list 3 4)) '() nil false nil tx)
+          (define before (list rejected (tx_state tx) (equal? tx (owner "__memcp_tx"))
+            (count ((show child "constraints" tx) "ForeignKeys"))
+            (scan tx marker '() '() '() (lambda () true) '("value") + 0 +)))
+          (tx_rollback owner)
+          (list before (scan nil marker '() '() '() (lambda () true) '("value") + 0 +)
+            (scan nil child '() '() '() (lambda () true) '("parent_id") + 0 +))))
+          (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+    expect: {result: [[true, active, true, 1, 7], 0, 999]}
+  - name: A disabled private view does not publish before its original rollback
+    tds:
+      statements:
+        - {connection: owner, sql: BEGIN TRANSACTION}
+        - {connection: owner, sql: ALTER TABLE committed_state_child NOCHECK CONSTRAINT FK_committed_state}
+        - connection: owner
+          sql: SELECT CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name=N'FK_committed_state'
+          expect: {rows: 1, data: [{disabled: 1, untrusted: 1}]}
+        - connection: observer
+          sql: SELECT CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name=N'FK_committed_state'
+          expect: {rows: 1, data: [{disabled: 0, untrusted: 0}]}
+        - {connection: owner, sql: ROLLBACK TRANSACTION}
+  - name: Disabling a committed FK retains the dependency and permits later orphan data
+    tds:
+      statements:
+        - {connection: owner, sql: BEGIN TRANSACTION}
+        - {connection: owner, sql: ALTER TABLE committed_state_child NOCHECK CONSTRAINT ALL}
+        - {connection: owner, sql: COMMIT TRANSACTION}
+        - connection: observer
+          sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name=N'FK_committed_state'
+          expect: {rows: 1, data: [{name: FK_committed_state, disabled: 1, untrusted: 1}]}
+        - {connection: observer, sql: INSERT committed_state_child VALUES(30,999)}
+        - connection: observer
+          sql: SELECT id,parent_id FROM committed_state_child ORDER BY id
+          expect: {rows: 3, data: [{id: 10, parent_id: 1}, {id: 20, parent_id: null}, {id: 30, parent_id: 999}]}
+  - name: Crash retains the committed disabled predecessor and its complete rows
+    scm: (crash)
+    expect: {error: true}
+  - name: Restart after the accepted disabled-decision crash
+    action: restart
+  - name: Recovered disabled state remains an actual dependency without enforcement
+    sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name=N'FK_committed_state'
+    expect: {rows: 1, data: [{name: FK_committed_state, disabled: 1, untrusted: 1}]}
+  - name: A disabled predecessor can remain disabled through another accepted replacement
+    tds:
+      statements:
+        - {connection: owner, sql: BEGIN TRANSACTION}
+        - {connection: owner, sql: ALTER TABLE committed_state_child NOCHECK CONSTRAINT FK_committed_state}
+        - {connection: owner, sql: COMMIT TRANSACTION}
+        - connection: observer
+          sql: SELECT CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name=N'FK_committed_state'
+          expect: {rows: 1, data: [{disabled: 1, untrusted: 1}]}
+        - connection: observer
+          sql: SELECT id,parent_id FROM committed_state_child ORDER BY id
+          expect: {rows: 3, data: [{id: 10, parent_id: 1}, {id: 20, parent_id: null}, {id: 30, parent_id: 999}]}
+  - name: Failed validation preserves the disabled predecessor and prior work under XACT_ABORT off
+    tds:
+      statements:
+        - {connection: owner, sql: SET XACT_ABORT OFF}
+        - {connection: owner, sql: BEGIN TRANSACTION}
+        - {connection: owner, sql: UPDATE committed_state_marker SET value=9 WHERE id=1}
+        - connection: owner
+          sql: |
+            BEGIN TRY
+              ALTER TABLE committed_state_child WITH CHECK CHECK CONSTRAINT FK_committed_state;
+            END TRY
+            BEGIN CATCH
+              SELECT ERROR_NUMBER() AS number,@@TRANCOUNT AS depth,XACT_STATE() AS state,
+                (SELECT value FROM committed_state_marker WHERE id=1) AS value,
+                CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted
+              FROM sys.foreign_keys WHERE name=N'FK_committed_state';
+            END CATCH
+          expect: {rows: 1, data: [{number: 547, depth: 1, state: 1, value: 9, disabled: 1, untrusted: 1}]}
+        - {connection: owner, sql: ROLLBACK TRANSACTION}
+        - connection: observer
+          sql: SELECT id,parent_id FROM committed_state_child ORDER BY id
+          expect: {rows: 3, data: [{id: 10, parent_id: 1}, {id: 20, parent_id: null}, {id: 30, parent_id: 999}]}
+  - name: CHECK without validation enables future enforcement and preserves historical orphans
+    tds:
+      statements:
+        - {connection: owner, sql: BEGIN TRANSACTION}
+        - {connection: owner, sql: ALTER TABLE committed_state_child WITH NOCHECK CHECK CONSTRAINT FK_committed_state}
+        - {connection: owner, sql: COMMIT TRANSACTION}
+        - connection: observer
+          sql: SELECT CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name=N'FK_committed_state'
+          expect: {rows: 1, data: [{disabled: 0, untrusted: 1}]}
+        - connection: observer
+          sql: INSERT committed_state_child VALUES(40,998)
+          expect: {error: true, contains: foreign key constraint}
+        - connection: observer
+          sql: SELECT id,parent_id FROM committed_state_child ORDER BY id
+          expect: {rows: 3, data: [{id: 10, parent_id: 1}, {id: 20, parent_id: null}, {id: 30, parent_id: 999}]}
+  - name: An original row repair and historical validation share the same native decision
+    tds:
+      statements:
+        - {connection: owner, sql: BEGIN TRANSACTION}
+        - {connection: owner, sql: UPDATE committed_state_child SET parent_id=2 WHERE id=30}
+        - {connection: owner, sql: ALTER TABLE committed_state_child WITH CHECK CHECK CONSTRAINT FK_committed_state}
+        - {connection: owner, sql: COMMIT TRANSACTION}
+        - connection: observer
+          sql: SELECT CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name=N'FK_committed_state'
+          expect: {rows: 1, data: [{disabled: 0, untrusted: 0}]}
+        - connection: observer
+          sql: SELECT id,parent_id FROM committed_state_child ORDER BY id
+          expect: {rows: 3, data: [{id: 10, parent_id: 1}, {id: 20, parent_id: null}, {id: 30, parent_id: 2}]}
+  - name: Disabling and reenabling inside one original transaction publishes actual enforcement
+    tds:
+      statements:
+        - {connection: owner, sql: BEGIN TRANSACTION}
+        - {connection: owner, sql: ALTER TABLE committed_state_child NOCHECK CONSTRAINT FK_committed_state}
+        - {connection: owner, sql: ALTER TABLE committed_state_child WITH CHECK CHECK CONSTRAINT FK_committed_state}
+        - {connection: owner, sql: COMMIT TRANSACTION}
+        - connection: observer
+          sql: SELECT CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name=N'FK_committed_state'
+          expect: {rows: 1, data: [{disabled: 0, untrusted: 0}]}
+        - connection: observer
+          sql: INSERT committed_state_child VALUES(42,996)
+          expect: {error: true, contains: foreign key constraint}
+        - connection: observer
+          sql: SELECT id,parent_id FROM committed_state_child ORDER BY id
+          expect: {rows: 3, data: [{id: 10, parent_id: 1}, {id: 20, parent_id: null}, {id: 30, parent_id: 2}]}
+  - name: Nested savepoints restore disabled enabled and original committed projections
+    tds:
+      statements:
+        - {connection: owner, sql: BEGIN TRANSACTION}
+        - {connection: owner, sql: SAVE TRANSACTION before_state}
+        - {connection: owner, sql: ALTER TABLE committed_state_child NOCHECK CONSTRAINT FK_committed_state}
+        - {connection: owner, sql: SAVE TRANSACTION disabled_state}
+        - {connection: owner, sql: ALTER TABLE committed_state_child WITH CHECK CHECK CONSTRAINT FK_committed_state}
+        - {connection: owner, sql: ROLLBACK TRANSACTION disabled_state}
+        - connection: owner
+          sql: SELECT CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name=N'FK_committed_state'
+          expect: {rows: 1, data: [{disabled: 1, untrusted: 1}]}
+        - {connection: owner, sql: ROLLBACK TRANSACTION before_state}
+        - connection: owner
+          sql: SELECT CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted,@@TRANCOUNT AS depth FROM sys.foreign_keys WHERE name=N'FK_committed_state'
+          expect: {rows: 1, data: [{disabled: 0, untrusted: 0, depth: 1}]}
+        - {connection: owner, sql: COMMIT TRANSACTION}
+  - name: ALL atomically changes committed and pending foreign declarations with observer isolation
+    tds:
+      statements:
+        - {connection: owner, sql: BEGIN TRANSACTION}
+        - {connection: owner, sql: ALTER TABLE committed_state_child ADD CONSTRAINT FK_committed_state_pending FOREIGN KEY(parent_id) REFERENCES committed_state_parent(id)}
+        - {connection: owner, sql: ALTER TABLE committed_state_child NOCHECK CONSTRAINT ALL}
+        - connection: owner
+          sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE parent_object_id=OBJECT_ID(N'dbo.committed_state_child') ORDER BY name
+          expect: {rows: 2, data: [{name: FK_committed_state, disabled: 1, untrusted: 1}, {name: FK_committed_state_pending, disabled: 1, untrusted: 1}]}
+        - connection: observer
+          sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE parent_object_id=OBJECT_ID(N'dbo.committed_state_child') ORDER BY name
+          expect: {rows: 1, data: [{name: FK_committed_state, disabled: 0, untrusted: 0}]}
+        - {connection: owner, sql: ROLLBACK TRANSACTION}
+  - name: An unknown named member leaves the whole cohort and original work unchanged
+    scm: |
+      (begin
+        (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+        (define tx (owner "__memcp_tx"))
+        (try (lambda () (begin
+          (define child (table "memcp-tests" false "committed_state_child" false tx))
+          (define marker (table "memcp-tests" false "committed_state_marker" false tx))
+          (insert marker '("id" "value") (list (list 2 6)) '() nil false nil tx)
+          (define rejected (try (lambda () (begin
+            (constraint_state child '("FK_committed_state" "missing_constraint") false false tx owner) false))
+            (lambda (cause) (if (strlike (concat cause) "%not an actual child-owned declaration%") true (error cause)))))
+          (insert marker '("id" "value") (list (list 3 7)) '() nil false nil tx)
+          (define fk (car ((show child "constraints" tx) "ForeignKeys")))
+          (define before (list rejected (tx_state tx) (coalesceNil (fk "Enabled") true)
+            (coalesceNil (fk "Trusted") true) (scan tx marker '() '() '() (lambda () true) '("value") + 0 +)))
+          (tx_rollback owner)
+          (list before (scan nil marker '() '() '() (lambda () true) '("value") + 0 +))))
+          (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+    expect: {result: [[true, active, true, true, 13], 0]}
+  - name: A committed CHECK in ALL rejects the complete cohort before any FK changes
+    scm: |
+      (begin
+        (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+        (define tx (owner "__memcp_tx"))
+        (try (lambda () (begin
+          (define mixed (table "memcp-tests" false "committed_state_mixed" false tx))
+          (define marker (table "memcp-tests" false "committed_state_marker" false tx))
+          (insert marker '("id" "value") (list (list 2 5)) '() nil false nil tx)
+          (define rejected (try (lambda () (begin (constraint_state mixed true false false tx owner) false))
+            (lambda (cause) (if (strlike (concat cause) "%committed CHECK state requires%") true (error cause)))))
+          (define fk (car ((show mixed "constraints" tx) "ForeignKeys")))
+          (define before (list rejected (tx_state tx) (coalesceNil (fk "Enabled") true)
+            (coalesceNil (fk "Trusted") true) (scan tx marker '() '() '() (lambda () true) '("value") + 0 +)))
+          (tx_rollback owner)
+          (list before (scan nil marker '() '() '() (lambda () true) '("value") + 0 +))))
+          (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+    expect: {result: [[true, active, true, true, 5], 0]}
+  - name: Retained unframed callbacks cannot grant committed state replacement authority
+    scm: |
+      (begin
+        (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+        (define tx (owner "__memcp_tx"))
+        (try (lambda () (begin
+          (define child (table "memcp-tests" false "committed_state_child" false tx))
+          (define callbacks (scan tx child '() '() '() (lambda () true) '("$update") (lambda (acc update) (+ acc 1)) 0 +))
+          (define rejected (try (lambda () (begin (constraint_state child true false false tx owner) false))
+            (lambda (cause) (if (strlike (concat cause) "%retained unframed mutation callbacks%") true (error cause)))))
+          (define before (list callbacks rejected (tx_state tx) (count ((show child "constraints" tx) "ForeignKeys"))))
+          (tx_rollback owner) before))
+          (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+    expect: {result: [3, true, active, 1]}
+  - name: A foreign retained writer rejects before state effects and leaves both original owners alive
+    scm: |
+      (begin
+        (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+        (define writer (newsession)) (writer "username" "root") (tx_begin_acid writer)
+        (define tx (owner "__memcp_tx"))
+        (try (lambda () (begin
+          (define child (table "memcp-tests" false "committed_state_child" false tx))
+          (define parent (table "memcp-tests" false "committed_state_parent" false tx))
+          (insert parent '("id") (list (list 88)) '() nil false nil (writer "__memcp_tx"))
+          (define rejected (try (lambda () (begin (constraint_state child true false false tx owner) false))
+            (lambda (cause) (if (strlike (concat cause) "%active table writer%") true (error cause)))))
+          (define before (list rejected (tx_state tx) (tx_state (writer "__memcp_tx"))
+            (scan nil parent '() '() '() (lambda () true) '("id") + 0 +)))
+          (tx_rollback writer) (tx_rollback owner) before))
+          (lambda (cause) (begin (tx_rollback writer) (tx_rollback owner) (error cause)))))
+    expect: {result: [true, active, active, 3]}
+  - name: Restart preserves the accepted old-disabled to enabled-trusted replacement
+    action: restart
+  - name: Recovered replacement retains exact values and future write enforcement
+    tds:
+      statements:
+        - sql: SELECT id,parent_id FROM committed_state_child ORDER BY id
+          expect: {rows: 3, data: [{id: 10, parent_id: 1}, {id: 20, parent_id: null}, {id: 30, parent_id: 2}]}
+        - sql: SELECT CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name=N'FK_committed_state'
+          expect: {rows: 1, data: [{disabled: 0, untrusted: 0}]}
+        - sql: INSERT committed_state_child VALUES(41,997)
+          expect: {error: true, contains: foreign key constraint}
+        - sql: SELECT id,parent_id FROM committed_state_child ORDER BY id
+          expect: {rows: 3, data: [{id: 10, parent_id: 1}, {id: 20, parent_id: null}, {id: 30, parent_id: 2}]}
