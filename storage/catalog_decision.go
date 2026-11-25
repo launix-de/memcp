@@ -137,6 +137,9 @@ func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarati
 	privateCreate := kind == catalogCreateKind
 
 	if tx.hasTableDrops() && (!public && !privateCreate || kind == catalogStatementTriggerKind || kind == catalogRowForeignKind || kind == catalogRowCheckKind) {
+		if kind == catalogStatementTriggerKind {
+			panic(newCatalogDeclarationProfileConflict("table-drop-statement-trigger", "table removal phase admits only default or source declarations"))
+		}
 		panic("table removal phase admits only default or source declarations")
 	}
 	// Construction admission owns effect policy. Merely preparing a private

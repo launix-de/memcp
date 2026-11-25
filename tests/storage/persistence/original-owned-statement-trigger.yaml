@@ -1,0 +1,865 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Original private table generations and statement source slots share existing admission, savepoint, accepted V22 replay and checkpoint owners
+setup:
+- sql: DROP TABLE IF EXISTS owned_trigger_unused
+- sql: DROP TABLE IF EXISTS owned_trigger_commit
+- sql: DROP TABLE IF EXISTS owned_trigger_rollback
+- sql: DROP TABLE IF EXISTS owned_trigger_rewind
+- sql: DROP TABLE IF EXISTS owned_trigger_cancel_a
+- sql: DROP TABLE IF EXISTS owned_trigger_cancel_b
+- sql: DROP TABLE IF EXISTS owned_trigger_state
+- sql: DROP TABLE IF EXISTS owned_trigger_public_support
+- sql: DROP TABLE IF EXISTS owned_trigger_drop_before
+- sql: DROP TABLE IF EXISTS owned_trigger_drop_after
+- sql: DROP TABLE IF EXISTS owned_trigger_durable
+- sql: DROP TABLE IF EXISTS owned_trigger_unaccepted
+- sql: DROP TABLE IF EXISTS owned_trigger_fk_child
+- sql: DROP TABLE IF EXISTS owned_trigger_fk_rewind
+- sql: DROP TABLE IF EXISTS owned_trigger_retire_before
+- sql: DROP TABLE IF EXISTS owned_trigger_retire_after
+- sql: DROP TABLE IF EXISTS owned_trigger_key_target
+- sql: DROP TABLE IF EXISTS owned_trigger_parent
+- sql: DROP TABLE IF EXISTS owned_trigger_public
+- sql: DROP TABLE IF EXISTS owned_trigger_audit
+- sql: CREATE TABLE owned_trigger_public(id INT PRIMARY KEY,value INT)
+- sql: INSERT owned_trigger_public VALUES(1,10)
+- sql: CREATE TABLE owned_trigger_audit(phase INT,id INT,old_value INT,new_value INT)
+- sql: CREATE TABLE owned_trigger_retire_before(id INT PRIMARY KEY,value INT)
+- sql: INSERT owned_trigger_retire_before VALUES(7,70)
+- sql: CREATE TABLE owned_trigger_retire_after(id INT PRIMARY KEY,value INT)
+- sql: INSERT owned_trigger_retire_after VALUES(8,80)
+- sql: CREATE TABLE owned_trigger_parent(id INT NOT NULL PRIMARY KEY)
+- sql: INSERT owned_trigger_parent VALUES(1),(2)
+- sql: CREATE TABLE owned_trigger_key_target(id INT NOT NULL)
+- sql: INSERT owned_trigger_key_target VALUES(7)
+cleanup:
+- sql: DROP TABLE IF EXISTS owned_trigger_unused
+- sql: DROP TABLE IF EXISTS owned_trigger_commit
+- sql: DROP TABLE IF EXISTS owned_trigger_rollback
+- sql: DROP TABLE IF EXISTS owned_trigger_rewind
+- sql: DROP TABLE IF EXISTS owned_trigger_cancel_a
+- sql: DROP TABLE IF EXISTS owned_trigger_cancel_b
+- sql: DROP TABLE IF EXISTS owned_trigger_state
+- sql: DROP TABLE IF EXISTS owned_trigger_public_support
+- sql: DROP TABLE IF EXISTS owned_trigger_drop_before
+- sql: DROP TABLE IF EXISTS owned_trigger_drop_after
+- sql: DROP TABLE IF EXISTS owned_trigger_durable
+- sql: DROP TABLE IF EXISTS owned_trigger_unaccepted
+- sql: DROP TABLE IF EXISTS owned_trigger_fk_child
+- sql: DROP TABLE IF EXISTS owned_trigger_fk_rewind
+- sql: DROP TABLE IF EXISTS owned_trigger_retire_before
+- sql: DROP TABLE IF EXISTS owned_trigger_retire_after
+- sql: DROP TABLE IF EXISTS owned_trigger_key_target
+- sql: DROP TABLE IF EXISTS owned_trigger_parent
+- sql: DROP TABLE IF EXISTS owned_trigger_public
+- sql: DROP TABLE IF EXISTS owned_trigger_audit
+test_cases:
+- name: Conditional dynamic trigger on an original constructor observes fresh rows and commits with both tables
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_unused(id INT)
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_commit(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT owned_trigger_commit VALUES(1,7)
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - depth: 1
+    - connection: owner
+      sql: IF OBJECT_ID(N'owned_trigger_commit_tr',N'TR') IS NULL EXEC sp_executesql N'CREATE TRIGGER owned_trigger_commit_tr ON owned_trigger_commit FOR
+        UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value) SELECT 1,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id
+        END'
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'owned_trigger_commit',N'U') AS target,(SELECT COUNT(*) FROM sys.triggers WHERE name=N'owned_trigger_commit_tr') AS recipes
+      expect:
+        rows: 1
+        data:
+        - target: null
+          recipes: 0
+    - connection: owner
+      sql: UPDATE owned_trigger_commit SET value=11
+    - connection: owner
+      sql: UPDATE owned_trigger_commit SET value=17
+    - connection: owner
+      sql: SELECT id,value FROM owned_trigger_commit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 17
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=1 ORDER BY new_value,old_value
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          old_value: 7
+          new_value: 11
+        - id: 1
+          old_value: 11
+          new_value: 17
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,value FROM owned_trigger_commit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 17
+    - connection: observer
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=1 ORDER BY new_value,old_value
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          old_value: 7
+          new_value: 11
+        - id: 1
+          old_value: 11
+          new_value: 17
+- name: Full rollback removes constructor trigger and its effects while restoring prior public work
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE owned_trigger_public SET value=20
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_rollback(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT owned_trigger_rollback VALUES(1,5)
+    - connection: owner
+      sql: CREATE TRIGGER owned_trigger_rollback_tr ON owned_trigger_rollback FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value)
+        SELECT 2,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    - connection: owner
+      sql: UPDATE owned_trigger_rollback SET value=6
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=2 ORDER BY new_value,old_value
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 5
+          new_value: 6
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'owned_trigger_rollback',N'U') AS target,(SELECT COUNT(*) FROM sys.triggers WHERE name=N'owned_trigger_rollback_tr') AS recipes,@@TRANCOUNT
+        AS depth
+      expect:
+        rows: 1
+        data:
+        - target: null
+          recipes: 0
+          depth: 0
+    - connection: owner
+      sql: SELECT id,value FROM owned_trigger_public ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=2 ORDER BY new_value,old_value
+      expect:
+        rows: 0
+        data: []
+- name: A savepoint retains its constructor while rewinding and retrying the exact trigger name
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_rewind(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT owned_trigger_rewind VALUES(1,30)
+    - connection: owner
+      sql: SAVE TRAN before_trigger
+    - connection: owner
+      sql: CREATE TRIGGER owned_trigger_rewind_tr ON owned_trigger_rewind FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value) SELECT
+        3,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    - connection: owner
+      sql: UPDATE owned_trigger_rewind SET value=40
+    - connection: owner
+      sql: ROLLBACK TRAN before_trigger
+    - connection: owner
+      sql: SELECT id,value FROM owned_trigger_rewind ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 30
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=3 ORDER BY new_value,old_value
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: SELECT COUNT(*) AS recipes FROM sys.triggers WHERE name=N'owned_trigger_rewind_tr'
+      expect:
+        rows: 1
+        data:
+        - recipes: 0
+    - connection: owner
+      sql: UPDATE owned_trigger_rewind SET value=31
+    - connection: owner
+      sql: CREATE TRIGGER owned_trigger_rewind_tr ON owned_trigger_rewind FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value) SELECT
+        4,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    - connection: owner
+      sql: UPDATE owned_trigger_rewind SET value=42
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=4 ORDER BY new_value,old_value
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 31
+          new_value: 42
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,value FROM owned_trigger_rewind ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 42
+- name: Canceling two original constructors releases exact slots and permits a fresh generation with the same names
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE owned_trigger_public SET value=21
+    - connection: owner
+      sql: SAVE TRAN before_constructors
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_cancel_a(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_cancel_b(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT owned_trigger_cancel_a VALUES(1,50)
+    - connection: owner
+      sql: INSERT owned_trigger_cancel_b VALUES(1,60)
+    - connection: owner
+      sql: CREATE TRIGGER owned_trigger_cancel_a_tr ON owned_trigger_cancel_a FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value)
+        SELECT 5,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    - connection: owner
+      sql: CREATE TRIGGER owned_trigger_cancel_b_tr ON owned_trigger_cancel_b FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value)
+        SELECT 6,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    - connection: owner
+      sql: UPDATE owned_trigger_cancel_a SET value=51
+    - connection: owner
+      sql: UPDATE owned_trigger_cancel_b SET value=61
+    - connection: owner
+      sql: ROLLBACK TRAN before_constructors
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'owned_trigger_cancel_a',N'U') AS a,OBJECT_ID(N'owned_trigger_cancel_b',N'U') AS b,(SELECT COUNT(*) FROM sys.triggers WHERE
+        name IN(N'owned_trigger_cancel_a_tr',N'owned_trigger_cancel_b_tr')) AS recipes,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - a: null
+          b: null
+          recipes: 0
+          depth: 1
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=5 ORDER BY new_value,old_value
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=6 ORDER BY new_value,old_value
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: SELECT id,value FROM owned_trigger_public ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_cancel_a(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT owned_trigger_cancel_a VALUES(1,100)
+    - connection: owner
+      sql: CREATE TRIGGER owned_trigger_cancel_a_tr ON owned_trigger_cancel_a FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value)
+        SELECT 7,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    - connection: owner
+      sql: UPDATE owned_trigger_cancel_a SET value=101
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=7 ORDER BY new_value,old_value
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 100
+          new_value: 101
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,value FROM owned_trigger_cancel_a ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 101
+    - connection: observer
+      sql: SELECT id,value FROM owned_trigger_public ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 21
+    - connection: owner
+      sql: UPDATE owned_trigger_public SET value=10
+- name: Original constructor trigger ALTER state and deletion rewind to the exact earlier source
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_state(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT owned_trigger_state VALUES(1,1)
+    - connection: owner
+      sql: CREATE TRIGGER owned_trigger_state_tr ON owned_trigger_state FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value) SELECT
+        8,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    - connection: owner
+      sql: UPDATE owned_trigger_state SET value=2
+    - connection: owner
+      sql: SAVE TRAN before_alter
+    - connection: owner
+      sql: ALTER TRIGGER owned_trigger_state_tr ON owned_trigger_state FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value) SELECT
+        9,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    - connection: owner
+      sql: DISABLE TRIGGER owned_trigger_state_tr ON owned_trigger_state
+    - connection: owner
+      sql: UPDATE owned_trigger_state SET value=3
+    - connection: owner
+      sql: ENABLE TRIGGER owned_trigger_state_tr ON owned_trigger_state
+    - connection: owner
+      sql: UPDATE owned_trigger_state SET value=4
+    - connection: owner
+      sql: DROP TRIGGER owned_trigger_state_tr
+    - connection: owner
+      sql: UPDATE owned_trigger_state SET value=5
+    - connection: owner
+      sql: ROLLBACK TRAN before_alter
+    - connection: owner
+      sql: SELECT id,value FROM owned_trigger_state ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 2
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=9 ORDER BY new_value,old_value
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: UPDATE owned_trigger_state SET value=6
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=8 ORDER BY new_value,old_value
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+        - id: 1
+          old_value: 2
+          new_value: 6
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,value FROM owned_trigger_state ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 6
+- name: A public trigger target retains its original writer beside an unrelated private constructor
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE owned_trigger_public SET value=14
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_public_support(id INT)
+    - connection: owner
+      sql: CREATE TRIGGER owned_trigger_public_tr ON owned_trigger_public FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value) SELECT
+        10,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    - connection: owner
+      sql: UPDATE owned_trigger_public SET value=15
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=10 ORDER BY new_value,old_value
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 14
+          new_value: 15
+    - connection: observer
+      sql: SELECT id,value FROM owned_trigger_public ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,value FROM owned_trigger_public ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 15
+    - connection: owner
+      sql: DROP TRIGGER owned_trigger_public_tr
+    - connection: owner
+      sql: UPDATE owned_trigger_public SET value=10
+- name: Table retirement before an original constructor trigger retains its unsupported profile without aborting the prefix
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_drop_before(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT owned_trigger_drop_before VALUES(1,70)
+    - connection: owner
+      sql: DROP TABLE owned_trigger_retire_before
+    - connection: owner
+      sql: CREATE TRIGGER owned_trigger_drop_before_tr ON owned_trigger_drop_before FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value)
+        SELECT 11,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+      expect:
+        error: true
+        contains:
+        - table removal phase admits only default or source declarations
+    - connection: owner
+      sql: SELECT id,value FROM owned_trigger_drop_before ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 70
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - depth: 1
+    - connection: observer
+      sql: SELECT id,value FROM owned_trigger_retire_before ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          value: 70
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'owned_trigger_drop_before',N'U') AS target
+      expect:
+        rows: 1
+        data:
+        - target: null
+    - connection: owner
+      sql: SELECT id,value FROM owned_trigger_retire_before ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          value: 70
+- name: An original constructor trigger cannot broaden the reverse table retirement profile
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_drop_after(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT owned_trigger_drop_after VALUES(1,80)
+    - connection: owner
+      sql: CREATE TRIGGER owned_trigger_drop_after_tr ON owned_trigger_drop_after FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value)
+        SELECT 12,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    - connection: owner
+      sql: DROP TABLE owned_trigger_retire_after
+      expect:
+        error: true
+        contains:
+        - table removal cannot join enforcing declaration amendments
+    - connection: owner
+      sql: UPDATE owned_trigger_drop_after SET value=81
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=12 ORDER BY new_value,old_value
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 80
+          new_value: 81
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - depth: 1
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: owner
+      sql: SELECT id,value FROM owned_trigger_retire_after ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 8
+          value: 80
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=12 ORDER BY new_value,old_value
+      expect:
+        rows: 0
+        data: []
+- name: An original trigger then unrelated public key and owned foreign declaration share one accepted decision
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_fk_child(id INT PRIMARY KEY,parent_id INT,value INT)
+    - connection: owner
+      sql: INSERT owned_trigger_fk_child VALUES(1,1,10)
+    - connection: owner
+      sql: CREATE TRIGGER owned_trigger_fk_tr ON owned_trigger_fk_child FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value) SELECT
+        40,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    - connection: owner
+      sql: ALTER TABLE owned_trigger_key_target ADD CONSTRAINT owned_trigger_key_pk PRIMARY KEY(id)
+    - connection: owner
+      sql: ALTER TABLE owned_trigger_fk_child ADD CONSTRAINT owned_trigger_fk FOREIGN KEY(parent_id) REFERENCES owned_trigger_parent(id)
+    - connection: owner
+      sql: UPDATE owned_trigger_fk_child SET value=11
+    - connection: owner
+      sql: UPDATE owned_trigger_fk_child SET parent_id=999,value=120
+      expect:
+        error: true
+        contains:
+        - owned_trigger_fk
+    - connection: owner
+      sql: SELECT id,parent_id,value FROM owned_trigger_fk_child ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          parent_id: 1
+          value: 11
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=40 ORDER BY new_value,old_value
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 11
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'owned_trigger_fk_child',N'U') AS target,(SELECT COUNT(*) FROM sys.key_constraints WHERE name=N'owned_trigger_key_pk') AS key_count
+      expect:
+        rows: 1
+        data:
+        - target: null
+          key_count: 0
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,parent_id,value FROM owned_trigger_fk_child ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          parent_id: 1
+          value: 11
+    - connection: owner
+      sql: SELECT is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name=N'owned_trigger_fk'
+      expect:
+        rows: 1
+        data:
+        - is_disabled: false
+          is_not_trusted: false
+- name: Rewinding an owned foreign addition retains the earlier constructor trigger and fresh row input
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_fk_rewind(id INT PRIMARY KEY,parent_id INT,value INT)
+    - connection: owner
+      sql: INSERT owned_trigger_fk_rewind VALUES(1,1,20)
+    - connection: owner
+      sql: CREATE TRIGGER owned_trigger_fk_rewind_tr ON owned_trigger_fk_rewind FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value)
+        SELECT 42,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    - connection: owner
+      sql: SAVE TRAN before_foreign
+    - connection: owner
+      sql: ALTER TABLE owned_trigger_fk_rewind ADD CONSTRAINT owned_trigger_fk_rewind_key FOREIGN KEY(parent_id) REFERENCES owned_trigger_parent(id)
+    - connection: owner
+      sql: UPDATE owned_trigger_fk_rewind SET value=21
+    - connection: owner
+      sql: ROLLBACK TRAN before_foreign
+    - connection: owner
+      sql: SELECT COUNT(*) AS foreign_keys FROM sys.foreign_keys WHERE name=N'owned_trigger_fk_rewind_key'
+      expect:
+        rows: 1
+        data:
+        - foreign_keys: 0
+    - connection: owner
+      sql: UPDATE owned_trigger_fk_rewind SET parent_id=999,value=22
+    - connection: owner
+      sql: UPDATE owned_trigger_fk_rewind SET parent_id=2
+    - connection: owner
+      sql: ALTER TABLE owned_trigger_fk_rewind ADD CONSTRAINT owned_trigger_fk_rewind_key FOREIGN KEY(parent_id) REFERENCES owned_trigger_parent(id)
+    - connection: owner
+      sql: UPDATE owned_trigger_fk_rewind SET value=23
+    - connection: owner
+      sql: SELECT id,parent_id,value FROM owned_trigger_fk_rewind ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          parent_id: 2
+          value: 23
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=42 ORDER BY new_value,old_value
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          old_value: 20
+          new_value: 22
+        - id: 1
+          old_value: 22
+          new_value: 22
+        - id: 1
+          old_value: 22
+          new_value: 23
+    - connection: owner
+      sql: COMMIT TRAN
+- name: One accepted original decision contains constructor rows and one trigger recipe before abrupt loss
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_durable(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT owned_trigger_durable VALUES(1,10)
+    - connection: owner
+      sql: CREATE TRIGGER owned_trigger_durable_tr ON owned_trigger_durable FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value)
+        SELECT 20,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    - connection: owner
+      sql: UPDATE owned_trigger_durable SET value=11
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: owner
+      sql: SELECT id,value FROM owned_trigger_durable ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=20 ORDER BY new_value,old_value
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 11
+- name: Crash after accepting the owned statement source
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart the accepted owned statement decision
+  action: restart
+- name: Replay restores one source recipe and fresh transitions on the original accepted constructor
+  tds:
+    statements:
+    - connection: owner
+      sql: SELECT id,value FROM owned_trigger_durable ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - connection: owner
+      sql: SELECT COUNT(*) AS recipes FROM sys.triggers WHERE name=N'owned_trigger_durable_tr'
+      expect:
+        rows: 1
+        data:
+        - recipes: 1
+    - connection: owner
+      sql: UPDATE owned_trigger_durable SET value=12
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=20 ORDER BY new_value,old_value
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 11
+        - id: 1
+          old_value: 11
+          new_value: 12
+    - connection: owner
+      sql: SELECT COUNT(*) AS key_count FROM sys.key_constraints WHERE name=N'owned_trigger_key_pk'
+      expect:
+        rows: 1
+        data:
+        - key_count: 1
+    - connection: owner
+      sql: SELECT id,parent_id,value FROM owned_trigger_fk_child ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          parent_id: 1
+          value: 11
+    - connection: owner
+      sql: UPDATE owned_trigger_fk_child SET value=12
+    - connection: owner
+      sql: UPDATE owned_trigger_fk_child SET parent_id=999
+      expect:
+        error: true
+        contains:
+        - owned_trigger_fk
+    - connection: owner
+      sql: SELECT id,parent_id,value FROM owned_trigger_fk_child ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          parent_id: 1
+          value: 12
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=40 ORDER BY new_value,old_value
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 11
+        - id: 1
+          old_value: 11
+          new_value: 12
+- name: Checkpoint the accepted constructor and source using the ordinary rebuild owner
+  scm: (begin (rebuild (table "memcp-tests" false "owned_trigger_durable" false nil) true false) (equal? (count (show (table "memcp-tests" false "owned_trigger_durable"
+    false nil) "statement_triggers")) 1))
+  expect:
+    result: true
+- name: Crash after checkpointing the owned source header
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart the checkpointed constructor and source header
+  action: restart
+- name: Checkpoint reload has one trigger effect and preserves all prior complete values
+  tds:
+    statements:
+    - connection: owner
+      sql: UPDATE owned_trigger_durable SET value=13
+    - connection: owner
+      sql: SELECT id,value FROM owned_trigger_durable ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 13
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=20 ORDER BY new_value,old_value
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 11
+        - id: 1
+          old_value: 11
+          new_value: 12
+        - id: 1
+          old_value: 12
+          new_value: 13
+    - connection: owner
+      sql: SELECT COUNT(*) AS recipes FROM sys.triggers WHERE name=N'owned_trigger_durable_tr'
+      expect:
+        rows: 1
+        data:
+        - recipes: 1
+- name: An unaccepted constructor and trigger remain private before abrupt loss
+  session_id: owned-trigger-unaccepted
+  steps:
+  - sql: BEGIN TRAN
+    session_id: owned-trigger-unaccepted
+  - sql: CREATE TABLE owned_trigger_unaccepted(id INT PRIMARY KEY,value INT)
+    session_id: owned-trigger-unaccepted
+  - sql: INSERT owned_trigger_unaccepted VALUES(1,70)
+    session_id: owned-trigger-unaccepted
+  - sql: CREATE TRIGGER owned_trigger_unaccepted_tr ON owned_trigger_unaccepted FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value)
+      SELECT 30,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    session_id: owned-trigger-unaccepted
+  - sql: UPDATE owned_trigger_unaccepted SET value=71
+    session_id: owned-trigger-unaccepted
+  - sql: SELECT id,value FROM owned_trigger_unaccepted ORDER BY id
+    session_id: owned-trigger-unaccepted
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        value: 71
+  - sql: SELECT OBJECT_ID(N'owned_trigger_unaccepted',N'U') AS target,(SELECT COUNT(*) FROM owned_trigger_audit WHERE phase=30) AS effects
+    expect:
+      rows: 1
+      data:
+      - target: null
+        effects: 0
+- name: Crash without accepting the owned constructor trigger
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart without the unaccepted constructor source
+  action: restart
+- name: Recovery excludes the unaccepted table source and every original trigger effect
+  sql: SELECT OBJECT_ID(N'owned_trigger_unaccepted',N'U') AS target,(SELECT COUNT(*) FROM sys.triggers WHERE name=N'owned_trigger_unaccepted_tr') AS recipes,(SELECT
+    COUNT(*) FROM owned_trigger_audit WHERE phase=30) AS effects
+  expect:
+    rows: 1
+    data:
+    - target: null
+      recipes: 0
+      effects: 0

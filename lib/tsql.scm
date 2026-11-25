@@ -1693,6 +1693,8 @@ finished its decision. THROW retains the raw cause, including completion facts. 
 		(list "error" cause "number" nil "message" message "state" nil)
 		'("catalog-declaration-conflict" "unpublished-table-drop" message)
 		(list "error" cause "number" nil "message" message "state" nil)
+		'("catalog-declaration-conflict" "table-drop-statement-trigger" message)
+		(list "error" cause "number" nil "message" message "state" nil)
 		'("tsql-error" number message state severity)
 		(list "error" cause "number" number "message" message "state" state "severity" severity)
 		'("tsql-error" number message state)

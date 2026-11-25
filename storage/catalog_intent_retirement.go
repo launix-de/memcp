@@ -67,6 +67,11 @@ func (changes *publicCatalogChanges) retireCancelledCatalogInputs(tx *TxContext,
 	if changes.owner != tx.transactionState || changes.db == nil {
 		panic("private catalog input retirement lost its declaration owner")
 	}
+	// Validate every existing slot while all containing generations are still
+	// registered. The ordinary shared slot owner attests the current header.
+	if err := changes.validateStatementTriggersLocked(); err != nil {
+		panic(err)
+	}
 	for _, t := range cancelled {
 		if lease := changes.leases[t]; lease != nil {
 			owner := &t.writeAdmission
@@ -78,12 +83,24 @@ func (changes *publicCatalogChanges) retireCancelledCatalogInputs(tx *TxContext,
 				panic("private catalog input retirement lost its original declaration lease")
 			}
 		}
-		// These public program slots have independent reservation lifetimes.
-		// Their existing profiles cannot target private constructors; never
-		// discard one silently if an inconsistent caller supplies that program.
-		for _, slot := range changes.statementTriggers {
-			if slot.table == t {
+		for name, slot := range changes.statementTriggers {
+			if slot.table != t {
+				continue
+			}
+			// History rewind released every definition on this actually canceled
+			// constructor. Only its exact headless name reservation may remain.
+			if changes.leases[t] == nil || slot.head != nil || slot.baseline != nil ||
+				slot.tableName != t.Name || slot.identity != t.RuntimeIdentity || slot.reservation == nil ||
+				slot.reservation.header.Name != name || !slot.reservation.reservation ||
+				slot.reservation.pendingDecision != tx.pendingCatalogKey() {
 				panic("private catalog retirement retains a statement trigger endpoint")
+			}
+			owner := &t.writeAdmission
+			owner.mu.Lock()
+			_, reserved := owner.triggerNames[name]
+			owner.mu.Unlock()
+			if !reserved {
+				panic("private catalog retirement lost its statement trigger reservation")
 			}
 		}
 		for _, state := range changes.constraintStates {
@@ -98,6 +115,13 @@ func (changes *publicCatalogChanges) retireCancelledCatalogInputs(tx *TxContext,
 	}
 	tables := maps.Clone(views.tables)
 	for _, t := range cancelled {
+		for name, slot := range changes.statementTriggers {
+			if slot.table == t {
+				t.releaseDeclarationTrigger(changes.owner, name)
+				changes.closeStatementTriggerSlotLocked(slot, false)
+				delete(changes.statementTriggers, name)
+			}
+		}
 		if lease := changes.leases[t]; lease != nil {
 			if changes.anchor == lease {
 				changes.anchor = nil
@@ -107,6 +131,10 @@ func (changes *publicCatalogChanges) retireCancelledCatalogInputs(tx *TxContext,
 		}
 		delete(changes.baselines, t)
 		delete(tables, t)
+	}
+	if len(changes.statementTriggers) == 0 {
+		changes.statementTriggers = nil
+		changes.statementTriggerHighWater = 0
 	}
 	if changes.anchor == nil {
 		for _, lease := range changes.leases {

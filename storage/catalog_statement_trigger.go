@@ -43,9 +43,9 @@ func (tx *TxContext) stageStatementTrigger(t *table, definition *statementTrigge
 	if tx == nil || tx.transactionState == nil {
 		panic("statement trigger declaration requires an active native transaction")
 	}
-	finish := tx.beginCatalogConstruction(catalogStatementTriggerConstruction, nil, t)
+	finish := tx.beginCatalogConstruction(catalogValidationConstruction, nil, t)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
-	if tx.State != TxActive || tx.decisionStarted || tx.coordinator != nil || tx.catalogIntents.Load() != nil {
+	if tx.State != TxActive || tx.decisionStarted || tx.coordinator != nil {
 		panic("statement trigger declaration requires a local public catalog transaction")
 	}
 	return tx.stagePublicCatalogDeclaration(t.schema, catalogStatementTriggerKind, nil, func(changes *publicCatalogChanges) bool {
@@ -96,7 +96,9 @@ func (changes *publicCatalogChanges) stageStatementTrigger(tx *TxContext, t *tab
 	defer access.Release()
 	db.schemalock.Lock()
 	defer db.schemalock.Unlock()
-	if db.tables.Get(t.Name) != t || t.RuntimeIdentity == "" || !t.committedAt(db.catalogView().version) || t.Ephemeral || sharedClusterDatabase(db.Name) || activeReplication(db) != nil {
+	owned := (catalogForeignEndpointScope{owner: tx.transactionState}).owns(t)
+	if db.tables.Get(t.Name) != t || t.RuntimeIdentity == "" || (!t.committedAt(db.catalogView().version) && !owned) ||
+		t.Ephemeral || t.ScopedSchema || t.mutationReadOnly || sharedClusterDatabase(db.Name) || activeReplication(db) != nil {
 		panic("statement trigger declaration requires its current local committed table")
 	}
 	tx.requireDeclarationEndpoint(t, maintenanceAlter)
@@ -179,6 +181,9 @@ func (changes *publicCatalogChanges) stageStatementTrigger(tx *TxContext, t *tab
 		defer t.mu.Unlock()
 		t.requireTriggerDeclarationMutationLocked()
 	}()
+	// Source validation and native admission have no accepted header effect.
+	// Mark before publishing any slot/history state, including later failures.
+	tx.noteStatementMutation(t)
 	slot := changes.statementTriggers[name]
 	if slot == nil {
 		t.reserveDeclarationTrigger(tx.transactionState, name, true)
@@ -368,6 +373,26 @@ func (changes *publicCatalogChanges) restoreStatementTriggerLocked(amendment *ca
 	changes.statementTriggerHistoryBytes -= uint(unsafe.Sizeof(*amendment))
 }
 
+// Both terminal resource close and exact private-constructor cancellation use
+// this same header/source-memory owner. Caller owns changes.mu and schema.
+func (changes *publicCatalogChanges) closeStatementTriggerSlotLocked(slot *catalogStatementTriggerSlot, committed bool) {
+	slot.table.mu.Lock()
+	if !committed || slot.head == nil {
+		if slot.baseline == nil {
+			slot.table.removeStatementTriggerHeaderLocked(slot.reservation.header.Name)
+		} else {
+			slot.table.setStatementTriggerLocked(slot.baseline)
+		}
+	} else {
+		slot.head.previousCommitted.Store(nil)
+	}
+	slot.table.mu.Unlock()
+	if slot.baseline != nil {
+		slot.baseline.memory.release(changes.db)
+	}
+	slot.reservation.memory.release(changes.db)
+}
+
 func (changes *publicCatalogChanges) closeStatementTriggersLocked() {
 	if len(changes.statementTriggers) == 0 {
 		return
@@ -378,21 +403,7 @@ func (changes *publicCatalogChanges) closeStatementTriggersLocked() {
 	defer changes.db.schemalock.Unlock()
 	committed := changes.owner.State == TxCommitted
 	for _, slot := range changes.statementTriggers {
-		slot.table.mu.Lock()
-		if !committed || slot.head == nil {
-			if slot.baseline == nil {
-				slot.table.removeStatementTriggerHeaderLocked(slot.reservation.header.Name)
-			} else {
-				slot.table.setStatementTriggerLocked(slot.baseline)
-			}
-		} else {
-			slot.head.previousCommitted.Store(nil)
-		}
-		slot.table.mu.Unlock()
-		if slot.baseline != nil {
-			slot.baseline.memory.release(changes.db)
-		}
-		slot.reservation.memory.release(changes.db)
+		changes.closeStatementTriggerSlotLocked(slot, committed)
 	}
 	if history := changes.owner.catalogAmendments.Load(); history != nil {
 		for _, amendment := range *history {

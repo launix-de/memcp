@@ -171,6 +171,13 @@ func (changes *publicCatalogChanges) stageTableDrop(tx *TxContext, t *table, lea
 	changes.mu.Lock()
 	defer changes.mu.Unlock()
 	defer changes.refreshMemoryLocked()
+	// Retained private constructors do not broaden the existing enforcing
+	// statement-program/table-retirement profile in the reverse order either.
+	for _, entry := range tx.publicForeignAmendments() {
+		if entry.statementTrigger != nil {
+			panic(newCatalogDeclarationProfileConflict("table-drop-statement-trigger", "table removal cannot join enforcing declaration amendments"))
+		}
+	}
 	// Re-attest under the amendment owner: an append constructor can publish
 	// after the caller's cold check while waiting for its existing DDL lease.
 	prospective := appendCatalogDeclarationHistory(tx.publicForeignAmendments(), catalogDeclarationAmendment{
