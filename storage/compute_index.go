@@ -403,27 +403,22 @@ func buildComputedFn(formulaExpr scm.Scmer, origParams scm.Scmer, env *scm.Env, 
 		origParams,
 		formulaExpr,
 	})
+	// Preserve an already numbered input before optimizing the new lambda.
+	// The language optimizer owns any additional local slots it introduces.
+	if containsNthLocalVar(formulaExpr) {
+		lambdaForm = scm.NewSlice(append(lambdaForm.Slice(), scm.NewInt(int64(len(conditionCols)))))
+	}
 	var result scm.Scmer
 	func() {
 		defer func() { recover() }()
-		result = scm.Eval(lambdaForm, env)
+		// The formula and parameters can belong to a retained scan predicate.
+		// Transfer private syntax to the normal compiler, including constant-
+		// pattern preparation, before the mapper reaches index row loops.
+		ownedLambda := scm.CloneOptimizerExpression(lambdaForm)
+		result = scm.Eval(scm.Optimize(ownedLambda, env, nil), env)
 	}()
 	if result.IsNil() {
 		return nil, scm.NewNil()
-	}
-	// The body may already contain NthLocalVar references (when the condition lambda
-	// was pre-compiled by the optimizer). Ensure NumVars is set so that
-	// PrepareSerialProc uses VarsNumbered instead of Vars[sym], which
-	// would leave NthLocalVar(i) unresolvable and cause an index-out-of-range panic.
-	if result.IsProc() {
-		// Important: only set NumVars when the body actually uses NthLocalVar.
-		// For symbol-based bodies, forcing NumVars would skip symbol bindings in
-		// PrepareSerialProc and make every param read as nil.
-		if containsNthLocalVar(result.Proc().Body) {
-			result.Proc().NumVars = len(conditionCols)
-		} else {
-			result.Proc().NumVars = 0
-		}
 	}
 	// mapCols = all conditionCols (lambda takes all params in order)
 	return conditionCols, result
