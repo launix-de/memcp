@@ -444,6 +444,10 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	for t := range statementInputs {
 		statementInput(t)
 	}
+	checkInputs := changes.retainedCheckInputTables()
+	for t := range checkInputs {
+		statementInput(t)
+	}
 	columnInputs := changes.retainedColumnInputTables()
 	for t := range columnInputs {
 		statementInput(t)
@@ -489,6 +493,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 		}
 		if amendment := entry.check; amendment != nil {
 			blocked[amendment.table] = struct{}{}
+			guarded[amendment.table] = guarded[amendment.table] || amendment.rowInput
 		}
 		if amendment := entry.foreignDrop; amendment != nil {
 			for _, t := range amendment.endpoints {
@@ -499,6 +504,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 		}
 		if amendment := entry.checkDrop; amendment != nil {
 			blocked[amendment.table] = struct{}{}
+			guarded[amendment.table] = guarded[amendment.table] || amendment.rowInput
 		}
 		if amendment := entry.constraintState; amendment != nil {
 			for _, view := range amendment.views {
@@ -547,7 +553,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 	for t := range blocked {
 		delete(writers, t)
 	}
-	checked := checkedCatalogWriters(history, statementInputs, columnInputs, changes.owner, changes.leases)
+	checked := checkedCatalogWriters(history, statementInputs, columnInputs, checkInputs, changes.owner, changes.leases)
 	changes.viewsHighWater = max(changes.viewsHighWater, len(tables))
 	changes.checkedWritersHighWater = max(changes.checkedWritersHighWater, len(checked))
 	changes.columnWritersHighWater = max(changes.columnWritersHighWater, len(writers))

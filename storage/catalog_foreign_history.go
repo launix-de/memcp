@@ -130,6 +130,13 @@ func (tx *TxContext) foreignReplacement(name string, child, parent *table) bool 
 // its release obligation to a later amendment.
 func foreignHistoryHasProgram(history []catalogDeclarationAmendment, table *table, name string) bool {
 	for _, entry := range history {
+		if drop := entry.checkDrop; drop != nil && drop.table == table {
+			for _, timing := range []TriggerTiming{BeforeInsert, BeforeUpdate} {
+				if drop.declaration.Check.triggerName(timing) == name {
+					return true
+				}
+			}
+		}
 		var programs []foreignKeyTrigger
 		if entry.foreign != nil {
 			programs = entry.foreign.programs
@@ -184,6 +191,12 @@ func (changes *publicCatalogChanges) validateForeignReservation(tx *TxContext, p
 		}
 		matched := false
 		for _, entry := range tx.publicForeignAmendments() {
+			if drop := entry.checkDrop; drop != nil && drop.table == t && trigger.IsSystem &&
+				trigger.checkDefinition == drop.declaration.Check && trigger.Timing == program.trigger.Timing &&
+				(trigger.Timing == BeforeInsert || trigger.Timing == BeforeUpdate) &&
+				trigger.Name == drop.declaration.Check.triggerName(trigger.Timing) {
+				matched = true
+			}
 			if drop := entry.foreignDrop; drop != nil && drop.addition == nil {
 				for _, old := range drop.programs {
 					if old.table == t && old.trigger.Name == trigger.Name && old.trigger.Timing == trigger.Timing && trigger.IsSystem {

@@ -4,7 +4,6 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 package storage
 
 import (
-	"context"
 	"fmt"
 	"maps"
 	"strings"
@@ -25,6 +24,8 @@ type catalogCheckAmendment struct {
 	table         *table
 	previous      *tableShowColumnsSnapshot
 	programs      []foreignKeyTrigger
+	reservations  []foreignKeyTrigger
+	rowInput      bool
 	retainedBytes uint
 }
 
@@ -33,45 +34,32 @@ func (tx *TxContext) stageCatalogCheck(t *table, definition *checkDeclaration) b
 		panic("check declaration requires an active native transaction")
 	}
 	requireCheckInvocation(tx)
-	finish := tx.beginCatalogConstruction(catalogEnforcementConstruction, nil, t)
+	rowInput := tx.publicCheckRowInput(t)
+	profile, kind := catalogEnforcementConstruction, catalogEnforcementKind
+	if rowInput {
+		profile, kind = catalogValidationConstruction, catalogRowCheckKind
+	}
+	finish := tx.beginCatalogConstruction(profile, nil, t)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
 	if tx.State != TxActive || tx.decisionStarted || tx.coordinator != nil || tx.catalogIntents.Load() != nil {
 		panic("check declaration requires a local public metadata transaction")
 	}
-	return tx.stagePublicCatalogDeclaration(t.schema, catalogEnforcementKind, nil, func(changes *publicCatalogChanges) bool {
-		return changes.stageCheck(tx, t, definition)
+	return tx.stagePublicCatalogDeclaration(t.schema, kind, nil, func(changes *publicCatalogChanges) bool {
+		return changes.stageCheck(tx, t, definition, rowInput)
 	})
 }
 
-func (changes *publicCatalogChanges) stageCheck(tx *TxContext, t *table, definition *checkDeclaration) bool {
+func (changes *publicCatalogChanges) stageCheck(tx *TxContext, t *table, definition *checkDeclaration, rowInput bool) bool {
 	changes.mu.Lock()
 	defer changes.mu.Unlock()
 	defer changes.refreshMemoryLocked()
-	accepted := false
-	acquired := changes.leases[t] == nil
-	if acquired {
-		lease, err := t.writeAdmission.admit(scanQueryContext(tx, context.Background()), tx.transactionState, tableCatalogDeclarationAdmission, false)
-		if err != nil {
-			panic(err)
-		}
-		changes.leases[t] = lease
-		changes.leasesHighWater = max(changes.leasesHighWater, len(changes.leases))
-		if changes.anchor == nil {
-			changes.refreshMemoryLocked()
-			lease.attachRetainedMemory(changes.memory)
-			changes.anchor = lease
-		}
+	if rowInput && tx.hasTableDrops() {
+		panic("public CHECK input cannot join table removal")
 	}
-	defer func() {
-		if !accepted && acquired {
-			if changes.anchor == changes.leases[t] {
-				changes.anchor = nil
-			}
-			_ = changes.leases[t].Close()
-			delete(changes.leases, t)
-			delete(changes.baselines, t)
-		}
-	}()
+	accepted := false
+	finishInput := changes.acquireCheckInput(tx, t, rowInput)
+	defer func() { finishInput(accepted) }()
+
 	db := changes.db
 	var declaration catalogCheckDeclaration
 	var observed *tableShowColumnsSnapshot
@@ -86,12 +74,15 @@ func (changes *publicCatalogChanges) stageCheck(tx *TxContext, t *table, definit
 	}()
 	// The exclusive native declaration lease holds the actual dependency
 	// contract stable. Compile/scan/measure privately, outside schema/shard locks.
-	programs := buildCheckTriggers(t, definition)
+	programs := buildCheckTriggersUsing(t, definition, t.columnNamesForTx(tx))
+	if rowInput {
+		t.enterPendingCatalogData(tx, changes.leases[t])
+	}
 	validateExistingCheckRows(tx, t, definition, programs[0].trigger.Func)
-	release := reserveForeignTriggerPrograms(tx.transactionState, programs)
+	reserved := changes.reserveForeignPrograms(tx, programs)
 	defer func() {
 		if !accepted {
-			release()
+			releaseForeignTriggerPrograms(tx.transactionState, reserved)
 		}
 	}()
 	views := maps.Clone(changes.views.Load().tables)
@@ -101,9 +92,9 @@ func (changes *publicCatalogChanges) stageCheck(tx *TxContext, t *table, definit
 		base = observed
 	}
 	view, bytes := appendConstraintMetadata(t, base, nil, []*checkDeclaration{definition}, 0)
-	amendment := &catalogCheckAmendment{declaration: declaration, table: t, previous: previous, programs: programs}
+	amendment := &catalogCheckAmendment{declaration: declaration, table: t, previous: previous, programs: programs, reservations: reserved, rowInput: rowInput}
 	amendment.retainedBytes = uint(unsafe.Sizeof(*amendment)) + definition.payloadFootprint + bytes + uint(unsafe.Sizeof(catalogConstraintState{}))
-	amendment.retainedBytes += uint(cap(programs)) * uint(unsafe.Sizeof(foreignKeyTrigger{}))
+	amendment.retainedBytes += uint(cap(programs)+cap(reserved)) * uint(unsafe.Sizeof(foreignKeyTrigger{}))
 	for _, program := range programs {
 		amendment.retainedBytes += constraintProgramBytes(program.trigger)
 	}
@@ -129,6 +120,7 @@ func (changes *publicCatalogChanges) stageCheck(tx *TxContext, t *table, definit
 	changes.constraintStatesHighWater = max(changes.constraintStatesHighWater, len(changes.constraintStates))
 	changes.amendmentBytes += amendment.retainedBytes
 	changes.historyBytes = uint(unsafe.Sizeof(history)) + uint(cap(history))*uint(unsafe.Sizeof(catalogDeclarationAmendment{}))
+	tx.noteStatementMutation(t)
 	tx.catalogAmendments.Store(&history)
 	changes.publishViews(history, views)
 	accepted = true
@@ -138,9 +130,9 @@ func (changes *publicCatalogChanges) stageCheck(tx *TxContext, t *table, definit
 // Caller owns schema publication and this transaction's amendment producer.
 func (changes *publicCatalogChanges) validateCheckStageLocked(tx *TxContext, t *table, declaration catalogCheckDeclaration) {
 	changes.validateConstraintStateEndpointsLocked(tx)
-	validateCatalogCheck(changes.db, declaration)
+	validateCatalogCheckUsing(changes.db, declaration, t.columnNamesForTx(tx))
 	requireTableMaintenance(changes.db.Name, declaration.Table, maintenanceAlter)
-	if changes.db.hasDeclarationNameLocked(declaration.Check.Id, nil, nil) || tx.pendingUniqueDeclarationName(declaration.Check.Id) {
+	if changes.db.hasDeclarationNameLocked(declaration.Check.Id, nil, tx.publicDeclarationViews()) || tx.pendingUniqueDeclarationName(declaration.Check.Id) {
 		panic("declaration name already exists: " + declaration.Check.Id)
 	}
 	for _, entry := range tx.publicForeignAmendments() {
@@ -152,6 +144,10 @@ func (changes *publicCatalogChanges) validateCheckStageLocked(tx *TxContext, t *
 }
 
 func validateCatalogCheck(db *database, declaration catalogCheckDeclaration) {
+	validateCatalogCheckUsing(db, declaration, nil)
+}
+
+func validateCatalogCheckUsing(db *database, declaration catalogCheckDeclaration, names *tableColumnNamesSnapshot) {
 	if _, err := uuid.Parse(declaration.Identity); err != nil {
 		panic("invalid check endpoint identity")
 	}
@@ -159,7 +155,10 @@ func validateCatalogCheck(db *database, declaration catalogCheckDeclaration) {
 	if t == nil || t.RuntimeIdentity != declaration.Identity || !t.committedAt(db.catalogView().version) {
 		panic("check declaration endpoint generation was replaced")
 	}
-	validateCheckColumns(t, declaration.Check)
+	if names == nil {
+		names = t.columnNamesSnapshot.Load()
+	}
+	validateCheckColumnsUsing(declaration.Check, names)
 }
 
 func validateExistingCheckRows(tx *TxContext, t *table, definition *checkDeclaration, predicate scm.Scmer) {
@@ -239,12 +238,16 @@ func (tx *TxContext) validatePublicChecks(db *database) error {
 		if entry.check == nil {
 			continue
 		}
-		validateCatalogCheck(db, entry.check.declaration)
-		if db.hasDeclarationNameLocked(entry.check.declaration.Check.Id, nil, nil) || tx.pendingUniqueDeclarationName(entry.check.declaration.Check.Id) {
+		validateCatalogCheckUsing(db, entry.check.declaration, entry.check.table.columnNamesForTx(tx))
+		var predecessor *checkDeclaration
+		if drop := tx.retiredCheck(entry.check.table, entry.check.declaration.Check.Id); drop != nil {
+			_, predecessor = validateCatalogCheckDrop(db, drop.declaration)
+		}
+		if db.hasDeclarationNameLocked(entry.check.declaration.Check.Id, nil, nil, predecessor) || tx.pendingUniqueDeclarationName(entry.check.declaration.Check.Id) {
 			return fmt.Errorf("public declaration conflict: check name already exists")
 		}
 		for _, program := range entry.check.programs {
-			program.table.validateDeclarationTrigger(tx.transactionState, program.trigger.Name)
+			tx.publicCatalogChanges().validateForeignReservation(tx, program)
 		}
 	}
 	return nil

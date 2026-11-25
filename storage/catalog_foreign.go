@@ -1091,10 +1091,15 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 			base, removalBytes = removeForeignDropMetadata(endpoint.table, base, declaration.Foreign, true)
 			snapshotBytes += removalBytes
 		}
+		for _, definition := range endpoint.checkDrops {
+			var removalBytes uint
+			base, removalBytes = removeCheckMetadata(base, definition.Id, true)
+			snapshotBytes += removalBytes
+		}
 		var finalBytes uint
 		endpoint.snapshot, finalBytes = appendConstraintMetadata(endpoint.table, base, additions[endpoint.table], checkAdditions[endpoint.table], version)
 		snapshotBytes += finalBytes
-		if len(endpoint.foreignDrops) > 0 {
+		if len(endpoint.foreignDrops) > 0 || len(endpoint.checkDrops) > 0 {
 			// The single public version must fall back to the actual predecessor,
 			// never to an intermediate private removal projection.
 			previous, metadata := *original, *original.metadata
@@ -1106,11 +1111,6 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 			var keyBytes uint
 			endpoint.snapshot, keyBytes = replaceUniqueMetadata(endpoint.snapshot, endpoint.keys, true)
 			snapshotBytes += keyBytes
-		}
-		for _, definition := range endpoint.checkDrops {
-			var removalBytes uint
-			endpoint.snapshot, removalBytes = removeCheckMetadata(endpoint.snapshot, definition.Id, true)
-			snapshotBytes += removalBytes
 		}
 		if input := columnInputs[endpoint.table]; input.columns != nil {
 			var columnBytes uint

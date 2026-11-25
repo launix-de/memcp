@@ -97,10 +97,13 @@ func (t *table) checkColumnDependency(name string) *checkDeclaration {
 // The caller owns declaration admission or an unpublished loader. Column
 // resolution is through the existing immutable native point directory.
 func validateCheckColumns(t *table, definition *checkDeclaration) {
+	validateCheckColumnsUsing(definition, t.columnNamesSnapshot.Load())
+}
+
+func validateCheckColumnsUsing(definition *checkDeclaration, names *tableColumnNamesSnapshot) {
 	if err := definition.validate(); err != nil {
 		panic(err)
 	}
-	names := t.columnNamesSnapshot.Load()
 	if names == nil {
 		panic("check declaration requires published column metadata")
 	}
@@ -119,9 +122,12 @@ func validateCheckColumns(t *table, definition *checkDeclaration) {
 // The trusted source compiler receives native semantic data only. Defaults,
 // statistics, physical storage and caller capabilities are not compile inputs.
 func checkCompilerContext(t *table, definition *checkDeclaration) scm.Scmer {
-	validateCheckColumns(t, definition)
+	return checkCompilerContextUsing(t, definition, t.columnNamesSnapshot.Load())
+}
+
+func checkCompilerContextUsing(t *table, definition *checkDeclaration, names *tableColumnNamesSnapshot) scm.Scmer {
+	validateCheckColumnsUsing(definition, names)
 	columns := make([]scm.Scmer, len(definition.Columns))
-	names := t.columnNamesSnapshot.Load()
 	for i, name := range definition.Columns {
 		row := names.declarations[names.exact[name].ordinal].show("", 0, 0, nil)
 		var fields []scm.Scmer
@@ -161,9 +167,9 @@ func checkTriggerHeader(definition *checkDeclaration, timing TriggerTiming) Trig
 		checkDefinition: definition, needsFinalInsertValues: timing == BeforeInsert, needsFinalUpdateValues: timing == BeforeUpdate}
 }
 
-func compileCheckProgram(t *table, definition *checkDeclaration) scm.Scmer {
+func compileCheckProgram(t *table, definition *checkDeclaration, names *tableColumnNamesSnapshot) scm.Scmer {
 	compiler := checkLanguageCompiler(definition.Language)
-	value := scm.Apply(compiler, scm.NewString(definition.Source), checkCompilerContext(t, definition)).WithoutSourceInfo()
+	value := scm.Apply(compiler, scm.NewString(definition.Source), checkCompilerContextUsing(t, definition, names)).WithoutSourceInfo()
 	predicate, plan := unwrapDeferredTriggerBody(value)
 	if predicate.IsNil() && !plan.IsNil() {
 		predicate = evaluateTriggerPlan(plan)
@@ -181,7 +187,11 @@ func compileCheckProgram(t *table, definition *checkDeclaration) scm.Scmer {
 }
 
 func buildCheckTriggers(t *table, definition *checkDeclaration) []foreignKeyTrigger {
-	program := compileCheckProgram(t, definition)
+	return buildCheckTriggersUsing(t, definition, t.columnNamesSnapshot.Load())
+}
+
+func buildCheckTriggersUsing(t *table, definition *checkDeclaration, names *tableColumnNamesSnapshot) []foreignKeyTrigger {
+	program := compileCheckProgram(t, definition, names)
 	insert, update := checkTriggerHeader(definition, BeforeInsert), checkTriggerHeader(definition, BeforeUpdate)
 	insert.Func, update.Func = program, program
 	// Both timing headers borrow this SAME procedure. Only the insert header

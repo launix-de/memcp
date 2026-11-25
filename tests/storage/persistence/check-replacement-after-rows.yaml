@@ -1,0 +1,750 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Committed CHECK retirement and validated same-ID replacement use the original guarded row view and one durable decision
+setup:
+- scm: (dropprocedure "memcp-tests" "check_row_prefix" true)
+- sql: DROP TABLE IF EXISTS check_row_values
+- sql: DROP TABLE IF EXISTS check_row_probe
+- sql: DROP TABLE IF EXISTS check_row_unconstrained
+- sql: DROP TABLE IF EXISTS check_row_marker
+- sql: CREATE TABLE check_row_values(id INT PRIMARY KEY,code VARCHAR(2) NULL,CONSTRAINT CK_check_row_code CHECK(code IS NULL OR ISNUMERIC(code)=1),CONSTRAINT
+    CK_check_row_id CHECK(id>0))
+- sql: CREATE TABLE check_row_probe(id INT PRIMARY KEY,v INT,CONSTRAINT CK_check_row_probe CHECK(v>=0))
+- sql: CREATE TABLE check_row_unconstrained(id INT PRIMARY KEY,v INT)
+- sql: CREATE TABLE check_row_marker(id INT PRIMARY KEY,value INT)
+- sql: INSERT check_row_values VALUES(1,'1'),(2,'2'),(3,NULL)
+- sql: INSERT check_row_probe VALUES(1,1),(2,2)
+- sql: INSERT check_row_unconstrained VALUES(1,1)
+- sql: INSERT check_row_marker VALUES(1,0)
+- scm: (registerprocedurelanguage "check-input-literal" (lambda (source _context) (lambda () (simplify source))))
+cleanup:
+- scm: (dropprocedure "memcp-tests" "check_row_prefix" true)
+- sql: DROP TABLE IF EXISTS check_row_values
+- sql: DROP TABLE IF EXISTS check_row_probe
+- sql: DROP TABLE IF EXISTS check_row_unconstrained
+- sql: DROP TABLE IF EXISTS check_row_marker
+test_cases:
+- name: A full original CHECK retirement cleanup width change and same-ID replacement commits one decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE check_row_marker SET value=1 WHERE id=1
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: ALTER TABLE check_row_values DROP CONSTRAINT CK_check_row_code
+    - connection: owner
+      sql: UPDATE check_row_marker SET value=2 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE check_row_values ALTER COLUMN code VARCHAR(4) NULL
+    - connection: owner
+      sql: UPDATE check_row_values SET code='bad' WHERE id=2
+    - connection: owner
+      sql: SELECT id,code FROM check_row_values ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          code: '1'
+        - id: 2
+          code: bad
+        - id: 3
+          code: null
+    - connection: observer
+      sql: SELECT id,code FROM check_row_values ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          code: '1'
+        - id: 2
+          code: '2'
+        - id: 3
+          code: null
+    - connection: owner
+      sql: SELECT name FROM sys.check_constraints WHERE parent_object_id=OBJECT_ID(N'dbo.check_row_values') ORDER BY name
+      expect:
+        rows: 1
+        data:
+        - name: CK_check_row_id
+    - connection: owner
+      sql: UPDATE check_row_values SET code='1234' WHERE id=2
+    - connection: owner
+      sql: ALTER TABLE check_row_values ADD CONSTRAINT CK_check_row_code CHECK(code IS NULL OR (ISNUMERIC(code)=1 AND code<>'0000'))
+    - connection: owner
+      sql: UPDATE check_row_marker SET value=3 WHERE id=1
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM check_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 3
+          depth: 1
+    - connection: owner
+      sql: SELECT id,code FROM check_row_values ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          code: '1'
+        - id: 2
+          code: '1234'
+        - id: 3
+          code: null
+    - connection: owner
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.check_constraints WHERE parent_object_id=OBJECT_ID(N'dbo.check_row_values')
+        ORDER BY name
+      expect:
+        rows: 2
+        data:
+        - name: CK_check_row_code
+          disabled: 0
+          untrusted: 0
+        - name: CK_check_row_id
+          disabled: 0
+          untrusted: 0
+    - connection: observer
+      sql: SELECT id,code FROM check_row_values ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          code: '1'
+        - id: 2
+          code: '2'
+        - id: 3
+          code: null
+    - connection: observer
+      sql: SELECT value FROM check_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 0
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,code FROM check_row_values ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          code: '1'
+        - id: 2
+          code: '1234'
+        - id: 3
+          code: null
+    - connection: observer
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.check_constraints WHERE parent_object_id=OBJECT_ID(N'dbo.check_row_values')
+        ORDER BY name
+      expect:
+        rows: 2
+        data:
+        - name: CK_check_row_code
+          disabled: 0
+          untrusted: 0
+        - name: CK_check_row_id
+          disabled: 0
+          untrusted: 0
+    - connection: observer
+      sql: SELECT max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.check_row_values') AND name='code'
+      expect:
+        rows: 1
+        data:
+        - max_length: 4
+- name: The newly selected CHECK recipe rejects a value the old recipe accepted
+  sql: INSERT check_row_values VALUES(4,'0000')
+  expect:
+    error: true
+    contains: check constraint CK_check_row_code failed
+- name: Unrelated CHECK enforcement survives exact old-program retirement
+  sql: INSERT check_row_values VALUES(-1,'1')
+  expect:
+    error: true
+    contains: check constraint CK_check_row_id failed
+- name: SQL UNKNOWN remains valid after replacement
+  sql: INSERT check_row_values VALUES(4,NULL)
+- name: The selected four-character declaration accepts a valid future value
+  sql: INSERT check_row_values VALUES(5,'9999')
+- name: The accepted row and CHECK replacement decision survives a process crash
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart the original catalog recovery owner
+  action: restart
+- name: Recovery restores exact rows selected width trusted CHECKs and only the new recipe
+  tds:
+    statements:
+    - connection: owner
+      sql: SELECT id,code FROM check_row_values ORDER BY id
+      expect:
+        rows: 5
+        data:
+        - id: 1
+          code: '1'
+        - id: 2
+          code: '1234'
+        - id: 3
+          code: null
+        - id: 4
+          code: null
+        - id: 5
+          code: '9999'
+    - connection: owner
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.check_constraints WHERE parent_object_id=OBJECT_ID(N'dbo.check_row_values')
+        ORDER BY name
+      expect:
+        rows: 2
+        data:
+        - name: CK_check_row_code
+          disabled: 0
+          untrusted: 0
+        - name: CK_check_row_id
+          disabled: 0
+          untrusted: 0
+    - connection: owner
+      sql: SELECT value FROM check_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 3
+    - connection: owner
+      sql: SELECT max_length FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.check_row_values') AND name='code'
+      expect:
+        rows: 1
+        data:
+        - max_length: 4
+    - connection: owner
+      sql: INSERT check_row_values VALUES(6,'0000')
+      expect:
+        error: true
+        contains:
+        - check constraint CK_check_row_code failed
+    - connection: owner
+      sql: INSERT check_row_values VALUES(-1,'1')
+      expect:
+        error: true
+        contains:
+        - check constraint CK_check_row_id failed
+- name: Whole rollback restores the original CHECK and all row and heartbeat values
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE check_row_marker SET value=7 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE check_row_probe DROP CONSTRAINT CK_check_row_probe
+    - connection: owner
+      sql: UPDATE check_row_probe SET v=-7 WHERE id=2
+    - connection: owner
+      sql: SELECT id,v FROM check_row_probe ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          v: 1
+        - id: 2
+          v: -7
+    - connection: observer
+      sql: SELECT id,v FROM check_row_probe ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          v: 1
+        - id: 2
+          v: 2
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: observer
+      sql: SELECT id,v FROM check_row_probe ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          v: 1
+        - id: 2
+          v: 2
+    - connection: observer
+      sql: SELECT name,CAST(is_not_trusted AS INT) AS untrusted FROM sys.check_constraints WHERE name='CK_check_row_probe'
+      expect:
+        rows: 1
+        data:
+        - name: CK_check_row_probe
+          untrusted: 0
+    - connection: observer
+      sql: SELECT value FROM check_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 3
+- name: A real CHECK violation retains existing XACT_ABORT OFF transaction semantics
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE check_row_marker SET value=77 WHERE id=1
+    - connection: owner
+      sql: INSERT check_row_values VALUES(6,'0000')
+      expect:
+        error: true
+        contains:
+        - check constraint CK_check_row_code failed
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM check_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 77
+          depth: 1
+    - connection: owner
+      sql: SELECT id,code FROM check_row_values ORDER BY id
+      expect:
+        rows: 5
+        data:
+        - id: 1
+          code: '1'
+        - id: 2
+          code: '1234'
+        - id: 3
+          code: null
+        - id: 4
+          code: null
+        - id: 5
+          code: '9999'
+    - connection: owner
+      sql: IF @@TRANCOUNT>0 ROLLBACK TRAN
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: SELECT value FROM check_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 3
+- name: A real CHECK violation retains existing XACT_ABORT ON transaction semantics
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT ON
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE check_row_marker SET value=77 WHERE id=1
+    - connection: owner
+      sql: INSERT check_row_values VALUES(6,'0000')
+      expect:
+        error: true
+        contains:
+        - check constraint CK_check_row_code failed
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM check_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 3
+          depth: 0
+    - connection: owner
+      sql: SELECT id,code FROM check_row_values ORDER BY id
+      expect:
+        rows: 5
+        data:
+        - id: 1
+          code: '1'
+        - id: 2
+          code: '1234'
+        - id: 3
+          code: null
+        - id: 4
+          code: null
+        - id: 5
+          code: '9999'
+    - connection: owner
+      sql: IF @@TRANCOUNT>0 ROLLBACK TRAN
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: SELECT value FROM check_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 3
+- name: Historical CHECK failure preserves old retirement original rows and retryable same-owner input
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "check_row_probe" false tx))
+      (define marker (table "memcp-tests" false "check_row_marker" false tx))
+      (define request (lambda (text body) (with_query_request owner nil 0 text "acid" (lambda (statement)
+        (statement text false body (lambda (_cause _completion) "preserve"))))))
+      (define write (lambda (handle columns values) (request "checked input insert" (lambda (input)
+        (with_table_mutation (list handle) (list "insert" '()) input owner
+          (lambda (bound) (insert handle columns values '() nil false nil bound)))))))
+      (define rows (lambda (handle input fields) (sort (scan input handle '() '() '() (lambda () true) fields
+        (lambda (acc id value) (append acc (list id value))) '() (lambda (left right) (merge (list left right))) false)
+        (lambda (left right) (< (car left) (car right))))))
+      (try (lambda () (begin
+        (write marker '("id" "value") (list (list 2 7)))
+        (define original (car ((show target "constraints") "Checks")))
+        (dropcheck target "CK_check_row_probe" tx)
+        (write target '("id" "v") (list (list 3 -7)))
+        (define rejected (try (lambda () (begin
+          (createcheck target "CK_check_row_probe" "tsql-check" "v > 0" '("v") tx owner) false))
+          (lambda (failure) (if (strlike (concat failure) "%check constraint CK_check_row_probe failed%") true (error failure)))))
+        (define failed (list rejected (tx_state tx) (equal? tx (owner "__memcp_tx"))
+          (rows target tx '("id" "v")) (rows target nil '("id" "v"))
+          (count (coalesceNil ((show target "constraints" tx) "Checks") '()))))
+        (request "repair original row" (lambda (input) (with_table_mutation (list target) (list "update" '("v")) input owner
+          (lambda (bound) (scan bound target '() '() '("id") (lambda (id) (equal? id 3)) '("$update")
+            (lambda (acc update) (begin (update (list "v" 7)) acc)) 0 +)))))
+        (createcheck target "CK_check_row_probe" "tsql-check" "v > 0" '("v") tx owner)
+        (define before (list failed (rows target tx '("id" "v")) (rows marker tx '("id" "value"))
+          (count ((show target "constraints" tx) "Checks"))))
+        (tx_rollback owner)
+        (list before (rows target nil '("id" "v")) (rows marker nil '("id" "value")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - - - true
+        - active
+        - true
+        - - - 1
+            - 1
+          - - 2
+            - 2
+          - - 3
+            - -7
+        - - - 1
+            - 1
+          - - 2
+            - 2
+        - 0
+      - - - 1
+          - 1
+        - - 2
+          - 2
+        - - 3
+          - 7
+      - - - 1
+          - 3
+        - - 2
+          - 7
+      - 1
+    - - - 1
+        - 1
+      - - 2
+        - 2
+    - - - 1
+        - 3
+- name: A retained source prefix and rewind before DROP restore exact baseline CHECK input and original row Undo
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "check_row_probe" false tx))
+      (define marker (table "memcp-tests" false "check_row_marker" false tx))
+      (define request (lambda (text body) (with_query_request owner nil 0 text "acid" (lambda (statement)
+        (statement text false body (lambda (_cause _completion) "preserve"))))))
+      (define write (lambda (handle columns values) (request "checked input insert" (lambda (input)
+        (with_table_mutation (list handle) (list "insert" '()) input owner
+          (lambda (bound) (insert handle columns values '() nil false nil bound)))))))
+      (define rows (lambda (handle input fields) (sort (scan input handle '() '() '() (lambda () true) fields
+        (lambda (acc id value) (append acc (list id value))) '() (lambda (left right) (merge (list left right))) false)
+        (lambda (left right) (< (car left) (car right))))))
+      (try (lambda () (begin
+        (write marker '("id" "value") (list (list 2 7)))
+        (createprocedure "memcp-tests" "check_row_prefix" "check-input-literal" "7" nil false tx)
+        (define boundary (tx_savepoint tx))
+        (dropcheck target "CK_check_row_probe" tx)
+        (write target '("id" "v") (list (list 3 -7)))
+        (tx_rollback_to_savepoint tx boundary)
+        (write target '("id" "v") (list (list 3 0)))
+        (define rejected (try (lambda () (begin (write target '("id" "v") (list (list 4 -1))) false))
+          (lambda (failure) (if (strlike (concat failure) "%check constraint CK_check_row_probe failed%") true (error failure)))))
+        (define before (list rejected (tx_state tx) (equal? tx (owner "__memcp_tx"))
+          (rows target tx '("id" "v")) (rows target nil '("id" "v"))
+          (count ((show target "constraints" tx) "Checks"))
+          (count (showprocedures "memcp-tests" "check_row_prefix" tx))
+          (count (showprocedures "memcp-tests" "check_row_prefix" nil))))
+        (tx_rollback owner)
+        (list before (rows target nil '("id" "v")) (rows marker nil '("id" "value")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - - true
+      - active
+      - true
+      - - - 1
+          - 1
+        - - 2
+          - 2
+        - - 3
+          - 0
+      - - - 1
+          - 1
+        - - 2
+          - 2
+      - 1
+      - 1
+      - 0
+    - - - 1
+        - 1
+      - - 2
+        - 2
+    - - - 1
+        - 3
+- name: Nested savepoints release only replacement reservations and keep the retired input reusable
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "check_row_probe" false tx))
+      (define marker (table "memcp-tests" false "check_row_marker" false tx))
+      (define request (lambda (text body) (with_query_request owner nil 0 text "acid" (lambda (statement)
+        (statement text false body (lambda (_cause _completion) "preserve"))))))
+      (define write (lambda (handle columns values) (request "checked input insert" (lambda (input)
+        (with_table_mutation (list handle) (list "insert" '()) input owner
+          (lambda (bound) (insert handle columns values '() nil false nil bound)))))))
+      (define rows (lambda (handle input fields) (sort (scan input handle '() '() '() (lambda () true) fields
+        (lambda (acc id value) (append acc (list id value))) '() (lambda (left right) (merge (list left right))) false)
+        (lambda (left right) (< (car left) (car right))))))
+      (try (lambda () (begin
+        (write marker '("id" "value") (list (list 2 7)))
+        (dropcheck target "CK_check_row_probe" tx)
+        (define retired (tx_savepoint tx))
+        (write target '("id" "v") (list (list 3 -7)))
+        (define before_cleanup (tx_savepoint tx))
+        (request "clean own row" (lambda (input) (with_table_mutation (list target) (list "update" '("v")) input owner
+          (lambda (bound) (scan bound target '() '() '("id") (lambda (id) (equal? id 3)) '("$update")
+            (lambda (acc update) (begin (update (list "v" 7)) acc)) 0 +)))))
+        (createcheck target "CK_check_row_probe" "tsql-check" "v > 0" '("v") tx owner)
+        (tx_rollback_to_savepoint tx before_cleanup)
+        (write target '("id" "v") (list (list 4 -8)))
+        (define rewound (rows target tx '("id" "v")))
+        (tx_rollback_to_savepoint tx retired)
+        (write target '("id" "v") (list (list 5 -9)))
+        (define before (list rewound (tx_state tx) (rows target tx '("id" "v"))
+          (count (coalesceNil ((show target "constraints" tx) "Checks") '()))))
+        (tx_rollback owner)
+        (list before (rows target nil '("id" "v")) (rows marker nil '("id" "value")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - - - - 1
+          - 1
+        - - 2
+          - 2
+        - - 3
+          - -7
+        - - 4
+          - -8
+      - active
+      - - - 1
+          - 1
+        - - 2
+          - 2
+        - - 5
+          - -9
+      - 0
+    - - - 1
+        - 1
+      - - 2
+        - 2
+    - - - 1
+        - 3
+- name: A foreign original writer conflicts before CHECK retirement and preserves both owners
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "check_row_probe" false tx))
+      (define marker (table "memcp-tests" false "check_row_marker" false tx))
+      (define request (lambda (text body) (with_query_request owner nil 0 text "acid" (lambda (statement)
+        (statement text false body (lambda (_cause _completion) "preserve"))))))
+      (define write (lambda (handle columns values) (request "checked input insert" (lambda (input)
+        (with_table_mutation (list handle) (list "insert" '()) input owner
+          (lambda (bound) (insert handle columns values '() nil false nil bound)))))))
+      (define rows (lambda (handle input fields) (sort (scan input handle '() '() '() (lambda () true) fields
+        (lambda (acc id value) (append acc (list id value))) '() (lambda (left right) (merge (list left right))) false)
+        (lambda (left right) (< (car left) (car right))))))
+      (try (lambda () (begin
+        (write marker '("id" "value") (list (list 2 7)))
+        (define writer (newsession)) (writer "username" "root") (tx_begin_acid writer)
+        (define other (writer "__memcp_tx"))
+        (try (lambda () (begin
+          (with_query_request writer nil 0 "foreign writer" "acid" (lambda (statement)
+            (statement "foreign writer" false (lambda (input)
+              (with_table_mutation (list target) (list "insert" '()) input writer
+                (lambda (bound) (insert target '("id" "v") (list (list 9 9)) '() nil false nil bound))))
+              (lambda (_cause _completion) "preserve"))))
+          (define rejected (try (lambda () (begin (dropcheck target "CK_check_row_probe" tx) false))
+            (lambda (failure) (if (strlike (concat failure) "%active table writer%") true (error failure)))))
+          (define other_active (tx_state other))
+          (tx_rollback writer)
+          (dropcheck target "CK_check_row_probe" tx)
+          (write target '("id" "v") (list (list 3 -7)))
+          (define before (list rejected other_active (tx_state tx) (rows target tx '("id" "v"))
+            (rows target nil '("id" "v"))))
+          (tx_rollback owner)
+          (list before (rows target nil '("id" "v")) (rows marker nil '("id" "value")))))
+          (lambda (failure) (begin (tx_rollback writer) (error failure))))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - - true
+      - active
+      - active
+      - - - 1
+          - 1
+        - - 2
+          - 2
+        - - 3
+          - -7
+      - - - 1
+          - 1
+        - - 2
+          - 2
+    - - - 1
+        - 1
+      - - 2
+        - 2
+    - - - 1
+        - 3
+- name: Retained unframed callback authority cannot be borrowed by the new CHECK input
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "check_row_probe" false tx))
+      (define marker (table "memcp-tests" false "check_row_marker" false tx))
+      (define request (lambda (text body) (with_query_request owner nil 0 text "acid" (lambda (statement)
+        (statement text false body (lambda (_cause _completion) "preserve"))))))
+      (define write (lambda (handle columns values) (request "checked input insert" (lambda (input)
+        (with_table_mutation (list handle) (list "insert" '()) input owner
+          (lambda (bound) (insert handle columns values '() nil false nil bound)))))))
+      (define rows (lambda (handle input fields) (sort (scan input handle '() '() '() (lambda () true) fields
+        (lambda (acc id value) (append acc (list id value))) '() (lambda (left right) (merge (list left right))) false)
+        (lambda (left right) (< (car left) (car right))))))
+      (try (lambda () (begin
+        (write marker '("id" "value") (list (list 2 7)))
+        (scan tx target '() '() '("id") (lambda (id) (equal? id -99)) '("$update")
+          (lambda (acc update) acc) 0 +)
+        (define rejected (try (lambda () (begin (dropcheck target "CK_check_row_probe" tx) false))
+          (lambda (failure) (if (strlike (concat failure) "%retained unframed mutation callbacks%") true (error failure)))))
+        (define before (list rejected (tx_state tx) (rows target tx '("id" "v"))
+          (count ((show target "constraints" tx) "Checks"))))
+        (tx_rollback owner)
+        (list before (rows target nil '("id" "v")) (rows marker nil '("id" "value")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - - true
+      - active
+      - - - 1
+          - 1
+        - - 2
+          - 2
+      - 1
+    - - - 1
+        - 1
+      - - 2
+        - 2
+    - - - 1
+        - 3
+- name: A current committed violating row cannot hide behind an earlier original-T read
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "check_row_probe" false tx))
+      (define marker (table "memcp-tests" false "check_row_marker" false tx))
+      (define request (lambda (text body) (with_query_request owner nil 0 text "acid" (lambda (statement)
+        (statement text false body (lambda (_cause _completion) "preserve"))))))
+      (define write (lambda (handle columns values) (request "checked input insert" (lambda (input)
+        (with_table_mutation (list handle) (list "insert" '()) input owner
+          (lambda (bound) (insert handle columns values '() nil false nil bound)))))))
+      (define rows (lambda (handle input fields) (sort (scan input handle '() '() '() (lambda () true) fields
+        (lambda (acc id value) (append acc (list id value))) '() (lambda (left right) (merge (list left right))) false)
+        (lambda (left right) (< (car left) (car right))))))
+      (try (lambda () (begin
+        (write marker '("id" "value") (list (list 2 7)))
+        (define target (table "memcp-tests" false "check_row_unconstrained" false tx))
+        (define before_read (rows target tx '("id" "v")))
+        (insert target '("id" "v") (list (list 9 -9)) '() nil false nil nil)
+        (define rejected (try (lambda () (begin
+          (createcheck target "CK_check_row_current" "tsql-check" "v>=0" '("v") tx owner) false))
+          (lambda (failure) (if (strlike (concat failure) "%check constraint CK_check_row_current failed%") true (error failure)))))
+        (define before (list rejected before_read (tx_state tx) (rows target tx '("id" "v"))
+          (count (coalesceNil ((show target "constraints" tx) "Checks") '()))))
+        (tx_rollback owner)
+        (list before (rows target nil '("id" "v")) (rows marker nil '("id" "value")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - - true
+      - - - 1
+          - 1
+      - active
+      - - - 1
+          - 1
+        - - 9
+          - -9
+      - 0
+    - - - 1
+        - 1
+      - - 9
+        - -9
+    - - - 1
+        - 3
+- name: Repeated valid SQL replacement cycles retain their requested final data and CHECK recipe
+  noncritical: true
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE check_row_marker SET value=19 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE check_row_probe DROP CONSTRAINT CK_check_row_probe
+    - connection: owner
+      sql: INSERT check_row_probe VALUES(3,-7)
+    - connection: owner
+      sql: UPDATE check_row_probe SET v=7 WHERE id=3
+    - connection: owner
+      sql: ALTER TABLE check_row_probe ADD CONSTRAINT CK_check_row_probe CHECK(v>0)
+    - connection: owner
+      sql: ALTER TABLE check_row_probe DROP CONSTRAINT CK_check_row_probe
+    - connection: owner
+      sql: ALTER TABLE check_row_probe ADD CONSTRAINT CK_check_row_probe CHECK(v>=0)
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: owner
+      sql: SELECT id,v FROM check_row_probe ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          v: 1
+        - id: 2
+          v: 2
+        - id: 3
+          v: 7
+    - connection: owner
+      sql: SELECT name,CAST(is_not_trusted AS INT) AS untrusted FROM sys.check_constraints WHERE name='CK_check_row_probe'
+      expect:
+        rows: 1
+        data:
+        - name: CK_check_row_probe
+          untrusted: 0

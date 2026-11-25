@@ -54,7 +54,10 @@ type tableWriteLease struct {
 	owner       *tableWriteAdmission
 	transaction *transactionState
 	declaration bool
-	once        sync.Once
+	// Cold, producer-owned binding profile; only immutable checked inputs
+	// consume its derived rights. It never permits raw writer borrowing.
+	inputProfile nativeMutationInputProfile
+	once         sync.Once
 	// The existing declaration lease may retain schema stability for private
 	// initialized slots until this same original transaction releases it.
 	ddlOnce  sync.Once

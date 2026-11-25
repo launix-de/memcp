@@ -7,7 +7,6 @@ import "fmt"
 import "maps"
 import "slices"
 import "unsafe"
-import "context"
 import "strings"
 import "github.com/launix-de/memcp/scm"
 
@@ -19,6 +18,7 @@ type catalogCheckDropAmendment struct {
 	previous      *tableShowColumnsSnapshot
 	retainedBytes uint
 	retiredBytes  uint
+	rowInput      bool
 }
 
 func checkMetadataContains(snapshot *tableShowColumnsSnapshot, name string) bool {
@@ -43,45 +43,32 @@ func (tx *TxContext) dropCatalogCheck(t *table, name string) bool {
 	if !checkMetadataContains(t.declarationMetadataForTx(tx), name) {
 		return false
 	}
-	finish := tx.beginCatalogConstruction(catalogEnforcementConstruction, nil, t)
-	defer finish()
+	rowInput := tx.publicCheckRowInput(t)
+	profile, kind := catalogEnforcementConstruction, catalogEnforcementKind
+	if rowInput {
+		profile, kind = catalogValidationConstruction, catalogRowCheckKind
+	}
+	finish := tx.beginCatalogConstruction(profile, nil, t)
+	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
 	if tx.coordinator != nil || tx.catalogIntents.Load() != nil || t.Ephemeral {
 		panic("check removal requires a local public declaration transaction")
 	}
-	return tx.stagePublicCatalogDeclaration(t.schema, catalogEnforcementKind, nil, func(changes *publicCatalogChanges) bool {
-		return changes.stageCheckDrop(tx, t, name)
+	return tx.stagePublicCatalogDeclaration(t.schema, kind, nil, func(changes *publicCatalogChanges) bool {
+		return changes.stageCheckDrop(tx, t, name, rowInput)
 	})
 }
 
-func (changes *publicCatalogChanges) stageCheckDrop(tx *TxContext, t *table, name string) bool {
+func (changes *publicCatalogChanges) stageCheckDrop(tx *TxContext, t *table, name string, rowInput bool) bool {
 	changes.mu.Lock()
 	defer changes.mu.Unlock()
 	defer changes.refreshMemoryLocked()
-	accepted := false
-	acquired := changes.leases[t] == nil
-	if acquired {
-		lease, err := t.writeAdmission.admit(scanQueryContext(tx, context.Background()), tx.transactionState, tableCatalogDeclarationAdmission, false)
-		if err != nil {
-			panic(err)
-		}
-		changes.leases[t] = lease
-		changes.leasesHighWater = max(changes.leasesHighWater, len(changes.leases))
-		if changes.anchor == nil {
-			changes.refreshMemoryLocked()
-			lease.attachRetainedMemory(changes.memory)
-			changes.anchor = lease
-		}
+	if rowInput && tx.hasTableDrops() {
+		panic("public CHECK input cannot join table removal")
 	}
-	defer func() {
-		if !accepted && acquired {
-			if changes.anchor == changes.leases[t] {
-				changes.anchor = nil
-			}
-			_ = changes.leases[t].Close()
-			delete(changes.leases, t)
-			delete(changes.baselines, t)
-		}
-	}()
+	accepted := false
+	finishInput := changes.acquireCheckInput(tx, t, rowInput)
+	defer func() { finishInput(accepted) }()
+
 	db := changes.db
 	access := db.GetWrite(tx)
 	defer access.Release()
@@ -98,6 +85,9 @@ func (changes *publicCatalogChanges) stageCheckDrop(tx *TxContext, t *table, nam
 	base := previous
 	if base == nil {
 		base = observed
+	}
+	if tx.retiredCheck(t, name) != nil {
+		panic("CHECK replacement admits only one committed retirement per identity")
 	}
 	if !checkMetadataContains(base, name) {
 		panic("check declaration changed during removal admission")
@@ -124,7 +114,7 @@ func (changes *publicCatalogChanges) stageCheckDrop(tx *TxContext, t *table, nam
 	view, bytes := removeCheckMetadata(base, definition.Id, false)
 	amendment := &catalogCheckDropAmendment{
 		declaration: catalogCheckDeclaration{Table: t.Name, Identity: t.RuntimeIdentity, Check: definition},
-		table:       t, previous: previous,
+		table:       t, previous: previous, rowInput: rowInput,
 	}
 	amendment.retainedBytes = uint(unsafe.Sizeof(*amendment)) + bytes
 	amendment.retiredBytes = definition.payloadFootprint
@@ -142,6 +132,7 @@ func (changes *publicCatalogChanges) stageCheckDrop(tx *TxContext, t *table, nam
 	changes.viewsHighWater = max(changes.viewsHighWater, len(views))
 	changes.amendmentBytes += amendment.retainedBytes
 	changes.historyBytes = uint(unsafe.Sizeof(history)) + uint(cap(history))*uint(unsafe.Sizeof(catalogDeclarationAmendment{}))
+	tx.noteStatementMutation(t)
 	tx.catalogAmendments.Store(&history)
 	changes.publishViews(history, views)
 	accepted = true

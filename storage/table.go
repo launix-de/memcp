@@ -168,13 +168,16 @@ func (c *column) hasDefault() bool {
 
 // Named defaults share the existing declaration namespace, not a second catalog.
 // Callers own schemalock; this is DDL admission only, never an execution check.
-func (t *table) hasColumnCheckDeclarationName(name string, excluded *column) bool {
+func (t *table) hasColumnCheckDeclarationName(name string, excluded *column, excludedChecks ...*checkDeclaration) bool {
 	for _, c := range t.Columns {
 		if c != excluded && c.DefaultName != "" && strings.EqualFold(c.DefaultName, name) {
 			return true
 		}
 	}
 	for _, check := range t.Checks {
+		if check != nil && slices.Contains(excludedChecks, check) {
+			continue
+		}
 		if strings.EqualFold(check.Id, name) {
 			return true
 		}
@@ -182,8 +185,8 @@ func (t *table) hasColumnCheckDeclarationName(name string, excluded *column) boo
 	return false
 }
 
-func (t *table) hasNonForeignDeclarationName(name string, excluded *column, includeKeyIDs bool) bool {
-	if t.hasColumnCheckDeclarationName(name, excluded) {
+func (t *table) hasNonForeignDeclarationName(name string, excluded *column, includeKeyIDs bool, excludedChecks ...*checkDeclaration) bool {
+	if t.hasColumnCheckDeclarationName(name, excluded, excludedChecks...) {
 		return true
 	}
 	for _, key := range t.Unique {
@@ -194,8 +197,8 @@ func (t *table) hasNonForeignDeclarationName(name string, excluded *column, incl
 	return false
 }
 
-func (t *table) hasDeclarationName(name string, excluded *column, includeKeyIDs bool) bool {
-	if t.hasNonForeignDeclarationName(name, excluded, includeKeyIDs) {
+func (t *table) hasDeclarationName(name string, excluded *column, includeKeyIDs bool, excludedChecks ...*checkDeclaration) bool {
+	if t.hasNonForeignDeclarationName(name, excluded, includeKeyIDs, excludedChecks...) {
 		return true
 	}
 	for _, key := range t.Foreign {
@@ -206,7 +209,7 @@ func (t *table) hasDeclarationName(name string, excluded *column, includeKeyIDs 
 	return false
 }
 
-func (db *database) hasDeclarationNameLocked(name string, excluded *column, views *publicCatalogViews) bool {
+func (db *database) hasDeclarationNameLocked(name string, excluded *column, views *publicCatalogViews, excludedChecks ...*checkDeclaration) bool {
 	for _, t := range db.tables.GetAll() {
 		if views != nil {
 			if _, dropped := views.dropped[t]; dropped {
@@ -244,7 +247,7 @@ func (db *database) hasDeclarationNameLocked(name string, excluded *column, view
 				continue
 			}
 		}
-		if t.hasDeclarationName(name, excluded, false) {
+		if t.hasDeclarationName(name, excluded, false, excludedChecks...) {
 			return true
 		}
 	}

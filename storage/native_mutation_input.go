@@ -18,13 +18,14 @@ const (
 	nativeOwnedCatalogRowInput
 	nativeColumnBindingRowInput
 	nativeColumnRetirementRowInput
+	nativeCheckRetirementRowInput
 )
 
 func (views *publicCatalogViews) mutationEventAllowed(t *table, event nativeMutationEvent) bool {
 	switch views.checkedWriters[t] {
 	case nativeDeclarationRowInput:
 		return event == nativeMutationInsert || event == nativeMutationUpdate
-	case nativeStatementTriggerRowInput, nativeOwnedCatalogRowInput, nativeColumnBindingRowInput, nativeColumnRetirementRowInput:
+	case nativeStatementTriggerRowInput, nativeOwnedCatalogRowInput, nativeColumnBindingRowInput, nativeColumnRetirementRowInput, nativeCheckRetirementRowInput:
 		return event == nativeMutationInsert || event == nativeMutationUpdate || event == nativeMutationDelete
 	default:
 		return false
@@ -183,7 +184,7 @@ func (tx *TxContext) mutationInputFor(t *table) *nativeMutationInput {
 // Source/history and descriptors come from the same immutable publication.
 // Statement programs use the same later-producer admission; other enforcing
 // programs outside this bounded input still prohibit writes.
-func checkedCatalogWriters(history []catalogDeclarationAmendment, statements, columns map[*table]struct{}, owner *transactionState, leased map[*table]*tableWriteLease) map[*table]nativeMutationInputProfile {
+func checkedCatalogWriters(history []catalogDeclarationAmendment, statements, columns, checks map[*table]struct{}, owner *transactionState, leased map[*table]*tableWriteLease) map[*table]nativeMutationInputProfile {
 	result, blocked := make(map[*table]nativeMutationInputProfile), make(map[*table]struct{})
 	// Rewound heads still have their original reserved slot/declaration lease.
 	// The later checked owner binds its actual baseline programs, not a dropped
@@ -195,6 +196,9 @@ func checkedCatalogWriters(history []catalogDeclarationAmendment, statements, co
 		// The retained lease alone selects an unchanged baseline. Actual key,
 		// property and layout amendments below impose their narrower profiles.
 		result[t] = nativeColumnBindingRowInput
+	}
+	for t := range checks {
+		result[t] = nativeCheckRetirementRowInput
 	}
 	for t, lease := range leased {
 		if lease != nil && lease.owner == &t.writeAdmission && lease.transaction == owner && (catalogForeignEndpointScope{owner: owner}).owns(t) {
@@ -239,7 +243,11 @@ func checkedCatalogWriters(history []catalogDeclarationAmendment, statements, co
 			blocked[c.table] = struct{}{}
 		}
 		if c := entry.checkDrop; c != nil {
-			blocked[c.table] = struct{}{}
+			if c.rowInput {
+				result[c.table] = nativeCheckRetirementRowInput
+			} else {
+				blocked[c.table] = struct{}{}
+			}
 		}
 		if state := entry.constraintState; state != nil {
 			for _, view := range state.views {
@@ -360,6 +368,13 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 	retired := make(map[nativeTriggerSlot]struct{})
 	retiredForeign := make(map[catalogForeignIdentity][]catalogForeignDeclaration)
 	for _, entry := range history {
+		if drop := entry.checkDrop; drop != nil && drop.table == t && drop.rowInput {
+			for _, timing := range []TriggerTiming{BeforeInsert, BeforeUpdate} {
+				program := foreignKeyTrigger{table: t, trigger: checkTriggerHeader(drop.declaration.Check, timing)}
+				tx.publicCatalogChanges().validateForeignReservation(tx, program)
+				retired[nativeTriggerSlot{program.trigger.Name, timing}] = struct{}{}
+			}
+		}
 		if drop := entry.foreignDrop; drop != nil {
 			identity := foreignIdentity(drop.declaration)
 			retiredForeign[identity] = append(retiredForeign[identity], drop.declaration)

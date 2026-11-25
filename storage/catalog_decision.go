@@ -28,6 +28,7 @@ const (
 	catalogOwnedForeignKind
 	catalogAllocatorResetKind
 	catalogRowForeignKind
+	catalogRowCheckKind
 )
 
 // Identity is allocated before the first unpublished declaration. It is part of
@@ -132,10 +133,10 @@ func (scope *transactionResources) catalogReadOnlyLocked() bool {
 }
 
 func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarationKind, initializer *nativeColumnInitializer) {
-	public := kind == catalogAllocatorResetKind || kind == catalogDefaultKind || kind == catalogSourceKind || kind == catalogTableDropKind || kind == catalogForeignDropKind || kind == catalogForeignReplacementKind || kind == catalogPublicKeyKind || kind == catalogColumnKind || kind == catalogStatementTriggerKind || kind == catalogOwnedForeignKind || kind == catalogRowForeignKind
+	public := kind == catalogAllocatorResetKind || kind == catalogDefaultKind || kind == catalogSourceKind || kind == catalogTableDropKind || kind == catalogForeignDropKind || kind == catalogForeignReplacementKind || kind == catalogPublicKeyKind || kind == catalogColumnKind || kind == catalogStatementTriggerKind || kind == catalogOwnedForeignKind || kind == catalogRowForeignKind || kind == catalogRowCheckKind
 	privateCreate := kind == catalogCreateKind
 
-	if tx.hasTableDrops() && (!public && !privateCreate || kind == catalogStatementTriggerKind || kind == catalogRowForeignKind) {
+	if tx.hasTableDrops() && (!public && !privateCreate || kind == catalogStatementTriggerKind || kind == catalogRowForeignKind || kind == catalogRowCheckKind) {
 		panic("table removal phase admits only default or source declarations")
 	}
 	// Construction admission owns effect policy. Merely preparing a private
@@ -550,6 +551,15 @@ func (tx *TxContext) prepareCatalogDecision() error {
 	// allocator operations. Its strict envelope must be selected last.
 	if _, disabled := record.foreignEnforcementFacts(); disabled {
 		record.Format = 29
+	}
+	// A replacement reuses CHECK IDs across the existing old/new recipe
+	// fields only in this strict family, selected after all mixed profiles.
+	if record.hasCheckReplacements() {
+		if err := record.validateCheckReplacementProfile(); err != nil {
+			db.schemalock.Unlock()
+			return err
+		}
+		record.Format = 30
 	}
 	encoded := encodeCatalogDecision(record)
 	db.schemalock.Unlock()
