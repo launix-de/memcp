@@ -12,9 +12,9 @@ import "unicode/utf8"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
-// V16 appends only a fresh, nullable ordinary declaration. There is no private
-// packed slot or stored value: old generations already represent its NULLs.
-// A preceding or subsequent write to the same endpoint is not in this profile.
+// V16 remains the historical fresh nullable-only reader domain. New appends
+// retain the existing V19 immutable historical-prefix recipe, including genuine
+// NULL without a future DEFAULT. Neither profile installs a private packed slot.
 type catalogColumnAppend struct {
 	Table               string                           `json:"table"`
 	Identity            string                           `json:"identity"`
@@ -193,7 +193,12 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 		tx.requireNoColumnAppendRows(t)
 	}
 	var initialization *catalogColumnInitialization
-	if initialized && (initializer == nil || !initializer.rowBased) {
+	if (initialized || c.AllowNull) && (initializer == nil || !initializer.rowBased) {
+		// A nullable declaration already proves NULL for its historical rows.
+		// Retain the actual frozen generation extents through the SAME V19
+		// prefix owner, without inventing a DEFAULT or scanning/replacing rows.
+		// Fresh-target admission above and raw-writer exclusion remain intact;
+		// later checked producers consume this complete immutable input.
 		initialization = captureColumnInitialization(tx, t, c, fillExisting)
 	}
 	access := changes.db.GetWrite(tx)

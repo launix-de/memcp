@@ -1,6 +1,23 @@
 <!-- Copyright (C) 2026 Carl-Philip Hänsch -->
 # Upgrade compatibility contract
 
+## Nullable historical prefixes and checked writes
+
+New ordinary nullable appends capture their actual main/delta generation extents
+through the existing `catalog-v19/` historical-prefix owner. Their historical
+value is genuine NULL; no future DEFAULT is invented, and no row scan or backfill
+is performed. The existing checked INSERT/UPDATE producer consumes the complete
+immutable input in the original transaction. Its normal row WAL records explicit
+later values, including those written before the append decision commits.
+
+Fresh-endpoint admission, retained raw-callback exclusion and the original
+savepoint/statement Undo owners remain in effect. Earlier V16 records retain
+their original read-only pending profile; no legacy record is upgraded by
+inference. Required V19 fields and all old journal format gates are unchanged.
+`nullable-column-checked-writes.yaml` covers nested transaction depth, correlated
+updates, NULL/missing scalar inputs, metadata without defaults, rollback,
+savepoints, failed statements, future inserts and accepted/unaccepted recovery.
+
 ## Historical generated-ID column appends
 
 The required `catalog-v10/v31/` domain composes a generated-ID append with the
