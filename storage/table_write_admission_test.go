@@ -37,6 +37,15 @@ func statementAdmissionTransaction(implicit bool) *TxContext {
 	return tx
 }
 
+func rollbackStatementAdmissionTransaction(tx *TxContext) {
+	tx.mu.Lock()
+	rollback := tx.State == TxActive && !tx.decisionStarted
+	tx.mu.Unlock()
+	if rollback {
+		tx.Rollback()
+	}
+}
+
 func statementAdmissionFixture(t *testing.T) (*table, *atomic.Int64) {
 	t.Helper()
 	cleanup := setupGCTest(t)
@@ -65,7 +74,7 @@ func statementAdmissionFixture(t *testing.T) (*table, *atomic.Int64) {
 		triggerLanguageCompilers.Unlock()
 	})
 	declaration := statementAdmissionTransaction(false)
-	defer declaration.Rollback()
+	defer rollbackStatementAdmissionTransaction(declaration)
 	createStatementTrigger(tbl, "statement_admission_update", AfterStatement, language,
 		"observe completed update", []string{"update"}, false, false, declaration)
 	if err := declaration.Commit(); err != nil {
@@ -153,10 +162,10 @@ func TestImplicitStatementWaitsBeforeItsWriterLease(t *testing.T) {
 			}()
 			defer func() {
 				cancel()
-				writer.Rollback()
+				rollbackStatementAdmissionTransaction(writer)
 				select {
 				case <-done:
-					waiter.Rollback()
+					rollbackStatementAdmissionTransaction(waiter)
 				case <-time.After(5 * time.Second):
 					t.Error("native waiter did not drain after cancellation")
 				}
@@ -215,10 +224,10 @@ func TestImplicitStatementWaitsBeforeItsWriterLease(t *testing.T) {
 func TestOriginalStatementWriterUpgradeStillFailsWithoutWaiting(t *testing.T) {
 	tbl, observed := statementAdmissionFixture(t)
 	writer := statementAdmissionTransaction(false)
-	defer writer.Rollback()
+	defer rollbackStatementAdmissionTransaction(writer)
 	statementAdmissionUpdate(tbl, writer, 2, 21)
 	original := statementAdmissionTransaction(false)
-	defer original.Rollback()
+	defer rollbackStatementAdmissionTransaction(original)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	probe := &statementAdmissionContext{Context: ctx, waiting: make(chan struct{})}
@@ -252,7 +261,7 @@ func TestOrdinaryImplicitCursorStabilityWritersRemainParallel(t *testing.T) {
 	for _, tx := range []*TxContext{first, second} {
 		tx.Session = scm.NewSession()
 		tx.autoCommit = true
-		defer tx.Rollback()
+		defer rollbackStatementAdmissionTransaction(tx)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		probe := &statementAdmissionContext{Context: ctx, waiting: make(chan struct{})}
@@ -288,7 +297,7 @@ func TestRetainedMutationProfilesRejectForeignStatementUpgrade(t *testing.T) {
 			other.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewInt(10)},
 				{scm.NewInt(2), scm.NewInt(20)}}, nil, scm.NewNil(), false, nil)
 			writer := statementAdmissionTransaction(false)
-			defer writer.Rollback()
+			defer rollbackStatementAdmissionTransaction(writer)
 			statementAdmissionUpdate(tbl, writer, 2, 21)
 			original := statementAdmissionTransaction(true)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -328,7 +337,7 @@ func TestRetainedMutationProfilesRejectForeignStatementUpgrade(t *testing.T) {
 				cancel()
 				select {
 				case <-done:
-					original.Rollback()
+					rollbackStatementAdmissionTransaction(original)
 				case <-time.After(5 * time.Second):
 					t.Error("rejected producer did not drain after cancellation")
 				}
@@ -358,8 +367,8 @@ func TestRetainedMutationProfilesRejectForeignStatementUpgrade(t *testing.T) {
 func TestImplicitStatementClaimExcludesNewForeignRawWriter(t *testing.T) {
 	owner := new(tableWriteAdmission)
 	first, second := statementAdmissionTransaction(true), statementAdmissionTransaction(true)
-	defer first.Rollback()
-	defer second.Rollback()
+	defer rollbackStatementAdmissionTransaction(first)
+	defer rollbackStatementAdmissionTransaction(second)
 	claim, err := owner.admit(context.Background(), first.transactionState, tableImplicitStatementWriteAdmission, true)
 	if err != nil {
 		t.Fatal(err)
