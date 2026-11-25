@@ -80,21 +80,46 @@ test_cases:
     - connection: observer
       sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_state_tds_existing'
       expect: {rows: 1, data: [{name: FK_state_tds_existing}]}
-- name: An unknown second target aborts the transaction without publishing the pending declaration
+- name: An unknown second target preserves the complete pending declaration before a valid original commit
   tds:
     statements:
+    - {connection: owner, sql: SET XACT_ABORT OFF}
     - {connection: owner, sql: BEGIN TRANSACTION}
     - {connection: owner, sql: 'ALTER TABLE state_tds_child ADD CONSTRAINT FK_state_tds_named FOREIGN KEY(parent_id) REFERENCES state_tds_parent(id)'}
+    - connection: owner
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted,@@TRANCOUNT AS depth,XACT_STATE() AS state FROM sys.foreign_keys WHERE parent_object_id=OBJECT_ID(N'dbo.state_tds_child') ORDER BY name
+      expect: {rows: 2, data: [{name: FK_state_tds_existing, disabled: 0, untrusted: 0, depth: 1, state: 1}, {name: FK_state_tds_named, disabled: 0, untrusted: 0, depth: 1, state: 1}]}
+    - connection: observer
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE parent_object_id=OBJECT_ID(N'dbo.state_tds_child') ORDER BY name
+      expect: {rows: 1, data: [{name: FK_state_tds_existing, disabled: 0, untrusted: 0}]}
     - connection: owner
       sql: ALTER TABLE state_tds_child NOCHECK CONSTRAINT FK_state_tds_named, unknown_constraint
       expect: {error: true, contains: ['constraint is not a pending foreign declaration']}
     - connection: owner
-      sql: COMMIT TRANSACTION
-      expect: {error: true, contains: ['transaction is aborted; ROLLBACK required']}
-    - {connection: owner, sql: ROLLBACK TRANSACTION}
+      # Every name is resolved by the compiler before the one native operation.
+      # The invalid second name must not disable the first or abort prior work.
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted,@@TRANCOUNT AS depth,XACT_STATE() AS state FROM sys.foreign_keys WHERE parent_object_id=OBJECT_ID(N'dbo.state_tds_child') ORDER BY name
+      expect: {rows: 2, data: [{name: FK_state_tds_existing, disabled: 0, untrusted: 0, depth: 1, state: 1}, {name: FK_state_tds_named, disabled: 0, untrusted: 0, depth: 1, state: 1}]}
+    - connection: owner
+      sql: SELECT id,parent_id FROM state_tds_child ORDER BY id
+      expect: {rows: 1, data: [{id: 10, parent_id: 1}]}
     - connection: observer
-      sql: SELECT constraint_name AS name FROM information_schema.referential_constraints WHERE constraint_name=N'FK_state_tds_named'
-      expect: {rows: 0}
+      sql: SELECT id,parent_id FROM state_tds_child ORDER BY id
+      expect: {rows: 1, data: [{id: 10, parent_id: 1}]}
+    - {connection: owner, sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted,@@TRANCOUNT AS depth,XACT_STATE() AS state FROM sys.foreign_keys WHERE parent_object_id=OBJECT_ID(N'dbo.state_tds_child') ORDER BY name
+      expect: {rows: 2, data: [{name: FK_state_tds_existing, disabled: 0, untrusted: 0, depth: 0, state: 0}, {name: FK_state_tds_named, disabled: 0, untrusted: 0, depth: 0, state: 0}]}
+    - connection: observer
+      sql: INSERT state_tds_child VALUES(91,999)
+      expect: {error: true, contains: ['foreign key constraint']}
+    - connection: observer
+      sql: SELECT id,parent_id FROM state_tds_child ORDER BY id
+      expect: {rows: 1, data: [{id: 10, parent_id: 1}]}
+    - {connection: observer, sql: ALTER TABLE state_tds_child DROP CONSTRAINT FK_state_tds_named}
+    - connection: observer
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE parent_object_id=OBJECT_ID(N'dbo.state_tds_child') ORDER BY name
+      expect: {rows: 1, data: [{name: FK_state_tds_existing, disabled: 0, untrusted: 0}]}
 - name: ALL changes committed and pending foreign state privately and rollback restores the whole original cohort
   tds:
     statements:
