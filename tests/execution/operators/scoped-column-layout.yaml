@@ -1,0 +1,219 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: mysql
+  isolated: true
+  description: Native temporary column layout uses the original scope transaction and completed input boundaries
+test_cases:
+- name: A foreign session cannot amend a supplied native temporary handle
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
+    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
+    \ (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\"\
+    \ \"INT\" (list) (list))\n\t\t\t(list \"column\" \"discarded\" \"INT\" (list) (list)))\n\t\t(list \"engine\"\
+    \ \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\t(define source (table\
+    \ \"memcp-tests\" false name false tx))\n\t(insert source '(\"id\" \"discarded\") (list (list 1 17) (list 2\
+    \ 29)) (list) nil false nil tx)\n\t(define rows (lambda (reader)\n\t\t(scan reader source (list) (list) (list)\
+    \ (lambda () true) '(\"id\" \"discarded\")\n\t\t\t(lambda (result id value) (set_assoc result id value)) (list)\
+    \ merge_assoc)))\n\n\t(define other (newsession)) (other \"username\" \"root\")\n\t(tx_begin_acid other) (define\
+    \ foreign_tx (other \"__memcp_tx\"))\n\t(define rejected (try (lambda () (begin (dropcolumn source \"discarded\"\
+    \ foreign_tx) false))\n\t\t(lambda (cause) (strlike (string (failure_value cause)) \"%another native relation\
+    \ scope owner%\"))))\n\t(define actual (rows tx))\n\t(define intact (and (expression_equal? (get_assoc actual\
+    \ 1) 17) (expression_equal? (get_assoc actual 2) 29)\n\t\t(not (nil? (show source \"column\" \"discarded\" false\
+    \ tx)))))\n\t(tx_rollback other) (tx_rollback owner) (close_relation_scope scope)\n\t(and rejected intact)\n\
+    )\n"
+  expect:
+    result: true
+- name: A retained raw mutation callback prevents declaration before effects and remains usable
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
+    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
+    \ (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\"\
+    \ \"INT\" (list) (list))\n\t\t\t(list \"column\" \"discarded\" \"INT\" (list) (list)))\n\t\t(list \"engine\"\
+    \ \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\t(define source (table\
+    \ \"memcp-tests\" false name false tx))\n\t(insert source '(\"id\" \"discarded\") (list (list 1 17) (list 2\
+    \ 29)) (list) nil false nil tx)\n\t(define rows (lambda (reader)\n\t\t(scan reader source (list) (list) (list)\
+    \ (lambda () true) '(\"id\" \"discarded\")\n\t\t\t(lambda (result id value) (set_assoc result id value)) (list)\
+    \ merge_assoc)))\n\n\t(define callback (scan tx source (list) (list) '(\"id\") (lambda (id) (equal? id 1)) '(\"\
+    $update\")\n\t\t(lambda (_ update) update) nil (lambda (_ update) update)))\n\t(define rejected (try (lambda\
+    \ () (begin (dropcolumn source \"discarded\" tx) false))\n\t\t(lambda (cause) (strlike (string (failure_value\
+    \ cause)) \"%retained unframed mutation callbacks%\"))))\n\t(define before (rows tx))\n\t(callback)\n\t(define\
+    \ after (rows tx))\n\t(define intact (and (not (nil? (show source \"column\" \"discarded\" false tx)))\n\t\t\
+    (expression_equal? (get_assoc before 1) 17) (expression_equal? (get_assoc before 2) 29)\n\t\t(nil? (get_assoc\
+    \ after 1)) (expression_equal? (get_assoc after 2) 29)))\n\t(tx_rollback owner) (close_relation_scope scope)\n\
+    \t(and rejected intact)\n)\n"
+  expect:
+    result: true
+- name: An active checked producer refuses self DDL and completes its original input
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
+    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
+    \ (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\"\
+    \ \"INT\" (list) (list))\n\t\t\t(list \"column\" \"discarded\" \"INT\" (list) (list)))\n\t\t(list \"engine\"\
+    \ \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\t(define source (table\
+    \ \"memcp-tests\" false name false tx))\n\t(insert source '(\"id\" \"discarded\") (list (list 1 17) (list 2\
+    \ 29)) (list) nil false nil tx)\n\t(define rows (lambda (reader)\n\t\t(scan reader source (list) (list) (list)\
+    \ (lambda () true) '(\"id\" \"discarded\")\n\t\t\t(lambda (result id value) (set_assoc result id value)) (list)\
+    \ merge_assoc)))\n\n\t(define rejected\n\t\t(with_table_mutation (list source) (list \"insert\" (list)) tx owner\n\
+    \t\t\t(lambda (bound) (begin\n\t\t\t\t(define denied (try (lambda () (begin (dropcolumn source \"discarded\"\
+    \ bound) false))\n\t\t\t\t\t(lambda (cause) (strlike (string (failure_value cause)) \"%native declaration input\
+    \ is in use%\"))))\n\t\t\t\t(insert source '(\"id\" \"discarded\") (list (list 3 41)) (list) nil false nil bound)\n\
+    \t\t\t\tdenied))))\n\t(define actual (rows tx))\n\t(define intact (and (expression_equal? (get_assoc actual\
+    \ 1) 17)\n\t\t(expression_equal? (get_assoc actual 2) 29) (expression_equal? (get_assoc actual 3) 41)\n\t\t\
+    (not (nil? (show source \"column\" \"discarded\" false tx)))))\n\t(tx_rollback owner) (close_relation_scope\
+    \ scope)\n\t(and rejected intact)\n)\n"
+  expect:
+    result: true
+- name: An admitted old reader completes before the same caller publishes its new layout
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
+    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
+    \ (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\"\
+    \ \"INT\" (list) (list))\n\t\t\t(list \"column\" \"discarded\" \"INT\" (list) (list)))\n\t\t(list \"engine\"\
+    \ \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\t(define source (table\
+    \ \"memcp-tests\" false name false tx))\n\t(insert source '(\"id\" \"discarded\") (list (list 1 17) (list 2\
+    \ 29)) (list) nil false nil tx)\n\n\t(define entered (newpromise)) (define released (newpromise)) (define result\
+    \ (newpromise))\n\t(define rejected (newpromise))\n\t(define await (lambda (promise remaining)\n\t\t(if (promise\
+    \ \"state\") true (> remaining 0)\n\t\t\t(begin (sleep 0.001) (await promise (- remaining 1)))\n\t\t\ttrue (error\
+    \ \"column input coordination did not finish\"))))\n\t(parallel\n\t\t(result \"once\" (scan tx source (list)\
+    \ (list) '(\"id\") (lambda (id) (equal? id 1)) '(\"discarded\")\n\t\t\t(lambda (_ value) (begin (entered \"\
+    once\" true) (await released 2000) value)) 0 +))\n\t\t(begin (await entered 2000)\n\t\t\t(rejected \"once\"\
+    \ (try (lambda () (begin (dropcolumn source \"discarded\" tx) false))\n\t\t\t\t(lambda (cause) (strlike (string\
+    \ (failure_value cause)) \"%input is in use by the original caller%\"))))\n\t\t\t(released \"once\" true)))\n\
+    \t(dropcolumn source \"discarded\" tx)\n\t(with_table_mutation (list source) (list \"insert\" (list)) tx owner\n\
+    \t\t(lambda (bound) (insert source '(\"id\") (list (list 3)) (list) nil false nil bound)))\n\t(define total\
+    \ (scan tx source (list) (list) (list) (lambda () true) '(\"id\") (lambda (total id) (+ total id)) 0 +))\n\t\
+    (define changed (nil? (show source \"column\" \"discarded\" false tx)))\n\t(tx_rollback owner) (close_relation_scope\
+    \ scope)\n\t(and (rejected \"value\") (expression_equal? (result \"value\") 17) changed (equal? total 6))\n\
+    )\n"
+  expect:
+    result: true
+- name: Rebuild refuses the actual pending layout and rollback retains every old physical cell
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
+    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
+    \ (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\"\
+    \ \"INT\" (list) (list))\n\t\t\t(list \"column\" \"discarded\" \"INT\" (list) (list)))\n\t\t(list \"engine\"\
+    \ \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\t(define source (table\
+    \ \"memcp-tests\" false name false tx))\n\t(insert source '(\"id\" \"discarded\") (list (list 1 17) (list 2\
+    \ 29)) (list) nil false nil tx)\n\t(define rows (lambda (reader)\n\t\t(scan reader source (list) (list) (list)\
+    \ (lambda () true) '(\"id\" \"discarded\")\n\t\t\t(lambda (result id value) (set_assoc result id value)) (list)\
+    \ merge_assoc)))\n\n\t(tx_commit owner)\n\t(rebuild source true false nil true)\n\t(tx_begin_acid owner) (set\
+    \ tx (owner \"__memcp_tx\"))\n\t(dropcolumn source \"discarded\" tx)\n\t(define rejected (try (lambda () (begin\
+    \ (rebuild source true false tx true) false))\n\t\t(lambda (cause) (strlike (string (failure_value cause)) \"\
+    %pending physical declaration ownership%\"))))\n\t(with_table_mutation (list source) (list \"insert\" (list))\
+    \ tx owner\n\t\t(lambda (bound) (insert source '(\"id\") (list (list 3)) (list) nil false nil bound)))\n\t(tx_rollback\
+    \ owner)\n\t(rebuild source true false nil true)\n\t(tx_begin_acid owner) (set tx (owner \"__memcp_tx\"))\n\t\
+    (define actual (rows tx))\n\t(define intact (and (expression_equal? (get_assoc actual 1) 17) (expression_equal?\
+    \ (get_assoc actual 2) 29)\n\t\t(nil? (get_assoc actual 3)) (not (nil? (show source \"column\" \"discarded\"\
+    \ false nil)))))\n\t(tx_rollback owner) (close_relation_scope scope)\n\t(and rejected intact)\n)\n"
+  expect:
+    result: true
+- name: Native stored ADD cannot consume its own pending DDL lease and earlier rows remain original
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
+    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
+    \ (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\"\
+    \ \"INT\" (list) (list))\n\t\t\t(list \"column\" \"discarded\" \"INT\" (list) (list)))\n\t\t(list \"engine\"\
+    \ \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\t(define source (table\
+    \ \"memcp-tests\" false name false tx))\n\t(insert source '(\"id\" \"discarded\") (list (list 1 17) (list 2\
+    \ 29)) (list) nil false nil tx)\n\t(define rows (lambda (reader)\n\t\t(scan reader source (list) (list) (list)\
+    \ (lambda () true) '(\"id\" \"discarded\")\n\t\t\t(lambda (result id value) (set_assoc result id value)) (list)\
+    \ merge_assoc)))\n\n\t(define saved (tx_savepoint tx))\n\t(dropcolumn source \"discarded\" tx)\n\t(with_table_mutation\
+    \ (list source) (list \"insert\" (list)) tx owner\n\t\t(lambda (bound) (insert source '(\"id\") (list (list\
+    \ 3)) (list) nil false nil bound)))\n\t(define rejected (try (lambda () (begin\n\t\t(createcolumn source \"\
+    extra\" \"INT\" (list) (list) nil nil tx) false))\n\t\t(lambda (cause) (strlike (string (failure_value cause))\
+    \ \"%pending lexical column declaration%\"))))\n\t(define runtime_rejected (try (lambda () (begin\n\t\t(createcolumn\
+    \ source \"discarded\" \"INT\" (list) (list \"temp\" true) nil nil tx) false))\n\t\t(lambda (cause) (strlike\
+    \ (string (failure_value cause)) \"%temporary preparation cannot replace a retained stored declaration%\"))))\n\
+    \t(tx_rollback_to_savepoint tx saved)\n\t(define actual (rows tx))\n\t(define intact (and (not (nil? (show source\
+    \ \"column\" \"discarded\" false tx)))\n\t\t(nil? (show source \"column\" \"extra\" false tx))\n\t\t(expression_equal?\
+    \ (get_assoc actual 1) 17) (expression_equal? (get_assoc actual 2) 29)\n\t\t(nil? (get_assoc actual 3))))\n\t\
+    (tx_rollback owner) (close_relation_scope scope)\n\t(and rejected runtime_rejected intact)\n)\n"
+  expect:
+    result: true
+- name: A stale scoped handle cannot amend a replacement generation at the same lexical slot
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
+    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
+    \ (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\"\
+    \ \"INT\" (list) (list))\n\t\t\t(list \"column\" \"discarded\" \"INT\" (list) (list)))\n\t\t(list \"engine\"\
+    \ \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\t(define source (table\
+    \ \"memcp-tests\" false name false tx))\n\t(insert source '(\"id\" \"discarded\") (list (list 1 17) (list 2\
+    \ 29)) (list) nil false nil tx)\n\n\t(drop_relation_scope_binding scope \"probe\" false tx)\n\t(createtable\
+    \ \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\" \"INT\" (list) (list)) (list \"column\" \"discarded\"\
+    \ \"INT\" (list) (list)))\n\t\t(list \"engine\" \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\"\
+    \ \"probe\") false tx)\n\t(define current_binding (relation_scope_binding scope \"probe\" tx))\n\t(define replacement\
+    \ (table (car current_binding) false (car (cdr current_binding)) false tx))\n\t(insert replacement '(\"id\"\
+    \ \"discarded\") (list (list 9 91)) (list) nil false nil tx)\n\t(define rejected (try (lambda () (begin (dropcolumn\
+    \ source \"discarded\" tx) false))\n\t\t(lambda (cause) (strlike (string (failure_value cause)) \"%outside its\
+    \ native lexical generation%\"))))\n\t(define value (scan tx replacement (list) (list) (list) (lambda () true)\
+    \ '(\"discarded\")\n\t\t(lambda (total value) (+ total value)) 0 +))\n\t(define intact (not (nil? (show replacement\
+    \ \"column\" \"discarded\" false tx))))\n\t(tx_rollback owner) (close_relation_scope scope)\n\t(and rejected\
+    \ intact (equal? value 91))\n)\n"
+  expect:
+    result: true
+- name: A foreign execution session cannot borrow the original transaction layout lease
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
+    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
+    \ (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\"\
+    \ \"INT\" (list) (list))\n\t\t\t(list \"column\" \"discarded\" \"INT\" (list) (list)))\n\t\t(list \"engine\"\
+    \ \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\t(define source (table\
+    \ \"memcp-tests\" false name false tx))\n\t(insert source '(\"id\" \"discarded\") (list (list 1 17) (list 2\
+    \ 29)) (list) nil false nil tx)\n\t(define rows (lambda (reader)\n\t\t(scan reader source (list) (list) (list)\
+    \ (lambda () true) '(\"id\" \"discarded\")\n\t\t\t(lambda (result id value) (set_assoc result id value)) (list)\
+    \ merge_assoc)))\n\n\t(dropcolumn source \"discarded\" tx)\n\t(define other (newsession)) (other \"username\"\
+    \ \"root\")\n\t(define rejected (try (lambda () (begin\n\t\t(with_table_mutation (list source) (list \"insert\"\
+    \ (list)) tx other\n\t\t\t(lambda (bound) (insert source '(\"id\") (list (list 9)) (list) nil false nil bound)))\
+    \ false))\n\t\t(lambda (cause) (strlike (string (failure_value cause)) \"%another native relation scope owner%\"\
+    ))))\n\t(with_table_mutation (list source) (list \"insert\" (list)) tx owner\n\t\t(lambda (bound) (insert source\
+    \ '(\"id\") (list (list 3)) (list) nil false nil bound)))\n\t(define total (scan tx source (list) (list) (list)\
+    \ (lambda () true) '(\"id\")\n\t\t(lambda (total id) (+ total id)) 0 +))\n\t(tx_rollback owner) (close_relation_scope\
+    \ scope)\n\t(and rejected (equal? total 6))\n)\n"
+  expect:
+    result: true
+- name: A raw sink cannot bypass the pending checked input and an owning producer still succeeds
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
+    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
+    \ (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\"\
+    \ \"INT\" (list) (list))\n\t\t\t(list \"column\" \"discarded\" \"INT\" (list) (list)))\n\t\t(list \"engine\"\
+    \ \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\t(define source (table\
+    \ \"memcp-tests\" false name false tx))\n\t(insert source '(\"id\" \"discarded\") (list (list 1 17) (list 2\
+    \ 29)) (list) nil false nil tx)\n\t(define rows (lambda (reader)\n\t\t(scan reader source (list) (list) (list)\
+    \ (lambda () true) '(\"id\" \"discarded\")\n\t\t\t(lambda (result id value) (set_assoc result id value)) (list)\
+    \ merge_assoc)))\n\n\t(dropcolumn source \"discarded\" tx)\n\t(define rejected (try (lambda () (begin\n\t\t\
+    (insert source '(\"id\") (list (list 9)) (list) nil false nil tx) false))\n\t\t(lambda (cause) (strlike (string\
+    \ (failure_value cause)) \"%requires its checked native producer%\"))))\n\t(with_table_mutation (list source)\
+    \ (list \"insert\" (list)) tx owner\n\t\t(lambda (bound) (insert source '(\"id\") (list (list 3)) (list) nil\
+    \ false nil bound)))\n\t(define total (scan tx source (list) (list) (list) (lambda () true) '(\"id\")\n\t\t\
+    (lambda (total id) (+ total id)) 0 +))\n\t(tx_rollback owner) (close_relation_scope scope)\n\t(and rejected\
+    \ (equal? total 6))\n)\n"
+  expect:
+    result: true
+- name: A retained scoped source handle requires its actual reader session before row callbacks
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
+    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
+    \ (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\"\
+    \ \"INT\" (list) (list))\n\t\t\t(list \"column\" \"discarded\" \"INT\" (list) (list)))\n\t\t(list \"engine\"\
+    \ \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\t(define source (table\
+    \ \"memcp-tests\" false name false tx))\n\t(insert source '(\"id\" \"discarded\") (list (list 1 17) (list 2\
+    \ 29)) (list) nil false nil tx)\n\t(define rows (lambda (reader)\n\t\t(scan reader source (list) (list) (list)\
+    \ (lambda () true) '(\"id\" \"discarded\")\n\t\t\t(lambda (result id value) (set_assoc result id value)) (list)\
+    \ merge_assoc)))\n\n\t(define other (newsession)) (other \"username\" \"root\")\n\t(tx_begin_acid other) (define\
+    \ foreign_tx (other \"__memcp_tx\"))\n\t(define reached (newpromise))\n\t(define rejected (try (lambda () (begin\n\
+    \t\t(scan foreign_tx source (list) (list) (list) (lambda () true) '(\"id\")\n\t\t\t(lambda (total id) (begin\
+    \ (reached \"once\" true) (+ total id))) 0 +) false))\n\t\t(lambda (cause) (strlike (string (failure_value cause))\
+    \ \"%another native relation scope owner%\"))))\n\t(define actual (rows tx))\n\t(define intact (and (expression_equal?\
+    \ (get_assoc actual 1) 17) (expression_equal? (get_assoc actual 2) 29)))\n\t(tx_rollback other) (tx_rollback\
+    \ owner) (close_relation_scope scope)\n\t(and rejected intact (not (reached \"state\")))\n)\n"
+  expect:
+    result: true
+- name: A handle without its original transaction cannot choose destructive immediate DROP
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
+    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
+    \ (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\"\
+    \ \"INT\" (list) (list))\n\t\t\t(list \"column\" \"discarded\" \"INT\" (list) (list)))\n\t\t(list \"engine\"\
+    \ \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\t(define source (table\
+    \ \"memcp-tests\" false name false tx))\n\t(insert source '(\"id\" \"discarded\") (list (list 1 17) (list 2\
+    \ 29)) (list) nil false nil tx)\n\t(define rows (lambda (reader)\n\t\t(scan reader source (list) (list) (list)\
+    \ (lambda () true) '(\"id\" \"discarded\")\n\t\t\t(lambda (result id value) (set_assoc result id value)) (list)\
+    \ merge_assoc)))\n\n\t(define rejected (try (lambda () (begin (dropcolumn source \"discarded\" nil) false))\n\
+    \t\t(lambda (cause) (strlike (string (failure_value cause)) \"%requires its original local caller-owned relation%\"\
+    ))))\n\t(define actual (rows tx))\n\t(define intact (and (expression_equal? (get_assoc actual 1) 17) (expression_equal?\
+    \ (get_assoc actual 2) 29)\n\t\t(not (nil? (show source \"column\" \"discarded\" false tx)))))\n\t(tx_rollback\
+    \ owner) (close_relation_scope scope)\n\t(and rejected intact)\n)\n"
+  expect:
+    result: true

@@ -94,6 +94,13 @@ func (db *database) projectColumnDrop(d *catalogColumnDrop, columns []*column, p
 	if columns == nil {
 		columns = t.columnDeclarations()
 	}
+	return t, t.projectStoredColumnDrop(d, columns, projection)
+}
+
+// The endpoint owner attests visibility/generation before this shared native
+// declaration interpreter. Private lexical schema decisions use the same
+// dependency and exact-predecessor rules without entering a public WAL domain.
+func (t *table) projectStoredColumnDrop(d *catalogColumnDrop, columns []*column, projection *catalogNativeProjection) []*column {
 	if d.Ordinal >= len(columns) {
 		panic("column retirement lost its physical ordinal")
 	}
@@ -132,7 +139,7 @@ func (db *database) projectColumnDrop(d *catalogColumnDrop, columns []*column, p
 	}
 	updated := append([]*column(nil), columns[:d.Ordinal]...)
 	updated = append(updated, columns[d.Ordinal+1:]...)
-	return t, updated
+	return updated
 }
 
 func (tx *TxContext) dropPublicColumn(t *table, name string, ifExists bool, expectedInput scm.Scmer) bool {

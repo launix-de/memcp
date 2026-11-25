@@ -2714,6 +2714,19 @@ func Init(en scm.Env) {
 			if len(a) > 7 {
 				queryTx = scmerToTxContext(a[7])
 			}
+			if queryTx != nil && queryTx.scopedRelationLayout(t) != nil {
+				queryTx.requireScopedRelationOwner(t)
+				if temporary {
+					for _, column := range t.columnDeclarations() {
+						if column.displayName() == colname && !column.IsTemp {
+							panic("temporary preparation cannot replace a retained stored declaration")
+						}
+					}
+				}
+			}
+			if !temporary && queryTx != nil && queryTx.scopedRelationLayout(t) != nil {
+				panic("stored ADD cannot consume a pending lexical column declaration")
+			}
 			if len(a) > 8 && !a[8].IsNil() {
 				if temporary || len(orcSortCols) != 0 || len(a) > 6 && !a[6].IsNil() {
 					panic("row initializer cannot define a computed column")
@@ -2737,8 +2750,13 @@ func Init(en scm.Env) {
 			// A staged removal owns ddlMu until its decision. Reject that
 			// caller's stale handle before attempting to borrow its own lock.
 			t.requireCatalogDataVisibility(queryTx)
-			t.ddlMu.Lock()
-			defer t.ddlMu.Unlock()
+			if queryTx == nil || queryTx.scopedRelationLayout(t) == nil {
+				t.ddlMu.Lock()
+				defer t.ddlMu.Unlock()
+			}
+			if temporary && queryTx != nil && queryTx.scopedRelationLayout(t) != nil {
+				defer queryTx.refreshScopedRuntimeColumns(t)
+			}
 			created := t.createColumnDDLLocked(colname, typename, dimensions, typeparams, queryTx)
 
 			// Software contract:
@@ -3275,11 +3293,17 @@ func Init(en scm.Env) {
 
 			switch operation {
 			case "drop":
+				if t.ScopedSchema {
+					return scm.NewBool(tx.dropScopedColumn(t, scm.String(a[2]), false, expectedInput))
+				}
 				if tx != nil && !t.implicitSharedColumnDrop(tx) {
 					return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[2]), false, expectedInput))
 				}
 				return scm.NewBool(t.DropColumn(scm.String(a[2]), expectedInput))
 			case "drop_if_exists":
+				if t.ScopedSchema {
+					return scm.NewBool(tx.dropScopedColumn(t, scm.String(a[2]), true, expectedInput))
+				}
 				if tx != nil && !t.implicitSharedColumnDrop(tx) {
 					return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[2]), true, expectedInput))
 				}
@@ -3455,10 +3479,15 @@ func Init(en scm.Env) {
 			if len(a) > 3 {
 				expectedInput = a[3]
 			}
+			var tx *TxContext
 			if len(a) > 2 {
-				if tx := scmerToTxContext(a[2]); tx != nil && !t.implicitSharedColumnDrop(tx) {
-					return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[1]), false, expectedInput))
-				}
+				tx = scmerToTxContext(a[2])
+			}
+			if t.ScopedSchema {
+				return scm.NewBool(tx.dropScopedColumn(t, scm.String(a[1]), false, expectedInput))
+			}
+			if tx != nil && !t.implicitSharedColumnDrop(tx) {
+				return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[1]), false, expectedInput))
 			}
 			return scm.NewBool(t.DropColumn(scm.String(a[1]), expectedInput))
 		},

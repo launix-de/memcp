@@ -1295,6 +1295,9 @@ func (t *table) catalogVisibleMetadata() *tableShowColumnsSnapshot {
 func (t *table) declarationMetadataForTx(tx *TxContext) *tableShowColumnsSnapshot {
 	t.requireCatalogDataVisibility(tx)
 	if tx != nil {
+		if layout := tx.scopedRelationLayout(t); layout != nil {
+			return layout.view
+		}
 		if changes := tx.publicCatalogChanges(); changes != nil && changes.db == t.schema {
 			if views := changes.views.Load(); views != nil {
 				if view := views.tables[t]; view != nil {

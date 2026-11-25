@@ -47,6 +47,7 @@ const (
 	tableUnframedCallbackAdmission
 	tableCatalogDeclarationAdmission
 	tableValidatedDeclarationAdmission
+	tableScopedDeclarationAdmission
 )
 
 type tableWriteLease struct {
@@ -89,7 +90,7 @@ func (t *table) admitStatement(operation *nativeMutationOperation) (*statementTa
 		}
 		return nil, fmt.Errorf("native statement conflicts with an active table writer; retry transaction")
 	}
-	if owner.declaration != nil && (owner.declaration != transaction || !operation.invocation.publicColumnMutationAllowed(t) && operation.invocation.privateMutationSource(t) == nil) {
+	if owner.declaration != nil && (owner.declaration != transaction || !operation.invocation.publicColumnMutationAllowed(t) && !operation.invocation.scopedColumnMutationAllowed(t) && operation.invocation.privateMutationSource(t) == nil) {
 		return nil, fmt.Errorf("native statement conflicts with a pending declaration; retry transaction")
 	}
 	for writer := range owner.writers {
@@ -313,10 +314,10 @@ func (t *table) admitTriggerMutationLocked(name string, system bool, timing Trig
 }
 
 func (owner *tableWriteAdmission) admit(ctx context.Context, transaction *transactionState, kind tableAdmissionKind, wait bool) (*tableWriteLease, error) {
-	if kind > tableValidatedDeclarationAdmission {
+	if kind > tableScopedDeclarationAdmission {
 		panic("invalid native table admission profile")
 	}
-	declaration := kind == tableCatalogDeclarationAdmission || kind == tableValidatedDeclarationAdmission
+	declaration := kind == tableCatalogDeclarationAdmission || kind == tableValidatedDeclarationAdmission || kind == tableScopedDeclarationAdmission
 	if kind == tableUnframedCallbackAdmission && transaction == nil {
 		return nil, fmt.Errorf("retained mutation callbacks require their original transaction")
 	}
@@ -330,11 +331,11 @@ func (owner *tableWriteAdmission) admit(ctx context.Context, transaction *transa
 			// each other while retaining their native transaction leases.
 			ownDefaultWriter := false
 			if transaction != nil {
-				if identity := transaction.catalogIdentity.Load(); identity != nil && (identity.latePublic || kind == tableValidatedDeclarationAdmission) {
+				if identity := transaction.catalogIdentity.Load(); kind == tableScopedDeclarationAdmission || identity != nil && (identity.latePublic || kind == tableValidatedDeclarationAdmission) {
 					ownDefaultWriter = len(owner.writers) == 1 && owner.writers[transaction].leases != 0
 				}
 			}
-			if kind == tableValidatedDeclarationAdmission && owner.writers[transaction].unframedCallbacks {
+			if (kind == tableValidatedDeclarationAdmission || kind == tableScopedDeclarationAdmission) && owner.writers[transaction].unframedCallbacks {
 				owner.mu.Unlock()
 				return nil, fmt.Errorf("native unique declaration conflicts with retained unframed mutation callbacks; finish the original transaction")
 			}
@@ -347,7 +348,7 @@ func (owner *tableWriteAdmission) admit(ctx context.Context, transaction *transa
 				return nil, err
 			}
 			owner.declaration = transaction
-			owner.declarationGuardedInput = kind == tableValidatedDeclarationAdmission
+			owner.declarationGuardedInput = kind == tableValidatedDeclarationAdmission || kind == tableScopedDeclarationAdmission
 			owner.mu.Unlock()
 			return &tableWriteLease{owner: owner, transaction: transaction, declaration: true}, nil
 		}
@@ -420,8 +421,11 @@ func (t *table) admitNativeWrite(tx *TxContext) func() {
 	if tx != nil {
 		tx.admitCatalogMutation(t)
 		tx.noteNativeRowAccess(t)
+		if tx.scopedRelationLayout(t) != nil && !tx.scopedColumnMutationAllowed(t) {
+			panic("pending lexical column declaration requires its checked native producer")
+		}
 		input := tx.mutationInputFor(t)
-		if tx.publicColumnMutationAllowed(t) || input != nil && input.source != nil {
+		if tx.publicColumnMutationAllowed(t) || tx.scopedColumnMutationAllowed(t) || input != nil && input.source != nil {
 			// The admitted default amendment already retains this exact table's
 			// exclusive declaration lease through the same native decision.
 			return func() {}

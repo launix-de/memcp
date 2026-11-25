@@ -366,6 +366,9 @@ func (changes *publicCatalogChanges) stageStoredColumn(tx *TxContext, t *table, 
 // The same amendment publishes SHOW/stored descriptors and native value input.
 func (tx *TxContext) columnDeclarationSnapshot(t *table) *tableColumnNamesSnapshot {
 	if tx != nil {
+		if layout := tx.scopedRelationLayout(t); layout != nil {
+			return layout.view.metadata.columnNames
+		}
 		if changes := tx.publicCatalogChanges(); changes != nil {
 			if views := changes.views.Load(); views != nil {
 				if view := views.tables[t]; view != nil {

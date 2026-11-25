@@ -79,7 +79,12 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 		uniqueTargets = append(uniqueTargets, target)
 		// Acquire the existing writer boundary BEFORE observing hasCheck. An
 		// ADD CHECK cannot publish between this observation and the first sink.
-		if source := parent.privateMutationSource(target); source != nil {
+		if parent != nil && parent.scopedRelationLayout(target) != nil {
+			// Only the actual checked invocation below may borrow the pending
+			// layout's retained DDL lease. The raw parent grants no row rights.
+			parent.requireScopedRelationOwner(target)
+			checked = true
+		} else if source := parent.privateMutationSource(target); source != nil {
 			if declarationTarget != nil && declarationTarget != target {
 				panic("private declaration input requires one checked native target")
 			}
@@ -175,6 +180,13 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 		operation.callerInputs.Store(&callerInputs)
 	}
 	return operation.runProducer(func(binding *TxContext) scm.Scmer {
+		for _, target := range targets {
+			if target.ScopedSchema {
+				// The supplied execution session can differ from the parent's.
+				// Borrowing its scope above cannot authorize a foreign invocation.
+				binding.requireScopedRelationOwner(target)
+			}
+		}
 		if operation.undoOwner == nil {
 			operation.beginStatement(db)
 		}

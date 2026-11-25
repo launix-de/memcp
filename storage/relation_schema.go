@@ -40,6 +40,7 @@ type relationSchemaChange struct {
 	canceled    bool
 	abandoned   bool
 	declaration *relationSchemaKeyDeclaration
+	layout      *relationSchemaLayoutChange
 }
 
 func (view *relationSchemaView) visible(tx *TxContext) *table {
@@ -198,6 +199,12 @@ func (tx *transactionState) finishRelationSchema(keep int, commit bool) {
 	if !commit {
 		for i := len(changes) - 1; i >= 0; i-- {
 			change := changes[i]
+			if change.layout != nil {
+				if !change.canceled && !change.abandoned {
+					tx.restoreScopedRelationLayout(change.layout)
+				}
+				continue
+			}
 			if change.declaration != nil {
 				if !change.canceled && !change.abandoned {
 					tx.restoreScopedRelationKeys(change.declaration)
@@ -239,7 +246,7 @@ func (tx *transactionState) finishRelationSchema(keep int, commit bool) {
 	}
 	if commit {
 		for _, change := range changes {
-			if change.abandoned || change.declaration != nil {
+			if change.abandoned || change.declaration != nil || change.layout != nil {
 				continue
 			}
 			view := change.slot.view.Load()
@@ -260,6 +267,7 @@ func (tx *transactionState) finishRelationSchema(keep int, commit bool) {
 				}
 			}
 		}
+		tx.publishScopedRelationLayouts()
 	}
 	// A metadata publication owns the existing schema/MOSI write capability.
 	for db, tables := range databases {
@@ -278,6 +286,17 @@ func (tx *transactionState) finishRelationSchema(keep int, commit bool) {
 			}
 			db.save()
 		}()
+	}
+	// Row decision and immutable header publication are complete. Release this
+	// exact declaration owner before the same schema journal physically retires
+	// a rolled-back or replaced temporary generation. The resource map retains
+	// the same idempotent closer for ordinary cleanup/retry.
+	if layouts := tx.relationSchemaLayouts.Load(); layouts != nil {
+		for _, layout := range *layouts {
+			if err := layout.lease.Close(); err != nil {
+				panic(err)
+			}
+		}
 	}
 	for table, drop := range retire {
 		if !drop {
@@ -306,6 +325,9 @@ func (tx *transactionState) finishRelationSchema(keep int, commit bool) {
 		scope.schemaDecisions -= count
 		scope.mu.Unlock()
 	}
+	// Successful terminal cleanup must not retain dead lexical generations or
+	// their private column snapshots through an old transaction binding.
+	tx.relationSchemaLayouts.Store(nil)
 }
 
 func initRelationSchema(en *scm.Env) {

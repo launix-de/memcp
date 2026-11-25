@@ -219,6 +219,11 @@ func captureColumnInitialization(tx *TxContext, t *table, c *column, fillExistin
 }
 
 func (tx *TxContext) retainedColumnDDL(t *table) bool {
+	if tx != nil {
+		if layout := tx.scopedRelationLayout(t); layout != nil {
+			return layout.lease.ddlTable.Load() == t
+		}
+	}
 	if changes := tx.publicCatalogChanges(); changes != nil {
 		changes.mu.Lock()
 		defer changes.mu.Unlock()

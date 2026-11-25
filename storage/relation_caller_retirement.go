@@ -256,11 +256,11 @@ func (retirement *relationCallerRetirement) pruneProjections(tables []*table) {
 // the native capability seals new inputs and joins already admitted readers or
 // writers before their original journals can be discarded.
 func (t *table) callerRelationScope() *relationScope {
-	if t == nil || !t.Ephemeral || t.PersistencyMode != Memory || t.ScopedSchema || t.dataOwner != nil {
+	if t == nil || !t.Ephemeral || t.PersistencyMode != Memory || t.dataOwner != nil {
 		return nil
 	}
 	scope := t.relationLifetime
-	if scope == nil || scope.dataPolicy != relationCallerData || scope.transactionalSchema {
+	if scope == nil || scope.dataPolicy != relationCallerData || scope.transactionalSchema != t.ScopedSchema {
 		return nil
 	}
 	return scope
@@ -289,6 +289,11 @@ func (t *table) beginCallerInput(tx *TxContext) func() {
 	scope := t.callerRelationScope()
 	if scope == nil {
 		return nil
+	}
+	if t.ScopedSchema {
+		// SQL temporary generations use the SAME coarse input/lifetime owner.
+		// This also excludes their active readers from a pending header change.
+		tx.requireScopedRelationOwner(t)
 	}
 	if t.callerInputBorrowed(tx) {
 		leave := tx.mutationOperation.borrowMutation(tx)

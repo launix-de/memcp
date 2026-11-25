@@ -228,6 +228,7 @@ type transactionState struct {
 	relationSchemaChanges     []*relationSchemaChange
 	relationSchemaRetirements []*relationSchemaChange
 	relationSchemaDecision    atomic.Uint32
+	relationSchemaLayouts     atomic.Pointer[map[*table]*relationSchemaLayout]
 
 	// Native mutation producers borrow the actual state, never its reusable
 	// executor. These fields are protected by mu; readers do not touch them.
