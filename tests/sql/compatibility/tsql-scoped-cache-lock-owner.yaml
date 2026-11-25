@@ -170,7 +170,9 @@ test_cases:
           (list "engine" "memory" "ephemeral" true "scope" scope "scope_key" "input") false constructor)
         (define source (table "memcp-tests" false name false constructor))
         (insert source '("id" "value") (list (list 1 17) (list 2 29)) (list) nil false nil constructor)
+        (define before_header (show source "declarations" constructor))
         (tx_commit owner)
+        (define after_header (show source "declarations" nil))
         (define state (newsession)) (state "shared" 0) (state "direct" 0)
         (define shared (lambda () (begin (state "shared" (+ (state "shared") 1)) "shared")))
         (define read_rows (lambda (tx) (scan tx source (list) (list) (list) (lambda () true)
@@ -188,9 +190,17 @@ test_cases:
           (with_cache_sources tx (list (table "memcp-tests" false "scoped_lock_targets" false tx))
             shared (lambda () "unexpected-direct")))))
         (define intact (with_autocommit owner nil 0 "retained scoped input" read_rows))
+        (define declarations (sql_relation_local_declarations "memcp-tests" name nil))
+        (define same (sql_relation_declarations_match? "memcp-tests" name nil declarations))
+        (define changed (sql_relation_declarations_match? "memcp-tests" name nil
+          (set_assoc declarations "lifetime" "persistent")))
+        (define public_header (show (table "memcp-tests" false "scoped_lock_targets" false nil) "declarations" nil))
         (close_relation_scope scope)
         (list actual denied public (state "shared") (state "direct")
-          (list (get_assoc intact 1) (get_assoc intact 2))))
+          (list (get_assoc intact 1) (get_assoc intact 2))
+          (list (get_assoc before_header "lifetime") (get_assoc before_header "visibility")
+            (get_assoc after_header "lifetime") (get_assoc after_header "visibility")
+            (get_assoc public_header "lifetime") same changed)))
     expect:
       result:
       - - 17
@@ -201,6 +211,13 @@ test_cases:
       - 1
       - - 17
         - 29
+      - - invocation
+        - transaction
+        - invocation
+        - null
+        - null
+        - true
+        - false
   - name: Committed current-scope aggregate inputs remain fresh across explicit and implicit transactions
     tds:
       statements:
@@ -408,6 +425,309 @@ test_cases:
           - depth: 0
       - connection: scope_owner
         sql: 'DROP TABLE #cache_scope_input'
+  - name: Scoped IN and NOT IN NULL witnesses retain three-valued results across commit rollback and recreated generations
+    tds:
+      statements:
+      - connection: witness_owner
+        sql: 'DROP TABLE IF EXISTS #cache_probes'
+      - connection: witness_owner
+        sql: 'DROP TABLE IF EXISTS #cache_rhs'
+      - connection: witness_owner
+        sql: BEGIN TRAN
+      - connection: witness_owner
+        sql: 'CREATE TABLE #cache_probes(id INT PRIMARY KEY,probe INT NULL)'
+      - connection: witness_owner
+        sql: 'INSERT #cache_probes VALUES(1,NULL),(2,0),(3,1),(4,2),(5,9)'
+      - connection: witness_owner
+        sql: 'CREATE TABLE #cache_rhs(value INT NULL,enabled INT NOT NULL)'
+      - connection: witness_owner
+        sql: 'INSERT #cache_rhs VALUES(NULL,1),(0,1),(0,1),(9,0)'
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: 1
+            not_in_value: 0
+          - id: 3
+            probe: 1
+            in_value: -1
+            not_in_value: -1
+          - id: 4
+            probe: 2
+            in_value: -1
+            not_in_value: -1
+          - id: 5
+            probe: 9
+            in_value: -1
+            not_in_value: -1
+      - connection: witness_owner
+        sql: COMMIT TRAN
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: 1
+            not_in_value: 0
+          - id: 3
+            probe: 1
+            in_value: -1
+            not_in_value: -1
+          - id: 4
+            probe: 2
+            in_value: -1
+            not_in_value: -1
+          - id: 5
+            probe: 9
+            in_value: -1
+            not_in_value: -1
+      - connection: witness_owner
+        sql: 'UPDATE #cache_rhs SET enabled=0 WHERE value IS NULL'
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: 1
+            not_in_value: 0
+          - id: 3
+            probe: 1
+            in_value: 0
+            not_in_value: 1
+          - id: 4
+            probe: 2
+            in_value: 0
+            not_in_value: 1
+          - id: 5
+            probe: 9
+            in_value: 0
+            not_in_value: 1
+      - connection: witness_owner
+        sql: BEGIN TRAN
+      - connection: witness_owner
+        sql: 'UPDATE #cache_rhs SET enabled=1 WHERE value IS NULL'
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: 1
+            not_in_value: 0
+          - id: 3
+            probe: 1
+            in_value: -1
+            not_in_value: -1
+          - id: 4
+            probe: 2
+            in_value: -1
+            not_in_value: -1
+          - id: 5
+            probe: 9
+            in_value: -1
+            not_in_value: -1
+      - connection: witness_owner
+        sql: ROLLBACK TRAN
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: 1
+            not_in_value: 0
+          - id: 3
+            probe: 1
+            in_value: 0
+            not_in_value: 1
+          - id: 4
+            probe: 2
+            in_value: 0
+            not_in_value: 1
+          - id: 5
+            probe: 9
+            in_value: 0
+            not_in_value: 1
+      - connection: witness_owner
+        sql: 'DROP TABLE #cache_rhs'
+      - connection: witness_owner
+        sql: BEGIN TRAN
+      - connection: witness_owner
+        sql: 'CREATE TABLE #cache_rhs(value INT NULL,enabled INT NOT NULL)'
+      - connection: witness_owner
+        sql: 'INSERT #cache_rhs VALUES(NULL,1),(1,1),(0,0)'
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: -1
+            not_in_value: -1
+          - id: 3
+            probe: 1
+            in_value: 1
+            not_in_value: 0
+          - id: 4
+            probe: 2
+            in_value: -1
+            not_in_value: -1
+          - id: 5
+            probe: 9
+            in_value: -1
+            not_in_value: -1
+      - connection: witness_owner
+        sql: COMMIT TRAN
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: -1
+            not_in_value: -1
+          - id: 3
+            probe: 1
+            in_value: 1
+            not_in_value: 0
+          - id: 4
+            probe: 2
+            in_value: -1
+            not_in_value: -1
+          - id: 5
+            probe: 9
+            in_value: -1
+            not_in_value: -1
+      - connection: witness_owner
+        sql: 'DELETE #cache_rhs WHERE value IS NULL'
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: 0
+            not_in_value: 1
+          - id: 3
+            probe: 1
+            in_value: 1
+            not_in_value: 0
+          - id: 4
+            probe: 2
+            in_value: 0
+            not_in_value: 1
+          - id: 5
+            probe: 9
+            in_value: 0
+            not_in_value: 1
+      - connection: witness_owner
+        sql: 'DELETE #cache_rhs'
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: 0
+            not_in_value: 1
+          - id: 2
+            probe: 0
+            in_value: 0
+            not_in_value: 1
+          - id: 3
+            probe: 1
+            in_value: 0
+            not_in_value: 1
+          - id: 4
+            probe: 2
+            in_value: 0
+            not_in_value: 1
+          - id: 5
+            probe: 9
+            in_value: 0
+            not_in_value: 1
+      - connection: witness_owner
+        sql: SELECT @@TRANCOUNT AS depth
+        expect:
+          rows: 1
+          data:
+          - depth: 0
+      - connection: witness_owner
+        sql: 'DROP TABLE #cache_rhs'
+      - connection: witness_owner
+        sql: 'DROP TABLE #cache_probes'
 cleanup:
   - sql: DROP TABLE IF EXISTS scoped_lock_targets
   - sql: DROP TABLE IF EXISTS scoped_lock_sites

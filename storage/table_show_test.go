@@ -1081,3 +1081,62 @@ func TestRebuiltStatisticsPreparationDoesNotHoldMutationLock(t *testing.T) {
 		t.Fatal("statistics preparation blocked the shard's mutation lock")
 	}
 }
+
+// The actual native input owner, rather than SQL names or transaction status,
+// determines whether a complete declaration may feed a stateless computation.
+func TestShowDeclarationsRetainCallerInputLifetimeAcrossPublication(t *testing.T) {
+	Init(scm.Globalenv)
+	show := scm.Globalenv.Vars["show"]
+	for _, tc := range []struct {
+		name   string
+		caller bool
+		scoped bool
+	}{
+		{"ordinary_public", false, false},
+		{"unowned_ephemeral", false, false},
+		{"caller_memory", true, false},
+		{"caller_scoped", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl := showColumnsTestTable(2)
+			tbl.schema = &database{Name: "declaration_inputs"}
+			tbl.Name = ".same_sql_name#input"
+			if tc.caller || tc.name == "unowned_ephemeral" {
+				tbl.Ephemeral, tbl.PersistencyMode = true, Memory
+			}
+			if tc.caller {
+				tbl.ScopedSchema = tc.scoped
+				tbl.relationLifetime = &relationScope{dataPolicy: relationCallerData, transactionalSchema: tc.scoped}
+			}
+			tbl.publishShowColumnsSnapshot(true)
+			header := tbl.catalogVisibleMetadata().metadata.declarations
+			read := func() scm.Scmer {
+				return scm.Apply(show, NewTableScmer(tbl), scm.NewString("declarations"), scm.NewNil())
+			}
+			before := read()
+			lifetime := showColumnProperty(before, "lifetime")
+			if tc.caller != (lifetime.IsString() && lifetime.String() == "invocation") {
+				t.Fatal("declaration lifetime did not follow the actual caller input owner")
+			}
+			if !tc.caller && &before.Slice()[0] != &header.Slice()[0] {
+				t.Fatal("committed public declaration stopped borrowing its O(1) header")
+			}
+			if tc.scoped {
+				if visibility := showColumnProperty(before, "visibility"); !visibility.IsString() || visibility.String() != "transaction" {
+					t.Fatal("unpublished scoped declaration lost transaction visibility")
+				}
+				tbl.CatalogVersion.Store(1)
+			}
+			after := read()
+			if tc.caller != (showColumnProperty(after, "lifetime").String() == "invocation") || !showColumnProperty(after, "visibility").IsNil() {
+				t.Fatal("publication removed caller lifetime or retained obsolete transaction visibility")
+			}
+			if !showColumnProperty(header, "lifetime").IsNil() || !showColumnProperty(header, "visibility").IsNil() {
+				t.Fatal("descriptive input facts mutated the immutable base header")
+			}
+			if tc.scoped && showColumnProperty(before, "visibility").String() != "transaction" {
+				t.Fatal("publication changed the previously retained declaration input")
+			}
+		})
+	}
+}

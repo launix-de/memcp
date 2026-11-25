@@ -2791,15 +2791,44 @@ func (t *table) refreshShowColumnsStatistics() scm.Scmer {
 	}
 }
 
-// Declarations borrows columns and constraints from one immutable publication.
-// It performs no lazy construction, ownership acquisition or storage access.
-func (t *table) Declarations() scm.Scmer {
-	if t != nil {
-		if snapshot := t.catalogVisibleMetadata(); snapshot != nil && snapshot.metadata != nil {
-			return snapshot.metadata.declarations
-		}
+// Declarations borrows one immutable endpoint publication and adds its existing
+// semantic input lifetime/visibility facts. No native owner capability, lazy
+// schema construction or row/storage access enters the descriptive packet.
+func (t *table) Declarations(tx *TxContext) scm.Scmer {
+	if t == nil {
+		return scm.NewNil()
 	}
-	return scm.NewNil()
+	snapshot := t.declarationMetadataForTx(tx)
+	if snapshot == nil || snapshot.metadata == nil {
+		return scm.NewNil()
+	}
+	// These pure input facts describe this actual native generation,
+	// never its owner capability. A caller-owned source still needs
+	// its invocation after COMMIT; an unpublished public source needs
+	// its original transaction. The common logical lifetime owner
+	// excludes both from stateless maintained computations.
+	committed := t.committedAt(t.schema.catalogView().version)
+	callerInput := t.callerRelationScope() != nil
+	if committed && !callerInput {
+		return snapshot.metadata.declarations
+	}
+	declarations := snapshot.metadata.declarations.Slice()
+	extra := 0
+	if !committed {
+		extra += 2
+	}
+	if callerInput {
+		extra += 2
+	}
+	result := make([]scm.Scmer, len(declarations), len(declarations)+extra)
+	copy(result, declarations)
+	if !committed {
+		result = append(result, scm.NewString("visibility"), scm.NewString("transaction"))
+	}
+	if callerInput {
+		result = append(result, scm.NewString("lifetime"), scm.NewString("invocation"))
+	}
+	return scm.NewSlice(result)
 }
 
 func (t *table) invalidateShowColumnsSnapshot() {

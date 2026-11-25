@@ -988,7 +988,7 @@ Their pure local facts let costing prove keys without late catalog lookups. */
 		(list target (sql_relation_local_declarations database target tx))))))))))
 /* A cache guard reads the current native publication but does not construct
 another logical snapshot. Each consumer names the declaration fields it uses:
-query reuse includes publication visibility, while cursor and write schemas
+query reuse includes input lifetime and publication visibility, while cursor and write schemas
 consume columns and constraints. Expected facts have already passed strict
 pure-data validation during compilation. Changed values compare unequal and
 return through ordinary recompilation and validation. */
@@ -1004,9 +1004,9 @@ return through ordinary recompilation and validation. */
 		(reduce fields (lambda (same field)
 			(and same (expression_equal? (expected field) (actual field)))) true)))))
 (define sql_relation_declarations_match? (lambda (database name tx expected)
-	(and (sql_relation_local_declarations_match? database name tx expected '("columns" "constraints" "visibility"))
+	(and (sql_relation_local_declarations_match? database name tx expected '("columns" "constraints" "visibility" "lifetime"))
 		(reduce (coalesceNil (expected "references") '()) (lambda (same reference)
-			(and same (sql_relation_local_declarations_match? database (car reference) tx (cadr reference) '("columns" "constraints" "visibility")))) true))))
+			(and same (sql_relation_local_declarations_match? database (car reference) tx (cadr reference) '("columns" "constraints" "visibility" "lifetime")))) true))))
 (define source_columns (lambda (src) (begin
 	(define columns (if (nil? (source_declarations src)) nil ((source_declarations src) "columns")))
 	(if (nil? columns)
