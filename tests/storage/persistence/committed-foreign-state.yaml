@@ -186,7 +186,7 @@ test_cases:
           expect: {rows: 1, data: [{disabled: 0, untrusted: 1}]}
         - connection: observer
           sql: INSERT committed_state_child VALUES(40,998)
-          expect: {error: true, contains: foreign key constraint}
+          expect: {error: true, contains: [foreign key constraint]}
         - connection: observer
           sql: SELECT id,parent_id FROM committed_state_child ORDER BY id
           expect: {rows: 3, data: [{id: 10, parent_id: 1}, {id: 20, parent_id: null}, {id: 30, parent_id: 999}]}
@@ -215,7 +215,7 @@ test_cases:
           expect: {rows: 1, data: [{disabled: 0, untrusted: 0}]}
         - connection: observer
           sql: INSERT committed_state_child VALUES(42,996)
-          expect: {error: true, contains: foreign key constraint}
+          expect: {error: true, contains: [foreign key constraint]}
         - connection: observer
           sql: SELECT id,parent_id FROM committed_state_child ORDER BY id
           expect: {rows: 3, data: [{id: 10, parent_id: 1}, {id: 20, parent_id: null}, {id: 30, parent_id: 2}]}
@@ -328,6 +328,6 @@ test_cases:
         - sql: SELECT CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name=N'FK_committed_state'
           expect: {rows: 1, data: [{disabled: 0, untrusted: 0}]}
         - sql: INSERT committed_state_child VALUES(41,997)
-          expect: {error: true, contains: foreign key constraint}
+          expect: {error: true, contains: [foreign key constraint]}
         - sql: SELECT id,parent_id FROM committed_state_child ORDER BY id
           expect: {rows: 3, data: [{id: 10, parent_id: 1}, {id: 20, parent_id: null}, {id: 30, parent_id: 2}]}
