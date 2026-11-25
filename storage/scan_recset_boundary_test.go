@@ -100,11 +100,7 @@ func TestRecSetScanSourceAddsExactBoundary(t *testing.T) {
 		return scm.NewBool(values[0].Int() >= 100)
 	})
 	got := make([]int64, 0, 2)
-	_, columnInput1, finishColumnInput1 := source.t.readDataContext(scm.NewNil())
-	defer finishColumnInput1()
-	columnAccess1 := nil
-	columnAccess1.columnInput = columnInput1
-	source.scan(columnAccess1, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"id"},
+	source.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"id"},
 		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			got = append(got, values[1].Int())
 			return values[0]
@@ -129,11 +125,7 @@ func TestRepeatedUnorderedRecSetScanDoesNotBuildMembershipIndex(t *testing.T) {
 
 	for range 4 {
 		got := make([]int64, 0, 2)
-		_, columnInput2, finishColumnInput2 := source.t.readDataContext(scm.NewNil())
-		defer finishColumnInput2()
-		columnAccess2 := nil
-		columnAccess2.columnInput = columnInput2
-		source.scan(columnAccess2, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"id"},
+		source.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"id"},
 			scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 				got = append(got, values[1].Int())
 				return values[0]
@@ -339,11 +331,7 @@ func TestSparseRecSetFilterAppliesPrunedAccessBoundary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			filtered := source.filterToRecSet(nil, nil, trueCondition(), tc.schema, tc.values)
 			got := make([]int64, 0)
-			_, columnInput3, finishColumnInput3 := filtered.t.readDataContext(scm.NewNil())
-			defer finishColumnInput3()
-			columnAccess3 := nil
-			columnAccess3.columnInput = columnInput3
-			filtered.scan(columnAccess3, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueCondition(), []string{"id"},
+			filtered.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueCondition(), []string{"id"},
 				scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { got = append(got, values[1].Int()); return values[0] }), scm.NewNil(), scm.NewNil(), false, nil)
 			if !equalInt64s(got, tc.want) {
 				t.Fatalf("filtered rows = %v, want %v", got, tc.want)
