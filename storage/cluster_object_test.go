@@ -1093,7 +1093,11 @@ func prepareRegisteredOrderedRun(t *testing.T, owner *nodeScanService, peer *mos
 	t.Helper()
 	old := tbl.ActiveShards()[0]
 	_, direction := persistableTestOrder(false)
-	run := old.prepareOrderedRun(shardScanInvocation{condition: scanJoinTrue(), order: &shardOrderInvocation{columns: []scm.Scmer{scm.NewString("id")}, directions: []func(...scm.Scmer) scm.Scmer{direction}, projected: []string{"id"}, limit: -1}})
+	run := func() *orderedScanRun {
+		_, columnInput, finishInput := old.t.readDataContext(nil)
+		defer finishInput()
+		return old.prepareOrderedRun(shardScanInvocation{access: scanAccess{columnInput: columnInput}, condition: scanJoinTrue(), order: &shardOrderInvocation{columns: []scm.Scmer{scm.NewString("id")}, directions: []func(...scm.Scmer) scm.Scmer{direction}, projected: []string{"id"}, limit: -1}})
+	}()
 	view, err := scm.ClusterObjectValue(run, context.Background(), scm.ClusterRequest{Method: "view"})
 	if err != nil {
 		t.Fatal(err)
