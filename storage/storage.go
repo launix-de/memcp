@@ -4061,7 +4061,7 @@ func Init(en scm.Env) {
 			if finishInput := t.beginCallerInput(tx); finishInput != nil {
 				defer finishInput()
 			}
-			releaseAdmission := t.admitNativeWrite(tx)
+			releaseAdmission := t.admitNativeWrite(tx, tableRowWriteAdmission)
 			defer releaseAdmission()
 			finishReservation := tx.admitAllocatorReservation()
 			defer finishReservation()

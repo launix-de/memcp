@@ -4471,11 +4471,12 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		tx.admitCatalogMutation(t)
 		tx.noteNativeRowAccess(t)
 	}
-	admit := t.admitNativeWrite
+	var releaseAdmission func()
 	if !onCollision.IsNil() && slices.Contains(onCollisionCols, "$update") {
-		admit = t.admitNativeMutationCallbacks
+		releaseAdmission = t.admitNativeMutationCallbacks(tx)
+	} else {
+		releaseAdmission = t.admitNativeWrite(tx, tableRowWriteAdmission)
 	}
-	releaseAdmission := admit(tx)
 	defer releaseAdmission()
 	// Whole-statement undo also protects ordinary synchronous row callbacks.
 	// Collision support depends on this admitted target's declarations, not
@@ -4509,11 +4510,12 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 		currentTx.admitCatalogMutation(t)
 		currentTx.noteNativeRowAccess(t)
 	}
-	admit := t.admitNativeWrite
+	var releaseAdmission func()
 	if !onCollision.IsNil() && slices.Contains(onCollisionCols, "$update") {
-		admit = t.admitNativeMutationCallbacks
+		releaseAdmission = t.admitNativeMutationCallbacks(currentTx)
+	} else {
+		releaseAdmission = t.admitNativeWrite(currentTx, tableRowWriteAdmission)
 	}
-	releaseAdmission := admit(currentTx)
 	defer releaseAdmission()
 	replicationCheckWriteTable(t, currentTx)
 	// A blocked request must not retain UNIQUE guards or routing reservations

@@ -47,6 +47,10 @@ func withTableMutation(targets []*table, descriptor nativeMutationDescriptor, pa
 // The data-owner selector above supplies one actual native transaction. This
 // owner keeps the existing write admission, statement Undo and callback ABI.
 func withNativeTableMutation(targets []*table, descriptor nativeMutationDescriptor, parent *TxContext, session, producer scm.Scmer) scm.Scmer {
+	admission := tableRowWriteAdmission
+	if len(targets) == 1 && parent.canWaitForImplicitStatement(targets[0]) {
+		admission = tableImplicitStatementWriteAdmission
+	}
 	var callerInputs map[*relationScope]bool
 	for _, target := range targets {
 		if scope := target.callerRelationScope(); scope != nil && !callerInputs[scope] {
@@ -98,7 +102,7 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 			// raw parent still has no grant to mutate this committed endpoint.
 			declarationTarget, checked = target, true
 		} else {
-			release := target.admitNativeWrite(parent)
+			release := target.admitNativeWrite(parent, admission)
 			defer release()
 		}
 		if target.dataOwner != nil {
@@ -201,7 +205,7 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 			if declarationSource == nil {
 				// A public baseline borrows no declaration lease. Retain its real
 				// ordinary writer through the same original transaction decision.
-				release := declarationTarget.admitNativeWrite(binding)
+				release := declarationTarget.admitNativeWrite(binding, tableRowWriteAdmission)
 				defer release()
 			}
 		}

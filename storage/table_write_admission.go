@@ -39,12 +39,16 @@ type tableWriteAdmission struct {
 type tableWriterCapability struct {
 	leases            int
 	unframedCallbacks bool
+	// Only a clean implicit root may claim this existing writer entry before
+	// observing enforcement. Foreign writers cannot race its checked upgrade.
+	implicitStatement bool
 }
 type tableAdmissionKind uint8
 
 const (
 	tableRowWriteAdmission tableAdmissionKind = iota
 	tableUnframedCallbackAdmission
+	tableImplicitStatementWriteAdmission
 	tableCatalogDeclarationAdmission
 	tableValidatedDeclarationAdmission
 	tableScopedDeclarationAdmission
@@ -356,7 +360,19 @@ func (owner *tableWriteAdmission) admit(ctx context.Context, transaction *transa
 			return &tableWriteLease{owner: owner, transaction: transaction, declaration: true}, nil
 		}
 		ownCallbackBorrow := kind == tableUnframedCallbackAdmission && owner.declaration == transaction && !owner.declarationGuardedInput
-		if (owner.declaration == nil || ownCallbackBorrow) && (owner.statement == nil || owner.statement.transaction == transaction) {
+		implicit := kind == tableImplicitStatementWriteAdmission
+		if implicit && (transaction == nil || owner.writers[transaction].leases != 0) {
+			owner.mu.Unlock()
+			return nil, fmt.Errorf("implicit statement admission requires a clean native writer")
+		}
+		foreignWriter := false
+		for writer, capability := range owner.writers {
+			if writer != transaction && (implicit || capability.implicitStatement) {
+				foreignWriter = true
+				break
+			}
+		}
+		if !foreignWriter && (owner.declaration == nil || ownCallbackBorrow) && (owner.statement == nil || owner.statement.transaction == transaction) {
 			if err := owner.advanceSerializableWriteLocked(transaction); err != nil {
 				owner.mu.Unlock()
 				return nil, err
@@ -366,6 +382,7 @@ func (owner *tableWriteAdmission) admit(ctx context.Context, transaction *transa
 			}
 			capability := owner.writers[transaction]
 			capability.leases++
+			capability.implicitStatement = capability.implicitStatement || implicit
 			if kind == tableUnframedCallbackAdmission {
 				capability.unframedCallbacks = true
 			}
@@ -379,7 +396,7 @@ func (owner *tableWriteAdmission) admit(ctx context.Context, transaction *transa
 			return nil, fmt.Errorf("native metadata-only transaction does not admit row mutation")
 		}
 		if !wait {
-			statement := owner.statement != nil
+			statement := owner.statement != nil || foreignWriter
 			owner.mu.Unlock()
 			if statement {
 				return nil, fmt.Errorf("native statement conflict: table writer is still active; retry maintenance")
@@ -399,10 +416,43 @@ func (owner *tableWriteAdmission) admit(ctx context.Context, transaction *transa
 	}
 }
 
+// Only an unexposed, implicit single-target root may wait before acquiring its
+// first writer. Retained original work, callback/child producers and private or
+// distributed data keep their existing nonblocking checked-upgrade contract.
+// Plan/cache resources do not make a fresh SQL transaction a data writer.
+func (tx *TxContext) canWaitForImplicitStatement(t *table) bool {
+	if tx == nil || tx.transactionState == nil || !tx.autoCommit || tx.Mode != TxACID || t == nil || t.schema == nil ||
+		tx.mutationOperation != nil || tx.relationData != nil || tx.postAbort != nil ||
+		tx.remoteObject != nil || tx.remoteInvocation || tx.Session.IsNil() ||
+		t.Ephemeral || t.ScopedSchema || t.dataOwner != nil || t.callerRelationScope() != nil ||
+		activeReplication(t.schema) != nil || sharedClusterDatabase(t.schema.Name) {
+		return false
+	}
+	state := tx.transactionState
+	scope := state.resourceScope()
+	// Preserve the existing resource -> state lock order. This is cold producer
+	// classification; neither mutex is held while waiting on the table owner.
+	scope.mu.Lock()
+	defer scope.mu.Unlock()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	// Local ACID stored-data roots already unconditionally select checked
+	// statement admission. Ordinary untriggered CS producers remain parallel.
+	return state.autoCommit && state.State == TxActive && state.Mode == TxACID &&
+		state.coordinator == nil && !state.decisionStarted && !state.rowAccessed.Load() &&
+		!state.rollbackOnly.Load() && state.mutationOperations == 0 && state.checkedMutation == nil &&
+		!state.mutationAdmissionClosed && state.mutationSavepoints == 0 && state.relationDataOrigins == 0 &&
+		state.catalogIdentity.Load() == nil && state.catalogIntents.Load() == nil && state.publicCatalog.Load() == nil &&
+		!scope.publicRowsEntered && !scope.deciding && !scope.closed && scope.constructing == 0
+}
+
 // admitNativeWrite is called before defaults, triggers, identities, routing or
 // native mutation callbacks. The nil-transaction API retains a statement lease;
 // explicit/autocommit transactions retain one lease until their final decision.
-func (t *table) admitNativeWrite(tx *TxContext) func() {
+func (t *table) admitNativeWrite(tx *TxContext, kind tableAdmissionKind) func() {
+	if kind != tableRowWriteAdmission && (kind != tableImplicitStatementWriteAdmission || !tx.canWaitForImplicitStatement(t)) {
+		panic("native writer admission requires its actual mutation profile")
+	}
 	tx.requireSerializableLocal(t)
 	tx.noteStatementMutation(t)
 	if t.mutationReadOnly {
@@ -435,7 +485,7 @@ func (t *table) admitNativeWrite(tx *TxContext) func() {
 		}
 		key := fmt.Sprintf("native-table-write/%p", t)
 		tx.getOrComputeResource(key, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
-			lease, err := t.writeAdmission.admit(ctx, tx.transactionState, tableRowWriteAdmission, true)
+			lease, err := t.writeAdmission.admit(ctx, tx.transactionState, kind, true)
 			if err != nil {
 				panic(err)
 			}
@@ -456,7 +506,7 @@ func (t *table) admitNativeWrite(tx *TxContext) func() {
 // admission wins and no raw callback can be constructed. No row callback gains
 // a new lock/counter; framed operations keep their existing drain proof.
 func (t *table) admitNativeMutationCallbacks(tx *TxContext) (release func()) {
-	release = t.admitNativeWrite(tx)
+	release = t.admitNativeWrite(tx, tableRowWriteAdmission)
 	ready := false
 	defer func() {
 		if !ready {
