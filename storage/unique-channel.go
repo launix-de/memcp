@@ -204,7 +204,7 @@ func (t *table) uniqueReadOnlyPrefix(columns []string, rows [][]scm.Scmer, merge
 				}
 				access := exactScanAccess(newExactScanAccessSchema(constraint.Cols), key)
 				for _, shard := range t.uniqueProbeShards(topology, constraint.Cols, key) {
-					if shard != nil && shard.probeUnique(access, tx) {
+					if shard != nil && shard.probeUnique(access, tx, nil) {
 						failure(constraint.Id, nil)
 						found = true
 						return
@@ -319,7 +319,7 @@ func (set *uniqueReservationSet) call(shard *storageShard, operation string, arg
 			}
 			key := arguments[1].Slice()
 			if anchor := set.uniqueProbeAnchor(columns, key); anchor != nil {
-				found := shard.probeUnique(exactScanAccess(newExactScanAccessSchema(columns), key), anchor.tx)
+				found := shard.probeUnique(exactScanAccess(newExactScanAccessSchema(columns), key), anchor.tx, nil)
 				return scm.NewSlice([]scm.Scmer{scm.NewBool(found), scm.NewInt(0), scm.NewSlice(nil)})
 			}
 		}
@@ -339,9 +339,12 @@ func (set *uniqueReservationSet) call(shard *storageShard, operation string, arg
 	return value
 }
 
-func (set *uniqueReservationSet) probe(shard *storageShard, columns []string, key []scm.Scmer, projection []string) (uint32, bool, []scm.Scmer) {
+func (set *uniqueReservationSet) probe(shard *storageShard, columns []string, key []scm.Scmer, projection []string, exclude *recMapTarget) (uint32, bool, []scm.Scmer) {
 	if part := set.nativeShard(shard); part != nil {
-		id, found := part.shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema(columns), key), part.tx, true)
+		if exclude != nil && part.shard.uuid == exclude.shard.uuid && part.shard != exclude.shard {
+			panic(uniqueReadRetry{})
+		}
+		id, found := part.shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema(columns), key), part.tx, true, exclude)
 		values := make([]scm.Scmer, len(projection))
 		if found {
 			for i, column := range projection {
@@ -355,8 +358,41 @@ func (set *uniqueReservationSet) probe(shard *storageShard, columns []string, ke
 		}
 		return id, found, values
 	}
-	value := set.call(shard, "probe", uniqueStringArray(columns), scm.NewSlice(key), uniqueStringArray(projection)).Slice()
+	arguments := []scm.Scmer{uniqueStringArray(columns), scm.NewSlice(key), uniqueStringArray(projection)}
+	// Preserve the old strict four-field probe for every unrelated shard.
+	// Only the actual source's native resource receives a physical exclusion.
+	if exclude != nil && shard.uuid == exclude.shard.uuid {
+		arguments = append(arguments, scm.NewSlice([]scm.Scmer{scm.NewString(exclude.shard.t.RuntimeIdentity), scm.NewString(exclude.shard.uuid.String()), scm.NewInt(int64(exclude.recid))}))
+	}
+	value := set.call(shard, "probe", arguments...).Slice()
 	return uint32(value[1].Int()), value[0].Bool(), value[2].Slice()
+}
+
+// The native reservation already owns this exact part and original writer.
+// Wire coordinates select a row within that retained input; they never create
+// writer authority or permit a row ID to be interpreted on a successor.
+func (set *uniqueReservationSet) decodeProbeExclusion(part *uniqueNativeShard, value scm.Scmer) (*recMapTarget, error) {
+	if part == nil || part.shard == nil || part.guard == nil || part.guard != set.guard || set.closed.Load() ||
+		part.shard.t != set.table || set.nativeShard(part.shard) != part {
+		return nil, fmt.Errorf("UNIQUE exclusion requires its reserved native mutation source")
+	}
+	sameOwner := part.tx == nil && part.guard.tx == nil || part.tx != nil && part.guard.tx != nil && part.tx.transactionState == part.guard.tx.transactionState
+	if !sameOwner || !value.IsSlice() || len(value.Slice()) != 3 {
+		return nil, fmt.Errorf("invalid UNIQUE exclusion owner or coordinates")
+	}
+	fields := value.Slice()
+	if !fields[0].IsString() || !fields[1].IsString() || !fields[2].IsInt() || fields[2].Int() < 0 || uint64(fields[2].Int()) > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("invalid UNIQUE exclusion coordinates")
+	}
+	identity, identityError := uuid.Parse(fields[0].String())
+	shardID, shardError := uuid.Parse(fields[1].String())
+	if identityError != nil || shardError != nil || identity == uuid.Nil || shardID == uuid.Nil ||
+		fields[0].String() != part.shard.t.RuntimeIdentity || shardID != part.shard.uuid {
+		return nil, fmt.Errorf("UNIQUE exclusion lost its exact reserved generation")
+	}
+	// GetRecordidForUnique validates the bound under its existing shard read
+	// lock before visiting any candidate or allowing an absence result.
+	return &recMapTarget{shard: part.shard, recid: uint32(fields[2].Int())}, nil
 }
 
 func (set *uniqueReservationSet) update(shard *storageShard, id uint32, changes scm.Scmer) scm.Scmer {
@@ -1005,7 +1041,7 @@ func (set *uniqueReservationSet) dispatchUniqueCommand(_ context.Context, comman
 	command = append([]scm.Scmer{command[0]}, command[2:]...)
 	switch scm.String(command[0]) {
 	case "probe":
-		if len(command) != 4 || !command[2].IsSlice() {
+		if (len(command) != 4 && len(command) != 5) || !command[2].IsSlice() {
 			return scm.NewNil(), fmt.Errorf("invalid UNIQUE probe command")
 		}
 		keyColumns, err := uniqueStrings(command[1])
@@ -1016,7 +1052,15 @@ func (set *uniqueReservationSet) dispatchUniqueCommand(_ context.Context, comman
 		if err != nil {
 			return scm.NewNil(), err
 		}
-		id, found := s.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema(keyColumns), command[2].Slice()), part.tx, true)
+		var exclude *recMapTarget
+		if len(command) == 5 {
+			var err error
+			exclude, err = set.decodeProbeExclusion(part, command[4])
+			if err != nil {
+				return scm.NewNil(), err
+			}
+		}
+		id, found := s.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema(keyColumns), command[2].Slice()), part.tx, true, exclude)
 		values := make([]scm.Scmer, len(projection))
 		if found {
 			for i, column := range projection {

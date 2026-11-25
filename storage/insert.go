@@ -199,11 +199,23 @@ func (g *uniqueWriteGuard) validReads() bool {
 // Forward UNIQUE existence checks before acquiring local shard payload. Warm
 // readable local shards keep the direct path; other owners run the same native
 // reservation/visibility kernel through the ordinary scan protocol.
-func (s *storageShard) probeUnique(access scanAccess, tx *TxContext) bool {
+func (s *storageShard) probeUnique(access scanAccess, tx *TxContext, exclude *recMapTarget) bool {
+	if exclude != nil && s.uuid == exclude.shard.uuid && s != exclude.shard {
+		panic(uniqueReadRetry{})
+	}
+	if exclude != nil && exclude.shard == s {
+		lease := s.getRead(tx, shardReadOptions{mutation: true})
+		defer lease.Release()
+		if lease.shard != s {
+			panic(uniqueReadRetry{})
+		}
+		_, found := lease.shard.GetRecordidForUnique(access, tx, true, exclude)
+		return found
+	}
 	if !sharedClusterSource(s.t) {
 		lease := s.GetRead(tx, false)
 		defer lease.Release()
-		_, found := lease.shard.GetRecordidForUnique(access, tx, true)
+		_, found := lease.shard.GetRecordidForUnique(access, tx, true, exclude)
 		return found
 	}
 	cluster := activeNodeCluster()
@@ -236,7 +248,7 @@ func (s *storageShard) probeUnique(access scanAccess, tx *TxContext) bool {
 			}()
 			lease := s.getRead(tx, shardReadOptions{mutation: true})
 			defer lease.Release()
-			_, found = lease.shard.GetRecordidForUnique(access, tx, true)
+			_, found = lease.shard.GetRecordidForUnique(access, tx, true, exclude)
 		}()
 		if !delegated {
 			return found

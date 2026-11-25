@@ -223,7 +223,7 @@ func (s *storageShard) executeClusterRequest(ctx context.Context, r scm.ClusterR
 				return scanResult{res: scm.NewBool(found), outCount: count, inputCount: inputCount}, nil
 			}
 			if input.operator == shardUniqueProbe {
-				_, found := s.GetRecordidForUnique(input.access, input.tx, true)
+				_, found := s.GetRecordidForUnique(input.access, input.tx, true, nil)
 				return scanResult{res: scm.NewBool(found), inputCount: inputCount}, nil
 			}
 			if input.operator == shardUniqueReserve {

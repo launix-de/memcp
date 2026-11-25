@@ -102,14 +102,14 @@ func TestInsertUniqueChecksAllowIndependentKeys(t *testing.T) {
 	entered, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
-		tbl.ProcessUniqueCollision([]string{"id"}, first, false, func(_ [][]scm.Scmer, _ *uniqueWriteGuard) { close(entered); <-resume }, nil, nil, 0, nil, nil, nil, nil)
+		tbl.ProcessUniqueCollision([]string{"id"}, first, false, func(_ [][]scm.Scmer, _ *uniqueWriteGuard) { close(entered); <-resume }, nil, nil, 0, nil, nil, nil, nil, nil)
 	}()
 	<-entered
 	defer func() { close(resume); <-done }()
 	secondDone := make(chan struct{})
 	go func() {
 		defer close(secondDone)
-		tbl.ProcessUniqueCollision([]string{"id"}, second, false, func(_ [][]scm.Scmer, _ *uniqueWriteGuard) {}, nil, nil, 0, nil, nil, nil, nil)
+		tbl.ProcessUniqueCollision([]string{"id"}, second, false, func(_ [][]scm.Scmer, _ *uniqueWriteGuard) {}, nil, nil, 0, nil, nil, nil, nil, nil)
 	}()
 	select {
 	case <-secondDone:
@@ -523,7 +523,7 @@ func TestInsertCollisionCallbackRechecksEarlierKeys(t *testing.T) {
 			if key == "name" {
 				tbl.Insert(columns, [][]scm.Scmer{{scm.NewInt(3), scm.NewString("other")}}, nil, scm.NewNil(), false, nil)
 			}
-		}, 0, nil, nil, nil, nil)
+		}, 0, nil, nil, nil, nil, nil)
 	if fmt.Sprint(collisions) != "[name PRIMARY]" {
 		t.Fatalf("collisions=%v", collisions)
 	}
@@ -885,7 +885,7 @@ func TestUniqueCollatedIndexLookup(t *testing.T) {
 			tbl.Insert([]string{"label"}, [][]scm.Scmer{{scm.NewString(pair[0])}}, nil, scm.NewNil(), false, nil)
 			for _, shard := range tbl.ActiveShards() {
 				access := exactScanAccess(newExactScanAccessSchema([]string{"label"}), []scm.Scmer{scm.NewString(pair[1])})
-				if _, found := shard.GetRecordidForUnique(access, nil, true); !found {
+				if _, found := shard.GetRecordidForUnique(access, nil, true, nil); !found {
 					t.Fatal("collated key absent from UNIQUE index")
 				}
 			}
@@ -915,7 +915,7 @@ func TestUniqueTextProbeDuringGlobalDefinitions(t *testing.T) {
 	}()
 	close(start)
 	for range iterations {
-		if _, found := shard.GetRecordidForUnique(access, nil, true); !found {
+		if _, found := shard.GetRecordidForUnique(access, nil, true, nil); !found {
 			t.Error("global definitions changed UNIQUE membership")
 			break
 		}
@@ -982,7 +982,7 @@ func TestUniqueNullRowAcquiresFirstConcreteKey(t *testing.T) {
 				}), scm.NewInt(0), scm.Globalenv.Vars[scm.Symbol("+")], false)
 			found := false
 			for _, shard := range tbl.ActiveShards() {
-				_, present := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"value"}), []scm.Scmer{scm.NewInt(7)}), nil, true)
+				_, present := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"value"}), []scm.Scmer{scm.NewInt(7)}), nil, true, nil)
 				found = found || present
 			}
 			if !found || tbl.CountExact() != 1 {
@@ -1041,7 +1041,7 @@ func TestUniqueNativeAfterInsertCanUpdatePublishedKey(t *testing.T) {
 		}
 		shard := tbl.ActiveShards()[0]
 		access := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(1)})
-		id, found := shard.GetRecordidForUnique(access, nil, true)
+		id, found := shard.GetRecordidForUnique(access, nil, true, nil)
 		if !found {
 			panic("AFTER trigger could not see the published row")
 		}
@@ -1061,7 +1061,7 @@ func TestUniqueNativeAfterInsertCanUpdatePublishedKey(t *testing.T) {
 		t.Fatal("AFTER INSERT waited for its own key guard")
 	}
 	shard := tbl.ActiveShards()[0]
-	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(1)}), nil, true)
+	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(1)}), nil, true, nil)
 	if !found || shard.rowValueByRecidLocked(id, "payload", nil, nil).String() != "after-insert" {
 		t.Fatal("native INSERT returned before its AFTER trigger's update")
 	}

@@ -640,7 +640,7 @@ func (t *table) hasDuplicateUniqueValues(cols []string, nullsNotDistinct bool, c
 			if shard == nil {
 				continue
 			}
-			recid, present := shard.GetRecordidForUnique(exactScanAccess(accessSchema, row.key), currentTx, false)
+			recid, present := shard.GetRecordidForUnique(exactScanAccess(accessSchema, row.key), currentTx, false, nil)
 			if present && (shard != row.shard || recid != row.recid) {
 				return true
 			}
@@ -4722,7 +4722,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 						} else {
 							panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
 						}
-					}, 0, currentTx, nil, []*storageShard{shard}, input)
+					}, 0, currentTx, nil, []*storageShard{shard}, input, nil)
 				} else {
 					// physically insert (no unique constraints)
 					insertRows(chunk, nil)
@@ -4887,7 +4887,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 					default:
 						result++
 					}
-				}, 0, currentTx, nil, targets, input)
+				}, 0, currentTx, nil, targets, input, nil)
 			} else {
 				insertRows(values, nil)
 			}
@@ -4932,7 +4932,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 					} else {
 						panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
 					}
-				}, 0, currentTx, nil, []*storageShard{s}, input)
+				}, 0, currentTx, nil, []*storageShard{s}, input, nil)
 			} else {
 				// physically insert (parallel)
 				s.Insert(columns, values, false, validatedSchema, onFirstInsertId, isIgnore, currentTx, nil)
@@ -5273,18 +5273,27 @@ func (t *table) uniqueUsesMOSI() bool {
 	return activeReplication(t.schema) != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable()
 }
 
-func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, *uniqueWriteGuard), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, borrowed *uniqueWriteGuard, targets []*storageShard, input *nativeMutationInput) {
+func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, *uniqueWriteGuard), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, borrowed *uniqueWriteGuard, targets []*storageShard, input *nativeMutationInput, exclude *recMapTarget) {
 	guard := t.guardUniqueWrites(columns, values, mergeNull, idx, currentTx, input)
+	if exclude != nil {
+		// Only the existing UPDATE callback may supply this local source. Its
+		// retained native writer and original guard own the lifetime; the row
+		// coordinate itself grants no mutation or declaration authority.
+		sameOwner := borrowed != nil && (borrowed.tx == nil && currentTx == nil || borrowed.tx != nil && currentTx != nil && borrowed.tx.transactionState == currentTx.transactionState)
+		if exclude.shard == nil || exclude.shard.t != t || borrowed == nil || borrowed.table != t || borrowed.input != input || !sameOwner || len(values) != 1 {
+			panic("UNIQUE exclusion requires its original native UPDATE source")
+		}
+	}
 	if borrowed != nil {
 		if borrowed.input != input {
 			panic("UNIQUE check lost its actual declaration input")
 		}
 		if t.uniqueUsesMOSI() && borrowed.ownedShard != nil && borrowed.reservations == nil {
-			t.processReservedUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, borrowed, []*storageShard{borrowed.ownedShard})
+			t.processReservedUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, borrowed, []*storageShard{borrowed.ownedShard}, exclude)
 			return
 		}
 		borrowed.extend(guard.mask)
-		t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, borrowed)
+		t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, borrowed, exclude)
 		return
 	}
 	defer guard.release()
@@ -5295,16 +5304,16 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				return
 			}
 		}
-		t.processReservedUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, &guard, targets)
+		t.processReservedUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, &guard, targets, exclude)
 		return
 	}
 	guard.lock()
-	t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, &guard)
+	t.processUniqueCollision(columns, values, mergeNull, success, onCollisionCols, failure, idx, currentTx, &guard, exclude)
 }
 
 // Replicated and shared-cluster batches acquire their native MOSI participants
 // before taking key stripes. Ordinary standalone batches retain the direct path.
-func (t *table) processReservedUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, *uniqueWriteGuard), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, guard *uniqueWriteGuard, targets []*storageShard) {
+func (t *table) processReservedUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, *uniqueWriteGuard), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, guard *uniqueWriteGuard, targets []*storageShard, exclude *recMapTarget) {
 	var retries uint
 	for {
 		retry := false
@@ -5342,7 +5351,7 @@ func (t *table) processReservedUniqueCollision(columns []string, values [][]scm.
 			t.processUniqueCollision(columns, values, mergeNull, func(rows [][]scm.Scmer, validate *uniqueWriteGuard) {
 				success(rows, validate)
 				guard.wrote = guard.wrote || len(rows) != 0
-			}, onCollisionCols, failure, idx, currentTx, guard)
+			}, onCollisionCols, failure, idx, currentTx, guard, exclude)
 			complete = true
 		}()
 		if !retry {
@@ -5367,7 +5376,7 @@ func (t *table) processReservedUniqueCollision(columns []string, values [][]scm.
 	}
 }
 
-func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, *uniqueWriteGuard), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, guard *uniqueWriteGuard) {
+func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, *uniqueWriteGuard), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, guard *uniqueWriteGuard, exclude *recMapTarget) {
 	keys := mutationUniqueKeys(t, guard.input)
 	// An omitted generated key skips only its own constraint. Keep the outer
 	// invocation's lock ownership when the first checked key is a later UNIQUE.
@@ -5491,7 +5500,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 				if checkedVersion != guard.version {
 					nextConstraint = 0 // a callback admitted other writers; recheck keys
 				}
-				t.processUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, nextConstraint, currentTx, guard)
+				t.processUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, nextConstraint, currentTx, guard, exclude)
 				last_j = j
 				clear(pending.heads)
 				pending.remember(j, key)
@@ -5501,11 +5510,11 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 				var present bool
 				var reservedValues []scm.Scmer
 				if guard.reservations != nil {
-					uid, present, reservedValues = guard.reservations.probe(s, uniq.Cols, key, onCollisionCols)
+					uid, present, reservedValues = guard.reservations.probe(s, uniq.Cols, key, onCollisionCols, exclude)
 				} else if sharedClusterSource(t) {
-					present = s.probeUnique(exactScanAccess(accessSchema, key), currentTx)
+					present = s.probeUnique(exactScanAccess(accessSchema, key), currentTx, exclude)
 				} else {
-					uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true)
+					uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true, exclude)
 				}
 				if present {
 					// found a unique collision
@@ -5514,7 +5523,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 						if checkedVersion != guard.version {
 							nextConstraint = 0 // callback allowed another writer; recheck earlier keys
 						}
-						t.processUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, nextConstraint, currentTx, guard) // flush
+						t.processUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, nextConstraint, currentTx, guard, exclude) // flush
 					}
 					last_j = j + 1
 					clear(pending.heads)
@@ -5562,7 +5571,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 							if access.shard != s {
 								panic(uniqueReadRetry{})
 							}
-							uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true)
+							uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true, exclude)
 							if !present {
 								panic(uniqueReadRetry{})
 							}
@@ -5579,13 +5588,13 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 									guard.mask.include(batchMask)
 									guard.lock()
 								}()
-								uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true)
+								uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true, exclude)
 								if !present {
 									guard.mask.include(batchMask)
 									guard.lock()
 									// Recheck only this untouched row. Earlier collision
 									// callbacks in this batch must never be replayed.
-									t.processUniqueCollision(columns, values[j:j+1], mergeNull, success, onCollisionCols, failure, 0, currentTx, guard)
+									t.processUniqueCollision(columns, values[j:j+1], mergeNull, success, onCollisionCols, failure, 0, currentTx, guard, exclude)
 									return
 								}
 							}
@@ -5604,7 +5613,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 							}
 							if callbackGuard == nil {
 								var present bool
-								uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true)
+								uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true, exclude)
 								if !present {
 									panic(uniqueReadRetry{})
 								}
@@ -5638,9 +5647,9 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 									guard.mask.include(needed.mask)
 									guard.lock()
 									var present bool
-									uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true)
+									uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true, exclude)
 									if !present {
-										t.processUniqueCollision(columns, values[j:j+1], mergeNull, success, onCollisionCols, failure, 0, currentTx, guard)
+										t.processUniqueCollision(columns, values[j:j+1], mergeNull, success, onCollisionCols, failure, 0, currentTx, guard, exclude)
 										return
 									}
 								}
@@ -5683,7 +5692,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 			if checkedVersion != guard.version {
 				nextConstraint = 0
 			}
-			t.processUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, nextConstraint, currentTx, guard) // flush the rest
+			t.processUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, nextConstraint, currentTx, guard, exclude) // flush the rest
 		}
 	}
 }

@@ -40,7 +40,7 @@ func TestUUIDBinaryDefaultSurvivesWALAndRebuild(t *testing.T) {
 				t.Fatal("lost binary default recipe")
 			}
 			accepted, collisions := 0, 0
-			restored.ProcessUniqueCollision(cols, rows, false, func(rows [][]scm.Scmer, _ *uniqueWriteGuard) { accepted += len(rows) }, nil, func(string, []scm.Scmer) { collisions++ }, 0, nil, nil, nil, nil)
+			restored.ProcessUniqueCollision(cols, rows, false, func(rows [][]scm.Scmer, _ *uniqueWriteGuard) { accepted += len(rows) }, nil, func(string, []scm.Scmer) { collisions++ }, 0, nil, nil, nil, nil, nil)
 			if accepted != 0 || collisions != 3 {
 				t.Fatalf("binary keys changed across reload: accepted=%d collisions=%d", accepted, collisions)
 			}

@@ -85,7 +85,7 @@ func TestClusterUniqueProbeUsesAcquiredSuccessor(t *testing.T) {
 		}()
 		tbl.ProcessUniqueCollision([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false,
 			func(rows [][]scm.Scmer, _ *uniqueWriteGuard) { result.accepted += len(rows) }, nil,
-			func(string, []scm.Scmer) { result.collisions++ }, 0, nil, nil, nil, nil)
+			func(string, []scm.Scmer) { result.collisions++ }, 0, nil, nil, nil, nil, nil)
 	}()
 	deadline := time.Now().Add(time.Second)
 	for topology.operations.Load() == 0 {
@@ -1171,7 +1171,7 @@ func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	lease := shard.GetRead(nil, false)
 	defer lease.Release()
-	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true)
+	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true, nil)
 	reader := shard.ColumnReaderTx(nil, "value", false, ReadAuto)
 	defer ReleaseColumnReader(reader)
 	if !found || reader.GetValue(id).Int() != workers*repetitions {
@@ -1183,7 +1183,7 @@ func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 		}), false, nil); n != 2 {
 		t.Fatalf("reserved column setter affected %d rows", n)
 	}
-	id, found = shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true)
+	id, found = shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true, nil)
 	updated := shard.ColumnReaderTx(nil, "value", false, ReadAuto)
 	defer ReleaseColumnReader(updated)
 	if !found || updated.GetValue(id).Int() != workers*repetitions+1 {
@@ -1244,7 +1244,7 @@ func TestClusterUniqueCallbackReleasesMOnPanic(t *testing.T) {
 					t.Fatal("callback executed without active M")
 				}
 				panic("callback failure")
-			}, 0, nil, nil, nil, nil)
+			}, 0, nil, nil, nil, nil, nil)
 	}()
 	if failure != "callback failure" || cell.ownstate.Writing() {
 		t.Fatalf("callback failure=%v retained writer=%v", failure, cell.ownstate.Writing())
@@ -1289,7 +1289,7 @@ func TestClusterUniquePreflightUsesMutationAdmissionAndKeepsNodeLimit(t *testing
 			}
 			accepted += len(rows)
 		}, nil,
-		func(string, []scm.Scmer) { t.Fatal("unrelated key collided") }, 0, nil, nil, nil, nil)
+		func(string, []scm.Scmer) { t.Fatal("unrelated key collided") }, 0, nil, nil, nil, nil, nil)
 	if accepted != 1 {
 		t.Fatal("fitting mutation preflight was refused at the read reserve")
 	}
@@ -1515,7 +1515,7 @@ func TestClusterLocalUniqueUpdaterCannotEscapeReservation(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	lease := shard.GetRead(nil, false)
 	defer lease.Release()
-	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true)
+	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true, nil)
 	reader := shard.ColumnReaderTx(nil, "value", false, ReadAuto)
 	defer ReleaseColumnReader(reader)
 	if !found || reader.GetValue(id).Int() != 0 {
@@ -1554,7 +1554,7 @@ func TestClusterUniqueCoordinatorRetriesAfterLaneAppend(t *testing.T) {
 			t.Error("coordinator did not retry a changed preflight domain")
 		}
 	}()
-	set.probe(next, columns, rows[0], []string{"$update"})
+	set.probe(next, columns, rows[0], []string{"$update"}, nil)
 }
 
 func TestClusterUniqueKeyChangeChecksAppendedLane(t *testing.T) {
@@ -1603,7 +1603,7 @@ func TestClusterUniqueKeyChangeChecksAppendedLane(t *testing.T) {
 			var actual int64 = -1
 			for _, shard := range tbl.ActiveShards() {
 				lease := shard.GetRead(nil, false)
-				id, found := lease.shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true)
+				id, found := lease.shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true, nil)
 				if found {
 					reader := lease.shard.ColumnReaderTx(nil, "value", false, ReadAuto)
 					actual = reader.GetValue(id).Int()
@@ -1652,7 +1652,7 @@ func TestClusterUniqueUnreservedReadNeedsHeldParticipant(t *testing.T) {
 			t.Error("unreserved read accepted a domain without a retained participant")
 		}
 	}()
-	set.probe(right, columns, []scm.Scmer{scm.NewInt(99)}, nil)
+	set.probe(right, columns, []scm.Scmer{scm.NewInt(99)}, nil, nil)
 }
 
 func TestClusterUniqueContentionDoesNotMoveOwnership(t *testing.T) {

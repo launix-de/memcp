@@ -2122,32 +2122,21 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					oldKeys := t.t.guardUniqueWrites(payloadCols, [][]scm.Scmer{oldRow}, false, 0, currentTx, input)
 					needed.mask.include(oldKeys.mask)
 					acquireUpdateKeys(needed)
-					wasDeletedBefore := t.deletions.Get(uint(targetIdx))
-					t.deletions.Set(uint(targetIdx), true)
-					checked := false
+					// The actual UPDATE source owns this exact physical record. A
+					// staged replacement may remain visible through original-T masks,
+					// so a temporary global deletion is neither authority nor exclusion.
+					exclude := &recMapTarget{shard: t, recid: targetIdx}
 					func() {
 						t.mu.Unlock()
-						defer func() {
-							if !checked {
-								t.deletions.Set(uint(targetIdx), wasDeletedBefore)
-							}
-						}()
 						defer t.mu.Lock()
-
 						t.t.ProcessUniqueCollision(payloadCols, [][]scm.Scmer{payloadRow}, false, func(values [][]scm.Scmer, validate *uniqueWriteGuard) {
 							if !validate.validReads() {
 								panic(uniqueReadRetry{})
 							}
 						}, nil, func(errmsg string, data []scm.Scmer) {
 							panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.t.Name, errmsg))
-						}, 0, currentTx, uniqueGuard, nil, input)
-						checked = true
+						}, 0, currentTx, uniqueGuard, nil, input, exclude)
 					}()
-					if attestReplacement {
-						// The exclusion above was only for this UNIQUE probe. Restore
-						// its original visibility before attesting the physical version.
-						t.deletions.Set(uint(targetIdx), wasDeletedBefore)
-					}
 				} else {
 					// Keep old row visible until after we inserted the replacement in
 					// non-ACID mode. This avoids transient "row disappears" gaps that
@@ -4466,7 +4455,7 @@ func releaseUniqueLookupScratch(scratch *uniqueLookupScratch, columns int) {
 	uniqueLookupScratchPool.Put(scratch)
 }
 
-func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxContext, checkReservations bool) (result uint32, present bool) {
+func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxContext, checkReservations bool, exclude *recMapTarget) (result uint32, present bool) {
 	initializedColumns := t.initializedColumnInput(currentTx)
 	access = t.t.uniqueAccess(access)
 	columns := access.len()
@@ -4523,11 +4512,28 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 
 	mainCount := t.main_count
+	if exclude != nil && exclude.shard == t {
+		if uint64(exclude.recid) >= uint64(mainCount)+uint64(len(t.deltaRows())) {
+			panic("UNIQUE exclusion is outside its retained native generation")
+		}
+		sourceVisible := !t.deletions.Get(uint(exclude.recid))
+		if acidMode {
+			sourceVisible = currentTx.IsVisible(t, exclude.recid)
+		}
+		if !sourceVisible {
+			panic("UNIQUE exclusion lost its original visible UPDATE source")
+		}
+	}
 
 	// Use iterateIndex for O(log n) lookup (builds index lazily if needed)
 	// Small buffer for existence check: stop early after first match
 	t.iterateIndex(currentTx, access, len(t.deltaRows()), scratch.ids[:], 1, nil, func(batch []uint32) bool {
 		for _, idx := range batch {
+			// Skip only this probe's already attested UPDATE source, then keep
+			// looking: another equal record remains a real UNIQUE violation.
+			if exclude != nil && exclude.shard == t && exclude.recid == idx {
+				continue
+			}
 			visible := !t.deletions.Get(uint(idx))
 			if acidMode {
 				visible = currentTx.IsVisible(t, idx)
