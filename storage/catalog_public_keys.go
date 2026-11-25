@@ -89,10 +89,35 @@ func (tx *TxContext) stagePublicKey(t *table, operation string, key uniqueKey, i
 	}
 	finish := tx.beginCatalogConstruction(catalogValidationConstruction, nil, t)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
-	if tx.replicationActive || tx.replicationWriting || tx.relationData != nil || tx.coordinator != nil || tx.clusterNumber.Load() != 0 || tx.remoteObject != nil || tx.remoteInvocation || (tx.catalogIntents.Load() != nil || tx.hasTableDrops()) && !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) || t.Ephemeral || t.ScopedSchema || t.PersistencyMode == Cache {
+	if tx.replicationActive || tx.replicationWriting || tx.relationData != nil || tx.coordinator != nil || tx.clusterNumber.Load() != 0 || tx.remoteObject != nil || tx.remoteInvocation || index == nil && (tx.catalogIntents.Load() != nil || tx.hasTableDrops()) && !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) || t.Ephemeral || t.ScopedSchema || t.PersistencyMode == Cache {
 		panic("public unique declaration requires a local committed native table")
 	}
+	if index != nil {
+		tx.requireLogicalIndexEndpoint(t)
+	}
 	return tx.stagePublicCatalogDeclaration(t.schema, catalogPublicKeyKind, nil, func(changes *publicCatalogChanges) bool { return changes.stageKey(tx, t, operation, key, index) })
+}
+
+// Only typed index actions select required V32. Their endpoint may be public
+// or belong to the SAME original constructor program; raw keys keep the old
+// transaction-wide veto. The existing common entry still attests prepared,
+// remote and native participant state under its actual declaration admission.
+func (tx *TxContext) requireLogicalIndexEndpoint(t *table) {
+	if t == nil || t.schema == nil || !localCatalogRowDatabase(t.schema) ||
+		t.schema.tables.Get(t.Name) != t || t.RuntimeIdentity == "" || tx.ownsTableDrop(t) {
+		panic("logical index requires an actual local endpoint outside pending table retirement")
+	}
+	tx.requireDeclarationEndpoint(t, maintenanceAlter)
+	if !t.committedAt(t.schema.catalogView().version) && !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) {
+		panic("logical index requires its original native endpoint owner")
+	}
+	if tx.catalogIntents.Load() != nil || tx.hasTableDrops() {
+		identity := tx.catalogIdentity.Load()
+		if tx.Mode != TxACID || tx.State != TxActive || tx.decisionStarted || tx.prepared != nil || tx.catalogCommit != nil || tx.rollbackOnly.Load() ||
+			identity == nil || identity.Namespace != "" || identity.database != t.schema || identity.Database != t.schema.Name || identity.Incarnation != t.schema.incarnationID() {
+			panic("joint logical index requires the same unprepared local ACID catalog decision")
+		}
+	}
 }
 
 func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation string, key uniqueKey, index *logicalIndexDeclaration) bool {
@@ -142,7 +167,11 @@ func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation
 		db.schemalock.RLock()
 		defer db.schemalock.RUnlock()
 		changes.validateConstraintStateEndpointsLocked(tx)
-		tx.requireDeclarationEndpoint(t, maintenanceAlter)
+		if index != nil {
+			tx.requireLogicalIndexEndpoint(t)
+		} else {
+			tx.requireDeclarationEndpoint(t, maintenanceAlter)
+		}
 		if t.schema != db || db.tables.Get(t.Name) != t || (!t.committedAt(db.catalogView().version) && !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t)) {
 			panic("unique declaration endpoint generation was replaced")
 		}
