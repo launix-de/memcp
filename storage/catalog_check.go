@@ -132,7 +132,7 @@ func (changes *publicCatalogChanges) validateCheckStageLocked(tx *TxContext, t *
 	changes.validateConstraintStateEndpointsLocked(tx)
 	validateCatalogCheck(changes.db, declaration, t.columnNamesForTx(tx))
 	requireTableMaintenance(changes.db.Name, declaration.Table, maintenanceAlter)
-	if changes.db.hasDeclarationNameLocked(declaration.Check.Id, nil, tx.publicDeclarationViews()) || tx.pendingUniqueDeclarationName(declaration.Check.Id) {
+	if changes.db.hasDeclarationNameLocked(declaration.Check.Id, nil, changes.views.Load()) || tx.pendingUniqueDeclarationName(declaration.Check.Id) {
 		panic("declaration name already exists: " + declaration.Check.Id)
 	}
 	for _, entry := range tx.publicForeignAmendments() {
