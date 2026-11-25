@@ -9,7 +9,7 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 	(define run (lambda (text) (begin
 		(define result (newsession)) (result "rows" (list))
 		(tsql_execute_request "memcp-tests" text caller nil 0
-			(lambda (row) (result "rows" (append (result "rows") (list row))))
+			(lambda (row) (result "rows" (append (result "rows") row)))
 			(lambda fields true))
 		(result "rows"))))
 	(define expect (lambda (text names expected) (begin
