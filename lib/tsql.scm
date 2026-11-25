@@ -1662,6 +1662,7 @@ finished its decision. THROW retains the raw cause, including completion facts. 
 		'("tsql-user-error" original) (tsql_diagnostic_failure_value original)
 		'("cardinality-error" message) (list "tsql-error" 512 message 1 16)
 		'("constraint-violation" "check" _name message) (list "tsql-error" 547 message 1 16)
+		'("constraint-violation" "foreign" _name message) (list "tsql-error" 547 message 1 16)
 		'("constraint-violation" "unique-declaration" _name message) (list "tsql-error" 1505 message 1 16)
 		'("constraint-violation" "not-null-declaration" _name message) (list "tsql-error" 515 message 1 16)
 		'("column-declaration-conflict" "name" table column)

@@ -14,6 +14,7 @@ https://learn.microsoft.com/sql/t-sql/statements/set-xact-abort-transact-sql */
 		(cons "tsql-error" _details) "runtime"
 		'("cardinality-error" _message) "runtime"
 		'("constraint-violation" "check" _name _message) "runtime"
+		'("constraint-violation" "foreign" _name _message) "runtime"
 		'("constraint-violation" "unique-declaration" _name _message) "runtime"
 		'("constraint-violation" "not-null-declaration" _name _message) "runtime"
 		'("column-declaration-conflict" "name" _table _column) "runtime"

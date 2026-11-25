@@ -504,7 +504,7 @@ func validateExistingForeignRows(tx *TxContext, child *table, fk foreignKey, par
 		}
 		parent.table.enterPendingCatalogData(tx, parentInput)
 		if !parent.exists(tx, values[1:]) {
-			panic(fmt.Errorf("foreign key constraint %s failed: existing child row has no parent", fk.Id))
+			panic(declarationValidationViolation("foreign", fk.Id, fmt.Sprintf("foreign key constraint %s failed: existing child row has no parent", fk.Id)))
 		}
 		return scm.NewBool(true)
 	})
