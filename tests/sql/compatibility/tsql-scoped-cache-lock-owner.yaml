@@ -306,7 +306,7 @@ test_cases:
         sql: 'SELECT id,value FROM #cache_scope_input'
         expect:
           error: true
-          contains: 'local temporary table does not exist: #cache_scope_input'
+          contains: ['local temporary table does not exist: #cache_scope_input']
       - connection: scope_owner
         sql: ROLLBACK TRAN
       - connection: scope_owner
