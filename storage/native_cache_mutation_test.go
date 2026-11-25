@@ -192,7 +192,7 @@ func TestCacheMutationRejectsImportedInvocationBeforeEffects(t *testing.T) {
 	}
 	assertStatementAdmissionRows(t, source, nil, 10, 20)
 	assertStatementAdmissionRows(t, target, nil, 10, 20)
-	if target.cacheUsers != 0 {
+	if atomic.LoadInt64(&target.cacheUsers) != 0 {
 		t.Fatal("rejected invocation retained a target pin")
 	}
 }
