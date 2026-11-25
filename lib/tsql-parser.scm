@@ -5162,7 +5162,9 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(list (quote tsql_has_dbaccess) (tsql_cast_expr name "NVARCHAR" '(128))
 					(tsql_actor_formula)) "INT" nil))
 		(parser '(tsql_keyword_ident_current "(" (define name tsql_expression) ")")
-			(tsql_ident_current_call schema name))
+			(tsql_identity_call schema name "current"))
+		(parser '(tsql_keyword_ident_seed "(" (define name tsql_expression) ")")
+			(tsql_identity_call schema name "seed"))
 		(parser '(tsql_keyword_scope_identity "(" ")") (tsql_identity_expr true))
 		(parser '((define name (or (parser tsql_keyword_error_message "message")
 			(parser tsql_keyword_error_number "number")
@@ -7374,10 +7376,6 @@ that context explicitly; stored views refuse this scalar before publication. */
 					(if compile_only (tsql_command_binding 'add-columns (map columns (lambda (definition)
 						(match definition '(column type dimensions attributes)
 							(tsql_prepare_column database (list 'list "column" column type dimensions (cons 'list attributes)) planning_session)))) '()) (begin
-							/* Native ADD has no identity backfill for historical rows.
-							Reject this form instead of manufacturing a parallel allocator. */
-							(if (find columns (lambda (column) ((nth column 3) "auto_increment")))
-								(error "ALTER ADD IDENTITY requires native historical-row initialization") true)
 							(list (quote tsql_add_columns) database name
 								(cons (quote list) (map columns (lambda (column)
 									(match column '(col type dimensions attributes)

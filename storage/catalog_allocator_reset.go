@@ -138,7 +138,7 @@ func (tx *TxContext) allocatorResetDeclarations() []catalogAllocatorResetDeclara
 	var result []catalogAllocatorResetDeclaration
 	// History order is deterministic; only the selected final branch survives.
 	for _, entry := range view.history {
-		a := entry.allocator
+		a := entry.allocatorBranch()
 		if a == nil || view.allocators[a.table] != a {
 			continue
 		}

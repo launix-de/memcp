@@ -14,7 +14,7 @@ func (t *table) persistedName() any {
 	if t.rawVisibleName() == t.Name {
 		return t.Name
 	}
-	return columnNameBinding{1, t.Name, t.rawVisibleName()}
+	return columnNameBinding{Version: 1, Storage: t.Name, Visible: t.rawVisibleName()}
 }
 
 // Like a column binding, a renamed table changes the TYPE of the existing
@@ -46,7 +46,7 @@ func (t *table) UnmarshalJSON(data []byte) error {
 	if err := decoder.Decode(&binding); err != nil {
 		return err
 	}
-	if binding.Version != 1 || binding.Storage == "" || binding.Visible == "" || !utf8.ValidString(binding.Storage) || !utf8.ValidString(binding.Visible) {
+	if binding.Version != 1 || binding.GeneratedIDs != nil || binding.Storage == "" || binding.Visible == "" || !utf8.ValidString(binding.Storage) || !utf8.ValidString(binding.Visible) {
 		return fmt.Errorf("invalid native table name binding")
 	}
 	t.Name = binding.Storage

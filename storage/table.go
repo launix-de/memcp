@@ -121,6 +121,7 @@ type column struct {
 	partitioningTraffic      atomic.Int64 // runtime query/UNIQUE routing hints; never persisted
 	PartitioningScore        int          // count this up to increase the chance of partitioning for this column
 	AutoIncrement            bool
+	generatedIDs             *columnIDGeneration
 	Default                  scm.Scmer
 	DefaultExpression        string
 	// Deferred declarations require the owning frontend to supply invocation data.
@@ -2080,6 +2081,9 @@ func (t *table) metadataMemory() uint {
 	size += uint(cap(t.Columns)) * uint(unsafe.Sizeof((*column)(nil)))
 	var declarationPayloads map[scm.Scmer]struct{}
 	for _, c := range t.Columns {
+		if c.generatedIDs != nil {
+			size += uint(unsafe.Sizeof(*c.generatedIDs))
+		}
 		size += uint(unsafe.Sizeof(*c)) + uint(len(c.Name)+len(c.visibleName)+len(c.Typ)+len(c.Collation)+len(c.Comment)+len(c.DefaultExpression)+len(c.DefaultName))
 		size += uint(cap(c.Typdimensions)) * uint(unsafe.Sizeof(int(0)))
 		size += uint(cap(c.EnumValues)) * uint(unsafe.Sizeof(""))
@@ -3026,6 +3030,12 @@ func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint,
 		scm.NewString("DefaultDeferred"), scm.NewBool(c.DefaultDeferred),
 		scm.NewString("DefaultName"), scm.NewString(c.DefaultName),
 		scm.NewString("Extra"), scm.NewString(extra),
+		scm.NewString("GenerationStart"), func() scm.Scmer {
+			if c.generatedIDs != nil {
+				return scm.NewString(strconv.FormatInt(c.generatedIDs.Start, 10))
+			}
+			return scm.NewNil()
+		}(),
 		scm.NewString("Computed"), scm.NewBool(isRuntimeComputedColumn(c)),
 		scm.NewString("Privileges"), scm.NewString("select,insert,update,references"),
 		scm.NewString("Comment"), scm.NewString(c.Comment),
@@ -3963,7 +3973,7 @@ func cloneStoredColumnDeclaration(current *column) *column {
 		Name: current.Name, visibleName: current.visibleName, Typ: current.Typ, Typdimensions: append([]int(nil), current.Typdimensions...),
 		EnumValues:        append([]string(nil), current.EnumValues...),
 		PartitioningScore: current.PartitioningScore,
-		AutoIncrement:     current.AutoIncrement, Default: current.Default,
+		AutoIncrement:     current.AutoIncrement, generatedIDs: current.generatedIDs, Default: current.Default,
 		DefaultExpression: current.DefaultExpression, DefaultDeferred: current.DefaultDeferred,
 		DefaultName:  current.DefaultName,
 		InitialValue: current.InitialValue, InitialValues: current.InitialValues,

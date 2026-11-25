@@ -1271,7 +1271,7 @@ scalar-query cardinality error. Restrict this owner to these constructions. */
 arguments are closed; caller-row expressions belong to the ordinary relational
 domain. Native-table observations must not read unrelated system.views rows or
 observe unrelated legacy allocator failures during namespace enumeration. */
-(define tsql_ident_current_databases (close_procedure ((lambda (visible)
+(define tsql_identity_databases (close_procedure ((lambda (visible)
 	(lambda (actor _tx)
 		(map (filter (show) (lambda (database) (visible actor database true)))
 			(lambda (database) (list database))))) tsql_metadata_visible?)))
@@ -1281,8 +1281,8 @@ not a worker-local account check. Resolve one actual native handle at the read
 and use it for both declaration and allocator. Only native-missing names enter
 the existing view lookup; unrelated pending view writers cannot affect a native
 observation through a gratuitous system.views scan. */
-(define tsql_ident_current_value (close_procedure ((lambda (relation view_name find_view parse_integer query_block? qb_sources state_reader decode_ir restore_code restore_layout)
-	(lambda (database name tx) (begin
+(define tsql_identity_value (close_procedure ((lambda (relation view_name find_view parse_integer query_block? qb_sources state_reader decode_ir restore_code restore_layout)
+	(lambda (database name kind tx) (begin
 		(define native (relation database name tx))
 		(if (nil? native) (begin
 			(define view (view_name database name tx))
@@ -1300,7 +1300,8 @@ observation through a gratuitous system.views scan. */
 					(if (or (nil? identity) (not (equal? identity (observation "table_uuid"))))
 						(error "IDENT_CURRENT allocator generation is unavailable") true)
 					(define issued (observation "issued"))
-					(define current (if (not (nil? (observation "current"))) (observation "current")
+					(define current (if (equal? kind "seed") (coalesceNil (declared "GenerationStart") (observation "start"))
+						(not (nil? (observation "current"))) (observation "current")
 						(nil? issued) nil
 						(not issued) (observation "start")
 						(observation "high_allocated") (observation "high") nil))
@@ -1309,7 +1310,7 @@ observation through a gratuitous system.views scan. */
 						(parse_integer current)))))))))
 	tsql_native_relation_handle tsql_view_name sql_find_view tsql_parse_integer query_block? qb_sources table_id_state
 	json_decode_scmer restore_storage_code sql_restore_source_layout)))
-(define tsql_ident_current_query (lambda (database name planning tx) (begin
+(define tsql_identity_query (lambda (database name kind planning tx) (begin
 	(define names (binding_collect_string_catalog name '()))
 	(define input_alias (binding_fresh_alias names "__tsql_identity_input"))
 	(define alias (binding_fresh_alias (set_assoc names input_alias true) "__tsql_identity_current"))
@@ -1322,7 +1323,7 @@ observation through a gratuitous system.views scan. */
 	(define columns (list
 		(list "Field" "database" "RawType" "NVARCHAR" "Dimensions" '(128) "Null" false)))
 	(define source (list alias database
-		(list 'table-function tsql_ident_current_databases (list (tsql_actor_formula) 'tx) '("database"))
+		(list 'table-function tsql_identity_databases (list (tsql_actor_formula) 'tx) '("database"))
 		false nil (list "columns" columns "constraints" '("Unique" () "ForeignKeys" ()) "lifetime" "invocation")))
 	(define column (lambda (field) (list 'get_column alias false field false)))
 	(define argument (list 'get_column input_alias false "name" false))
@@ -1336,15 +1337,15 @@ observation through a gratuitous system.views scan. */
 		/* Physical projection preparation may precede WHERE. Keep the same
 		lazy selector around the read itself, not just in the row predicate. */
 		(list "current_value" (list 'sql_type_expr (list 'if matches
-			(list tsql_ident_current_value (column "database") (address "name") 'tx) nil)
+			(list tsql_identity_value (column "database") (address "name") kind 'tx) nil)
 			(list "NUMERIC" '(38 0)) nil)) matches nil nil nil nil nil '() '()
 		(list (list 'fresh_invocation true)))))))
-(define tsql_ident_current_call (lambda (database value)
+(define tsql_identity_call (lambda (database value kind)
 	(list 'sql_type_expr
 		(list 'tsql_relational_scalar_call
-			(close_procedure ((lambda (database lookup)
+			(close_procedure ((lambda (database kind lookup)
 				(lambda (arguments _outer_sources _policy planning tx)
-					(lookup database (car arguments) planning tx))) database tsql_ident_current_query))
+					(lookup database (car arguments) kind planning tx))) database kind tsql_identity_query))
 			(list value))
 		(list "NUMERIC" '(38 0)) nil)))
 

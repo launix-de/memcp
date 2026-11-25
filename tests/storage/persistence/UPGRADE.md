@@ -1,6 +1,31 @@
 <!-- Copyright (C) 2026 Carl-Philip Hänsch -->
 # Upgrade compatibility contract
 
+## Historical generated-ID column appends
+
+The required `catalog-v10/v31/` domain composes a generated-ID append with the
+same original transaction's realized row journals, selected allocator epoch and
+existing ordered declaration actions, including V30 CHECK replacement. The
+append records the new column's configured positive origin. It does not replace
+the table allocator's authentic Start or Issued provenance. The new operation
+requires a proven unused native allocator and no existing identity column;
+unknown and previously issued predecessors are rejected before publication.
+
+A native scan reserves one typed range for the visible historical rows. Finite
+per-shard offsets assign distinct values through the existing realized column
+initializer. The header and private allocator branch share one amendment and
+savepoint history. Recovery replays stored values and the accepted epoch; it
+never reruns a generator or reserves a second range.
+
+All earlier journal domains reject the new `generated_ids` field, including an
+explicit null spelling. Checkpoints use version 2 of the required column-name
+binding with the configured origin, so an older reader also fails closed after
+journal retirement. Ordinary and renamed legacy columns keep their previous
+encodings. `identity-column-append.yaml` covers historical rows, tombstones,
+original row work, rollback, savepoints, overflow, signed exhaustion, mixed CHECK
+replacement, checkpoint recovery and inherited seed reflection. These source
+controls require matching-native runtime qualification before a release claim.
+
 ## Pending foreign-key enforcement state
 
 The `catalog-v10/v29/` domain records the final enabled and trusted state of

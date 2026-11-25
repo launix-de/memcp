@@ -220,10 +220,10 @@ test_cases:
       (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests-allocator-authority`.* TO allocator_metadata_reader" nil))
       (define fresh (list "allocator_metadata_reader" (tsql_account_id "allocator_metadata_reader")))
       (define observe (lambda (actor) (begin
-        (define database (find (tsql_ident_current_databases actor nil) (lambda (row)
+        (define database (find (tsql_identity_databases actor nil) (lambda (row)
           (equal? (car row) "memcp-tests-allocator-authority")) nil))
         (list (list (if (nil? database) nil
-          (tsql_ident_current_value (car database) "allocator_secured" nil)))))))
+          (tsql_identity_value (car database) "allocator_secured" "current" nil)))))))
       (define old_result (observe old))
       (define new_result (observe fresh))
       (eval (parse_sql "memcp-tests" "DROP USER allocator_metadata_reader" nil))
@@ -395,14 +395,14 @@ test_cases:
   scm: |
     (begin
       (define actor (list "root" (tsql_account_id "root")))
-      (define database (find (tsql_ident_current_databases actor nil) (lambda (row)
+      (define database (find (tsql_identity_databases actor nil) (lambda (row)
         (equal? (car row) "memcp-tests")) nil))
       (define admin (newsession)) (admin "username" "root")
       (tsql_execute_request "memcp-tests" "DROP TABLE allocator_address_replaced" admin nil 0
         (lambda (row) true) (lambda fields true))
       (tsql_execute_request "memcp-tests" "CREATE TABLE allocator_address_replaced(value INT)" admin nil 0
         (lambda (row) true) (lambda fields true))
-      (define current_value (tsql_ident_current_value (car database) "allocator_address_replaced" nil))
+      (define current_value (tsql_identity_value (car database) "allocator_address_replaced" "current" nil))
       (define rows (newsession)) (rows "data" '())
       (tsql_execute_request "memcp-tests" "SELECT value FROM allocator_address_replaced" admin nil 0
         (lambda (row) (rows "data" (append (rows "data") row))) (lambda fields true))

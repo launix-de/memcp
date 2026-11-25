@@ -1,0 +1,530 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Historical generated-ID ADD retains configured column origin, actual table provenance, original statement Undo and strict
+    V31 recovery
+setup:
+- sql: DROP TABLE IF EXISTS identity_add_audit
+- sql: DROP TABLE IF EXISTS identity_add_copy
+- sql: DROP TABLE IF EXISTS identity_add_mixed
+- sql: DROP TABLE IF EXISTS identity_add_uncommitted
+- sql: DROP TABLE IF EXISTS identity_add_crash
+- sql: DROP TABLE IF EXISTS identity_add_parallel
+- sql: DROP TABLE IF EXISTS identity_add_stale
+- sql: DROP TABLE IF EXISTS identity_add_used
+- sql: DROP TABLE IF EXISTS identity_add_negative
+- sql: DROP TABLE IF EXISTS identity_add_maximum
+- sql: DROP TABLE IF EXISTS identity_add_overflow
+- sql: DROP TABLE IF EXISTS identity_add_cursor
+- sql: DROP TABLE IF EXISTS identity_add_save
+- sql: DROP TABLE IF EXISTS identity_add_rollback
+- sql: DROP TABLE IF EXISTS identity_add_rows
+- sql: DROP TABLE IF EXISTS identity_add_empty
+- sql: CREATE TABLE identity_add_empty(code INT NOT NULL PRIMARY KEY,payload INT NOT NULL)
+- sql: CREATE TABLE identity_add_rows(code INT NOT NULL PRIMARY KEY,payload INT NOT NULL)
+- sql: CREATE TABLE identity_add_rollback(code INT NOT NULL PRIMARY KEY,payload INT NOT NULL)
+- sql: CREATE TABLE identity_add_save(code INT NOT NULL PRIMARY KEY,payload INT NOT NULL)
+- sql: CREATE TABLE identity_add_cursor(code INT NOT NULL PRIMARY KEY,payload INT NOT NULL)
+- sql: CREATE TABLE identity_add_overflow(code INT NOT NULL PRIMARY KEY,payload INT NOT NULL)
+- sql: CREATE TABLE identity_add_maximum(code INT NOT NULL PRIMARY KEY,payload INT NOT NULL)
+- sql: CREATE TABLE identity_add_negative(code INT NOT NULL PRIMARY KEY,payload INT NOT NULL)
+- sql: CREATE TABLE identity_add_used(code INT NOT NULL PRIMARY KEY,payload INT NOT NULL)
+- sql: CREATE TABLE identity_add_stale(code INT NOT NULL PRIMARY KEY,payload INT NOT NULL)
+- sql: CREATE TABLE identity_add_parallel(code INT NOT NULL PRIMARY KEY,payload INT NOT NULL)
+- sql: CREATE TABLE identity_add_crash(code INT NOT NULL PRIMARY KEY,payload INT NOT NULL)
+- sql: CREATE TABLE identity_add_uncommitted(code INT NOT NULL PRIMARY KEY,payload INT NOT NULL)
+- sql: CREATE TABLE identity_add_mixed(code INT NOT NULL PRIMARY KEY,payload INT NOT NULL)
+- sql: INSERT identity_add_rows VALUES(1,10),(2,20),(3,30)
+- sql: INSERT identity_add_rollback VALUES(1,10),(2,20),(3,30)
+- sql: INSERT identity_add_save VALUES(1,10),(2,20),(3,30)
+- sql: INSERT identity_add_cursor VALUES(1,10),(2,20),(3,30)
+- sql: INSERT identity_add_overflow VALUES(1,10),(2,20),(3,30)
+- sql: INSERT identity_add_parallel VALUES(1,10),(2,20),(3,30)
+- sql: INSERT identity_add_crash VALUES(1,10),(2,20),(3,30)
+- sql: INSERT identity_add_uncommitted VALUES(1,10),(2,20),(3,30)
+- sql: INSERT identity_add_mixed VALUES(1,10),(2,20),(3,30)
+- scm: '(rebuild (table "memcp-tests" false "identity_add_rows" false nil) true false nil true)
+
+    '
+- sql: DELETE identity_add_rows WHERE code=2
+- sql: INSERT identity_add_rows VALUES(4,40)
+- sql: ALTER TABLE identity_add_mixed ADD CONSTRAINT CK_identity_add_payload CHECK(payload>=0)
+- sql: CREATE TABLE identity_add_audit(kind INT NOT NULL,n INT NOT NULL)
+- sql: CREATE TRIGGER identity_add_rows_update ON identity_add_rows AFTER UPDATE AS INSERT identity_add_audit SELECT 1,COUNT(*) FROM inserted
+- sql: CREATE TRIGGER identity_add_rows_insert ON identity_add_rows AFTER INSERT AS INSERT identity_add_audit SELECT 2,COUNT(*) FROM inserted
+- sql: CREATE TRIGGER identity_add_rows_delete ON identity_add_rows AFTER DELETE AS INSERT identity_add_audit SELECT 3,COUNT(*) FROM deleted
+cleanup:
+- sql: DROP TABLE IF EXISTS identity_add_copy
+- sql: DROP TABLE IF EXISTS identity_add_mixed
+- sql: DROP TABLE IF EXISTS identity_add_uncommitted
+- sql: DROP TABLE IF EXISTS identity_add_crash
+- sql: DROP TABLE IF EXISTS identity_add_parallel
+- sql: DROP TABLE IF EXISTS identity_add_stale
+- sql: DROP TABLE IF EXISTS identity_add_used
+- sql: DROP TABLE IF EXISTS identity_add_negative
+- sql: DROP TABLE IF EXISTS identity_add_maximum
+- sql: DROP TABLE IF EXISTS identity_add_overflow
+- sql: DROP TABLE IF EXISTS identity_add_cursor
+- sql: DROP TABLE IF EXISTS identity_add_save
+- sql: DROP TABLE IF EXISTS identity_add_rollback
+- sql: DROP TABLE IF EXISTS identity_add_rows
+- sql: DROP TABLE IF EXISTS identity_add_empty
+- sql: DROP TABLE IF EXISTS identity_add_audit
+test_cases:
+- name: Actual empty historical table accepts a configured identity and its first future insert
+  sql: ALTER TABLE identity_add_empty ADD ID INT NOT NULL IDENTITY(7,1); INSERT identity_add_empty(code,payload) VALUES(1,10); SELECT code,payload,ID,IDENT_SEED(N'identity_add_empty')
+    AS seed,IDENT_CURRENT(N'identity_add_empty') AS current_value FROM identity_add_empty
+  expect:
+    rows: 1
+    data:
+    - code: 1
+      payload: 10
+      ID: 7
+      seed: 7
+      current_value: 7
+- name: Historical main delta tombstones and original row prefix receive one range without early publication
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE identity_add_rows SET payload=11 WHERE code=1
+    - connection: owner
+      sql: INSERT identity_add_rows VALUES(5,50)
+    - connection: owner
+      sql: DELETE identity_add_rows WHERE code=3
+    - connection: owner
+      sql: ALTER TABLE identity_add_rows ADD ID INT NOT NULL IDENTITY(10,1)
+    - connection: owner
+      sql: SELECT code,payload FROM identity_add_rows ORDER BY code
+      expect:
+        rows: 3
+        data:
+        - code: 1
+          payload: 11
+        - code: 4
+          payload: 40
+        - code: 5
+          payload: 50
+    - connection: owner
+      sql: SELECT COUNT(*) AS n,COUNT(DISTINCT ID) AS distinct_ids,MIN(ID) AS lo,MAX(ID) AS hi,SUM(ID) AS total FROM identity_add_rows
+      expect:
+        rows: 1
+        data:
+        - n: 3
+          distinct_ids: 3
+          lo: 10
+          hi: 12
+          total: 33
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'identity_add_rows',N'ID') AS identity_length
+      expect:
+        rows: 1
+        data:
+        - identity_length: null
+    - connection: observer
+      sql: SELECT code,payload FROM identity_add_rows ORDER BY code
+      expect:
+        rows: 3
+        data:
+        - code: 1
+          payload: 10
+        - code: 3
+          payload: 30
+        - code: 4
+          payload: 40
+    - connection: owner
+      sql: SELECT kind,n FROM identity_add_audit ORDER BY kind
+      expect:
+        rows: 3
+        data:
+        - kind: 1
+          n: 1
+        - kind: 2
+          n: 1
+        - kind: 3
+          n: 1
+    - connection: owner
+      sql: INSERT identity_add_rows(code,payload) VALUES(6,60)
+    - connection: owner
+      sql: SELECT code,payload,ID FROM identity_add_rows WHERE code=6
+      expect:
+        rows: 1
+        data:
+        - code: 6
+          payload: 60
+          ID: 13
+    - connection: owner
+      sql: SELECT IDENT_SEED(N'identity_add_rows') AS seed,IDENT_CURRENT(N'identity_add_rows') AS current_value,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - seed: 10
+          current_value: 13
+          depth: 1
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT COUNT(*) AS n,COUNT(DISTINCT ID) AS distinct_ids,MIN(ID) AS lo,MAX(ID) AS hi,SUM(ID) AS total FROM identity_add_rows
+      expect:
+        rows: 1
+        data:
+        - n: 4
+          distinct_ids: 4
+          lo: 10
+          hi: 13
+          total: 46
+- name: Full rollback removes both realized cells and the unpublished allocator branch
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE identity_add_rollback SET payload=11 WHERE code=1
+    - connection: owner
+      sql: ALTER TABLE identity_add_rollback ADD ID INT NOT NULL IDENTITY(50,1)
+    - connection: owner
+      sql: INSERT identity_add_rollback(code,payload) VALUES(4,40)
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: owner
+      sql: SELECT code,payload,COL_LENGTH(N'identity_add_rollback',N'ID') AS identity_length,@@TRANCOUNT AS depth FROM identity_add_rollback
+        ORDER BY code
+      expect:
+        rows: 3
+        data:
+        - code: 1
+          payload: 10
+          identity_length: null
+          depth: 0
+        - code: 2
+          payload: 20
+          identity_length: null
+          depth: 0
+        - code: 3
+          payload: 30
+          identity_length: null
+          depth: 0
+    - connection: owner
+      sql: ALTER TABLE identity_add_rollback ADD ID INT NOT NULL IDENTITY(5,1)
+    - connection: owner
+      sql: SELECT COUNT(*) AS n,MIN(ID) AS lo,MAX(ID) AS hi FROM identity_add_rollback
+      expect:
+        rows: 1
+        data:
+        - n: 3
+          lo: 5
+          hi: 7
+- name: Savepoint removal restores its original header rows and proven unused predecessor before a new append
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE identity_add_save SET payload=11 WHERE code=1
+    - connection: owner
+      sql: SAVE TRAN before_identity
+    - connection: owner
+      sql: ALTER TABLE identity_add_save ADD ID INT NOT NULL IDENTITY(100,1)
+    - connection: owner
+      sql: INSERT identity_add_save(code,payload) VALUES(4,40)
+    - connection: owner
+      sql: ROLLBACK TRAN before_identity
+    - connection: owner
+      sql: SELECT code,payload,COL_LENGTH(N'identity_add_save',N'ID') AS identity_length FROM identity_add_save ORDER BY code
+      expect:
+        rows: 3
+        data:
+        - code: 1
+          payload: 11
+          identity_length: null
+        - code: 2
+          payload: 20
+          identity_length: null
+        - code: 3
+          payload: 30
+          identity_length: null
+    - connection: owner
+      sql: ALTER TABLE identity_add_save ADD ID INT NOT NULL IDENTITY(20,1)
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: owner
+      sql: SELECT COUNT(*) AS n,COUNT(DISTINCT ID) AS distinct_ids,MIN(ID) AS lo,MAX(ID) AS hi,SUM(ID) AS total FROM identity_add_save
+      expect:
+        rows: 1
+        data:
+        - n: 3
+          distinct_ids: 3
+          lo: 20
+          hi: 22
+          total: 63
+- name: A surviving append epoch consumes later rolled back reservations once
+  sql: BEGIN TRAN; ALTER TABLE identity_add_cursor ADD ID INT NOT NULL IDENTITY(5,1); SAVE TRAN after_identity; INSERT identity_add_cursor(code,payload)
+    VALUES(4,40); ROLLBACK TRAN after_identity; INSERT identity_add_cursor(code,payload) VALUES(5,50); COMMIT TRAN; SELECT code,payload,ID
+    FROM identity_add_cursor WHERE code=5
+  expect:
+    rows: 1
+    data:
+    - code: 5
+      payload: 50
+      ID: 9
+- name: Overflow rejects the complete historical range before header or allocator publication
+  sql: ALTER TABLE identity_add_overflow ADD ID TINYINT NOT NULL IDENTITY(254,1)
+  expect:
+    error: true
+    contains: generated-ID historical range exceeds its declared bound
+- name: Overflow leaves original values and no column
+  sql: SELECT code,payload,COL_LENGTH(N'identity_add_overflow',N'ID') AS identity_length FROM identity_add_overflow ORDER BY code
+  expect:
+    rows: 3
+    data:
+    - code: 1
+      payload: 10
+      identity_length: null
+    - code: 2
+      payload: 20
+      identity_length: null
+    - code: 3
+      payload: 30
+      identity_length: null
+- name: The predecessor remains usable after failed range preparation
+  sql: ALTER TABLE identity_add_overflow ADD ID INT NOT NULL IDENTITY(30,1); SELECT COUNT(*) AS n,MIN(ID) AS lo,MAX(ID) AS hi FROM identity_add_overflow
+  expect:
+    rows: 1
+    data:
+    - n: 3
+      lo: 30
+      hi: 32
+- name: The native signed maximum can be the first generated identity without predecessor arithmetic
+  sql: ALTER TABLE identity_add_maximum ADD ID BIGINT NOT NULL IDENTITY(9223372036854775807,1); INSERT identity_add_maximum(code,payload)
+    VALUES(1,10); SELECT code,payload,ID FROM identity_add_maximum
+  expect:
+    rows: 1
+    data:
+    - code: 1
+      payload: 10
+      ID: 9223372036854775807
+- name: Exhaustion rejects another row without signed wrap
+  sql: INSERT identity_add_maximum(code,payload) VALUES(2,20)
+  expect:
+    error: true
+    contains: generated ID block exceeds native integer capacity
+- name: Exhaustion leaves exactly the one accepted maximum row
+  sql: SELECT code,payload,ID FROM identity_add_maximum ORDER BY code
+  expect:
+    rows: 1
+    data:
+    - code: 1
+      payload: 10
+      ID: 9223372036854775807
+- name: Negative SQL seed remains an explicit unsupported declaration before effects
+  sql: ALTER TABLE identity_add_negative ADD ID INT NOT NULL IDENTITY(-1,1)
+  expect:
+    error: true
+    contains: IDENTITY currently requires a positive seed and increment 1
+- name: Negative SQL seed leaves the original empty header
+  sql: SELECT COL_LENGTH(N'identity_add_negative',N'ID') AS identity_length,COUNT(*) AS n FROM identity_add_negative
+  expect:
+    rows: 1
+    data:
+    - identity_length: null
+      n: 0
+- name: A later signed DBCC epoch preserves the authentic positive configured column seed
+  sql: DBCC CHECKIDENT(identity_add_empty,RESEED,-9) WITH NO_INFOMSGS; INSERT identity_add_empty(code,payload) VALUES(2,20); SELECT code,payload,ID,IDENT_SEED(N'identity_add_empty')
+    AS seed FROM identity_add_empty ORDER BY code
+  expect:
+    rows: 2
+    data:
+    - code: 1
+      payload: 10
+      ID: 7
+      seed: 7
+    - code: 2
+      payload: 20
+      ID: -8
+      seed: 7
+- name: A previously issued allocator rejects identity append without epoch or header effects
+  scm: "(begin\n\t(define target (table \"memcp-tests\" false \"identity_add_used\" false nil))\n\t(define original (table_id_state target\
+    \ nil))\n\t(reserve_ids target 1 nil)\n\t(define before (table_id_state target nil))\n\t(define owner (newsession)) (owner \"username\"\
+    \ \"root\") (tx_begin_acid owner)\n\t(define tx (owner \"__memcp_tx\"))\n\t(try (lambda () (begin\n\t\t(define failed (try (lambda ()\
+    \ (begin\n\t\t\t(createcolumns target (list (list \"ID\" \"INT\" (list) (list \"null\" false \"auto_increment\" true)\n\t\t\t\t(list\
+    \ \"table-id\" 1 (before \"token\") \"10\" \"2147483647\"))) tx)\n\t\t\tfalse)) (lambda (cause) (equal? (failure_value cause) \"generated-ID\
+    \ append requires its observed proven-unused native allocator\"))))\n\t\t(define unchanged (equal? before (table_id_state target tx)))\n\
+    \t\t(define absent (nil? (show target \"column\" \"ID\" false tx)))\n\t\t(define state (tx_state tx)) (tx_rollback owner)\n\t\t(list\
+    \ failed unchanged absent state (equal? before (table_id_state target nil)))))\n\t\t(lambda (cause) (begin (tx_rollback owner) (error\
+    \ cause)))))\n"
+  expect:
+    result:
+    - true
+    - true
+    - true
+    - active
+    - true
+- name: A stale observation allocator rejects identity append without epoch or header effects
+  scm: "(begin\n\t(define target (table \"memcp-tests\" false \"identity_add_stale\" false nil))\n\t(define original (table_id_state target\
+    \ nil))\n\t(altertable target \"auto_increment\" 5)\n\t(define before (table_id_state target nil))\n\t(define owner (newsession)) (owner\
+    \ \"username\" \"root\") (tx_begin_acid owner)\n\t(define tx (owner \"__memcp_tx\"))\n\t(try (lambda () (begin\n\t\t(define failed (try\
+    \ (lambda () (begin\n\t\t\t(createcolumns target (list (list \"ID\" \"INT\" (list) (list \"null\" false \"auto_increment\" true)\n\t\t\
+    \t\t(list \"table-id\" 1 (original \"token\") \"10\" \"2147483647\"))) tx)\n\t\t\tfalse)) (lambda (cause) (equal? (failure_value cause)\
+    \ \"generated-ID append requires its observed proven-unused native allocator\"))))\n\t\t(define unchanged (equal? before (table_id_state\
+    \ target tx)))\n\t\t(define absent (nil? (show target \"column\" \"ID\" false tx)))\n\t\t(define state (tx_state tx)) (tx_rollback owner)\n\
+    \t\t(list failed unchanged absent state (equal? before (table_id_state target nil)))))\n\t\t(lambda (cause) (begin (tx_rollback owner)\
+    \ (error cause)))))\n"
+  expect:
+    result:
+    - true
+    - true
+    - true
+    - active
+    - true
+- name: Parallel generations receive disjoint native ranges while stored payloads remain exact
+  scm: "(begin\n\t(define previous (settings \"ShardSize\"))\n\t(try (lambda () (begin\n\t\t(define target (table \"memcp-tests\" false \"\
+    identity_add_parallel\" false nil))\n\t\t(insert target (list \"code\" \"payload\") (produceN 125 (lambda (index) (list (+ index 4) (*\
+    \ (+ index 4) 10)))))\n\t\t(settings \"ShardSize\" 32) (rebuild target true true nil true) (settings \"ShardSize\" previous)\n\t\t(define\
+    \ owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n\t\t(define tx (owner \"__memcp_tx\")) (define before (table_id_state\
+    \ target tx))\n\t\t(try (lambda () (begin\n\t\t\t(createcolumns target (list (list \"ID\" \"INT\" (list) (list \"null\" false \"auto_increment\"\
+    \ true)\n\t\t\t\t(list \"table-id\" 1 (before \"token\") \"100\" \"2147483647\"))) tx)\n\t\t\t(define rows (scan tx target (list) (list)\
+    \ (list) (lambda () true) (list \"code\" \"payload\" \"ID\")\n\t\t\t\t(lambda (rows code payload id) (merge rows (list (list code payload\
+    \ id)))) (list) merge))\n\t\t\t(define after (table_id_state target tx))\n\t\t\t(tx_commit owner)\n\t\t\t(list (count rows) (equal? (sort\
+    \ (map rows (lambda (row) (nth row 2))) <) (produceN 128 (lambda (index) (+ index 100))))\n\t\t\t\t(reduce rows (lambda (valid row) (and\
+    \ valid (equal? (cadr row) (* (car row) 10)))) true)\n\t\t\t\t(equal? (before \"start\") (after \"start\")) (before \"issued\") (after\
+    \ \"issued\") (after \"current\") (after \"next\"))))\n\t\t\t(lambda (cause) (begin (tx_rollback owner) (error cause))))))\n\t\t(lambda\
+    \ (cause) (begin (settings \"ShardSize\" previous) (error cause)))))\n"
+  expect:
+    result:
+    - 128
+    - true
+    - true
+    - true
+    - false
+    - true
+    - '227'
+    - '228'
+- name: Identity append composes ordered CHECK replacement in one required decision
+  sql: BEGIN TRAN; ALTER TABLE identity_add_mixed DROP CONSTRAINT CK_identity_add_payload; UPDATE identity_add_mixed SET payload=11 WHERE
+    code=1; ALTER TABLE identity_add_mixed ADD ID INT NOT NULL IDENTITY(40,1); ALTER TABLE identity_add_mixed ADD CONSTRAINT CK_identity_add_payload
+    CHECK(payload>0); COMMIT TRAN; SELECT COUNT(*) AS n,MIN(ID) AS lo,MAX(ID) AS hi,SUM(payload) AS total FROM identity_add_mixed
+  expect:
+    rows: 1
+    data:
+    - n: 3
+      lo: 40
+      hi: 42
+      total: 61
+- name: The mixed final CHECK continues to protect the generated header
+  sql: INSERT identity_add_mixed(code,payload) VALUES(4,-1)
+  expect:
+    error: true
+    contains: check constraint CK_identity_add_payload failed
+- name: Accepted historical values and later generation share one recoverable decision
+  sql: BEGIN TRAN; ALTER TABLE identity_add_crash ADD ID INT NOT NULL IDENTITY(60,1); INSERT identity_add_crash(code,payload) VALUES(4,40);
+    COMMIT TRAN; SELECT COUNT(*) AS n,MIN(ID) AS lo,MAX(ID) AS hi,SUM(ID) AS total FROM identity_add_crash
+  expect:
+    rows: 1
+    data:
+    - n: 4
+      lo: 60
+      hi: 63
+      total: 246
+- name: Crash after accepted identity append and before another private branch commits
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n\t(define tx (owner \"__memcp_tx\")) (define\
+    \ target (table \"memcp-tests\" false \"identity_add_uncommitted\" false tx))\n\t(define before (table_id_state target tx))\n\t(createcolumns\
+    \ target (list (list \"ID\" \"INT\" (list) (list \"null\" false \"auto_increment\" true)\n\t\t(list \"table-id\" 1 (before \"token\"\
+    ) \"500\" \"2147483647\"))) tx)\n\t(crash))\n"
+  expect:
+    interrupted_ok: true
+- name: Restart replays the accepted header rows and private allocator selection only
+  action: restart
+- name: Recovery resumes at the exact selected next ID and retains configured origin
+  sql: INSERT identity_add_crash(code,payload) VALUES(5,50); SELECT code,payload,ID,IDENT_SEED(N'identity_add_crash') AS seed FROM identity_add_crash
+    WHERE code>=4 ORDER BY code
+  expect:
+    rows: 2
+    data:
+    - code: 4
+      payload: 40
+      ID: 63
+      seed: 60
+    - code: 5
+      payload: 50
+      ID: 64
+      seed: 60
+- name: Unaccepted wider row WAL never publishes the aborted identity header
+  sql: SELECT code,payload,COL_LENGTH(N'identity_add_uncommitted',N'ID') AS identity_length FROM identity_add_uncommitted ORDER BY code
+  expect:
+    rows: 3
+    data:
+    - code: 1
+      payload: 10
+      identity_length: null
+    - code: 2
+      payload: 20
+      identity_length: null
+    - code: 3
+      payload: 30
+      identity_length: null
+- name: The uncommitted epoch did not mark the surviving predecessor issued
+  sql: ALTER TABLE identity_add_uncommitted ADD ID INT NOT NULL IDENTITY(6,1); SELECT COUNT(*) AS n,MIN(ID) AS lo,MAX(ID) AS hi FROM identity_add_uncommitted
+  expect:
+    rows: 1
+    data:
+    - n: 3
+      lo: 6
+      hi: 8
+- name: Rebuild preserves realized identity values
+  sql: SELECT code,payload,ID INTO identity_add_copy FROM identity_add_crash; SELECT IDENT_SEED(N'identity_add_copy') AS seed,COUNT(*) AS
+    n,MIN(ID) AS lo,MAX(ID) AS hi FROM identity_add_copy
+  expect:
+    rows: 1
+    data:
+    - seed: 60
+      n: 5
+      lo: 60
+      hi: 64
+- name: Checkpoint rebuild retains the required configured-column origin
+  scm: '(rebuild (table "memcp-tests" false "identity_add_crash" false nil) true false nil true)
+
+    '
+- name: Crash after configured-origin checkpoint
+  scm: '(crash)
+
+    '
+  expect:
+    interrupted_ok: true
+- name: Restart accepts the required generated-column checkpoint header
+  action: restart
+- name: Checkpoint recovery and SQL seed reflection preserve next generation
+  sql: INSERT identity_add_crash(code,payload) VALUES(6,60); SELECT code,payload,ID,IDENT_SEED(N'identity_add_crash') AS seed FROM identity_add_crash
+    WHERE code>=4 ORDER BY code
+  expect:
+    rows: 3
+    data:
+    - code: 4
+      payload: 40
+      ID: 63
+      seed: 60
+    - code: 5
+      payload: 50
+      ID: 64
+      seed: 60
+    - code: 6
+      payload: 60
+      ID: 65
+      seed: 60
+- name: Mixed V30 replacement remains selected after V31 recovery
+  sql: SELECT COUNT(*) AS n,MIN(ID) AS lo,MAX(ID) AS hi,IDENT_SEED(N'identity_add_mixed') AS seed FROM identity_add_mixed
+  expect:
+    rows: 1
+    data:
+    - n: 3
+      lo: 40
+      hi: 42
+      seed: 40
+- name: Mixed recovered CHECK rejects its original forbidden payload
+  sql: INSERT identity_add_mixed(code,payload) VALUES(5,0)
+  expect:
+    error: true
+    contains: check constraint CK_identity_add_payload failed

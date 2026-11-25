@@ -23,9 +23,32 @@ func (c *column) displayName() string {
 }
 
 type columnNameBinding struct {
-	Version int    `json:"version"`
-	Storage string `json:"storage"`
-	Visible string `json:"visible"`
+	Version      int                 `json:"version"`
+	Storage      string              `json:"storage"`
+	Visible      string              `json:"visible"`
+	GeneratedIDs *columnIDGeneration `json:"generated_ids,omitempty"`
+}
+
+func (binding *columnNameBinding) UnmarshalJSON(data []byte) error {
+	type plain columnNameBinding
+	var decoded plain
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if _, present := fields["generated_ids"]; decoded.Version == 1 && present {
+		return fmt.Errorf("legacy native name binding cannot contain generation data")
+	}
+	if decoded.Version == 2 && decoded.GeneratedIDs.validate() != nil {
+		return fmt.Errorf("native generated-ID binding requires its configured origin")
+	}
+	*binding = columnNameBinding(decoded)
+	return nil
 }
 
 // The existing checkpoint Name field changes TYPE for a renamed declaration.
@@ -33,10 +56,13 @@ type columnNameBinding struct {
 // rename WAL has been checkpointed and retired. Unknown extra fields alone
 // would allow an older reader to silently open a different physical column.
 func (c *column) persistedName() any {
+	if c.generatedIDs != nil {
+		return columnNameBinding{Version: 2, Storage: c.Name, Visible: c.displayName(), GeneratedIDs: c.generatedIDs}
+	}
 	if c.displayName() == c.Name {
 		return c.Name
 	}
-	return columnNameBinding{1, c.Name, c.displayName()}
+	return columnNameBinding{Version: 1, Storage: c.Name, Visible: c.displayName()}
 }
 
 func (c *column) restoreName(raw json.RawMessage) error {
@@ -44,7 +70,7 @@ func (c *column) restoreName(raw json.RawMessage) error {
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
 		return nil
 	}
-	c.visibleName = ""
+	c.visibleName, c.generatedIDs = "", nil
 	if raw[0] == '"' {
 		return json.Unmarshal(raw, &c.Name)
 	}
@@ -54,10 +80,13 @@ func (c *column) restoreName(raw json.RawMessage) error {
 	if err := decoder.Decode(&binding); err != nil {
 		return err
 	}
-	if binding.Version != 1 || binding.Storage == "" || binding.Visible == "" || !utf8.ValidString(binding.Storage) || !utf8.ValidString(binding.Visible) {
+	if (binding.Version != 1 && binding.Version != 2) || binding.Storage == "" || binding.Visible == "" || !utf8.ValidString(binding.Storage) || !utf8.ValidString(binding.Visible) {
 		return fmt.Errorf("invalid native column name binding")
 	}
-	c.Name, c.visibleName = binding.Storage, binding.Visible
+	if binding.Version == 1 && binding.GeneratedIDs != nil || binding.Version == 2 && (binding.GeneratedIDs.validate() != nil || !c.AutoIncrement) {
+		return fmt.Errorf("invalid native generated-ID name binding")
+	}
+	c.Name, c.visibleName, c.generatedIDs = binding.Storage, binding.Visible, binding.GeneratedIDs
 	return nil
 }
 

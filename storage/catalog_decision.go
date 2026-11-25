@@ -561,6 +561,13 @@ func (tx *TxContext) prepareCatalogDecision() error {
 		}
 		record.Format = 30
 	}
+	if record.hasIdentityAppends() {
+		record.Format = 31
+		if err := record.validateIdentityAppendProfile(); err != nil {
+			db.schemalock.Unlock()
+			return err
+		}
+	}
 	encoded := encodeCatalogDecision(record)
 	db.schemalock.Unlock()
 	frozen, err := decodeCatalogDecision(encoded)

@@ -289,11 +289,12 @@ result flags cannot prove that a direct export lacks an underlying identity. */
 		(if (if column (equal? (column "Extra") "auto_increment") false) true
 			(error "SELECT INTO lost its original identity declaration"))
 		(define state (table_id_state handle tx))
-		(if (and (state "start") (equal? (state "table_uuid") (show handle "identity" tx))) true
+		(define configured_seed (coalesceNil (column "GenerationStart") (state "start")))
+		(if (and configured_seed (equal? (state "table_uuid") (show handle "identity" tx))) true
 			(error "SELECT INTO identity seed provenance is unavailable"))
 		/* Existing native identities have increment one. Other increments are
 		not admitted by the declaration grammar and are never guessed here. */
-		(define seed (tsql_parse_integer (state "start")))
+		(define seed (tsql_parse_integer configured_seed))
 		(if (and (>= seed 1) (<= seed (tsql_identity_maximum (column "RawType") (column "Dimensions")))) true
 			(error "SELECT INTO requires a supported positive identity seed"))
 		(list "handle" handle "source" source "seed" seed))))))

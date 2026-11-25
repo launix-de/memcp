@@ -662,19 +662,29 @@ column, including ordinary siblings of a generated column. */
 			(list column_name type dimensions (tsql_publish_alias_attributes type attributes))))))
 		(define initialized (find published_columns (lambda (column)
 			(not (nil? (tsql_add_column_initializer (nth column 3))))) nil))
+		(define identities (filter published_columns (lambda (column) ((nth column 3) "auto_increment"))))
+		(if (> (count identities) 1) (error "only one IDENTITY column is allowed") true)
 		/* A nullable marker without a DEFAULT uses the same native NULL history
 		and exclusive declaration claim; ROWGUIDCOL never invents a generator. */
-		(if (or initialized marked) (begin
+		(if (or initialized marked (not (empty_list? identities))) (begin
 			(define handle (table database false name false tx))
 			(define collation (get_assoc (show handle true) "Collation"))
+			(define allocator (if (empty_list? identities) nil (table_id_state handle tx)))
 			(createcolumns handle (map published_columns (lambda (column) (match column
 				'(column_name type dimensions attributes) (begin
-					(define attributes (sql_add_column_attributes attributes))
+					(define initializer (if (attributes "auto_increment") (begin
+						(define seed (coalesceNil (attributes "identity_seed") 1))
+						(define maximum (tsql_identity_maximum type dimensions))
+						(if (and (>= seed 1) (<= seed maximum)) true (error "IDENTITY seed exceeds the declared range"))
+						(list "table-id" 1 (allocator "token") (concat seed) (concat maximum)))
+						(tsql_add_column_initializer attributes)))
+					(define attributes (sql_add_column_attributes
+						(filter_assoc attributes (lambda (key _value) (not (equal? key "identity_seed"))))))
 					(define attributes (if (if (attributes "properties") ((attributes "properties") "tsql.rowguidcol") false)
 						(append attributes "exclusive_properties" '("tsql.rowguidcol")) attributes))
 					(list column_name type dimensions
 						(sql_column_collation_defaults type (append attributes "name_ignorecase" true) collation)
-						(tsql_add_column_initializer attributes)))))) tx))
+						initializer))))) tx))
 			(reduce published_columns (lambda (_ column) (match column '(column_name type dimensions attributes)
 				(if (sql_create_column (table database false name false tx) column_name type dimensions
 					(merge (sql_add_column_attributes attributes) '("name_ignorecase" true)) tx) true

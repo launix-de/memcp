@@ -24,6 +24,10 @@ type nativeColumnInitializer struct {
 	lease               *tableWriteLease
 	before              *tableColumnNamesSnapshot
 	after               *tableColumnNamesSnapshot
+	ids                 *nativeColumnIDInitialization
+	allocator           *catalogAllocatorReset
+	idRanges            map[*storageShard]nativeIdentityShardRange
+	idCount             uint64
 }
 
 // Caller holds the original state mutex. All compared pointers are immutable
@@ -42,6 +46,7 @@ type nativeColumnInitializationDefinition struct {
 	fillExisting bool
 	generator    scm.Scmer
 	exclusive    []string
+	ids          *nativeColumnIDInitialization
 }
 
 // Decode the finite declaration batch before creating its statement owner.
@@ -65,6 +70,11 @@ func decodeNativeColumnInitialization(definitions scm.Scmer) []nativeColumnIniti
 			panic("column attributes must be key/value pairs")
 		}
 		generator := fields[4]
+		var ids *nativeColumnIDInitialization
+		if generator.IsSlice() {
+			ids = decodeColumnIDInitialization(generator)
+			generator = scm.NewNil()
+		}
 		if !generator.IsNil() && !(generator.IsProc() || generator.IsNativeFunc() || generator.IsJIT()) {
 			panic("row initializer requires an invocation callable")
 		}
@@ -77,6 +87,10 @@ func decodeNativeColumnInitialization(definitions scm.Scmer) []nativeColumnIniti
 				continue
 			}
 			switch key {
+			case "auto_increment":
+				if ids == nil || !options[i+1].IsBool() || !options[i+1].Bool() {
+					panic("generated-ID append requires its native table-ID initializer")
+				}
 			case "null", "fill_existing", "name_ignorecase", "collate", "properties", "comment", "enum_values", "default", "default_name":
 			case "default_expression", "default_deferred":
 				if generator.IsNil() {
@@ -89,10 +103,26 @@ func decodeNativeColumnInitialization(definitions scm.Scmer) []nativeColumnIniti
 		}
 		d := decodeColumnDefinition(fields[0].String(), fields[1].String(), dimensions, columnOptions)
 		c := d.column
-		if c.Name == "" || c.IsTemp || c.AutoIncrement || len(d.unique) != 0 {
+		if c.Name == "" || c.IsTemp || c.AutoIncrement != (ids != nil) || len(d.unique) != 0 {
 			panic("column initialization requires a fresh ordinary declaration")
 		}
-		if generator.IsNil() {
+		if ids != nil {
+			if c.AllowNull || d.hasDefault || c.DefaultExpression != "" || !c.OnUpdate.IsNil() || !d.fillExisting || len(exclusive) != 0 {
+				panic("generated-ID append requires complete nonnullable history without a default")
+			}
+			// Even an empty history must establish the native integer carrier.
+			// Declared SQL bounds are supplied by SCM; this only attests that
+			// storage normalization leaves the exact generated value intact.
+			for _, id := range []int64{ids.start, ids.maximum} {
+				value := scm.NewInt(id)
+				if c.sanitizer != nil {
+					value = c.sanitizer(value)
+				}
+				if !value.IsInt() || value.Int() != id {
+					panic("generated-ID declaration must retain its exact native integer value")
+				}
+			}
+		} else if generator.IsNil() {
 			// Exclusive metadata can accompany the existing realized NULL history.
 			// Constant-default extents use a different lifetime and cannot carry it.
 			if (len(exclusive) != 0 && d.hasDefault) || (!c.AllowNull && !d.hasDefault) {
@@ -107,7 +137,7 @@ func decodeNativeColumnInitialization(definitions scm.Scmer) []nativeColumnIniti
 		if err := validateColumnInitialScalar(c.Default); err != nil {
 			panic(err)
 		}
-		result = append(result, nativeColumnInitializationDefinition{c, d.hasDefault, d.fillExisting, generator, exclusive})
+		result = append(result, nativeColumnInitializationDefinition{c, d.hasDefault, d.fillExisting, generator, exclusive, ids})
 	}
 	if len(result) == 0 {
 		panic("column initialization requires a nonempty declaration batch")
@@ -123,6 +153,12 @@ func (tx *TxContext) appendInitializedColumns(t *table, definitions []nativeColu
 		panic("row-initialized append cannot share unordered property retirement")
 	}
 	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+	for _, d := range definitions {
+		if d.ids != nil {
+			t.prepareAllocatorRecovery()
+			break
+		}
+	}
 	operation, err := newNativeMutationBinding(tx, tx.Session)
 	if err != nil {
 		panic(err)
@@ -147,7 +183,8 @@ func (tx *TxContext) appendInitializedColumns(t *table, definitions []nativeColu
 		for _, d := range definitions {
 			// Each preceding column's workers have drained before this cold setup.
 			initializer.column, initializer.generator = d.column, d.generator
-			initializer.rowBased, initializer.generate = !d.generator.IsNil() || !d.hasDefault, !d.generator.IsNil() && d.fillExisting
+			initializer.ids, initializer.allocator, initializer.idRanges = d.ids, nil, nil
+			initializer.rowBased, initializer.generate = d.ids != nil || !d.generator.IsNil() || !d.hasDefault, !d.generator.IsNil() && d.fillExisting
 			initializer.exclusiveProperties = d.exclusive
 			result := binding.stagePublicCatalogDeclaration(t.schema, catalogColumnKind, initializer, func(changes *publicCatalogChanges) bool {
 				return changes.stageColumnAppend(binding, t, d.column, d.hasDefault, d.fillExisting, initializer)
@@ -171,7 +208,7 @@ func initCatalogColumnInitialization(en *scm.Env) {
 			panic("createcolumns requires a native transaction")
 		}
 		return scm.NewBool(tx.appendInitializedColumns(TableFromScmer(a[0]), decodeNativeColumnInitialization(a[1])))
-	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Description: "Atomically appends ordinary stored declarations using the original local ACID statement Undo. Optional zero-argument initializers run once per historical visible row outside owner locks; realized values use ordinary native row journals without DML events.", Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}, {Kind: "list", Label: "definitions"}, {Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
+	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Description: "Atomically appends ordinary stored declarations using the original local ACID statement Undo. Optional zero-argument initializers run once per historical visible row outside owner locks. A versioned table-id initializer selects a proven-unused allocator epoch for exact native historical IDs; realized values use ordinary row journals without DML events.", Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}, {Kind: "list", Label: "definitions"}, {Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
 }
 
 // This is the existing getWrite admission seam, with a single precise caller
@@ -207,13 +244,14 @@ func (initializer *nativeColumnInitializer) admitShard(s *storageShard, tx *TxCo
 
 func (initializer *nativeColumnInitializer) run() {
 	t, tx := initializer.target, initializer.operation.invocation
+	initializer.prepareIDRanges()
 	t.beginContributionMutation()
 	defer t.endContributionMutation()
 	// The existing table scan captures finite per-shard input highwaters,
 	// respects original-T masks, schedules parallel shard workers and drains all
 	// workers before returning a failure. No relation-sized Scheme row list.
 	access := scanAccess{runtime: &scanAccessRuntime{initializer: initializer}}
-	t.scanWithBatchFrom(tx, nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, access, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
+	result := t.scanWithBatchFrom(tx, nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, access, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
 		[]string{"$record_ref"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			if err := scanQueryContext(tx, context.Background()).Err(); err != nil {
 				panic(err)
@@ -222,11 +260,17 @@ func (initializer *nativeColumnInitializer) run() {
 			// Scalar evaluation is outside physical/schema/amendment locks and
 			// happens once for this exact historically visible source row.
 			value := scm.NewNil()
-			if initializer.generate {
+			if initializer.ids != nil {
+				value = initializer.historicalID(ref, values[0].Int())
+			} else if initializer.generate {
 				value = scm.Apply(initializer.generator)
 			}
+			generated := value
 			if initializer.column.sanitizer != nil {
 				value = initializer.column.sanitizer(value)
+			}
+			if initializer.ids != nil && (!value.IsInt() || value.Int() != generated.Int()) {
+				panic("generated-ID declaration must retain its exact native integer value")
 			}
 			if err := validateColumnInitialScalar(value); err != nil {
 				panic(err)
@@ -234,6 +278,9 @@ func (initializer *nativeColumnInitializer) run() {
 			initializer.replace(ref, value)
 			return scm.NewInt(values[0].Int() + 1)
 		}), scm.NewInt(0), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return scm.NewInt(values[0].Int() + values[1].Int()) }), false, 0, nil)
+	if initializer.ids != nil && uint64(result.Int()) != initializer.idCount {
+		panic("generated-ID append visible input changed during initialization")
+	}
 }
 
 func (initializer *nativeColumnInitializer) replace(ref recMapTarget, value scm.Scmer) {
@@ -359,7 +406,7 @@ func (changes *publicCatalogChanges) retainedColumnInputTables() map[*table]stru
 
 func (tx *TxContext) hasRowInitializedColumns() bool {
 	for _, entry := range tx.publicForeignAmendments() {
-		if a := entry.column; a != nil && a.appendDeclaration != nil && a.appendDeclaration.RowInitialization != nil && !tx.ownsTableDrop(a.table) {
+		if a := entry.column; a != nil && a.appendDeclaration != nil && (a.appendDeclaration.RowInitialization != nil || a.appendDeclaration.GeneratedIDs != nil) && !tx.ownsTableDrop(a.table) {
 			return true
 		}
 	}
@@ -370,7 +417,7 @@ func (tx *TxContext) hasRowInitializedColumns() bool {
 // with accepted tables/name actions; standalone V21 remains a read-only domain.
 func (record *catalogDecisionRecord) hasRowInitializedAppends() bool {
 	for _, d := range record.ColumnAppends {
-		if d.RowInitialization != nil {
+		if d.RowInitialization != nil || d.GeneratedIDs != nil {
 			return true
 		}
 	}

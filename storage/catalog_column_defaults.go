@@ -31,6 +31,7 @@ type catalogStoredColumnAmendment struct {
 	propertyRemoval      *catalogColumnPropertyRemoval
 	propertyChange       *catalogColumnPropertyChange
 	appendDeclaration    *catalogColumnAppend
+	allocator            *catalogAllocatorReset
 	rename               *catalogColumnRename
 	drop                 *catalogColumnDrop
 	nameMetadataOnly     bool
@@ -463,7 +464,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 		}
 	}
 	for _, entry := range history {
-		if a := entry.allocator; a != nil {
+		if a := entry.allocatorBranch(); a != nil {
 			if allocators == nil {
 				allocators = make(map[*table]*catalogAllocatorReset)
 			}
@@ -530,7 +531,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 						break
 					}
 				}
-				if amendment.appendDeclaration.Initialization == nil && amendment.appendDeclaration.RowInitialization == nil {
+				if amendment.appendDeclaration.Initialization == nil && amendment.appendDeclaration.RowInitialization == nil && amendment.appendDeclaration.GeneratedIDs == nil {
 					if nullColumns[amendment.table] == nil {
 						nullColumns[amendment.table] = make(map[string]struct{})
 					}
@@ -660,6 +661,9 @@ func storedColumnBytes(c *column) uint {
 	bytes := uint(unsafe.Sizeof(*c)) + uint(len(c.DefaultExpression)+len(c.DefaultName))
 	bytes += uint(len(c.visibleName))
 	bytes += uint(cap(c.Typdimensions))*uint(unsafe.Sizeof(int(0))) + uint(cap(c.EnumValues))*uint(unsafe.Sizeof(""))
+	if c.generatedIDs != nil {
+		bytes += uint(unsafe.Sizeof(*c.generatedIDs))
+	}
 	bytes += 64 * uint(len(c.DeclarationProperties))
 	if c.InitialValues != nil {
 		bytes += 64 + 64*uint(len(c.InitialValues)) + scm.ComputeSize(c.InitialValue) - uint(unsafe.Sizeof(scm.Scmer{}))

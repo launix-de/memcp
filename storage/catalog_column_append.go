@@ -28,6 +28,7 @@ type catalogColumnAppend struct {
 	NameBinding         *columnNameBinding               `json:"name_binding,omitempty"`
 	ExclusiveProperties []string                         `json:"exclusive_properties,omitempty"`
 	RowInitialization   *catalogColumnDefaultDeclaration `json:"row_initialization,omitempty"`
+	GeneratedIDs        *columnIDGeneration              `json:"generated_ids,omitempty"`
 }
 
 func (d catalogColumnAppend) column() *column {
@@ -42,6 +43,9 @@ func (d catalogColumnAppend) column() *column {
 	if d.RowInitialization != nil {
 		r := d.RowInitialization
 		c.Default, c.DefaultName, c.DefaultExpression, c.DefaultDeferred = r.Value, r.Name, r.Expression, r.Deferred
+	}
+	if d.GeneratedIDs != nil {
+		c.AutoIncrement, c.generatedIDs = true, d.GeneratedIDs
 	}
 	c.UpdateSanitizer()
 	if d.Initialization != nil && c.sanitizer != nil {
@@ -84,6 +88,9 @@ func (d *catalogColumnAppend) memory() uint {
 	}
 	// A decoded durable envelope owns independent scalar payloads as well.
 	extra := uint(0)
+	if d.GeneratedIDs != nil {
+		extra += uint(unsafe.Sizeof(*d.GeneratedIDs))
+	}
 	for _, key := range d.ExclusiveProperties {
 		extra += uint(len(key))
 	}
@@ -228,6 +235,10 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 		}
 	}
 	t.allocateColumnStorage(c, columns)
+	if initializer != nil {
+		initializer.column = c
+		initializer.prepareIDBranch(columns)
+	}
 	if initializer != nil && initializer.rowBased {
 		c = validateAppendedPropertyClaims(t, columns, c, initializer.exclusiveProperties)
 		initializer.column = c
@@ -246,11 +257,15 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 	}
 	d := &catalogColumnAppend{Table: t.Name, Identity: t.RuntimeIdentity, Ordinal: len(columns), Name: c.Name, Type: storedColumnTypeOf(c), EnumValues: append([]string(nil), c.EnumValues...), Properties: maps.Clone(c.DeclarationProperties), Comment: c.Comment, Initialization: initialization}
 	if c.displayName() != c.Name {
-		d.NameBinding = &columnNameBinding{1, c.Name, c.displayName()}
+		d.NameBinding = &columnNameBinding{Version: 1, Storage: c.Name, Visible: c.displayName()}
 	}
 	if initializer != nil && initializer.rowBased {
 		d.ExclusiveProperties = append([]string(nil), initializer.exclusiveProperties...)
-		d.RowInitialization = &catalogColumnDefaultDeclaration{Table: t.Name, Identity: t.RuntimeIdentity, Column: c.Name, Value: c.Default, Expression: c.DefaultExpression, Name: c.DefaultName, Deferred: c.DefaultDeferred}
+		if initializer.ids != nil {
+			d.GeneratedIDs = c.generatedIDs
+		} else {
+			d.RowInitialization = &catalogColumnDefaultDeclaration{Table: t.Name, Identity: t.RuntimeIdentity, Column: c.Name, Value: c.Default, Expression: c.DefaultExpression, Name: c.DefaultName, Deferred: c.DefaultDeferred}
+		}
 		initializer.lease, initializer.before = lease, base.metadata.columnNames
 	}
 	columns = append(append([]*column(nil), columns...), c)
@@ -280,6 +295,12 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 	view, bytes := replaceStoredColumnMetadata(t, base, columns, observed.metadata.columnNames)
 	amendment := &catalogStoredColumnAmendment{appendDeclaration: d, table: t, columns: columns, previous: changes.views.Load().tables[t], columnBytes: storedColumnBytes(c) + columnAppendStrings(c.Name, c.Typ, c.Collation, c.Comment, c.EnumValues, c.DeclarationProperties)}
 	amendment.retainedBytes = uint(unsafe.Sizeof(*amendment)) + uint(cap(columns))*uint(unsafe.Sizeof((*column)(nil))) + amendment.columnBytes + bytes + d.containers() + d.Initialization.containers() + 128
+	if initializer != nil {
+		amendment.allocator = initializer.allocator
+		if initializer.allocator != nil {
+			amendment.retainedBytes += initializer.allocator.bytes
+		}
+	}
 	history := appendCatalogDeclarationHistory(tx.publicForeignAmendments(), catalogDeclarationAmendment{column: amendment})
 	changes.requireColumnPropertyDecision(tx, history)
 	views := maps.Clone(changes.views.Load().tables)
@@ -388,6 +409,13 @@ func validateCatalogColumnAppend(db *database, d catalogColumnAppend, columns []
 			panic("nullable append name already exists")
 		}
 	}
+	if d.GeneratedIDs != nil {
+		for _, c := range columns {
+			if c.AutoIncrement {
+				panic("generated-ID append predecessor already has an identity")
+			}
+		}
+	}
 	if d.RowInitialization != nil {
 		validateAppendedPropertyClaims(t, columns, d.column(), d.ExclusiveProperties)
 	}
@@ -432,7 +460,7 @@ func validateColumnAppendShape(appends []catalogColumnAppend) error {
 	identities := make(map[string]string)
 	for _, d := range appends {
 		key := d.Table + "\x00" + scm.CaseFoldKey(d.Name)
-		if d.Table == "" || d.Name == "" || d.Ordinal < 0 || seen[key] || d.Type.Type == "" || (!d.Type.Nullable && d.Initialization == nil && d.RowInitialization == nil) || d.Type.Collation == "" || !utf8.ValidString(d.Table) || !utf8.ValidString(d.Name) || !utf8.ValidString(d.Type.Type) || !utf8.ValidString(d.Type.Collation) || !utf8.ValidString(d.Comment) {
+		if d.Table == "" || d.Name == "" || d.Ordinal < 0 || seen[key] || d.Type.Type == "" || (!d.Type.Nullable && d.Initialization == nil && d.RowInitialization == nil && d.GeneratedIDs == nil) || d.Type.Collation == "" || !utf8.ValidString(d.Table) || !utf8.ValidString(d.Name) || !utf8.ValidString(d.Type.Type) || !utf8.ValidString(d.Type.Collation) || !utf8.ValidString(d.Comment) {
 			return fmt.Errorf("invalid native nullable append")
 		}
 		if identity, err := uuid.Parse(d.Identity); err != nil || identity == uuid.Nil {
@@ -445,6 +473,9 @@ func validateColumnAppendShape(appends []catalogColumnAppend) error {
 			if err := validateColumnInitialization(d); err != nil {
 				return err
 			}
+		}
+		if d.GeneratedIDs != nil && (d.GeneratedIDs.validate() != nil || d.Type.Nullable || d.Initialization != nil || d.RowInitialization != nil) {
+			return fmt.Errorf("invalid generated-ID append declaration")
 		}
 		if d.NameBinding != nil && (d.NameBinding.Version != 1 || d.NameBinding.Storage != d.Name || d.NameBinding.Visible == "" || !utf8.ValidString(d.NameBinding.Visible)) {
 			return fmt.Errorf("invalid appended column name binding")

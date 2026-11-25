@@ -233,7 +233,7 @@ func checkedCatalogWriters(history []catalogDeclarationAmendment, statements, co
 			}
 		}
 		if c := entry.column; c != nil && c.appendDeclaration != nil {
-			if c.appendDeclaration.Initialization != nil || c.appendDeclaration.RowInitialization != nil {
+			if c.appendDeclaration.Initialization != nil || c.appendDeclaration.RowInitialization != nil || c.appendDeclaration.GeneratedIDs != nil {
 				result[c.table] = nativeDeclarationRowInput
 			} else {
 				blocked[c.table] = struct{}{}
