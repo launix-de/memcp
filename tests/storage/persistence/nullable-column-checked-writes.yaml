@@ -85,8 +85,8 @@ test_cases:
         data:
         - depth: 1
     - connection: owner
-      sql: SELECT name,CAST(is_nullable AS INT) AS nullable_flag,default_object_id FROM sys.columns WHERE object_id=OBJECT_ID(N'np_rows')
-        AND name=N'new_name'
+      sql: SELECT name,CAST(is_nullable AS INT) AS nullable_flag,default_object_id FROM sys.columns WHERE object_id=OBJECT_ID(N'np_rows') AND
+        name=N'new_name'
       expect:
         rows: 1
         data:
@@ -145,8 +145,8 @@ test_cases:
           parent_id: 2
           payload: 66
     - connection: owner
-      sql: UPDATE np_rows SET new_name=(SELECT CONVERT(VARCHAR(49),ISNULL(name,'')) FROM np_source WHERE np_source.id=np_rows.parent_id)
-        WHERE new_name IS NULL
+      sql: UPDATE np_rows SET new_name=(SELECT CONVERT(VARCHAR(49),ISNULL(name,'')) FROM np_source WHERE np_source.id=np_rows.parent_id) WHERE
+        new_name IS NULL
     - connection: owner
       sql: SELECT id,parent_id,payload,new_name FROM np_rows ORDER BY id
       expect:
@@ -213,8 +213,8 @@ test_cases:
           payload: 66
           new_name: ''
     - connection: observer
-      sql: SELECT name,CAST(is_nullable AS INT) AS nullable_flag,default_object_id FROM sys.columns WHERE object_id=OBJECT_ID(N'np_rows')
-        AND name=N'new_name'
+      sql: SELECT name,CAST(is_nullable AS INT) AS nullable_flag,default_object_id FROM sys.columns WHERE object_id=OBJECT_ID(N'np_rows') AND
+        name=N'new_name'
       expect:
         rows: 1
         data:
@@ -229,8 +229,8 @@ test_cases:
         - value: 9
           depth: 0
 - name: Future omitted and explicit inputs remain distinct without an invented DEFAULT
-  sql: INSERT np_rows(id,parent_id,payload) VALUES(7,1,77); INSERT np_rows(id,parent_id,payload,new_name) VALUES(8,3,88,'explicit');
-    SELECT id,parent_id,payload,new_name FROM np_rows ORDER BY id
+  sql: INSERT np_rows(id,parent_id,payload) VALUES(7,1,77); INSERT np_rows(id,parent_id,payload,new_name) VALUES(8,3,88,'explicit'); SELECT id,parent_id,payload,new_name
+    FROM np_rows ORDER BY id
   expect:
     rows: 7
     data:
@@ -470,8 +470,7 @@ test_cases:
         data:
         - value: 10
 - name: A later transaction can reappend the aborted name with genuine clean NULL history
-  sql: ALTER TABLE np_before_save ADD new_name VARCHAR(50) NULL; SELECT id,parent_id,payload,new_name FROM np_before_save
-    ORDER BY id
+  sql: ALTER TABLE np_before_save ADD new_name VARCHAR(50) NULL; SELECT id,parent_id,payload,new_name FROM np_before_save ORDER BY id
   expect:
     rows: 2
     data:
@@ -496,7 +495,8 @@ test_cases:
       sql: UPDATE np_failure SET new_name=(SELECT name FROM np_duplicate WHERE np_duplicate.id=np_failure.parent_id)
       expect:
         error: true
-        contains: scalar subselect returned more than one row
+        contains:
+        - scalar subselect returned more than one row
     - connection: owner
       sql: SELECT id,parent_id,payload,new_name FROM np_failure ORDER BY id
       expect:
@@ -517,8 +517,8 @@ test_cases:
         data:
         - depth: 1
     - connection: owner
-      sql: SELECT name,CAST(is_nullable AS INT) AS nullable_flag,default_object_id FROM sys.columns WHERE object_id=OBJECT_ID(N'np_failure')
-        AND name=N'new_name'
+      sql: SELECT name,CAST(is_nullable AS INT) AS nullable_flag,default_object_id FROM sys.columns WHERE object_id=OBJECT_ID(N'np_failure') AND
+        name=N'new_name'
       expect:
         rows: 1
         data:
@@ -544,9 +544,8 @@ test_cases:
           payload: 22
           new_name: ''
 - name: An empty predecessor admits INSERT in the same transaction without historical backfill
-  sql: BEGIN TRAN; ALTER TABLE np_empty ADD new_name VARCHAR(50) NULL; INSERT np_empty(id,parent_id,payload) VALUES(1,1,11);
-    INSERT np_empty(id,parent_id,payload,new_name) VALUES(2,2,22,'new'); COMMIT TRAN; SELECT id,parent_id,payload,new_name
-    FROM np_empty ORDER BY id
+  sql: BEGIN TRAN; ALTER TABLE np_empty ADD new_name VARCHAR(50) NULL; INSERT np_empty(id,parent_id,payload) VALUES(1,1,11); INSERT np_empty(id,parent_id,payload,new_name)
+    VALUES(2,2,22,'new'); COMMIT TRAN; SELECT id,parent_id,payload,new_name FROM np_empty ORDER BY id
   expect:
     rows: 2
     data:
@@ -642,8 +641,8 @@ test_cases:
         payload: 22
 - name: An accepted append and checked row mutation share one durable decision
   sql: BEGIN TRAN; ALTER TABLE np_crash ADD new_name VARCHAR(50) NULL; UPDATE np_crash SET new_name=(SELECT CONVERT(VARCHAR(49),ISNULL(name,''))
-    FROM np_source WHERE np_source.id=np_crash.parent_id) WHERE new_name IS NULL; INSERT np_crash(id,parent_id,payload) VALUES(3,1,33);
-    COMMIT TRAN; SELECT id,parent_id,payload,new_name FROM np_crash ORDER BY id
+    FROM np_source WHERE np_source.id=np_crash.parent_id) WHERE new_name IS NULL; INSERT np_crash(id,parent_id,payload) VALUES(3,1,33); COMMIT
+    TRAN; SELECT id,parent_id,payload,new_name FROM np_crash ORDER BY id
   expect:
     rows: 3
     data:
