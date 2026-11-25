@@ -50,7 +50,7 @@ func (branch *catalogAllocatorReset) reserve(input tableIDExplicit, count uint64
 }
 
 func (t *table) resetTableIDs(column, token string, current, next int64, hasNext bool, tx *TxContext) bool {
-	if tx == nil || t.RuntimeIdentity == "" || !localCatalogRowDatabase(t.schema) {
+	if tx == nil || t.RuntimeIdentity == "" || t.Ephemeral || t.ScopedSchema || !localCatalogRowDatabase(t.schema) {
 		panic("allocator reset requires its original local native transaction and table generation")
 	}
 	if !hasNext && next != 0 {

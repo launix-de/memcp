@@ -217,3 +217,27 @@ test_cases:
     \ owner) (close_relation_scope scope)\n\t(and rejected intact)\n)\n"
   expect:
     result: true
+- name: A scoped allocator cannot enter public epoch WAL before or after its constructor decision
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
+    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
+    \ (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\"\
+    \ \"INT\" (list) (list \"auto_increment\" true))\n\t\t\t(list \"column\" \"kept\" \"INT\" (list) (list)))\n\t\
+    \t(list \"engine\" \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\t(define\
+    \ source (table \"memcp-tests\" false name false tx))\n\t(insert source '(\"id\" \"kept\") (list (list 1 17)\
+    \ (list 2 29)) (list) nil false nil tx)\n\t(define before (table_id_state source tx))\n\t(define header (show\
+    \ source \"column\" \"id\" false tx))\n\t(define reject_reset (lambda (input)\n\t\t(try (lambda () (begin (reset_table_ids\
+    \ source \"id\" (before \"token\") \"90\" \"91\" input) false))\n\t\t\t(lambda (cause) (strlike (string (failure_value\
+    \ cause)) \"%allocator reset requires its original local native transaction%\")))))\n\t(define constructor_rejected\
+    \ (reject_reset tx))\n\t(define constructor_intact (and (expression_equal? before (table_id_state source tx))\n\
+    \t\t(expression_equal? header (show source \"column\" \"id\" false tx))))\n\t(tx_commit owner)\n\t(tx_begin_acid\
+    \ owner) (set tx (owner \"__memcp_tx\"))\n\t(define later_rejected (reject_reset tx))\n\t(define later_intact\
+    \ (and (expression_equal? before (table_id_state source tx))\n\t\t(expression_equal? header (show source \"\
+    column\" \"id\" false tx))))\n\t(tx_rollback owner)\n\t(tx_begin_acid owner) (set tx (owner \"__memcp_tx\"))\n\
+    \t(define rows (scan tx source (list) (list) (list) (lambda () true) '(\"id\" \"kept\")\n\t\t(lambda (result\
+    \ id value) (set_assoc result id value)) (list) merge_assoc))\n\t(define rollback_intact (and (expression_equal?\
+    \ before (table_id_state source tx))\n\t\t(expression_equal? header (show source \"column\" \"id\" false tx))\n\
+    \t\t(expression_equal? (get_assoc rows 1) 17) (expression_equal? (get_assoc rows 2) 29)))\n\t(tx_rollback owner)\
+    \ (close_relation_scope scope)\n\t(and constructor_rejected constructor_intact later_rejected later_intact rollback_intact)\n\
+    )\n"
+  expect:
+    result: true
