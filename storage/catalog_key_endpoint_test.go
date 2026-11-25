@@ -38,6 +38,9 @@ func TestRawPublicKeyJointEndpointRequiresActualOriginalConstructors(t *testing.
 	withoutDrop := []catalogDeclarationAmendment{}
 	tx.catalogAmendments.Store(&withoutDrop)
 	changes.publishViews(withoutDrop, changes.views.Load().tables)
+	if tx.rowAccessed.Load() {
+		t.Fatal("protected-input control unexpectedly entered a native row phase")
+	}
 	tx.requireKeyEndpoint(public, nil)
 	before := changes.views.Load()
 	refused := func() {
@@ -47,6 +50,14 @@ func TestRawPublicKeyJointEndpointRequiresActualOriginalConstructors(t *testing.
 			t.Fatal("refused key endpoint changed existing original resources")
 		}
 	}
+	owner := changes.owner
+	changes.owner = &transactionState{}
+	refused()
+	changes.owner = owner
+	database := changes.db
+	changes.db = newDatabase()
+	refused()
+	changes.db = database
 	tx.Mode = TxCursorStability
 	refused()
 	tx.Mode = TxACID
@@ -65,4 +76,43 @@ func TestRawPublicKeyJointEndpointRequiresActualOriginalConstructors(t *testing.
 		t.Fatal("fixture did not select its actual retained table-DROP prefix")
 	}
 	refused()
+}
+
+func TestRawPublicKeyRejectsCleanPromotedConstructorUntilActualRowInput(t *testing.T) {
+	tx, changes, constructor, public, _ := cancelledCatalogInputFixture(t)
+	tx.Mode = TxACID // clean catalog admission promotes a tx_begin CS binding
+	identity := *tx.catalogIdentity.Load()
+	identity.Namespace = ""
+	tx.catalogIdentity.Store(&identity)
+	constructor.CreatorNamespace = ""
+	public.CatalogVersion.Store(1)
+	changes.db.catalogVersion = 1
+	db := changes.db
+	// Retire the fixture's public resource through its actual close owner.
+	// The registered original constructor and its identity remain live.
+	if err := changes.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if tx.publicCatalogChanges() != nil || tx.rowAccessed.Load() || !tx.ownsPendingTable(constructor) {
+		t.Fatal("clean promoted constructor fixture retained public/row authority")
+	}
+	tx.publicCatalogEntered.Store(true)
+	before, history, intents := public.showColumnsSnapshot.Load(), tx.catalogAmendments.Load(), tx.catalogIntents.Load()
+	var cause any
+	func() {
+		defer func() { cause = recover() }()
+		tx.requireKeyEndpoint(public, nil)
+	}()
+	if fmt.Sprint(cause) != "public unique declaration requires a local committed native table" ||
+		public.showColumnsSnapshot.Load() != before || tx.catalogAmendments.Load() != history || tx.catalogIntents.Load() != intents ||
+		db.tables.Get(constructor.Name) != constructor || tx.State != TxActive {
+		t.Fatalf("clean constructor-only promotion gained public key authority or changed original state: %v", cause)
+	}
+	// Only the existing native data admission publishes the row capability;
+	// no SQL flag, extra owner, caller spelling or fake row count is involved.
+	constructor.enterPendingCatalogData(tx, nil)
+	if !tx.rowAccessed.Load() || !constructor.catalogDataEntered.Load() {
+		t.Fatal("actual original constructor data admission did not publish its input")
+	}
+	tx.requireKeyEndpoint(public, nil)
 }

@@ -6,6 +6,8 @@ metadata:
   requires_tds: true
   description: Original private table generations and statement source slots share existing admission, savepoint, accepted V22 replay and checkpoint owners
 setup:
+- sql: DROP TABLE IF EXISTS owned_trigger_empty_key
+- sql: DROP TABLE IF EXISTS owned_trigger_empty_key_target
 - sql: DROP TABLE IF EXISTS owned_trigger_unused
 - sql: DROP TABLE IF EXISTS owned_trigger_commit
 - sql: DROP TABLE IF EXISTS owned_trigger_rollback
@@ -37,7 +39,11 @@ setup:
 - sql: INSERT owned_trigger_parent VALUES(1),(2)
 - sql: CREATE TABLE owned_trigger_key_target(id INT NOT NULL)
 - sql: INSERT owned_trigger_key_target VALUES(7)
+- sql: CREATE TABLE owned_trigger_empty_key_target(id INT NOT NULL)
+- sql: INSERT owned_trigger_empty_key_target VALUES(7)
 cleanup:
+- sql: DROP TABLE IF EXISTS owned_trigger_empty_key
+- sql: DROP TABLE IF EXISTS owned_trigger_empty_key_target
 - sql: DROP TABLE IF EXISTS owned_trigger_unused
 - sql: DROP TABLE IF EXISTS owned_trigger_commit
 - sql: DROP TABLE IF EXISTS owned_trigger_rollback
@@ -671,6 +677,60 @@ test_cases:
           new_value: 23
     - connection: owner
       sql: COMMIT TRAN
+- name: An empty original constructor with its actual trigger input admits the unrelated public key
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: CREATE TABLE owned_trigger_empty_key(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: CREATE TRIGGER owned_trigger_empty_key_tr ON owned_trigger_empty_key FOR UPDATE AS BEGIN INSERT owned_trigger_audit(phase,id,old_value,new_value)
+        SELECT 43,i.id,d.value,i.value FROM inserted i JOIN deleted d ON d.id=i.id END
+    - connection: owner
+      sql: ALTER TABLE owned_trigger_empty_key_target ADD CONSTRAINT owned_trigger_empty_key_pk PRIMARY KEY(id)
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'owned_trigger_empty_key',N'U') AS target,(SELECT COUNT(*) FROM sys.key_constraints WHERE name=N'owned_trigger_empty_key_pk')
+        AS key_count
+      expect:
+        rows: 1
+        data:
+        - target: null
+          key_count: 0
+    - connection: owner
+      sql: INSERT owned_trigger_empty_key VALUES(1,10)
+    - connection: owner
+      sql: UPDATE owned_trigger_empty_key SET value=11
+    - connection: owner
+      sql: SELECT id,value FROM owned_trigger_empty_key ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - connection: owner
+      sql: SELECT id,old_value,new_value FROM owned_trigger_audit WHERE phase=43 ORDER BY new_value,old_value
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 11
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,value FROM owned_trigger_empty_key ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - connection: owner
+      sql: SELECT COUNT(*) AS key_count FROM sys.key_constraints WHERE name=N'owned_trigger_empty_key_pk'
+      expect:
+        rows: 1
+        data:
+        - key_count: 1
 - name: One accepted original decision contains constructor rows and one trigger recipe before abrupt loss
   tds:
     statements:

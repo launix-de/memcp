@@ -98,7 +98,8 @@ func (tx *TxContext) stagePublicKey(t *table, operation string, key uniqueKey, i
 
 // Raw keys retain the existing V22 action; typed indexes select V32. Both
 // use the same actual original endpoint and catalog admission. A raw public
-// key may join surviving constructors, but not a whole-table retirement.
+// key may join a row-bearing or protected original constructor input, but
+// not clean constructor-only promotion or a whole-table retirement.
 func (tx *TxContext) requireKeyEndpoint(t *table, index *logicalIndexDeclaration) {
 	if t == nil || t.schema == nil || !localCatalogRowDatabase(t.schema) ||
 		t.schema.tables.Get(t.Name) != t || t.RuntimeIdentity == "" || tx.ownsTableDrop(t) {
@@ -120,12 +121,29 @@ func (tx *TxContext) requireKeyEndpoint(t *table, index *logicalIndexDeclaration
 			panic("joint logical index requires the same unprepared local ACID catalog decision")
 		}
 		intents := tx.catalogIntentTables()
+		jointInput := tx.rowAccessed.Load()
+		var inputViews *publicCatalogViews
+		if index == nil && !owned && !jointInput {
+			if changes := tx.publicCatalogChanges(); changes != nil && changes.owner == tx.transactionState && changes.db == t.schema {
+				inputViews = changes.views.Load()
+			}
+		}
 		for _, constructor := range intents {
 			if constructor == nil || constructor.schema != t.schema || !scope.owns(constructor) {
 				panic("joint unique declaration lost its surviving original constructor")
 			}
+			// The producer attested the exact native declaration lease and UUID
+			// before publishing this immutable input. Construction admission
+			// excludes its retirement; the scope check above reattests the actual
+			// original constructor. A phase marker alone grants no input rights.
+			if !jointInput && inputViews != nil {
+				_, checked := inputViews.checkedWriters[constructor]
+				_, blocked := inputViews.blockedWriters[constructor]
+				_, dropped := inputViews.dropped[constructor]
+				jointInput = checked && blocked && !dropped && inputViews.tables[constructor] != nil
+			}
 		}
-		if index == nil && !owned && (len(intents) == 0 || tx.hasTableDrops()) {
+		if index == nil && !owned && (len(intents) == 0 || tx.hasTableDrops() || !jointInput) {
 			panic("public unique declaration requires a local committed native table")
 		}
 	}
