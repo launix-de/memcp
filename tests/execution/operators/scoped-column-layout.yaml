@@ -128,24 +128,27 @@ test_cases:
     result: true
 - name: A stale scoped handle cannot amend a replacement generation at the same lexical slot
   scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
-    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
-    \ (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\"\
-    \ \"INT\" (list) (list))\n\t\t\t(list \"column\" \"discarded\" \"INT\" (list) (list)))\n\t\t(list \"engine\"\
-    \ \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\t(define source (table\
-    \ \"memcp-tests\" false name false tx))\n\t(insert source '(\"id\" \"discarded\") (list (list 1 17) (list 2\
-    \ 29)) (list) nil false nil tx)\n\n\t(drop_relation_scope_binding scope \"probe\" false tx)\n\t(createtable\
-    \ \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\" \"INT\" (list) (list)) (list \"column\" \"discarded\"\
-    \ \"INT\" (list) (list)))\n\t\t(list \"engine\" \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\"\
-    \ \"probe\") false tx)\n\t(define current_binding (relation_scope_binding scope \"probe\" tx))\n\t(define replacement\
-    \ (table (car current_binding) false (car (cdr current_binding)) false tx))\n\t(insert replacement '(\"id\"\
-    \ \"discarded\") (list (list 9 91)) (list) nil false nil tx)\n\t(define rejected (try (lambda () (begin (dropcolumn\
-    \ source \"discarded\" tx) false))\n\t\t(lambda (cause) (strlike (string (failure_value cause)) \"%outside its\
-    \ native lexical generation%\"))))\n\t(define value (scan tx replacement (list) (list) (list) (lambda () true)\
-    \ '(\"discarded\")\n\t\t(lambda (total value) (+ total value)) 0 +))\n\t(define intact (not (nil? (show replacement\
-    \ \"column\" \"discarded\" false tx))))\n\t(tx_rollback owner) (close_relation_scope scope)\n\t(and rejected\
-    \ intact (equal? value 91))\n)\n"
+    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid\
+    \ owner) (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"\
+    column\" \"id\" \"INT\" (list) (list))\n\t\t\t(list \"column\" \"discarded\" \"INT\" (list) (list)))\n\
+    \t\t(list \"engine\" \"memory\" \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\
+    \t(define source (table \"memcp-tests\" false name false tx))\n\t(insert source '(\"id\" \"discarded\"\
+    ) (list (list 1 17) (list 2 29)) (list) nil false nil tx)\n\n\t(drop_relation_scope_binding scope \"\
+    probe\" false tx)\n\t(define replacement_name (concat \".column-layout:\" (uuid)))\n\t(createtable \"\
+    memcp-tests\" replacement_name\n\t\t(list (list \"column\" \"id\" \"INT\" (list) (list)) (list \"column\"\
+    \ \"discarded\" \"INT\" (list) (list)))\n\t\t(list \"engine\" \"memory\" \"ephemeral\" true \"scope\"\
+    \ scope \"scope_key\" \"probe\") false tx)\n\t(define current_binding (relation_scope_binding scope\
+    \ \"probe\" tx))\n\t(define replacement (table (car current_binding) false (car (cdr current_binding))\
+    \ false tx))\n\t(insert replacement '(\"id\" \"discarded\") (list (list 9 91)) (list) nil false nil\
+    \ tx)\n\t(define rejected (try (lambda () (begin (dropcolumn source \"discarded\" tx) false))\n\t\t\
+    (lambda (cause) (strlike (string (failure_value cause)) \"%outside its native lexical generation%\"\
+    ))))\n\t(define value (scan tx replacement (list) (list) (list) (lambda () true) '(\"discarded\")\n\t\
+    \t(lambda (total value) (+ total value)) 0 +))\n\t(define intact (not (nil? (show replacement \"column\"\
+    \ \"discarded\" false tx))))\n\t(tx_rollback owner) (close_relation_scope scope)\n\t(and rejected intact\
+    \ (equal? value 91))\n)\n"
   expect:
     result: true
+
 - name: A foreign execution session cannot borrow the original transaction layout lease
   scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
     \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
