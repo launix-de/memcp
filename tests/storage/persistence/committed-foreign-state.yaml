@@ -6,6 +6,12 @@ metadata:
   requires_tds: true
   description: Committed native foreign state uses exact original-T replacement history and real historical validation
 setup:
+  - sql: DROP TABLE IF EXISTS committed_state_mixed
+  - sql: DROP TABLE IF EXISTS committed_state_legacy
+  - sql: DROP TABLE IF EXISTS committed_state_child
+  - sql: DROP TABLE IF EXISTS committed_state_parent
+  - sql: DROP TABLE IF EXISTS committed_state_marker
+  - sql: DROP TABLE IF EXISTS committed_state_callback
   - sql: CREATE TABLE committed_state_parent(id INT PRIMARY KEY)
   - sql: CREATE TABLE committed_state_child(id INT PRIMARY KEY,parent_id INT)
   - sql: CREATE TABLE committed_state_marker(id INT PRIMARY KEY,value INT)
