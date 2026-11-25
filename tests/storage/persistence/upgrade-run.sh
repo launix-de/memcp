@@ -263,6 +263,10 @@ python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
 bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
 python3 "$HELPERS" mutate "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
 bash "$VALIDATOR" "$MYSQL_PORT" mutate "$ORACLES/before.json" "$ORACLES/after-dml.json"
+# New writer-only identity fixtures follow every mandatory legacy comparison.
+curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin \
+  --data-binary @"$GITHUB_WORKSPACE/candidate/tests/storage/persistence/upgrade-identity-add-fill.scm"
+
 stop_server
 
 # The post-DML oracle is derived from the old reference plus specified
@@ -271,4 +275,8 @@ start_server candidate candidate-restart
 python3 "$HELPERS" cold-mutate "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
 python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
 bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/after-dml.json"
+# New writer-only identity fixtures follow every mandatory legacy comparison.
+curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin \
+  --data-binary @"$GITHUB_WORKSPACE/candidate/tests/storage/persistence/upgrade-identity-add-verify.scm"
+
 stop_server
