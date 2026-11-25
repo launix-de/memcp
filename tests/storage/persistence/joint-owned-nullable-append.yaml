@@ -1004,3 +1004,73 @@ test_cases:
       a_value: 11
       b_value: 22
       constructor: null
+- name: XACT_ABORT ON rolls back the same rejected supporting-name profile and its original prefix
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT ON
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: EXEC sp_rename N'joint_append_name_support',N'joint_append_name_support_renamed',N'OBJECT'
+    - connection: owner
+      sql: DROP TABLE joint_append_name_old
+    - connection: owner
+      sql: ALTER TABLE joint_append_name_target ADD link UNIQUEIDENTIFIER NULL
+    - connection: owner
+      sql: DROP TABLE joint_append_name_support_renamed
+      expect:
+        error: true
+        contains:
+        - nullable append and table retirement require an existing owned namespace decision
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_name_support ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 8
+          value: 88
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_name_old ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 3
+          value: 33
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'joint_append_name_target',N'link') AS width,OBJECT_ID(N'joint_append_name_support_renamed',N'U') AS renamed,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - width: null
+          renamed: null
+          depth: 0
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+- name: Finite native declaration conflicts expose semantic diagnostics while unknown failures stay opaque
+  scm: |
+    (begin
+      (define namespace (list "catalog-declaration-conflict" "owned-namespace" "namespace profile refused"))
+      (define private (list "catalog-declaration-conflict" "unpublished-table-drop" "private profile refused"))
+      (define unknown (list "catalog-declaration-conflict" "unknown-kind" "opaque"))
+      (define namespace_context (tsql_error_context namespace))
+      (define private_context (tsql_error_context private))
+      (list
+        (tsql_failure_origin namespace)
+        (tsql_failure_origin private)
+        (tsql_failure_origin unknown)
+        (tsql_failure_origin "opaque native failure")
+        (namespace_context "message")
+        (private_context "message")
+        (namespace_context "number")
+        (private_context "number")))
+  expect:
+    result:
+    - runtime
+    - runtime
+    - native
+    - native
+    - namespace profile refused
+    - private profile refused
+    - null
+    - null

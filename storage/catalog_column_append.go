@@ -471,7 +471,7 @@ func (record *catalogDecisionRecord) validateColumnAppendTableProfile() error {
 		}
 	}
 	if len(record.Tables) == 0 && !record.hasNameDeclarationActions() && !record.hasOwnedKeyDeclarationActions() {
-		return fmt.Errorf("nullable append and table retirement require an existing owned namespace decision")
+		return newCatalogDeclarationProfileConflict("owned-namespace", "nullable append and table retirement require an existing owned namespace decision")
 	}
 	return nil
 }

@@ -18,6 +18,8 @@ https://learn.microsoft.com/sql/t-sql/statements/set-xact-abort-transact-sql */
 		'("constraint-violation" "unique-declaration" _name _message) "runtime"
 		'("constraint-violation" "not-null-declaration" _name _message) "runtime"
 		'("column-declaration-conflict" "name" _table _column) "runtime"
+		'("catalog-declaration-conflict" "owned-namespace" _message) "runtime"
+		'("catalog-declaration-conflict" "unpublished-table-drop" _message) "runtime"
 		'("column-property-conflict" _table _column "tsql.rowguidcol" true _owner) "runtime"
 		_ (if (failure_diagnostic failure) "runtime" "native")))))
 (define tsql_arithmetic_batch_abort? (lambda (session failure)

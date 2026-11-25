@@ -119,7 +119,10 @@ func (tx *TxContext) dropCatalogTable(db *database, name string, ifexists bool) 
 	if tx == nil || tx.transactionState == nil || tx.State != TxActive || tx.decisionStarted {
 		panic("table removal requires an active native transaction")
 	}
-	finish := tx.beginCatalogConstruction(catalogDeclarationConstruction, nil)
+	// Admission and the prospective program checks have no table effect. Keep
+	// their failure untouched for the original statement's native disposition;
+	// the accepted amendment below marks the actual declaration publication.
+	finish := tx.beginCatalogConstruction(catalogValidationConstruction, nil)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
 	t := db.GetTableForTx(name, false, tx)
 	if t == nil {
@@ -133,9 +136,11 @@ func (tx *TxContext) dropCatalogTable(db *database, name string, ifexists bool) 
 	if err := tx.validateColumnAppendTableProgram(prospective, tx.catalogIntentTables()); err != nil {
 		panic(err)
 	}
-	requireTableMaintenance(db.Name, name, maintenanceDrop)
-	if t.Ephemeral || t.ScopedSchema || tx.ownsPendingTable(t) ||
-		tx.coordinator != nil || sharedClusterDatabase(db.Name) || activeReplication(db) != nil {
+	tx.requireDeclarationEndpoint(t, maintenanceDrop)
+	if tx.ownsPendingTable(t) {
+		panic(newCatalogDeclarationProfileConflict("unpublished-table-drop", "transactional table removal requires a local committed public table"))
+	}
+	if t.Ephemeral || t.ScopedSchema || tx.coordinator != nil || sharedClusterDatabase(db.Name) || activeReplication(db) != nil {
 		panic("transactional table removal requires a local committed public table")
 	}
 	if _, err := uuid.Parse(t.RuntimeIdentity); err != nil {
@@ -218,6 +223,10 @@ func (changes *publicCatalogChanges) stageTableDrop(tx *TxContext, t *table, lea
 	}
 	amendment := &catalogTableDropAmendment{declaration: catalogTableDropDeclaration{t.Name, t.RuntimeIdentity}, table: t, lease: lease, writer: acquired}
 	amendment.bytes = uint(unsafe.Sizeof(*amendment)) + uint(unsafe.Sizeof(*lease))
+	// Every refusal above leaves the original declaration prefix unchanged.
+	// Mark before the first retained-history effect, so a failure during later
+	// summary/publication cannot incorrectly claim an untouched statement.
+	tx.noteStatementMutation(t)
 	changes.tableDropBytes += amendment.bytes
 	history := append(append([]catalogDeclarationAmendment(nil), tx.publicForeignAmendments()...), catalogDeclarationAmendment{tableDrop: amendment})
 	changes.historyBytes = uint(unsafe.Sizeof(history)) + uint(cap(history))*uint(unsafe.Sizeof(catalogDeclarationAmendment{}))

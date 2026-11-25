@@ -4,6 +4,7 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 package storage
 
 import "fmt"
+import "context"
 import "testing"
 import "strings"
 
@@ -74,5 +75,106 @@ func TestColumnAppendRetirementUsesSurvivingJointProgram(t *testing.T) {
 	}
 	if tx.catalogIntents.Load() != &intents || tx.catalogAmendments.Load() != &history {
 		t.Fatal("failed constructor cancellation changed the selected original program")
+	}
+}
+
+// The native constructor must not turn a rejected prospective program into an
+// apparent row/declaration effect. The language's existing failure policy owns
+// the resulting untouched error; prior original-T rename/drop/append stays live.
+func TestRejectedSupportingNameDropLeavesOriginalStatementUntouched(t *testing.T) {
+	tx, changes, target, support, dropped := cancelledCatalogInputFixture(t)
+	changes.db.loadOnce.Do(func() {}) // this finite native-owner fixture has no persistence load
+	tx.catalogIntents.Store(nil)
+	history := []catalogDeclarationAmendment{
+		{tableRename: &catalogTableRenameAmendment{table: support, declaration: &catalogTableRename{
+			Storage: support.Name, Identity: support.RuntimeIdentity, Before: support.Name, After: "renamed_support"}}},
+		{tableDrop: &catalogTableDropAmendment{table: dropped, declaration: catalogTableDropDeclaration{dropped.Name, dropped.RuntimeIdentity}}},
+		{column: &catalogStoredColumnAmendment{table: target, appendDeclaration: &catalogColumnAppend{
+			Table: target.Name, Identity: target.RuntimeIdentity, Name: "added", Type: storedColumnType{Type: "INT", Nullable: true},
+			Initialization: &catalogColumnInitialization{Extents: map[string]columnInitialExtent{}}}}},
+	}
+	tx.catalogAmendments.Store(&history)
+	views := &publicCatalogViews{tables: changes.views.Load().tables,
+		names: nativeNamespaceProjection(history), dropped: map[*table]struct{}{dropped: {}}}
+	changes.views.Store(views)
+	anchor, leases := changes.anchor, len(changes.leases)
+	tx.failureTracking.Store(true)
+	defer tx.failureTracking.Store(false)
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		tx.dropCatalogTable(changes.db, "renamed_support", false)
+	}()
+	if failure == nil || !strings.Contains(fmt.Sprint(failure), "existing owned namespace decision") {
+		t.Fatalf("supporting-name DROP did not refuse the unsupported candidate: %v", failure)
+	}
+	conflict, semantic := failure.(*catalogDeclarationProfileConflict)
+	if !semantic || conflict.diagnostic.Slice()[1].String() != "owned-namespace" {
+		t.Fatalf("actual profile refusal lost its finite native diagnostic: %T", failure)
+	}
+	if completion := tx.failureCompletion(tx.ID, tx.statementGeneration.Load(), failure); completion != "untouched" {
+		t.Fatalf("rejected admission reported %s and would abort the original transaction", completion)
+	}
+	if tx.State != TxActive || tx.catalogAmendments.Load() != &history || changes.views.Load() != views ||
+		changes.anchor != anchor || len(changes.leases) != leases || tx.resources.constructing != 0 ||
+		changes.db.GetTableForTx("renamed_support", false, tx) != support ||
+		changes.db.tables.Get(dropped.Name) != dropped {
+		t.Fatal("refusing the prospective DROP changed the original program, generation or retained leases")
+	}
+	// Contrast with an actual accepted mutation note: the same native policy
+	// owner must still refuse to preserve an unrestored declaration effect.
+	tx.noteStatementMutation(support)
+	if completion := tx.failureCompletion(tx.ID, tx.statementGeneration.Load(), failure); completion != "unrestored" {
+		t.Fatalf("actual declaration effect reported %s", completion)
+	}
+}
+
+func TestUnpublishedTableDropRefusesThroughItsActualDeclarationOwner(t *testing.T) {
+	tx, changes, constructor, _, _ := cancelledCatalogInputFixture(t)
+	changes.db.loadOnce.Do(func() {})
+	changes.db.publishTableNamesLocked(nil)
+	before, history, anchor := changes.views.Load(), tx.catalogAmendments.Load(), changes.anchor
+	tx.failureTracking.Store(true)
+	defer tx.failureTracking.Store(false)
+	refuse := func() any {
+		var failure any
+		func() {
+			defer func() { failure = recover() }()
+			tx.dropCatalogTable(changes.db, constructor.Name, false)
+		}()
+		return failure
+	}
+	failure := refuse()
+	conflict, semantic := failure.(*catalogDeclarationProfileConflict)
+	if !semantic || conflict.diagnostic.Slice()[1].String() != "unpublished-table-drop" ||
+		fmt.Sprint(failure) != "transactional table removal requires a local committed public table" {
+		t.Fatalf("original private generation did not reach its exact unsupported-profile refusal: %v", failure)
+	}
+	if tx.failureCompletion(tx.ID, tx.statementGeneration.Load(), failure) != "untouched" ||
+		tx.State != TxActive || changes.views.Load() != before || tx.catalogAmendments.Load() != history ||
+		changes.anchor != anchor || changes.db.GetTableForTx(constructor.Name, false, tx) != constructor {
+		t.Fatal("unsupported private DROP changed the original constructor or public prefix")
+	}
+	constructor.creator.Store(&transactionState{State: TxActive})
+	foreignFailure := refuse()
+	constructor.creator.Store(tx.transactionState)
+	if _, semantic := foreignFailure.(*catalogDeclarationProfileConflict); foreignFailure == nil || semantic {
+		t.Fatalf("foreign constructor bypassed actual owner attestation: %v", foreignFailure)
+	}
+}
+
+func TestDeclarationProfileDiagnosticGrantsNoNativeRecoveryAuthority(t *testing.T) {
+	failure := newCatalogDeclarationProfileConflict("owned-namespace", "profile refused")
+	if nativeFailurePolicyExcluded(failure) || nativeFailureOriginalValue(failure) != failure.diagnostic {
+		t.Fatal("finite semantic refusal lost its ordinary native diagnostic projection")
+	}
+	unknown := fmt.Errorf("opaque native failure")
+	if nativeFailureOriginalValue(unknown) != unknown {
+		t.Fatal("unknown native failure was converted into a semantic admission fact")
+	}
+	for _, excluded := range []error{context.Canceled, context.DeadlineExceeded, &PersistenceFailure{}, &transactionResourceCleanupError{state: TxAborted}} {
+		if !nativeFailurePolicyExcluded(excluded) {
+			t.Fatalf("failure policy admitted excluded %T", excluded)
+		}
 	}
 }
