@@ -12,9 +12,11 @@ setup:
 - sql: DROP TABLE IF EXISTS check_row_probe
 - sql: DROP TABLE IF EXISTS check_row_unconstrained
 - sql: DROP TABLE IF EXISTS check_row_marker
-- sql: CREATE TABLE check_row_values(id INT PRIMARY KEY,code VARCHAR(2) NULL,CONSTRAINT CK_check_row_code CHECK(code IS NULL OR ISNUMERIC(code)=1),CONSTRAINT
-    CK_check_row_id CHECK(id>0))
-- sql: CREATE TABLE check_row_probe(id INT PRIMARY KEY,v INT,CONSTRAINT CK_check_row_probe CHECK(v>=0))
+- sql: CREATE TABLE check_row_values(id INT PRIMARY KEY,code VARCHAR(2) NULL)
+- sql: ALTER TABLE check_row_values ADD CONSTRAINT CK_check_row_code CHECK(code IS NULL OR ISNUMERIC(code)=1)
+- sql: ALTER TABLE check_row_values ADD CONSTRAINT CK_check_row_id CHECK(id>0)
+- sql: CREATE TABLE check_row_probe(id INT PRIMARY KEY,v INT)
+- sql: ALTER TABLE check_row_probe ADD CONSTRAINT CK_check_row_probe CHECK(v>=0)
 - sql: CREATE TABLE check_row_unconstrained(id INT PRIMARY KEY,v INT)
 - sql: CREATE TABLE check_row_marker(id INT PRIMARY KEY,value INT)
 - sql: INSERT check_row_values VALUES(1,'1'),(2,'2'),(3,NULL)
