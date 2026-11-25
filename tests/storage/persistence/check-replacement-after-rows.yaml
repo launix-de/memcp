@@ -715,7 +715,7 @@ test_cases:
     - sql: CREATE TABLE check_row_appended(id INT PRIMARY KEY)
     - sql: BEGIN TRAN
     - sql: INSERT check_row_appended VALUES(1)
-    - sql: ALTER TABLE check_row_appended ADD checked_v INT NULL DEFAULT(7)
+    - sql: ALTER TABLE check_row_appended ADD checked_v INT NULL DEFAULT(7) WITH VALUES
     - sql: ALTER TABLE check_row_appended ADD CONSTRAINT CK_check_row_appended CHECK(checked_v IS NULL OR checked_v>=0)
     - sql: COMMIT TRAN
     - sql: SELECT id,checked_v FROM check_row_appended ORDER BY id
