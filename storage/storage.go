@@ -3294,7 +3294,7 @@ func Init(en scm.Env) {
 			switch operation {
 			case "drop":
 				if t.ScopedSchema {
-					return scm.NewBool(tx.dropScopedColumn(t, scm.String(a[2]), false, expectedInput))
+					return scm.NewBool(tx.alterScopedColumn(t, scm.String(a[2]), "drop", false, expectedInput))
 				}
 				if tx != nil && !t.implicitSharedColumnDrop(tx) {
 					return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[2]), false, expectedInput))
@@ -3302,7 +3302,7 @@ func Init(en scm.Env) {
 				return scm.NewBool(t.DropColumn(scm.String(a[2]), expectedInput))
 			case "drop_if_exists":
 				if t.ScopedSchema {
-					return scm.NewBool(tx.dropScopedColumn(t, scm.String(a[2]), true, expectedInput))
+					return scm.NewBool(tx.alterScopedColumn(t, scm.String(a[2]), "drop", true, expectedInput))
 				}
 				if tx != nil && !t.implicitSharedColumnDrop(tx) {
 					return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[2]), true, expectedInput))
@@ -3399,6 +3399,9 @@ func Init(en scm.Env) {
 			if len(a) > 4 {
 				currentTx = scmerToTxContext(a[4])
 			}
+			if t.ScopedSchema && scm.String(a[2]) == "drop_default" {
+				return scm.NewBool(currentTx.alterScopedColumn(t, scm.String(a[1]), "drop_default", false, scm.NewNil()))
+			}
 			if !t.committedAt(t.schema.catalogView().version) {
 				return currentTx.alterCatalogColumn(t, scm.String(a[1]), scm.String(a[2]), a[3])
 			}
@@ -3484,7 +3487,7 @@ func Init(en scm.Env) {
 				tx = scmerToTxContext(a[2])
 			}
 			if t.ScopedSchema {
-				return scm.NewBool(tx.dropScopedColumn(t, scm.String(a[1]), false, expectedInput))
+				return scm.NewBool(tx.alterScopedColumn(t, scm.String(a[1]), "drop", false, expectedInput))
 			}
 			if tx != nil && !t.implicitSharedColumnDrop(tx) {
 				return scm.NewBool(tx.dropPublicColumn(t, scm.String(a[1]), false, expectedInput))

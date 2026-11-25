@@ -222,6 +222,26 @@ test_cases:
     - sql: 'INSERT INTO #layout_default(id,kept) VALUES(1,11)'
     - sql: BEGIN TRANSACTION
     - sql: 'ALTER TABLE #layout_default DROP CONSTRAINT DF_layout_default_discarded'
+    - sql: 'SELECT * FROM #layout_default'
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          kept: 11
+          discarded: 7
+    - sql: SAVE TRANSACTION after_default_clear
+    - sql: 'INSERT INTO #layout_default(id,kept) VALUES(9,99)'
+    - sql: 'SELECT * FROM #layout_default ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          kept: 11
+          discarded: 7
+        - id: 9
+          kept: 99
+          discarded: null
+    - sql: ROLLBACK TRANSACTION after_default_clear
     - sql: 'ALTER TABLE #layout_default DROP COLUMN discarded'
     - sql: 'INSERT INTO #layout_default VALUES(2,22)'
     - sql: 'SELECT * FROM #layout_default ORDER BY id'
@@ -240,7 +260,87 @@ test_cases:
         - id: 1
           kept: 11
           discarded: 7
+    - sql: 'INSERT INTO #layout_default(id,kept) VALUES(3,33)'
+    - sql: 'SELECT * FROM #layout_default ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          kept: 11
+          discarded: 7
+        - id: 3
+          kept: 33
+          discarded: 7
     - sql: 'DROP TABLE #layout_default'
+- name: A default-only scoped decision commits its header while retaining every stored cell
+  tds:
+    statements:
+    - sql: 'CREATE TABLE #layout_default_clear(id INT PRIMARY KEY,value INT CONSTRAINT DF_layout_default_clear DEFAULT(7))'
+    - sql: 'INSERT INTO #layout_default_clear(id) VALUES(1)'
+    - sql: BEGIN TRANSACTION
+    - sql: 'ALTER TABLE #layout_default_clear DROP CONSTRAINT DF_layout_default_clear'
+    - sql: 'INSERT INTO #layout_default_clear(id) VALUES(2)'
+    - sql: 'SELECT * FROM #layout_default_clear ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 7
+        - id: 2
+          value: null
+    - sql: COMMIT TRANSACTION
+    - sql: 'INSERT INTO #layout_default_clear(id) VALUES(3)'
+    - sql: 'SELECT * FROM #layout_default_clear ORDER BY id'
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 7
+        - id: 2
+          value: null
+        - id: 3
+          value: null
+    - sql: 'DROP TABLE #layout_default_clear'
+- name: A scoped default savepoint restores its recipe and rows before the original commit
+  tds:
+    statements:
+    - sql: 'CREATE TABLE #layout_default_save(id INT PRIMARY KEY,value INT CONSTRAINT DF_layout_default_save DEFAULT(7))'
+    - sql: 'INSERT INTO #layout_default_save(id) VALUES(1)'
+    - sql: BEGIN TRANSACTION
+    - sql: SAVE TRANSACTION keep_default
+    - sql: 'ALTER TABLE #layout_default_save DROP CONSTRAINT DF_layout_default_save'
+    - sql: 'INSERT INTO #layout_default_save(id) VALUES(2)'
+    - sql: 'SELECT * FROM #layout_default_save ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 7
+        - id: 2
+          value: null
+    - sql: ROLLBACK TRANSACTION keep_default
+    - sql: 'INSERT INTO #layout_default_save(id) VALUES(3)'
+    - sql: 'SELECT * FROM #layout_default_save ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 7
+        - id: 3
+          value: 7
+    - sql: COMMIT TRANSACTION
+    - sql: 'INSERT INTO #layout_default_save(id) VALUES(4)'
+    - sql: 'SELECT * FROM #layout_default_save ORDER BY id'
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 7
+        - id: 3
+          value: 7
+        - id: 4
+          value: 7
+    - sql: 'DROP TABLE #layout_default_save'
 - name: Two module invocations reuse one temporary name with independent native layouts
   tds:
     statements:

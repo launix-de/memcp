@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strings"
 
 	"github.com/launix-de/memcp/scm"
 )
@@ -102,7 +103,14 @@ func (tx *TxContext) requireScopedColumnOwner(t *table) *relationScope {
 	return tx.requireScopedRelationOwner(t)
 }
 
-func (tx *TxContext) dropScopedColumn(t *table, name string, ifExists bool, expectedInput scm.Scmer) bool {
+// The existing column layout owner admits only retirement and removal of an
+// exact named default. Both publish immutable headers in the SAME schema
+// journal; no public catalog decision, row rewrite or independent owner exists.
+func (tx *TxContext) alterScopedColumn(t *table, name, operation string, ifExists bool, expectedInput scm.Scmer) bool {
+	if operation != "drop" && operation != "drop_default" {
+		panic("unsupported scoped stored-column declaration operation")
+	}
+	retiring := operation == "drop"
 	scope := tx.requireScopedColumnOwner(t)
 	finish := tx.beginCatalogConstruction(catalogValidationConstruction, nil, t)
 	defer finish()
@@ -158,20 +166,20 @@ func (tx *TxContext) dropScopedColumn(t *table, name string, ifExists bool, expe
 		lifecycle = lifecycle || tr.Timing == AfterDropColumn
 	}
 	t.mu.Unlock()
-	if lifecycle {
+	if retiring && lifecycle {
 		panic("transactional column retirement requires lifecycle consumers to be removed")
 	}
 	before := tx.scopedRelationLayout(t)
 	columns := before.view.metadata.columnNames.declarations
 	ordinal := -1
 	for i, c := range columns {
-		if c.Name == name {
+		if retiring && c.Name == name || !retiring && c.DefaultName != "" && strings.EqualFold(c.DefaultName, name) {
 			ordinal = i
 			break
 		}
 	}
 	if ordinal < 0 {
-		if ifExists {
+		if !retiring || ifExists {
 			return false
 		}
 		panic("drop column does not exist: " + t.Name + "." + name)
@@ -180,25 +188,36 @@ func (tx *TxContext) dropScopedColumn(t *table, name string, ifExists bool, expe
 	if !expectedInput.IsNil() {
 		requireExpectedStoredColumnInput(c, expectedInput)
 	}
-	// DROP owns removal of its default too, using the same native declaration
-	// formula as public chronological clear-default -> drop. No callback runs.
-	if !c.Default.IsNil() || c.DefaultName != "" || c.DefaultExpression != "" || c.DefaultDeferred {
-		columns = append([]*column(nil), columns...)
+	retired := before.retired
+	if retiring {
+		// Direct native retirement keeps the existing atomic default cleanup.
+		// SQL's explicit dependency guard still requires DROP CONSTRAINT first.
+		if !c.Default.IsNil() || c.DefaultName != "" || c.DefaultExpression != "" || c.DefaultDeferred {
+			columns = append([]*column(nil), columns...)
+			c = cloneStoredColumnDeclaration(c)
+			c.Alter("default", scm.NewNil())
+			columns[ordinal] = c
+		}
+		d := &catalogColumnDrop{t.Name, t.RuntimeIdentity, c.Name, c.displayName(), ordinal, storedColumnTypeOf(c)}
+		if err := validateColumnDropShape(d); err != nil {
+			panic(err)
+		}
+		columns = t.projectStoredColumnDrop(d, columns, newCatalogNativeProjection(t.schema))
+		retired = maps.Clone(before.retired)
+		if retired == nil {
+			retired = make(map[string]bool)
+		}
+		retired[c.Name] = true
+	} else {
+		if c.IsTemp || isRuntimeComputedColumn(c) {
+			panic("default removal requires an ordinary stored declaration")
+		}
 		c = cloneStoredColumnDeclaration(c)
-		c.Alter("default", scm.NewNil())
+		c.Alter("drop_default", scm.NewNil())
+		columns = append([]*column(nil), columns...)
 		columns[ordinal] = c
 	}
-	d := &catalogColumnDrop{t.Name, t.RuntimeIdentity, c.Name, c.displayName(), ordinal, storedColumnTypeOf(c)}
-	if err := validateColumnDropShape(d); err != nil {
-		panic(err)
-	}
-	columns = t.projectStoredColumnDrop(d, columns, newCatalogNativeProjection(t.schema))
 	view, _ := replaceStoredColumnMetadata(t, before.view, columns, t.columnNamesSnapshot.Load())
-	retired := maps.Clone(before.retired)
-	if retired == nil {
-		retired = make(map[string]bool)
-	}
-	retired[c.Name] = true
 	after := &relationSchemaLayout{table: t, scope: scope, lease: lease, view: view, retired: retired}
 	change := &relationSchemaChange{scope: scope, layout: &relationSchemaLayoutChange{before, after}}
 	// Reattest the completion boundary after validation: another operator may
@@ -208,7 +227,7 @@ func (tx *TxContext) dropScopedColumn(t *table, name string, ifExists bool, expe
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, tr := range t.Triggers {
-		if tr.Timing == AfterDropColumn {
+		if retiring && tr.Timing == AfterDropColumn {
 			panic("column retirement acquired a lifecycle consumer")
 		}
 	}
@@ -281,7 +300,10 @@ func (tx *transactionState) publishScopedRelationLayouts() {
 		return
 	}
 	for t, layout := range *layouts {
-		if len(layout.retired) == 0 {
+		// A property-only change owns a selected header too. Baseline journal
+		// entries after rewind retain the exact published header and need no
+		// publication. This uses the existing immutable view, not a new tracker.
+		if layout.view.metadata.columnNames == t.columnNamesSnapshot.Load() {
 			continue
 		}
 		access := t.schema.GetWrite(nil)
@@ -293,7 +315,7 @@ func (tx *transactionState) publishScopedRelationLayouts() {
 				panic("relation column decision lost its native generation")
 			}
 			t.Columns = append([]*column(nil), layout.view.metadata.columnNames.declarations...)
-			if t.DroppedColumns == nil {
+			if len(layout.retired) != 0 && t.DroppedColumns == nil {
 				t.DroppedColumns = make(map[string]bool)
 			}
 			for name := range layout.retired {
