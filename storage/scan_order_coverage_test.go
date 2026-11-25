@@ -322,11 +322,19 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	shard.mu.RLock()
 	var buildBuf [8]uint32
-	shard.iterateIndexForce(nil, runtimeScanAccess(bounds), len(shard.deltaRows()), buildBuf[:], false,
+	_, columnInput101, finishColumnInput101 := shard.t.readDataContext(nil)
+	defer finishColumnInput101()
+	columnAccess101 := runtimeScanAccess(bounds)
+	columnAccess101.columnInput = columnInput101
+	shard.iterateIndexForce(nil, columnAccess101, len(shard.deltaRows()), buildBuf[:], false,
 		func([]uint32) bool { return false })
 	shard.mu.RUnlock()
 	run := func(acceptCols []string, accept scm.Scmer) *shardqueue {
-		queue := shard.scan_order(coveredRuntimeScanAccess(bounds),
+		_, columnInput1, finishColumnInput1 := shard.t.readDataContext(nil)
+		defer finishColumnInput1()
+		columnAccess1 := coveredRuntimeScanAccess(bounds)
+		columnAccess1.columnInput = columnInput1
+		queue := shard.scan_order(columnAccess1,
 			[]string{"bucket"}, condition, acceptCols, accept,
 			[]scm.Scmer{scm.NewString("rank")}, []func(...scm.Scmer) scm.Scmer{order},
 			0, 0, limit, nil, nil, nil)
@@ -419,7 +427,11 @@ func TestOrderedComparisonReaderLifetime(t *testing.T) {
 	sortcols := []scm.Scmer{scm.NewString("label")}
 	sortdirs := []func(...scm.Scmer) scm.Scmer{order}
 	run := func() *shardqueue {
-		return shard.scan_order(scanAccess{}, nil, trueCondition(), nil, scm.NewNil(),
+		_, columnInput2, finishColumnInput2 := shard.t.readDataContext(nil)
+		defer finishColumnInput2()
+		columnAccess2 := scanAccess{}
+		columnAccess2.columnInput = columnInput2
+		return shard.scan_order(columnAccess2, nil, trueCondition(), nil, scm.NewNil(),
 			sortcols, sortdirs, 0, 0, 2, nil, nil, nil)
 	}
 	queue := run()
@@ -448,7 +460,11 @@ func TestOrderedComparisonReaderLifetime(t *testing.T) {
 				t.Fatal("comparison panic was lost")
 			}
 		}()
-		shard.scan_order(scanAccess{}, nil, trueCondition(), nil, scm.NewNil(), sortcols,
+		_, columnInput3, finishColumnInput3 := shard.t.readDataContext(nil)
+		defer finishColumnInput3()
+		columnAccess3 := scanAccess{}
+		columnAccess3.columnInput = columnInput3
+		shard.scan_order(columnAccess3, nil, trueCondition(), nil, scm.NewNil(), sortcols,
 			[]func(...scm.Scmer) scm.Scmer{func(...scm.Scmer) scm.Scmer { panic("comparison failed") }},
 			0, 0, 2, nil, nil, nil)
 	}()

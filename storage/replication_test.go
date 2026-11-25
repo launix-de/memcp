@@ -957,7 +957,7 @@ func TestReplicationCleanupRetainsCompletedBackup(t *testing.T) {
 	cell.ownstate.Publish(mosi.M)
 	access := cell.current.Load().GetRead(nil, false)
 	defer access.Release()
-	value := access.shard.getColumnStorageOrPanic("payload", false, nil).GetValue(0)
+	value := access.shard.getColumnStorageInput("payload", false, access.shard.initializedColumnInput(access.shard.t.bindColumnInput(nil)), nil).GetValue(0)
 	if value.String() != "row-00000001" {
 		t.Fatalf("completed backup was not restored: %v", value)
 	}

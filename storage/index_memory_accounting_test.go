@@ -60,7 +60,11 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 	bounds := analyzedBoundaries{{col: "id", matcher: EqualMatcher, lower: scm.NewInt(5), lowerInclusive: true, upper: scm.NewInt(5), upperInclusive: true}}
 	var buf [8]uint32
 	shard.mu.RLock()
-	shard.iterateIndex(nil, runtimeScanAccess(bounds), len(shard.deltaRows()), buf[:], 0, nil, func(batch []uint32) bool {
+	_, columnInput1, finishColumnInput1 := shard.t.readDataContext(nil)
+	defer finishColumnInput1()
+	columnAccess1 := runtimeScanAccess(bounds)
+	columnAccess1.columnInput = columnInput1
+	shard.iterateIndex(nil, columnAccess1, len(shard.deltaRows()), buf[:], 0, nil, func(batch []uint32) bool {
 		return true
 	})
 	shard.mu.RUnlock()
@@ -163,9 +167,9 @@ func TestComputedDeltaIndexPreparesEachKeyOnceAndRetainsDuplicates(t *testing.T)
 	}}
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
-	getters := index.buildGetters(nil, nil)
+	getters := index.buildGetters(nil, nil, index.t.t.bindColumnInput(nil))
 	defer releaseIndexGetters(getters)
-	index.buildIndex(getters, nil)
+	index.buildIndex(getters, nil, index.t.t.bindColumnInput(nil))
 	if calls != len(rows) || index.baseState.deltaBtree.Len() != len(rows) {
 		t.Fatalf("computed %d keys and retained %d rows; want %d of each", calls, index.baseState.deltaBtree.Len(), len(rows))
 	}
@@ -221,7 +225,11 @@ func TestIndexInvocationRetainsOrderingAfterOwnerEviction(t *testing.T) {
 	var buffer [8]uint32
 	var selectedIndex *StorageIndex
 	count, sum := 0, int64(0)
-	shard.iterateIndexEx(nil, access, len(shard.deltaRows()), buffer[:], 1, true, nil, nil, nil,
+	_, columnInput2, finishColumnInput2 := shard.t.readDataContext(nil)
+	defer finishColumnInput2()
+	columnAccess2 := access
+	columnAccess2.columnInput = columnInput2
+	shard.iterateIndexEx(nil, columnAccess2, len(shard.deltaRows()), buffer[:], 1, true, nil, nil, nil,
 		func(index *StorageIndex, indexed bool) {
 			if !indexed || !indexCleanup(index, nil) {
 				t.Fatal("fixture did not evict the selected index after invocation setup")
@@ -249,8 +257,8 @@ func TestIndexInsertRetainsStateAndEvictionOnlyDetaches(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	index := &StorageIndex{t: shard, Cols: []string{"id"}}
 	shard.mu.RLock()
-	getters := index.buildGetters(nil, nil)
-	index.buildIndex(getters, nil)
+	getters := index.buildGetters(nil, nil, index.t.t.bindColumnInput(nil))
+	index.buildIndex(getters, nil, index.t.t.bindColumnInput(nil))
 	releaseIndexGetters(getters)
 	shard.mu.RUnlock()
 	state := index.baseState

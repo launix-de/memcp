@@ -216,11 +216,12 @@ func touchTempColumns(t *table, colSets ...[]string) {
 // be absent from the residual filter, so its column preflight is intentionally
 // not relied upon here.
 func (t *storageShard) ensureScanAccessColumns(access scanAccess, alreadyLocked bool, currentTx *TxContext) {
+	initializedColumns := t.initializedColumnInput(access.columnInput)
 	for i := 0; i < access.len(); i++ {
 		mapCols, _ := access.boundaryMap(i)
 		if len(mapCols) > 0 {
 			for _, col := range mapCols {
-				t.getColumnStorageOrPanic(col, alreadyLocked, currentTx)
+				t.getColumnStorageInput(col, alreadyLocked, initializedColumns, currentTx)
 			}
 			continue
 		}
@@ -228,6 +229,6 @@ func (t *storageShard) ensureScanAccessColumns(access scanAccess, alreadyLocked 
 		if column == "" || column[0] == '$' {
 			continue
 		}
-		t.getColumnStorageOrPanic(column, alreadyLocked, currentTx)
+		t.getColumnStorageInput(column, alreadyLocked, initializedColumns, currentTx)
 	}
 }

@@ -381,7 +381,7 @@ func TestComputeColumnRetainsPayloadThroughCallbackAndPanic(t *testing.T) {
 			t.Fatalf("preparation calls=%d leaked readers=%d", calls, shard.cacheReaders.Load())
 		}
 		if !fail {
-			reader := shard.ColumnReaderTx(nil, name, false, ReadAuto)
+			reader := shard.ColumnReaderTx(nil, name, false, ReadAuto, shard.t.bindColumnInput(nil))
 			if got := reader.GetValue(0).Int(); got != 2 {
 				t.Errorf("computed value = %d, want 2", got)
 			}
@@ -574,7 +574,7 @@ func TestFilteredComputeColumnReusesValidValuesAcrossFilters(t *testing.T) {
 	if changedFilterProxy != canonicalProxy {
 		t.Fatal("changed filter replaced the canonical compute proxy")
 	}
-	reader := shard.ColumnReaderTx(nil, "cached", false, ReadAuto)
+	reader := shard.ColumnReaderTx(nil, "cached", false, ReadAuto, shard.t.bindColumnInput(nil))
 	defer ReleaseColumnReader(reader)
 	for i := uint32(0); i < 4; i++ {
 		if got := reader.GetValue(i).Int(); got != int64(i+1) {
@@ -627,7 +627,7 @@ func TestUnfilteredComputeColumnReusesCompletePreparationUntilMutation(t *testin
 		t.Fatalf("post-insert repair invoked computor %d times, want 4 total", got)
 	}
 
-	reader := tbl.ActiveShards()[0].ColumnReaderTx(nil, "cached", false, ReadAuto).GetValue
+	reader := tbl.ActiveShards()[0].ColumnReaderTx(nil, "cached", false, ReadAuto, tbl.ActiveShards()[0].t.bindColumnInput(nil)).GetValue
 	if got := reader(3).Int(); got != 80 {
 		t.Fatalf("repaired appended computed value = %d, want 80", got)
 	}
@@ -742,7 +742,7 @@ func TestComputeSetDoesNotUpgradeShardReadOwnership(t *testing.T) {
 					scm.Apply(args[1], scm.NewInt(42))
 					return args[0]
 				})
-				mapper := shard.OpenMapReducer([]string{"$set:cached"}, callback, false, 0, nil, nil)
+				mapper := shard.OpenMapReducer([]string{"$set:cached"}, callback, false, 0, nil, nil, shard.t.bindColumnInput(nil))
 				defer mapper.Close()
 				id := uint32(0)
 				if !main {

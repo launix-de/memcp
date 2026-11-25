@@ -319,7 +319,7 @@ func BenchmarkStorageIntSum(b *testing.B) {
 			NumVars: 2,
 		})
 
-		mr := shard.OpenMapReducer([]string{"x"}, mapReduceProc, false, 1, nil, nil)
+		mr := shard.OpenMapReducer([]string{"x"}, mapReduceProc, false, 1, nil, nil, shard.t.bindColumnInput(nil))
 		defer mr.Close()
 
 		// build recid list [0..benchN-1]

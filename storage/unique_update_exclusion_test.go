@@ -77,7 +77,7 @@ func TestRepeatedUniqueUpdatesPreserveOriginalRowsAndRealCollisions(t *testing.T
 				}
 				value := func(id int64, reader *TxContext) int64 {
 					recid := locate(id, reader)
-					column := shard.ColumnReaderTx(reader, "value", false, ReadAuto)
+					column := shard.ColumnReaderTx(reader, "value", false, ReadAuto, shard.t.bindColumnInput(reader))
 					defer ReleaseColumnReader(column)
 					return column.GetValue(recid).Int()
 				}

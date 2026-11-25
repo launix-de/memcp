@@ -607,7 +607,7 @@ func (t *table) hasDuplicateUniqueValues(cols []string, nullsNotDistinct bool, c
 		readAccesses[i] = shard.GetRead(currentTx, false)
 		shard = readAccesses[i].shard
 		shards[i] = shard
-		initializedColumns := shard.initializedColumnInput(currentTx)
+		initializedColumns := shard.initializedColumnInput(shard.t.bindColumnInput(currentTx))
 		func() {
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
@@ -5377,6 +5377,7 @@ func (t *table) processReservedUniqueCollision(columns []string, values [][]scm.
 }
 
 func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer, *uniqueWriteGuard), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext, guard *uniqueWriteGuard, exclude *recMapTarget) {
+	columnInput := t.bindColumnInput(currentTx)
 	keys := mutationUniqueKeys(t, guard.input)
 	// An omitted generated key skips only its own constraint. Keep the outer
 	// invocation's lock ownership when the first checked key is a later UNIQUE.
@@ -5633,7 +5634,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 									}
 									row := make([]scm.Scmer, len(cols))
 									for i, name := range cols {
-										reader := s.ColumnReaderTx(currentTx, name, false, ReadAuto)
+										reader := s.ColumnReaderTx(currentTx, name, false, ReadAuto, columnInput)
 										row[i] = reader.GetValue(uid)
 										ReleaseColumnReader(reader)
 									}
@@ -5675,7 +5676,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 									}
 								}
 							} else {
-								params[i] = s.ColumnReaderTx(currentTx, p, false, ReadAuto).GetValue(uid)
+								params[i] = s.ColumnReaderTx(currentTx, p, false, ReadAuto, columnInput).GetValue(uid)
 							}
 						}
 						guard.wrote = true       // a collision callback may publish effects; never replay it

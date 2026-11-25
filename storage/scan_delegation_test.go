@@ -56,7 +56,7 @@ func TestScanDelegationColdSingleAndMixedShards(t *testing.T) {
 			var sum int64
 			var count int64
 			lease := remote.GetRead(nil, false)
-			reader := remote.ColumnReaderTx(nil, "id", false, ReadAuto)
+			reader := remote.ColumnReaderTx(nil, "id", false, ReadAuto, remote.t.bindColumnInput(nil))
 			for id := uint32(0); id < remote.main_count; id++ {
 				sum += reader.GetValue(id).Int()
 				count++

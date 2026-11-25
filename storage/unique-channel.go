@@ -351,7 +351,7 @@ func (set *uniqueReservationSet) probe(shard *storageShard, columns []string, ke
 				if column == "$update" || strings.HasPrefix(column, "$set:") || strings.HasPrefix(column, "NEW.") {
 					continue
 				}
-				reader := part.shard.ColumnReaderTx(part.tx, column, false, ReadAuto)
+				reader := part.shard.ColumnReaderTx(part.tx, column, false, ReadAuto, part.shard.t.bindColumnInput(part.tx))
 				values[i] = reader.GetValue(id)
 				ReleaseColumnReader(reader)
 			}
@@ -424,7 +424,7 @@ func (set *uniqueReservationSet) setValue(shard *storageShard, id uint32, column
 }
 
 func (s *storageShard) setCollisionValue(id uint32, column string, value scm.Scmer, tx *TxContext, guard *uniqueWriteGuard) scm.Scmer {
-	if proxy, computed := s.getColumnStorageOrPanic(column, false, tx).(*StorageComputeProxy); computed {
+	if proxy, computed := s.getColumnStorageInput(column, false, s.initializedColumnInput(s.t.bindColumnInput(tx)), tx).(*StorageComputeProxy); computed {
 		proxy.SetValue(id, value)
 	} else {
 		s.UpdateFunction(id, true, false, tx, guard)(scm.NewSlice([]scm.Scmer{scm.NewString(column), value}))
@@ -1067,7 +1067,7 @@ func (set *uniqueReservationSet) dispatchUniqueCommand(_ context.Context, comman
 				if column == "$update" || strings.HasPrefix(column, "$set:") || strings.HasPrefix(column, "NEW.") {
 					continue // invocation-owned inputs/handles are bound by the caller
 				}
-				reader := s.ColumnReaderTx(part.tx, column, false, ReadAuto)
+				reader := s.ColumnReaderTx(part.tx, column, false, ReadAuto, s.t.bindColumnInput(part.tx))
 				values[i] = reader.GetValue(id)
 				ReleaseColumnReader(reader)
 			}

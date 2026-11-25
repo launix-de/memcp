@@ -354,13 +354,21 @@ func TestStorageStringPreparedFilterReaderIsConsumed(t *testing.T) {
 	}
 	// Early-exit scans reuse an already admitted cache without decoding a cold one.
 	shard := tbl.ActiveShards()[0]
-	if _, found := shard.scanFirstRecord(scanAccess{}, []string{"label"}, condition, tx, nil, nil); !found {
+	_, columnInput1, finishColumnInput1 := shard.t.readDataContext(tx)
+	defer finishColumnInput1()
+	columnAccess1 := scanAccess{}
+	columnAccess1.columnInput = columnInput1
+	if _, found := shard.scanFirstRecord(columnAccess1, []string{"label"}, condition, tx, nil, nil); !found {
 		t.Fatal("first-record filter bypassed warm reader")
 	}
 	deltaCondition := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
 		return scm.NewBool(args[0].IsString() && args[0].String() == "delta label")
 	})
-	if id, found := shard.scanFirstRecord(scanAccess{}, []string{"label"}, deltaCondition, tx, nil, nil); !found || id != 2048 {
+	_, columnInput2, finishColumnInput2 := shard.t.readDataContext(tx)
+	defer finishColumnInput2()
+	columnAccess2 := scanAccess{}
+	columnAccess2.columnInput = columnInput2
+	if id, found := shard.scanFirstRecord(columnAccess2, []string{"label"}, deltaCondition, tx, nil, nil); !found || id != 2048 {
 		t.Fatal("first-record prepared reader lost physical delta")
 	}
 	delta := tbl.scan_order(tx, access, nil, []string{"label"}, deltaCondition, nil, nil, 0, 0, 1,
@@ -417,7 +425,7 @@ func TestMaterializedComputedReaderPreparesOutputOnly(t *testing.T) {
 	proxy := &StorageComputeProxy{shard: shard, main: main, count: 2, compressed: true,
 		inputCols: []string{"label"}, delta: make(map[uint32]scm.Scmer),
 		computor: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })}
-	reader := newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned, nil)
+	reader := newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned, nil, proxy.shard.t.bindColumnInput(nil))
 	if input.ReadCount() != 0 {
 		t.Fatal("materialized output prepared an unused input instead of its actual main")
 	}
@@ -480,11 +488,13 @@ func TestComputedReaderSetupFailureReleasesEarlierChildren(t *testing.T) {
 	index := &StorageIndex{t: shard, Cols: []string{".mapped"}, ColMapCols: [][]string{{"first", "second"}},
 		ColMapFn: []scm.Scmer{scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })}}
 	for _, prepare := range []func(){
-		func() { newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned, nil) },
+		func() {
+			newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned, nil, proxy.shard.t.bindColumnInput(nil))
+		},
 		func() {
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
-			index.buildGetters(nil, nil)
+			index.buildGetters(nil, nil, index.t.t.bindColumnInput(nil))
 		},
 	} {
 		warm := first.GetCachedReader(ReadDecoded)
@@ -522,7 +532,7 @@ func TestMaterializedReaderRepairPreservesExistingShardRead(t *testing.T) {
 	tx.querySeq.Store(19)
 	tx.queryActive.Store(true)
 	shard.mu.RLock()
-	reader := newCachedColumnReaderTx(proxy, tx, true, ReadDecoded|readOperatorOwned, nil)
+	reader := newCachedColumnReaderTx(proxy, tx, true, ReadDecoded|readOperatorOwned, nil, proxy.shard.t.bindColumnInput(tx))
 	writerDone := make(chan struct{})
 	go func() {
 		shard.mu.Lock()
@@ -570,7 +580,7 @@ type jitCapabilityTextStorage struct {
 	calls  int
 }
 
-func (s *jitCapabilityTextStorage) GetCachedReaderTx(_ *TxContext, locked bool, hints ColumnReadHints) ColumnReader {
+func (s *jitCapabilityTextStorage) GetCachedReaderTx(_ *TxContext, locked bool, hints ColumnReadHints, _ *nativeTableInput) ColumnReader {
 	s.locked, s.hints = locked, hints
 	s.calls++
 	return s.StorageString.GetCachedReader(hints)
@@ -616,7 +626,7 @@ func TestRecSetResidualPreparesVisibleTextBatch(t *testing.T) {
 	tbl.Insert([]string{"id", "label"}, rows, nil, scm.NewNil(), false, nil)
 	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
-	stored := shard.getColumnStorageOrPanic("label", false, nil)
+	stored := shard.getColumnStorageInput("label", false, shard.initializedColumnInput(shard.t.bindColumnInput(nil)), nil)
 	if overlay, ok := stored.(*OverlayBlob); ok {
 		stored = overlay.Base
 	}

@@ -633,6 +633,7 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 
 // scanOrderTableSpec holds per-table parameters for scanOrderMulti.
 type scanOrderTableSpec struct {
+	columnInput   *nativeTableInput
 	producerInput *nativeMutationInput // explicit local producer input, not compiled or serialized
 
 	dataTx          *TxContext // selected once for this actual native input
@@ -1103,14 +1104,22 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			continue
 		}
 		var finishData func()
+		defer func() {
+			if finishData != nil {
+				finishData()
+			}
+		}()
 		input := tables[index].backingTable()
 		if scanMutates(tables[index].callbackCols) {
 			tables[index].dataTx, finishData = input.writeDataContext(currentTx)
+			topology := input.pinActiveTopology()
+			defer topology.releaseOperation()
+			tables[index].columnInput = input.bindColumnInput(tables[index].dataTx)
+			tables[index].columnInput.topology = topology
 		} else {
-			tables[index].dataTx, finishData = input.readDataContext(currentTx)
+			tables[index].dataTx, tables[index].columnInput, finishData = input.readDataContext(currentTx)
 		}
 		tables[index].dataBound = true
-		defer finishData()
 	}
 
 	for i := range tables {
@@ -1129,7 +1138,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		if tables[i].recset != nil {
 			shards += len(tables[i].recset.shards)
 		} else {
-			shards += len(tables[i].backingTable().activeTopology().shards)
+			shards += len(tables[i].columnInput.topology.shards)
 		}
 	}
 	for i := range tables {
@@ -1215,6 +1224,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		scratch := acquireScanAnalyzeScratch()
 		defer releaseScanAnalyzeScratch(scratch)
 		bounds, compiled := scanAccessFromScheme(spec.accessSchema, spec.accessValues, nil)
+		bounds.columnInput = spec.columnInput
 		bounds.producerInput = spec.producerInput
 		if !compiled {
 			panic("scan_order received an invalid compiled access schema")
@@ -1441,14 +1451,14 @@ func mergeScanOrderQueues(currentTx *TxContext, tables []scanOrderTableSpec, q g
 			continue
 		}
 		if spec.recordVisitor == nil {
-			sq.mapper = sq.shard.OpenMapReducer(sq.callbackCols, sq.callback, false, 0, nil, inputTx)
+			sq.mapper = sq.shard.OpenMapReducer(sq.callbackCols, sq.callback, false, 0, nil, inputTx, tables[sq.tableIdx].columnInput)
 			sq.mapper.exactUpdate = sq.mapper.exactUpdate || spec.producerInput.exactUpdateFor(sq.shard.t, inputTx)
 		}
 		if !spec.postOrderFilter.IsNil() {
 			sq.postOrderMapper = sq.shard.OpenMapper(
 				spec.postOrderCols,
 				spec.postOrderFilter,
-				false, inputTx,
+				false, inputTx, tables[sq.tableIdx].columnInput,
 			)
 		}
 	}
@@ -1701,15 +1711,15 @@ func consumeDirectScanOrder(queue *shardqueue, spec *scanOrderTableSpec, current
 	mapper := &mapperStorage
 	if mapReducerCanUseReadWorkspace(spec.callbackCols) {
 		prepareReadMapReducerStorage(&mapperStorage, &mapperWorkspace, len(spec.callbackCols))
-		queue.shard.initReadMapReducer(&mapperStorage, spec.callbackCols, spec.callback, false, currentTx)
+		queue.shard.initReadMapReducer(&mapperStorage, spec.callbackCols, spec.callback, false, currentTx, spec.columnInput)
 	} else {
-		mapper = queue.shard.OpenMapReducer(spec.callbackCols, spec.callback, false, 0, nil, currentTx)
+		mapper = queue.shard.OpenMapReducer(spec.callbackCols, spec.callback, false, 0, nil, currentTx, spec.columnInput)
 		mapper.exactUpdate = mapper.exactUpdate || spec.producerInput.exactUpdateFor(queue.shard.t, currentTx)
 	}
 	defer mapper.Close()
 	var postOrderMapper *ShardMapReducer
 	if !spec.postOrderFilter.IsNil() {
-		postOrderMapper = queue.shard.OpenMapper(spec.postOrderCols, spec.postOrderFilter, false, currentTx)
+		postOrderMapper = queue.shard.OpenMapper(spec.postOrderCols, spec.postOrderFilter, false, currentTx, spec.columnInput)
 		defer postOrderMapper.Close()
 	}
 	if limitPartitionCols == 0 && postOrderMapper == nil {
@@ -1894,12 +1904,20 @@ func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopolog
 func (t *table) scanOrderSingle(currentTx *TxContext, spec scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols, offset, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) (scm.Scmer, bool) {
 	if !spec.dataBound {
 		var finishData func()
+		defer func() {
+			if finishData != nil {
+				finishData()
+			}
+		}()
 		if scanMutates(spec.callbackCols) {
 			currentTx, finishData = t.writeDataContext(currentTx)
+			topology := t.pinActiveTopology()
+			defer topology.releaseOperation()
+			spec.columnInput = t.bindColumnInput(currentTx)
+			spec.columnInput.topology = topology
 		} else {
-			currentTx, finishData = t.readDataContext(currentTx)
+			currentTx, spec.columnInput, finishData = t.readDataContext(currentTx)
 		}
-		defer finishData()
 	} else {
 		currentTx = spec.dataTx
 	}
@@ -1922,6 +1940,7 @@ func (t *table) scanOrderSingle(currentTx *TxContext, spec scanOrderTableSpec, s
 	scratch := acquireScanAnalyzeScratch()
 	defer releaseScanAnalyzeScratch(scratch)
 	bounds, compiled := scanAccessFromScheme(spec.accessSchema, spec.accessValues, nil)
+	bounds.columnInput = spec.columnInput
 	bounds.producerInput = spec.producerInput
 	if !compiled {
 		panic("scan_order received an invalid compiled access schema")
@@ -1962,12 +1981,21 @@ func (t *table) scanOrderSingle(currentTx *TxContext, spec scanOrderTableSpec, s
 // queue/channel merge machinery for actual fanout.
 func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer, producerInput *nativeMutationInput) scm.Scmer {
 	var finishData func()
+	defer func() {
+		if finishData != nil {
+			finishData()
+		}
+	}()
+	var columnInput *nativeTableInput
 	if scanMutates(callbackCols) {
 		currentTx, finishData = t.writeDataContext(currentTx)
+		topology := t.pinActiveTopology()
+		defer topology.releaseOperation()
+		columnInput = t.bindColumnInput(currentTx)
+		columnInput.topology = topology
 	} else {
-		currentTx, finishData = t.readDataContext(currentTx)
+		currentTx, columnInput, finishData = t.readDataContext(currentTx)
 	}
-	defer finishData()
 
 	if scanMutates(callbackCols) {
 		if slices.Contains(callbackCols, "$update") {
@@ -1980,10 +2008,10 @@ func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessV
 	// explicitly allowed to add overhead, so keep it visible instead of letting
 	// the LIMIT 1 fast path silently omit this scan from system statistics.
 	if !Settings.ScanDebugging && !contributionMutationColumns(callbackCols) && postOrderFilter.IsNil() && len(sortcols) == 0 && limitPartitionCols == 0 && offset == 0 && limit == 1 && !isOuter {
-		return t.scanOrderFirst(currentTx, accessSchema, accessValues, conditionCols, condition, callbackCols, mapReduce, neutral, notFoundValue, producerInput)
+		return t.scanOrderFirst(currentTx, accessSchema, accessValues, conditionCols, condition, callbackCols, mapReduce, neutral, notFoundValue, producerInput, columnInput)
 	}
 	spec := scanOrderTableSpec{
-		dataTx: currentTx, dataBound: true,
+		dataTx: currentTx, dataBound: true, columnInput: columnInput,
 		producerInput:   producerInput,
 		table:           t,
 		conditionCols:   conditionCols,
@@ -2009,7 +2037,7 @@ func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessV
 // scanOrderFirst is the no-order LIMIT 1 specialization of scan_order. It
 // preserves the scan operator contract while avoiding the queues, channels,
 // and global merge needed by the general ordered multi-shard implementation.
-func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer, producerInput *nativeMutationInput) scm.Scmer {
+func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer, producerInput *nativeMutationInput, columnInput *nativeTableInput) scm.Scmer {
 	// scan_order owns this exact source input throughout the specialization.
 	if contributionMutationColumns(callbackCols) {
 		t.beginContributionMutation()
@@ -2018,6 +2046,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	bounds, compiled := scanAccessFromScheme(accessSchema, accessValues, nil)
+	bounds.columnInput = columnInput
 	bounds.producerInput = producerInput
 	if !compiled {
 		panic("scan_order received an invalid compiled access schema")
@@ -2058,7 +2087,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 			panic("query killed")
 		}
 		if acquisitionFailure != nil {
-			spec := scanOrderTableSpec{producerInput: producerInput, table: t, conditionCols: conditionCols, condition: condition, callbackCols: callbackCols, callback: mapReduce}
+			spec := scanOrderTableSpec{columnInput: columnInput, producerInput: producerInput, table: t, conditionCols: conditionCols, condition: condition, callbackCols: callbackCols, callback: mapReduce}
 			queue := delegateOrderedQueue(currentTx, shard, bounds, &spec, nil, 0, 0, 1, acquisitionFailure)
 			adopted := false
 			defer func() {
@@ -2101,7 +2130,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 		panic(firstErr)
 	}
 	if foundQueue != nil {
-		spec := scanOrderTableSpec{producerInput: producerInput, callbackCols: callbackCols, callback: mapReduce}
+		spec := scanOrderTableSpec{columnInput: columnInput, producerInput: producerInput, callbackCols: callbackCols, callback: mapReduce}
 		result, _ := foundQueue.remote.stream(&spec, foundQueue, scm.ApplyOnce(neutral, nil), foundQueue.items[:1])
 		return result
 	}
@@ -2115,9 +2144,9 @@ func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, acc
 		mapperWorkspace := acquireShardMapReducerWorkspace()
 		defer releaseShardMapReducerWorkspace(mapperWorkspace)
 		prepareReadMapReducerStorage(&mapperStorage, mapperWorkspace, len(callbackCols))
-		foundShard.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, mapperAlreadyLocked, currentTx)
+		foundShard.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, mapperAlreadyLocked, currentTx, columnInput)
 	} else {
-		mapper = foundShard.OpenMapReducer(callbackCols, mapReduce, mapperAlreadyLocked, 0, nil, currentTx)
+		mapper = foundShard.OpenMapReducer(callbackCols, mapReduce, mapperAlreadyLocked, 0, nil, currentTx, columnInput)
 		mapper.exactUpdate = mapper.exactUpdate || producerInput.exactUpdateFor(foundShard.t, currentTx)
 	}
 	defer mapper.Close()
@@ -2168,7 +2197,7 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 }
 
 func (t *storageShard) scan_order(access scanAccess, conditionCols []string, condition scm.Scmer, acceptCols []string, accept scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
-	initializedColumns := t.initializedColumnInput(currentTx)
+	initializedColumns := t.initializedColumnInput(access.columnInput)
 	result = new(shardqueue)
 	complete := false
 	defer func() {
@@ -2245,8 +2274,8 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 				conditionGetters[i] = getter
 				continue
 			}
-			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned, t.t)
+			ccols[i] = t.getColumnStorageInput(k, skipShardReadLock, initializedColumns, currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned, t.t, access.columnInput)
 			defer ReleaseColumnReader(cReaders[i])
 			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
 			reader := ColumnReader(ccols[i])
@@ -2261,8 +2290,8 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 	aNeedsCachedReader := make([]bool, len(acceptCols))
 	aMultiFuncs := make([]scm.JITStorageGetValueMultiFunc, len(acceptCols))
 	for i, column := range acceptCols {
-		acols[i] = t.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
-		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx, false, ReadAuto|readOperatorOwned, t.t)
+		acols[i] = t.getColumnStorageInput(column, skipShardReadLock, initializedColumns, currentTx)
+		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx, false, ReadAuto|readOperatorOwned, t.t, access.columnInput)
 		defer ReleaseColumnReader(aReaders[i])
 		aNeedsCachedReader[i] = columnReaderRequiresBinding(acols[i], aReaders[i])
 		reader := ColumnReader(acols[i])
@@ -2524,7 +2553,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 		}
 		if scol.IsString() {
 			colname := scol.String()
-			reader := t.ColumnReaderTx(currentTx, colname, false, sortReadHints)
+			reader := t.ColumnReaderTx(currentTx, colname, false, sortReadHints, access.columnInput)
 			result.sortReaders = append(result.sortReaders, reader)
 			result.scols[i] = reader.GetValue
 			continue
@@ -2551,7 +2580,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 					txValue := txContextScmer(currentTx)
 					largs[j] = func(uint32) scm.Scmer { return txValue }
 				} else {
-					reader := t.ColumnReaderTx(currentTx, name, false, sortReadHints)
+					reader := t.ColumnReaderTx(currentTx, name, false, sortReadHints, access.columnInput)
 					result.sortReaders = append(result.sortReaders, reader)
 					largs[j] = reader.GetValue
 				}

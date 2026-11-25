@@ -209,6 +209,7 @@ func orderedPrefixBounds(original scanAccess, prefix *orderedPrefixAccess) scanA
 	bounds.producerInput = original.producerInput
 	bounds.ensureRuntime().prefixMerge = prefix
 	bounds.feedback = original.feedback
+	bounds.columnInput = original.columnInput
 	return bounds
 }
 
@@ -419,7 +420,7 @@ func (s *StorageIndex) projectPrefixCandidates(tx *TxContext, bounds scanAccess,
 		return false
 	}
 	prefix := bounds.runtime.prefixMerge
-	part := s.t.projectJoinKeysPart(tx, []string{prefix.column}, prefix.keys, SessionStateFromTx(tx), true, true)
+	part := s.t.projectJoinKeysPart(tx, []string{prefix.column}, prefix.keys, SessionStateFromTx(tx), true, true, bounds.columnInput)
 	count := 0
 	stopped := false
 	part.forEachID(func(id uint32) bool {

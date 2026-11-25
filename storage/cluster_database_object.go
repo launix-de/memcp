@@ -46,10 +46,12 @@ func (database *database) executeClusterRequest(ctx context.Context, call scm.Cl
 		if tbl == nil || tbl.isEphemeralQueryTable() {
 			return nil, fmt.Errorf("unknown or ephemeral remote table")
 		}
+		_, columnInput, finishData := tbl.readDataContext(nil)
+		defer finishData()
 		result := make(remoteScanDescription, 0)
 		var scanErr any
 		var mu sync.Mutex
-		done := tbl.iterateShardsParallel(nil, scanAccess{}, nil, func(shard *storageShard, _ bool, failure any) {
+		done := tbl.iterateShardsParallel(nil, scanAccess{columnInput: columnInput}, nil, func(shard *storageShard, _ bool, failure any) {
 			if failure != nil {
 				mu.Lock()
 				scanErr = failure

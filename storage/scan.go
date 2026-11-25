@@ -1448,7 +1448,7 @@ func (t *table) scanExists(currentTx *TxContext, accessSchema scm.Scmer, accessV
 }
 
 func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer) bool {
-	currentTx, finishData := t.readDataContext(currentTx)
+	currentTx, columnInput, finishData := t.readDataContext(currentTx)
 	defer finishData()
 
 	ss := SessionStateFromTx(currentTx)
@@ -1462,6 +1462,7 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchem
 	if access.impossible() {
 		return false
 	}
+	access.columnInput = columnInput
 	executionAccess := access
 	for i := 0; i < executionAccess.len(); i++ {
 		t.AddPartitioningScore([]string{executionAccess.boundaryColumn(i)}, executionAccess.boundaryAnalyzer(i) != EqualMatcher)
@@ -1604,13 +1605,26 @@ func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology
 
 func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSchema scm.Scmer, accessValues []scm.Scmer, requiredAccess scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
 	var finishData func()
+	defer func() {
+		if finishData != nil {
+			finishData()
+		}
+	}()
+	var columnInput *nativeTableInput
 	if scanMutates(callbackCols) {
 		currentTx, finishData = t.writeDataContext(currentTx)
+		topology := t.pinActiveTopology()
+		defer topology.releaseOperation()
+		columnInput = t.bindColumnInput(currentTx)
+		columnInput.topology = topology
 	} else {
-		currentTx, finishData = t.readDataContext(currentTx)
+		currentTx, columnInput, finishData = t.readDataContext(currentTx)
 	}
-	defer finishData()
 
+	return t.scanWithBatchInput(currentTx, source, accessSchema, accessValues, requiredAccess, conditionCols, condition, callbackCols, mapReduce, neutral, combine, isOuter, stride, batchdata, columnInput)
+}
+
+func (t *table) scanWithBatchInput(currentTx *TxContext, source *recSet, accessSchema scm.Scmer, accessValues []scm.Scmer, requiredAccess scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer, columnInput *nativeTableInput) scm.Scmer {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	hasMutationCallback := false
@@ -1648,6 +1662,7 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	if !compiled {
 		panic("scan received an invalid compiled access schema")
 	}
+	access.columnInput = columnInput
 	access.producerInput = requiredAccess.producerInput
 	if requiredAccess.runtime != nil && requiredAccess.runtime.initializer != nil {
 		access.ensureRuntime().initializer = requiredAccess.runtime.initializer
@@ -2083,7 +2098,7 @@ func (t *storageShard) filterVisibleBatchedScanBatch(batch []uint32, batchIDs []
 }
 
 func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) (uint32, bool) {
-	initializedColumns := t.initializedColumnInput(currentTx)
+	initializedColumns := t.initializedColumnInput(access.columnInput)
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
@@ -2122,8 +2137,8 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 				}
 				continue
 			}
-			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto|readOperatorOwned, t.t)
+			ccols[i] = t.getColumnStorageInput(k, skipShardReadLock, initializedColumns, currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto|readOperatorOwned, t.t, access.columnInput)
 			defer ReleaseColumnReader(cReaders[i])
 			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
 		}
@@ -2246,7 +2261,7 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 }
 
 func (t *storageShard) scan(access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, writeAcquired bool) (scm.Scmer, int64, int64) {
-	initializedColumns := t.initializedColumnInput(currentTx)
+	initializedColumns := t.initializedColumnInput(access.columnInput)
 	if scanMutates(callbackCols) && !writeAcquired {
 		writeAccess := t.GetWrite(currentTx)
 		defer writeAccess.Release()
@@ -2287,7 +2302,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	conditionProgram, conditionAlwaysTrue := prepareScanCondition(conditionCols, condition, access, hasMutationCallback)
 
 	// Ensure shard is loaded from disk before accessing columns.
-	// ensureLoaded() must run before getColumnStorageOrPanic so that COLD
+	// ensureLoaded() must run before getColumnStorageInput so that COLD
 	// shards have their column map populated by load(t) first.
 	// ensureMainCount then loads at least one column to initialize main_count.
 	t.ensureLoaded()
@@ -2297,10 +2312,10 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	// caller's stack and inspect the two existing column slices directly, so the
 	// correctness preflight below adds no heap work to an ordinary scan.
 	var orderedProxies []*StorageComputeProxy
-	if t.hasOrderedScanProxy(conditionCols, currentTx) || t.hasOrderedScanProxy(callbackCols, currentTx) {
+	if t.hasOrderedScanProxy(conditionCols, currentTx, initializedColumns) || t.hasOrderedScanProxy(callbackCols, currentTx, initializedColumns) {
 		var orderedProxyStorage [4]*StorageComputeProxy
-		orderedProxies = t.appendOrderedScanProxies(orderedProxyStorage[:0], conditionCols, currentTx)
-		orderedProxies = t.appendOrderedScanProxies(orderedProxies, callbackCols, currentTx)
+		orderedProxies = t.appendOrderedScanProxies(orderedProxyStorage[:0], conditionCols, currentTx, initializedColumns)
+		orderedProxies = t.appendOrderedScanProxies(orderedProxies, callbackCols, currentTx, initializedColumns)
 	}
 	prepareOrdered := func() {
 		if len(orderedProxies) == 0 {
@@ -2323,7 +2338,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		for _, proxy := range orderedProxies {
 			for _, id := range recids {
 				if !proxy.validMask.AtomicGet(uint(id)) {
-					proxy.GetValue(id)
+					proxy.valueFromInput(currentTx, id, false, ReadAuto, access.columnInput)
 				}
 			}
 		}
@@ -2406,8 +2421,8 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 				conditionGetters[i] = getter
 				continue
 			}
-			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned, t.t)
+			ccols[i] = t.getColumnStorageInput(k, skipShardReadLock, initializedColumns, currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned, t.t, access.columnInput)
 			defer ReleaseColumnReader(cReaders[i])
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
@@ -2431,9 +2446,9 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		mapperWorkspace := acquireShardMapReducerWorkspace()
 		defer releaseShardMapReducerWorkspace(mapperWorkspace)
 		prepareReadMapReducerStorage(&mapperStorage, mapperWorkspace, len(callbackCols))
-		t.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, skipShardReadLock, currentTx)
+		t.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, skipShardReadLock, currentTx, access.columnInput)
 	} else {
-		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, 0, nil, currentTx)
+		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, 0, nil, currentTx, access.columnInput)
 	}
 	mapper.uniqueGuard = mutationGuard
 	mapper.exactUpdate = mapper.exactUpdate || access.producerInput.exactUpdateFor(t.t, currentTx)
@@ -2625,7 +2640,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 // shard read or write lock. The caller supplies stack capacity for the normal
 // case; linear deduplication is cheaper than allocating a map for a handful of
 // projected columns.
-func (t *storageShard) appendOrderedScanProxies(result []*StorageComputeProxy, cols []string, currentTx *TxContext) []*StorageComputeProxy {
+func (t *storageShard) appendOrderedScanProxies(result []*StorageComputeProxy, cols []string, currentTx *TxContext, initializedColumns *nativeColumnInitialInput) []*StorageComputeProxy {
 	for _, col := range cols {
 		if col == "$recset_contains" || col == "$recmap_call" || col == "$record_ref" || col == "$update" || col == "$break" ||
 			strings.HasPrefix(col, "NEW.") || strings.HasPrefix(col, "$invalidate:") ||
@@ -2635,7 +2650,7 @@ func (t *storageShard) appendOrderedScanProxies(result []*StorageComputeProxy, c
 		if _, ok := parseBatchPseudoColName(col); ok {
 			continue
 		}
-		proxy, ok := t.getColumnStorageOrPanic(col, false, currentTx).(*StorageComputeProxy)
+		proxy, ok := t.getColumnStorageInput(col, false, initializedColumns, currentTx).(*StorageComputeProxy)
 		if !ok || !proxy.isOrdered {
 			continue
 		}
@@ -2657,7 +2672,7 @@ func (t *storageShard) appendOrderedScanProxies(result []*StorageComputeProxy, c
 // hasOrderedScanProxy keeps the overwhelmingly common non-ORC path free of
 // proxy-list storage. It deliberately performs only the same stable column
 // lookup appendOrderedScanProxies would perform; ORC scans pay the second pass.
-func (t *storageShard) hasOrderedScanProxy(cols []string, currentTx *TxContext) bool {
+func (t *storageShard) hasOrderedScanProxy(cols []string, currentTx *TxContext, initializedColumns *nativeColumnInitialInput) bool {
 	if !t.t.hasOrderedColumns.Load() {
 		return false
 	}
@@ -2670,7 +2685,7 @@ func (t *storageShard) hasOrderedScanProxy(cols []string, currentTx *TxContext) 
 		if _, ok := parseBatchPseudoColName(col); ok {
 			continue
 		}
-		proxy, ok := t.getColumnStorageOrPanic(col, false, currentTx).(*StorageComputeProxy)
+		proxy, ok := t.getColumnStorageInput(col, false, initializedColumns, currentTx).(*StorageComputeProxy)
 		if ok && proxy.isOrdered {
 			return true
 		}
@@ -2679,7 +2694,7 @@ func (t *storageShard) hasOrderedScanProxy(cols []string, currentTx *TxContext) 
 }
 
 func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, mutationGuard *uniqueWriteGuard) (scm.Scmer, int64, int64) {
-	initializedColumns := t.initializedColumnInput(currentTx)
+	initializedColumns := t.initializedColumnInput(access.columnInput)
 	akkumulator := scm.ApplyOnce(neutral, nil)
 	var outCount int64
 	var candidateCount int64
@@ -2755,8 +2770,8 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 				conditionBatchSubidx[i] = subidx + 1
 				continue
 			}
-			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned, t.t)
+			ccols[i] = t.getColumnStorageInput(k, skipShardReadLock, initializedColumns, currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned, t.t, access.columnInput)
 			defer ReleaseColumnReader(cReaders[i])
 			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
 		}
@@ -2769,9 +2784,9 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 		mapperWorkspace := acquireShardMapReducerWorkspace()
 		defer releaseShardMapReducerWorkspace(mapperWorkspace)
 		prepareReadMapReducerStorage(&mapperStorage, mapperWorkspace, len(callbackCols))
-		t.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, skipShardReadLock, currentTx)
+		t.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, skipShardReadLock, currentTx, access.columnInput)
 	} else {
-		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, stride, batchdata, currentTx)
+		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, stride, batchdata, currentTx, access.columnInput)
 	}
 	mapper.uniqueGuard = mutationGuard
 	mapper.exactUpdate = mapper.exactUpdate || access.producerInput.exactUpdateFor(t.t, currentTx)
@@ -2814,6 +2829,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 		}
 		currentBoundaries := access.withBatch(stride, batchdata, batchid)
 
+		currentBoundaries.columnInput = access.columnInput
 		t.iterateIndex(currentTx, currentBoundaries, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 			candidateCount += int64(len(batch))
 			outN := t.filterVisibleBatchedScanBatch(batch, batchBuf[:], uint32(batchid), visibleUpper, hasMutationCallback, currentTx, mutationSeen)

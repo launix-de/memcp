@@ -129,7 +129,7 @@ func (f ColumnReaderFunc) GetValueRange(recid uint32, count uint32, target []scm
 // the legacy GetCachedReader path. The boolean records an already-held shard
 // lock and must propagate when binding computed-column dependencies.
 type TxColumnReaderProvider interface {
-	GetCachedReaderTx(*TxContext, bool, ColumnReadHints) ColumnReader
+	GetCachedReaderTx(*TxContext, bool, ColumnReadHints, *nativeTableInput) ColumnReader
 }
 
 func scmerToTxContext(v scm.Scmer) *TxContext {
@@ -1335,7 +1335,7 @@ func Init(en scm.Env) {
 				}
 				return scm.NewNil()
 			}
-			currentTx, finishData := t.readDataContext(currentTx)
+			currentTx, columnInput, finishData := t.readDataContext(currentTx)
 			defer finishData()
 			conditionCols := scmerSliceToStrings(mustScmerSlice(a[4], "condition columns"))
 			condition := a[5]
@@ -1343,9 +1343,7 @@ func Init(en scm.Env) {
 			if limit <= 0 {
 				limit = 1024
 			}
-			topology := t.pinActiveTopology()
-			defer topology.releaseOperation()
-			shards := topology.shards
+			shards := columnInput.topology.shards
 			if len(shards) == 0 || input == 0 {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewInt(0)}),
@@ -1374,7 +1372,7 @@ func Init(en scm.Env) {
 					release := shard.GetRead(currentTx, false)
 					shard = release.shard
 					defer release.Release()
-					return shard.EstimateFilteredRows(conditionCols, condition, limit, currentTx, accessSchema, accessValues)
+					return shard.EstimateFilteredRows(conditionCols, condition, limit, currentTx, accessSchema, accessValues, columnInput)
 				}()
 				if estimate.examined == 0 {
 					continue

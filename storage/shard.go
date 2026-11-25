@@ -893,9 +893,11 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool, cu
 // deadlock that occurs when a concurrent writer is waiting for mu.Lock()
 // (Go's write-preferring RWMutex queues new readers behind pending writers).
 // Panics if the column is missing or not yet loaded from disk.
-func (u *storageShard) getColumnStorageRLocked(colName string, tx *TxContext) ColumnStorage {
-	if storage := u.pendingAppendedStorage(tx, colName); storage != nil {
-		return storage
+func (u *storageShard) getColumnStorageRLocked(colName string, input *nativeColumnInitialInput) ColumnStorage {
+	if input != nil {
+		if value, ok := input.fields[colName]; ok {
+			return value.main
+		}
 	}
 	cs, present := u.columns[colName]
 	if !present {
@@ -907,11 +909,14 @@ func (u *storageShard) getColumnStorageRLocked(colName string, tx *TxContext) Co
 	return cs
 }
 
-// getColumnStorageOrPanic returns a stable column storage. Callers must state
+// getColumnStorageInput returns a stable column storage from captured initialization.
+// currentTx retains only the existing cold-load cancellation context. Callers state
 // whether they already hold u.mu; lock ownership is never inferred implicitly.
-func (u *storageShard) getColumnStorageOrPanic(colName string, alreadyLocked bool, currentTx *TxContext) ColumnStorage {
-	if storage := u.pendingAppendedStorage(currentTx, colName); storage != nil {
-		return storage
+func (u *storageShard) getColumnStorageInput(colName string, alreadyLocked bool, input *nativeColumnInitialInput, currentTx *TxContext) ColumnStorage {
+	if input != nil {
+		if value, ok := input.fields[colName]; ok {
+			return value.main
+		}
 	}
 	if alreadyLocked {
 		cs, present := u.columns[colName]
@@ -1549,7 +1554,7 @@ func (t *storageShard) hasWriteOwnerForTx(currentTx *TxContext) bool {
 // rowValueByRecidLocked reads a column value for a recid. Caller must hold t.mu.
 func (t *storageShard) rowValueByRecidLocked(recid uint32, col string, tx *TxContext, initial *nativeColumnInitialInput) scm.Scmer {
 	if recid < t.main_count {
-		cs := t.getColumnStorageInput(col, true, initial)
+		cs := t.getColumnStorageInput(col, true, initial, tx)
 		return cs.GetValue(recid)
 	}
 	return t.getDeltaInput(int(recid-t.main_count), col, initial)
@@ -1597,7 +1602,7 @@ func (t *storageShard) resolveVisiblePrimaryRecidLocked(staleRecid uint32, input
 func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocked bool, currentTx *TxContext, uniqueGuard *uniqueWriteGuard) func(...scm.Scmer) scm.Scmer {
 	input := currentTx.mutationInputFor(t.t)
 	declarations := mutationColumns(t.t, currentTx, input)
-	initializedColumns := t.initializedColumnInput(currentTx)
+	initializedColumns := t.initializedColumnInput(t.t.bindColumnInput(currentTx))
 	var eventWriter *nativeMutationEventWriter
 	var assignments nativeMutationAssignments
 	exactUpdate := false
@@ -1871,7 +1876,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						continue
 					}
 					k := colDesc.Name
-					cs := t.getColumnStorageInput(k, true, initializedColumns)
+					cs := t.getColumnStorageInput(k, true, initializedColumns, currentTx)
 					colidx, ok := t.deltaColumns[k]
 					if !ok {
 						colidx = len(t.deltaColumns)
@@ -2207,7 +2212,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 							row[i] = scm.NewNil()
 							continue
 						}
-						cs := t.getColumnStorageInput(col.Name, true, initializedColumns)
+						cs := t.getColumnStorageInput(col.Name, true, initializedColumns, currentTx)
 						if idx < t.main_count {
 							row[i] = cs.GetValue(idx)
 						} else {
@@ -2610,20 +2615,21 @@ func (r *shardColumnReader) GetValueRange(start, count uint32, target []scm.Scme
 
 func (r *shardColumnReader) release() { ReleaseColumnReader(r.main) }
 
-func (t *storageShard) ColumnReaderTx(tx *TxContext, col string, alreadyLocked bool, hints ColumnReadHints) ColumnReader {
+func (t *storageShard) ColumnReaderTx(tx *TxContext, col string, alreadyLocked bool, hints ColumnReadHints, columnInput *nativeTableInput) ColumnReader {
 	// Computed readers recursively bind their input columns. A mutation scan
 	// initializes them while holding this shard's write lock, recorded explicitly
 	// on the transaction, so re-entering the RWMutex here would self-deadlock.
+	initializedColumns := t.initializedColumnInput(columnInput)
 	writeLocked := tx != nil && tx.HasShardWrite(t)
 	var cstorage ColumnStorage
 	if alreadyLocked && !writeLocked {
-		cstorage = t.getColumnStorageRLocked(col, tx)
+		cstorage = t.getColumnStorageRLocked(col, initializedColumns)
 	} else {
-		cstorage = t.getColumnStorageOrPanic(col, writeLocked, tx)
+		cstorage = t.getColumnStorageInput(col, writeLocked, initializedColumns, tx)
 	}
-	reader := newCachedColumnReaderTx(cstorage, tx, alreadyLocked || writeLocked, hints, t.t)
+	reader := newCachedColumnReaderTx(cstorage, tx, alreadyLocked || writeLocked, hints, t.t, columnInput)
 	_, computed := cstorage.(*StorageComputeProxy)
-	return &shardColumnReader{shard: t, main: reader, column: col, computed: computed, input: t.initializedColumnInput(tx)}
+	return &shardColumnReader{shard: t, main: reader, column: col, computed: computed, input: initializedColumns}
 }
 
 // breakSentinel is the panic value injected by $break pseudo-column closures.
@@ -2714,6 +2720,7 @@ type ShardMapReducer struct {
 	assignments       nativeMutationAssignments
 	mutationInput     *nativeMutationInput
 	columnInput       *nativeColumnInitialInput
+	readInput         *nativeTableInput
 	mutationColumns   []*column            // one effective declaration contract per native input
 	exactUpdate       bool                 // bound once from the actual admitted mutation event
 	dataInputReleases []func()             // operator-owned target data views, never row-owned leases
@@ -2785,8 +2792,9 @@ func prepareMapReducerCallFrame(mr *ShardMapReducer) {
 
 // initReadMapReducer initializes an ordinary read-only mapper without the
 // per-column closures required by pseudo-column and mutation scans.
-func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, currentTx *TxContext) {
-	mr.columnInput = t.initializedColumnInput(currentTx)
+func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, currentTx *TxContext, columnInput *nativeTableInput) {
+	mr.readInput = columnInput
+	mr.columnInput = t.initializedColumnInput(columnInput)
 	mr.shard = t
 	mr.currentTx = currentTx
 	mr.mutationInput = currentTx.mutationInputFor(t.t)
@@ -2802,8 +2810,8 @@ func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, ma
 	mr.mainValuesCompiled = true
 
 	for i, colName := range cols {
-		mainCol := t.getColumnStorageOrPanic(colName, alreadyLocked, currentTx)
-		mainReader := newCachedColumnReaderTx(mainCol, currentTx, false, ReadAuto|readOperatorOwned, t.t)
+		mainCol := t.getColumnStorageInput(colName, alreadyLocked, mr.columnInput, currentTx)
+		mainReader := newCachedColumnReaderTx(mainCol, currentTx, false, ReadAuto|readOperatorOwned, t.t, columnInput)
 		mr.mainCols[i] = mainCol
 		mr.mainBulkReaders[i] = mainReader
 		mr.mainValueFuncs[i] = compiledColumnGetValue(mainReader)
@@ -2815,7 +2823,7 @@ func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, ma
 	if mr.hasUpdateCol && activeReplication(t.t.schema) == nil {
 		for _, constraint := range mutationUniqueKeys(t.t, mr.mutationInput) {
 			for _, column := range constraint.Cols {
-				t.getColumnStorageOrPanic(column, alreadyLocked, currentTx)
+				t.getColumnStorageInput(column, alreadyLocked, mr.columnInput, currentTx)
 			}
 		}
 	}
@@ -2967,9 +2975,10 @@ func (m *ShardMapReducer) callMutationMapper(body func() scm.Scmer) scm.Scmer {
 
 // initMapReducer initializes the general mapper, including pseudo-columns and
 // mutation metadata. Retained operators allocate it through OpenMapReducer.
-func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext) {
+func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext, columnInput *nativeTableInput) {
 	*mr = ShardMapReducer{
-		columnInput:      t.initializedColumnInput(currentTx),
+		readInput:        columnInput,
+		columnInput:      t.initializedColumnInput(columnInput),
 		shard:            t,
 		currentTx:        currentTx,
 		mutationInput:    currentTx.mutationInputFor(t.t),
@@ -3062,7 +3071,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			continue
 		}
 		if len(col) > 12 && col[:12] == "$orc_stored:" {
-			proxy, ok := t.getColumnStorageOrPanic(col[12:], alreadyLocked, currentTx).(*StorageComputeProxy)
+			proxy, ok := t.getColumnStorageInput(col[12:], alreadyLocked, mr.columnInput, currentTx).(*StorageComputeProxy)
 			if !ok || !proxy.isOrdered {
 				panic("$orc_stored requires an ordered computed column")
 			}
@@ -3085,7 +3094,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 		} else if len(col) > 12 && col[:12] == "$invalidate:" {
 			mr.isInvalidate[i] = true
 			cacheColName := col[12:]
-			cs := t.getColumnStorageOrPanic(cacheColName, alreadyLocked, currentTx)
+			cs := t.getColumnStorageInput(cacheColName, alreadyLocked, mr.columnInput, currentTx)
 			if proxy, ok := cs.(*StorageComputeProxy); ok {
 				mr.invalidateProxy[i] = proxy
 			}
@@ -3093,7 +3102,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			mr.isIncrement[i] = true
 			mr.hasIncrementCol = true
 			cacheColName := col[11:]
-			cs := t.getColumnStorageOrPanic(cacheColName, alreadyLocked, currentTx)
+			cs := t.getColumnStorageInput(cacheColName, alreadyLocked, mr.columnInput, currentTx)
 			if proxy, ok := cs.(*StorageComputeProxy); ok {
 				mr.incrementProxy[i] = proxy
 			}
@@ -3101,7 +3110,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			mr.isSet[i] = true
 			mr.hasSetCol = true
 			cacheColName := col[5:]
-			cs := t.getColumnStorageOrPanic(cacheColName, alreadyLocked, currentTx)
+			cs := t.getColumnStorageInput(cacheColName, alreadyLocked, mr.columnInput, currentTx)
 			if proxy, ok := cs.(*StorageComputeProxy); ok {
 				mr.setProxy[i] = proxy
 			}
@@ -3109,7 +3118,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			mr.isBreak[i] = true
 			mr.hasBreakCol = true
 		} else {
-			mr.mainCols[i] = t.getColumnStorageOrPanic(col, alreadyLocked, currentTx)
+			mr.mainCols[i] = t.getColumnStorageInput(col, alreadyLocked, mr.columnInput, currentTx)
 		}
 	}
 	if mr.hasUpdateCol && currentTx != nil && currentTx.mutationOperation != nil {
@@ -3259,7 +3268,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 			continue
 		}
 		mainCol := mr.mainCols[i]
-		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx, false, ReadAuto|readOperatorOwned, t.t)
+		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx, false, ReadAuto|readOperatorOwned, t.t, mr.readInput)
 		mr.mainBulkReaders[i] = mainReader
 		mr.mainMultiFuncs[i] = compiledColumnGetValueMulti(mainReader)
 		colName := mr.colNames[i]
@@ -3281,17 +3290,17 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 
 // OpenMapReducer creates a retained MapReducer for operators whose mapper
 // outlives one synchronous shard call.
-func (t *storageShard) OpenMapReducer(cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext) *ShardMapReducer {
+func (t *storageShard) OpenMapReducer(cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext, columnInput *nativeTableInput) *ShardMapReducer {
 	mr := new(ShardMapReducer)
-	t.initMapReducer(mr, cols, mapReduceFn, alreadyLocked, stride, batchdata, currentTx)
+	t.initMapReducer(mr, cols, mapReduceFn, alreadyLocked, stride, batchdata, currentTx, columnInput)
 	return mr
 }
 
 // OpenMapper creates a retained mapper for materialization and predicates that
 // do not participate in a reduction.
-func (t *storageShard) OpenMapper(cols []string, mapFn scm.Scmer, alreadyLocked bool, currentTx *TxContext) *ShardMapReducer {
+func (t *storageShard) OpenMapper(cols []string, mapFn scm.Scmer, alreadyLocked bool, currentTx *TxContext, columnInput *nativeTableInput) *ShardMapReducer {
 	mr := new(ShardMapReducer)
-	t.initMapReducer(mr, cols, scm.NewNil(), alreadyLocked, 0, nil, currentTx)
+	t.initMapReducer(mr, cols, scm.NewNil(), alreadyLocked, 0, nil, currentTx, columnInput)
 	mr.mapProgram = scm.PrepareSerialProc(mapFn)
 	return mr
 }
@@ -3312,7 +3321,7 @@ func (m *ShardMapReducer) prepareProjectionReaders(rows int) {
 		if _, ready := m.mainBulkReaders[i].(interface{ release() }); ready {
 			continue
 		}
-		reader := newCachedColumnReaderTx(col, m.currentTx, false, ReadDecoded, m.shard.t)
+		reader := newCachedColumnReaderTx(col, m.currentTx, false, ReadDecoded, m.shard.t, m.readInput)
 		m.mainBulkReaders[i] = reader
 		if i < len(m.mainValueFuncs) {
 			m.mainValueFuncs[i] = compiledColumnGetValue(reader)
@@ -3896,6 +3905,8 @@ func (m *ShardMapReducer) Close() {
 		mapReducerBulkBufferPools[width-1].Put(m.mainBulkBuffer)
 		m.mainBulkBuffer = nil
 	}
+	m.readInput = nil
+	m.columnInput = nil
 	m.bufferReduceFn = nil
 	m.bufferReduceProc = nil
 	m.bufferValueTypes = nil
@@ -4456,7 +4467,9 @@ func releaseUniqueLookupScratch(scratch *uniqueLookupScratch, columns int) {
 }
 
 func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxContext, checkReservations bool, exclude *recMapTarget) (result uint32, present bool) {
-	initializedColumns := t.initializedColumnInput(currentTx)
+	columnInput := t.t.bindColumnInput(currentTx)
+	access.columnInput = columnInput
+	initializedColumns := t.initializedColumnInput(columnInput)
 	access = t.t.uniqueAccess(access)
 	columns := access.len()
 	scratch := acquireUniqueLookupScratch()
@@ -4503,7 +4516,7 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 		t.mu.RUnlock()
 		t.ensureMainCount(false, currentTx)
 		for i := range mcols {
-			mcols[i] = t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx)
+			mcols[i] = t.getColumnStorageInput(access.boundaryColumn(i), false, initializedColumns, currentTx)
 		}
 		t.mu.RLock()
 	}
@@ -4594,8 +4607,8 @@ type filteredRowEstimate struct {
 	coverage   string
 }
 
-func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition scm.Scmer, limit int, currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer) filteredRowEstimate {
-	initializedColumns := t.initializedColumnInput(currentTx)
+func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition scm.Scmer, limit int, currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, columnInput *nativeTableInput) filteredRowEstimate {
+	initializedColumns := t.initializedColumnInput(columnInput)
 	if limit <= 0 {
 		limit = 1024
 	}
@@ -4604,6 +4617,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	ccols := make([]ColumnStorage, len(conditionCols))
 	conditionGetters := make([]mapArgGetter, len(conditionCols))
 	bounds, compiled := scanAccessFromScheme(accessSchema, accessValues, nil)
+	bounds.columnInput = columnInput
 	if !compiled {
 		panic("scan_selectivity_estimate received an invalid compiled access schema")
 	}
@@ -4623,7 +4637,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 			}
 			continue
 		}
-		ccols[i] = t.getColumnStorageOrPanic(col, false, currentTx)
+		ccols[i] = t.getColumnStorageInput(col, false, initializedColumns, currentTx)
 	}
 
 	conditionProgram := scm.PrepareSerialProc(condition)
@@ -4998,7 +5012,7 @@ func replayRebuiltRows(reader ColumnReader, mainRecids []uint32, mainMask []bool
 
 // rebuild main storage from main+delta
 func (t *storageShard) rebuild(all bool) *storageShard {
-	initializedColumns := t.initializedColumnInput(nil)
+	initializedColumns := t.initializedColumnInput(t.t.bindColumnInput(nil))
 	if cell := t.coherence.Load(); cell != nil && cell.engine != nil && cell.engine.cluster != nil && cell.resolved().ownstate.Phase() != mosi.M {
 		return t
 	}
@@ -5425,9 +5439,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				}
 				if allFound {
 					func() {
-						getters := idx.buildGetters(nil, nil)
+						getters := idx.buildGetters(nil, nil, idx.t.t.bindColumnInput(nil))
 						defer releaseIndexGetters(getters)
-						idx.buildIndex(getters, nil)
+						idx.buildIndex(getters, nil, idx.t.t.bindColumnInput(nil))
 					}()
 					GlobalCache.AddItem(idx, int64(idx.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
 				}

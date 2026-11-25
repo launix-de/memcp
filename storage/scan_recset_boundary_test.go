@@ -84,7 +84,11 @@ func buildRankOrderIndex(t *testing.T, tbl *table) func(...scm.Scmer) scm.Scmer 
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	var buf [8]uint32
-	shard.iterateIndexForce(nil, runtimeScanAccess(bounds), len(shard.deltaRows()), buf[:], false,
+	_, columnInput101, finishColumnInput101 := shard.t.readDataContext(nil)
+	defer finishColumnInput101()
+	columnAccess101 := runtimeScanAccess(bounds)
+	columnAccess101.columnInput = columnInput101
+	shard.iterateIndexForce(nil, columnAccess101, len(shard.deltaRows()), buf[:], false,
 		func([]uint32) bool { return false })
 	return order
 }
@@ -96,7 +100,11 @@ func TestRecSetScanSourceAddsExactBoundary(t *testing.T) {
 		return scm.NewBool(values[0].Int() >= 100)
 	})
 	got := make([]int64, 0, 2)
-	source.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"id"},
+	_, columnInput1, finishColumnInput1 := source.t.readDataContext(scm.NewNil())
+	defer finishColumnInput1()
+	columnAccess1 := nil
+	columnAccess1.columnInput = columnInput1
+	source.scan(columnAccess1, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"id"},
 		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			got = append(got, values[1].Int())
 			return values[0]
@@ -121,7 +129,11 @@ func TestRepeatedUnorderedRecSetScanDoesNotBuildMembershipIndex(t *testing.T) {
 
 	for range 4 {
 		got := make([]int64, 0, 2)
-		source.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"id"},
+		_, columnInput2, finishColumnInput2 := source.t.readDataContext(scm.NewNil())
+		defer finishColumnInput2()
+		columnAccess2 := nil
+		columnAccess2.columnInput = columnInput2
+		source.scan(columnAccess2, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, []string{"id"}, condition, []string{"id"},
 			scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 				got = append(got, values[1].Int())
 				return values[0]
@@ -327,7 +339,11 @@ func TestSparseRecSetFilterAppliesPrunedAccessBoundary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			filtered := source.filterToRecSet(nil, nil, trueCondition(), tc.schema, tc.values)
 			got := make([]int64, 0)
-			filtered.scan(nil, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueCondition(), []string{"id"},
+			_, columnInput3, finishColumnInput3 := filtered.t.readDataContext(scm.NewNil())
+			defer finishColumnInput3()
+			columnAccess3 := nil
+			columnAccess3.columnInput = columnInput3
+			filtered.scan(columnAccess3, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueCondition(), []string{"id"},
 				scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { got = append(got, values[1].Int()); return values[0] }), scm.NewNil(), scm.NewNil(), false, nil)
 			if !equalInt64s(got, tc.want) {
 				t.Fatalf("filtered rows = %v, want %v", got, tc.want)
@@ -347,7 +363,11 @@ func TestSparseOrderedRecSetAppliesNativeIndexRange(t *testing.T) {
 		shard.mu.RLock()
 		defer shard.mu.RUnlock()
 		var buffer [8]uint32
-		shard.iterateIndexForce(nil, access, len(shard.deltaRows()), buffer[:], false, func([]uint32) bool { return false })
+		_, columnInput102, finishColumnInput102 := shard.t.readDataContext(nil)
+		defer finishColumnInput102()
+		columnAccess102 := access
+		columnAccess102.columnInput = columnInput102
+		shard.iterateIndexForce(nil, columnAccess102, len(shard.deltaRows()), buffer[:], false, func([]uint32) bool { return false })
 		for _, index := range shard.Indexes {
 			if len(index.Cols) == 1 && index.Cols[0] == "id" {
 				index.storeSavings(8)

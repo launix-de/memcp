@@ -681,7 +681,7 @@ func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext, input *nativeMut
 		}
 	}
 	for _, column := range columns {
-		s.getColumnStorageOrPanic(column, false, tx)
+		s.getColumnStorageInput(column, false, s.initializedColumnInput(s.t.bindColumnInput(tx)), tx)
 	}
 	values := make([]scm.Scmer, len(columns))
 	read := func() bool {

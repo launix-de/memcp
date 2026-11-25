@@ -42,7 +42,7 @@ func TestGetColumnStorageOrPanicExAddsSchemaColumnWhenLocked(t *testing.T) {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	col := shard.getColumnStorageOrPanic("database", true, nil)
+	col := shard.getColumnStorageInput("database", true, shard.initializedColumnInput(shard.t.bindColumnInput(nil)), nil)
 	if col == nil {
 		t.Fatal("expected sparse storage for schema column missing from shard map")
 	}
@@ -75,7 +75,7 @@ func TestGetColumnStorageOrPanicUsesExplicitWriteOwnership(t *testing.T) {
 			tx.ExitShardWrite(shard)
 			shard.mu.Unlock()
 		}()
-		done <- shard.getColumnStorageOrPanic("username", true, tx)
+		done <- shard.getColumnStorageInput("username", true, shard.initializedColumnInput(shard.t.bindColumnInput(tx)), tx)
 	}()
 
 	select {

@@ -152,7 +152,7 @@ func TestColdShardLoadWaitObservesQueryCancellation(t *testing.T) {
 			// The cancelled attempt must leave the complete persisted generation readable.
 			var sum int64
 			for _, shard := range shards {
-				cs := shard.getColumnStorageOrPanic("id", false, nil)
+				cs := shard.getColumnStorageInput("id", false, shard.initializedColumnInput(shard.t.bindColumnInput(nil)), nil)
 				shard.mu.RLock()
 				for row := uint32(0); row < shard.main_count; row++ {
 					sum += cs.GetValue(row).Int()
@@ -269,7 +269,7 @@ func TestColdColumnLoadCancellationKeepsMutationAtomic(t *testing.T) {
 				t.Fatalf("column preflight failure = %v, want query killed", failure)
 			}
 		}()
-		shard.getColumnStorageOrPanic("payload", false, tx)
+		shard.getColumnStorageInput("payload", false, shard.initializedColumnInput(shard.t.bindColumnInput(tx)), tx)
 	}()
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
@@ -277,7 +277,7 @@ func TestColdColumnLoadCancellationKeepsMutationAtomic(t *testing.T) {
 		t.Fatal("cancelled column preflight published storage")
 	}
 	// An already entered mutation must finish even with a cancelled query.
-	cs := shard.getColumnStorageOrPanic("payload", true, tx)
+	cs := shard.getColumnStorageInput("payload", true, shard.initializedColumnInput(shard.t.bindColumnInput(tx)), tx)
 	if got := cs.GetValue(1).String(); got != "row-00000002" {
 		t.Fatalf("write-locked column load = %q, want row-00000002", got)
 	}
@@ -1053,7 +1053,7 @@ func TestShardRebuildUpdatePropagationUsesStableTranslation(t *testing.T) {
 	rebuilt.mu.RLock()
 	rowOneDeleted := rebuilt.deletions.Get(1)
 	rebuilt.mu.RUnlock()
-	got := rebuilt.ColumnReaderTx(nil, "payload", false, ReadAuto).GetValue(2)
+	got := rebuilt.ColumnReaderTx(nil, "payload", false, ReadAuto, rebuilt.t.bindColumnInput(nil)).GetValue(2)
 	if !rowOneDeleted || got.String() != "two-updated" {
 		t.Fatalf("rebuilt update state = (deleted=%v, payload=%v), want (true, two-updated)", rowOneDeleted, got)
 	}
@@ -2829,10 +2829,10 @@ func TestIndexComputedReadersRespectHeldShardLock(t *testing.T) {
 			}
 			done := make(chan []colGetter, 1)
 			go func() {
-				getters := index.buildGetters(nil, nil)
+				getters := index.buildGetters(nil, nil, index.t.t.bindColumnInput(nil))
 				// Sorting must keep the same lock capability while preparing its
 				// operator-specific reader and immutable boundary values.
-				index.buildIndex(getters, nil)
+				index.buildIndex(getters, nil, index.t.t.bindColumnInput(nil))
 				done <- getters
 			}()
 			var getters []colGetter
@@ -2903,7 +2903,11 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 				lower: scm.NewString("row-00000001"), lowerInclusive: true,
 				upper: scm.NewString("row-00000001"), upperInclusive: true,
 			}})
-			shard.ensureScanAccessColumns(access, false, nil)
+			_, columnInput101, finishColumnInput101 := shard.t.readDataContext(nil)
+			defer finishColumnInput101()
+			columnAccess101 := access
+			columnAccess101.columnInput = columnInput101
+			shard.ensureScanAccessColumns(columnAccess101, false, nil)
 			// The manual cleanup below exercises CacheManager-owned ledger
 			// internals. Pause/resume its existing worker, as other ownership
 			// tests do, so this test is the sole eviction caller.
@@ -2917,7 +2921,7 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 				shard.mu.RLock()
 				defer shard.mu.RUnlock()
 				index := &StorageIndex{t: shard, Cols: []string{"payload"}}
-				getters := index.buildGetters(nil, nil)
+				getters := index.buildGetters(nil, nil, index.t.t.bindColumnInput(nil))
 				defer releaseIndexGetters(getters)
 				if got := getters[0].get(0).String(); got != "row-00000001" {
 					t.Fatalf("prepared index value = %q", got)
@@ -2930,8 +2934,12 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 			}
 			if engine == Safe {
 				release = shard.GetRead(nil, false)
-				shard.ensureScanAccessColumns(access, false, nil)
-				if got := shard.ColumnReaderTx(nil, "payload", false, ReadAuto).GetValue(0).String(); got != "row-00000001" {
+				_, columnInput102, finishColumnInput102 := shard.t.readDataContext(nil)
+				defer finishColumnInput102()
+				columnAccess102 := access
+				columnAccess102.columnInput = columnInput102
+				shard.ensureScanAccessColumns(columnAccess102, false, nil)
+				if got := shard.ColumnReaderTx(nil, "payload", false, ReadAuto, shard.t.bindColumnInput(nil)).GetValue(0).String(); got != "row-00000001" {
 					t.Fatalf("durable value after eviction/reload = %q", got)
 				}
 			}
@@ -3009,7 +3017,7 @@ func TestNewShardRetainsComputedColumnDefinition(t *testing.T) {
 			shard.publishDeltaRows([][]scm.Scmer{{scm.NewInt(7)}, {scm.NewInt(11)}})
 			release := shard.GetRead(nil, false)
 			defer release.Release()
-			reader := shard.ColumnReaderTx(nil, "computed", false, ReadAuto).GetValue
+			reader := shard.ColumnReaderTx(nil, "computed", false, ReadAuto, shard.t.bindColumnInput(nil)).GetValue
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
 			for i, want := range []int{14, 22} {
@@ -3158,7 +3166,7 @@ func TestInsertReservationRetainsItsPreparedGeneration(t *testing.T) {
 	}
 	lease := shard.GetRead(nil, false)
 	defer lease.Release()
-	if got := shard.ColumnReaderTx(nil, "id", false, ReadCompressed).GetValue(1).Int(); got != 2 {
+	if got := shard.ColumnReaderTx(nil, "id", false, ReadCompressed, shard.t.bindColumnInput(nil)).GetValue(1).Int(); got != 2 {
 		t.Fatalf("reserved generation lost its persisted contents: %d", got)
 	}
 }

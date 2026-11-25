@@ -64,9 +64,6 @@ type scanLookupParallelMapState struct {
 }
 
 func executeCompiledScanLookup(t *table, currentTx *TxContext, schemaValue, valuesValue scm.Scmer) scm.Scmer {
-	currentTx, finishData := t.readDataContext(currentTx)
-	defer finishData()
-
 	schema := mustScmerSlice(schemaValue, "scan_lookup schema")
 	values := mustScmerSlice(valuesValue, "scan_lookup values")
 	meta := scanAccessSchemaMeta{}
@@ -162,9 +159,6 @@ func parseScanLookupPlanSlices(schema, values []scm.Scmer) scanLookupPlan {
 }
 
 func (t *table) executeScanLookup(currentTx *TxContext, plan scanLookupPlan) scm.Scmer {
-	currentTx, finishData := t.readDataContext(currentTx)
-	defer finishData()
-
 	matchCount := plan.access.len()
 	for i := 0; i < matchCount; i++ {
 		value := plan.access.boundValue(i, false)
@@ -290,8 +284,9 @@ func (t *table) scanLookupMap(currentTx *TxContext, access scanAccess, mapCols [
 }
 
 func (t *table) scanLookupMapOne(currentTx *TxContext, access scanAccess, mapCols []string) ([]scm.Scmer, int) {
-	currentTx, finishData := t.readDataContext(currentTx)
+	currentTx, columnInput, finishData := t.readDataContext(currentTx)
 	defer finishData()
+	access.columnInput = columnInput
 
 	if t.hasTableLock() {
 		t.waitTableLock(SessionStateFromTx(currentTx), querySeqFromTx(currentTx), false)
@@ -348,12 +343,12 @@ func (t *table) scanLookupMapOne(currentTx *TxContext, access scanAccess, mapCol
 }
 
 func (t *storageShard) scanLookupMapOne(access scanAccess, mapCols []string, currentTx *TxContext) ([]scm.Scmer, int) {
-	initializedColumns := t.initializedColumnInput(currentTx)
+	initializedColumns := t.initializedColumnInput(access.columnInput)
 	t.ensureLoaded()
 	t.ensureMainCount(false, currentTx)
 	lookupCol := access.boundaryColumn(0)
 	lookupValue := access.boundValue(0, false)
-	lookupReader := newCachedColumnReaderTx(t.getColumnStorageOrPanic(lookupCol, false, currentTx), currentTx, false, ReadAuto, t.t)
+	lookupReader := newCachedColumnReaderTx(t.getColumnStorageInput(lookupCol, false, initializedColumns, currentTx), currentTx, false, ReadAuto, t.t, access.columnInput)
 	lookupGetValue := compiledColumnGetValue(lookupReader)
 	var fixedMapReaders [8]scanLookupMapReader
 	mapReaders := fixedMapReaders[:]
@@ -362,7 +357,7 @@ func (t *storageShard) scanLookupMapOne(access scanAccess, mapCols []string, cur
 	} else {
 		mapReaders = make([]scanLookupMapReader, len(mapCols))
 	}
-	t.prepareScanLookupMapReaders(mapCols, mapReaders, currentTx)
+	t.prepareScanLookupMapReaders(mapCols, mapReaders, currentTx, access.columnInput)
 
 	var values []scm.Scmer
 	matches := 0
@@ -406,12 +401,12 @@ func (t *storageShard) scanLookupMapOne(access scanAccess, mapCols []string, cur
 	return values, matches
 }
 
-func (t *storageShard) prepareScanLookupMapReaders(mapCols []string, readers []scanLookupMapReader, currentTx *TxContext) {
-	input := t.initializedColumnInput(currentTx)
+func (t *storageShard) prepareScanLookupMapReaders(mapCols []string, readers []scanLookupMapReader, currentTx *TxContext, columnInput *nativeTableInput) {
+	input := t.initializedColumnInput(columnInput)
 	for i, col := range mapCols {
 		readers[i].input = input
-		storage := t.getColumnStorageOrPanic(col, false, currentTx)
-		readers[i].reader = newCachedColumnReaderTx(storage, currentTx, false, ReadAuto, t.t)
+		storage := t.getColumnStorageInput(col, false, input, currentTx)
+		readers[i].reader = newCachedColumnReaderTx(storage, currentTx, false, ReadAuto, t.t, columnInput)
 		readers[i].compiled = compiledColumnGetValue(readers[i].reader)
 		_, readers[i].computed = storage.(*StorageComputeProxy)
 	}
@@ -434,8 +429,9 @@ func (t *storageShard) scanLookupMapValues(recid, mainCount uint32, mapCols []st
 }
 
 func (t *table) scanLookupOne(currentTx *TxContext, access scanAccess, resultCol string, returnValue bool) scm.Scmer {
-	currentTx, finishData := t.readDataContext(currentTx)
+	currentTx, columnInput, finishData := t.readDataContext(currentTx)
 	defer finishData()
+	access.columnInput = columnInput
 
 	if t.hasTableLock() {
 		t.waitTableLock(SessionStateFromTx(currentTx), querySeqFromTx(currentTx), false)
@@ -511,20 +507,20 @@ func (t *table) scanLookupOne(currentTx *TxContext, access scanAccess, resultCol
 }
 
 func (t *storageShard) scanLookupOne(access scanAccess, resultCol string, returnValue bool, currentTx *TxContext) (scm.Scmer, int) {
-	initializedColumns := t.initializedColumnInput(currentTx)
+	initializedColumns := t.initializedColumnInput(access.columnInput)
 	t.ensureLoaded()
 	t.ensureMainCount(false, currentTx)
 	lookupCol := access.boundaryColumn(0)
 	lookupValue := access.boundValue(0, false)
-	lookupStorage := t.getColumnStorageOrPanic(lookupCol, false, currentTx)
-	lookupReader := newCachedColumnReaderTx(lookupStorage, currentTx, false, ReadAuto, t.t)
+	lookupStorage := t.getColumnStorageInput(lookupCol, false, initializedColumns, currentTx)
+	lookupReader := newCachedColumnReaderTx(lookupStorage, currentTx, false, ReadAuto, t.t, access.columnInput)
 	lookupGetValue := compiledColumnGetValue(lookupReader)
 	var resultReader ColumnReader
 	var resultGetValue scm.JITStorageGetValueFunc
 	resultComputed := false
 	if returnValue {
-		resultStorage := t.getColumnStorageOrPanic(resultCol, false, currentTx)
-		resultReader = newCachedColumnReaderTx(resultStorage, currentTx, false, ReadCompressed, nil)
+		resultStorage := t.getColumnStorageInput(resultCol, false, initializedColumns, currentTx)
+		resultReader = newCachedColumnReaderTx(resultStorage, currentTx, false, ReadCompressed, nil, access.columnInput)
 		resultGetValue = compiledColumnGetValue(resultReader)
 		_, resultComputed = resultStorage.(*StorageComputeProxy)
 	}
@@ -595,8 +591,9 @@ func scanLookupColumns(access scanAccess, inline []string) []string {
 }
 
 func (t *table) scanLookupMany(currentTx *TxContext, access scanAccess, resultCol string, returnValue bool) scm.Scmer {
-	currentTx, finishData := t.readDataContext(currentTx)
+	currentTx, columnInput, finishData := t.readDataContext(currentTx)
 	defer finishData()
+	access.columnInput = columnInput
 
 	if t.hasTableLock() {
 		t.waitTableLock(SessionStateFromTx(currentTx), querySeqFromTx(currentTx), false)
@@ -678,7 +675,7 @@ func (t *table) scanLookupMany(currentTx *TxContext, access scanAccess, resultCo
 }
 
 func (t *storageShard) scanLookupMany(access scanAccess, resultCol string, returnValue bool, currentTx *TxContext, stop *atomic.Bool) (scm.Scmer, int) {
-	initializedColumns := t.initializedColumnInput(currentTx)
+	initializedColumns := t.initializedColumnInput(access.columnInput)
 	t.ensureLoaded()
 	t.ensureMainCount(false, currentTx)
 	var fixedLookupReaders [8]scanLookupValueReader
@@ -689,13 +686,13 @@ func (t *storageShard) scanLookupMany(access scanAccess, resultCol string, retur
 		lookupReaders = make([]scanLookupValueReader, access.len())
 	}
 	for i := range lookupReaders {
-		lookupReaders[i] = newScanLookupValueReader(newCachedColumnReaderTx(t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx), currentTx, false, ReadAuto, t.t))
+		lookupReaders[i] = newScanLookupValueReader(newCachedColumnReaderTx(t.getColumnStorageInput(access.boundaryColumn(i), false, initializedColumns, currentTx), currentTx, false, ReadAuto, t.t, access.columnInput))
 	}
 	var resultReader scanLookupValueReader
 	resultComputed := false
 	if returnValue {
-		resultStorage := t.getColumnStorageOrPanic(resultCol, false, currentTx)
-		resultReader = newScanLookupValueReader(newCachedColumnReaderTx(resultStorage, currentTx, false, ReadCompressed, nil))
+		resultStorage := t.getColumnStorageInput(resultCol, false, initializedColumns, currentTx)
+		resultReader = newScanLookupValueReader(newCachedColumnReaderTx(resultStorage, currentTx, false, ReadCompressed, nil, access.columnInput))
 		_, resultComputed = resultStorage.(*StorageComputeProxy)
 	}
 
@@ -760,8 +757,9 @@ func (t *storageShard) scanLookupMany(access scanAccess, resultCol string, retur
 }
 
 func (t *table) scanLookupMapMany(currentTx *TxContext, access scanAccess, mapCols []string) ([]scm.Scmer, int) {
-	currentTx, finishData := t.readDataContext(currentTx)
+	currentTx, columnInput, finishData := t.readDataContext(currentTx)
 	defer finishData()
+	access.columnInput = columnInput
 
 	if t.hasTableLock() {
 		t.waitTableLock(SessionStateFromTx(currentTx), querySeqFromTx(currentTx), false)
@@ -823,7 +821,7 @@ func (t *table) scanLookupMapMany(currentTx *TxContext, access scanAccess, mapCo
 }
 
 func (t *storageShard) scanLookupMapMany(access scanAccess, mapCols []string, currentTx *TxContext, stop *atomic.Bool) ([]scm.Scmer, int) {
-	initializedColumns := t.initializedColumnInput(currentTx)
+	initializedColumns := t.initializedColumnInput(access.columnInput)
 	t.ensureLoaded()
 	t.ensureMainCount(false, currentTx)
 	var fixedLookupReaders [8]scanLookupValueReader
@@ -834,7 +832,7 @@ func (t *storageShard) scanLookupMapMany(access scanAccess, mapCols []string, cu
 		lookupReaders = make([]scanLookupValueReader, access.len())
 	}
 	for i := range lookupReaders {
-		lookupReaders[i] = newScanLookupValueReader(newCachedColumnReaderTx(t.getColumnStorageOrPanic(access.boundaryColumn(i), false, currentTx), currentTx, false, ReadAuto, t.t))
+		lookupReaders[i] = newScanLookupValueReader(newCachedColumnReaderTx(t.getColumnStorageInput(access.boundaryColumn(i), false, initializedColumns, currentTx), currentTx, false, ReadAuto, t.t, access.columnInput))
 	}
 	var fixedMapReaders [8]scanLookupMapReader
 	mapReaders := fixedMapReaders[:]
@@ -843,7 +841,7 @@ func (t *storageShard) scanLookupMapMany(access scanAccess, mapCols []string, cu
 	} else {
 		mapReaders = make([]scanLookupMapReader, len(mapCols))
 	}
-	t.prepareScanLookupMapReaders(mapCols, mapReaders, currentTx)
+	t.prepareScanLookupMapReaders(mapCols, mapReaders, currentTx, access.columnInput)
 
 	var values []scm.Scmer
 	matches := 0

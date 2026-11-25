@@ -1095,7 +1095,11 @@ func TestClusterMutationScanBorrowsAcquiredWriter(t *testing.T) {
 	done := make(chan any, 1)
 	go func() {
 		defer func() { done <- recover() }()
-		value, count, _ := shard.scan(scanAccess{}, nil, scm.NewBool(true), []string{"value", "$update"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		_, columnInput1, finishColumnInput1 := shard.t.readDataContext(nil)
+		defer finishColumnInput1()
+		columnAccess1 := scanAccess{}
+		columnAccess1.columnInput = columnInput1
+		value, count, _ := shard.scan(columnAccess1, nil, scm.NewBool(true), []string{"value", "$update"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 			if !cell.ownstate.Writing() {
 				panic("mutation callback lost M")
 			}
@@ -1172,7 +1176,7 @@ func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 	lease := shard.GetRead(nil, false)
 	defer lease.Release()
 	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true, nil)
-	reader := shard.ColumnReaderTx(nil, "value", false, ReadAuto)
+	reader := shard.ColumnReaderTx(nil, "value", false, ReadAuto, shard.t.bindColumnInput(nil))
 	defer ReleaseColumnReader(reader)
 	if !found || reader.GetValue(id).Int() != workers*repetitions {
 		t.Fatalf("native collision lost increments: found=%v value=%v", found, reader.GetValue(id))
@@ -1184,7 +1188,7 @@ func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 		t.Fatalf("reserved column setter affected %d rows", n)
 	}
 	id, found = shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true, nil)
-	updated := shard.ColumnReaderTx(nil, "value", false, ReadAuto)
+	updated := shard.ColumnReaderTx(nil, "value", false, ReadAuto, shard.t.bindColumnInput(nil))
 	defer ReleaseColumnReader(updated)
 	if !found || updated.GetValue(id).Int() != workers*repetitions+1 {
 		t.Fatal("reserved column setter lost its native effect")
@@ -1516,7 +1520,7 @@ func TestClusterLocalUniqueUpdaterCannotEscapeReservation(t *testing.T) {
 	lease := shard.GetRead(nil, false)
 	defer lease.Release()
 	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true, nil)
-	reader := shard.ColumnReaderTx(nil, "value", false, ReadAuto)
+	reader := shard.ColumnReaderTx(nil, "value", false, ReadAuto, shard.t.bindColumnInput(nil))
 	defer ReleaseColumnReader(reader)
 	if !found || reader.GetValue(id).Int() != 0 {
 		t.Fatal("expired updater changed visible data")
@@ -1605,7 +1609,7 @@ func TestClusterUniqueKeyChangeChecksAppendedLane(t *testing.T) {
 				lease := shard.GetRead(nil, false)
 				id, found := lease.shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true, nil)
 				if found {
-					reader := lease.shard.ColumnReaderTx(nil, "value", false, ReadAuto)
+					reader := lease.shard.ColumnReaderTx(nil, "value", false, ReadAuto, lease.shard.t.bindColumnInput(nil))
 					actual = reader.GetValue(id).Int()
 					ReleaseColumnReader(reader)
 				}

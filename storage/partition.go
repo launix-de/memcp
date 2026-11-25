@@ -300,22 +300,18 @@ func runSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shar
 // relevant-shard slice used by the fanout path, allowing concrete scan kernels
 // to execute without an escaping callback frame.
 func (t *table) pinSingleShardForScan(access scanAccess) (*tableShardTopology, *storageShard, bool) {
-	for {
-		topology := t.activeTopology()
-		shard, single := singleRelevantShard(topology.dimensions, access, topology.shards)
-		if !single {
-			return nil, nil, false
-		}
-		if !topology.acquireOperation() {
-			continue
-		}
-		shard.activeScanners.Add(1)
-		if t.topology.Load() == topology {
-			return topology, shard, true
-		}
-		shard.activeScanners.Add(-1)
-		topology.releaseOperation()
+	input := access.columnInput
+	if input == nil || input.table != t || input.topology == nil {
+		panic("scan requires its admitted native input")
 	}
+	topology := input.topology
+	shard, single := singleRelevantShard(topology.dimensions, access, topology.shards)
+	if !single {
+		return nil, nil, false
+	}
+	topology.operations.Add(1) // parent input retains this generation
+	shard.activeScanners.Add(1)
+	return topology, shard, true
 }
 
 func singleRelevantShard(schema []shardDimension, access scanAccess, shards []*storageShard) (*storageShard, bool) {
@@ -393,7 +389,11 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, p
 	// the whole shard-local scan pipeline to a remote holder; row readers must not
 	// perform another resource acquisition from inside the callback.
 	for {
-		topology := t.activeTopology()
+		input := access.columnInput
+		if input == nil || input.table != t || input.topology == nil {
+			panic("scan requires its admitted native input")
+		}
+		topology := input.topology
 		var relevant []*storageShard
 		if topology.mode == ShardModeFree {
 			relevant = topology.shards
@@ -413,24 +413,11 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, p
 			return nil
 		}
 
-		// Pin every shard task to the loaded immutable generation, then verify
-		// that it is still authoritative. A publisher never waits for this
-		// registration; late readers simply release it and retry on the new
-		// generation before touching shard state.
-		registered := 0
+		// The admitted parent retains this immutable generation through all tasks.
+		// Child pins keep existing task/drain ownership, including after DROP.
 		for _, s := range relevant {
-			if !topology.acquireOperation() {
-				break
-			}
+			topology.operations.Add(1) // parent input retains this generation
 			s.activeScanners.Add(1)
-			registered++
-		}
-		if registered != len(relevant) || t.topology.Load() != topology {
-			for _, s := range relevant[:registered] {
-				s.activeScanners.Add(-1)
-				topology.releaseOperation()
-			}
-			continue
 		}
 
 		// Result buffering must use this registered domain. Loading a separate
@@ -577,7 +564,7 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 		// Ensure shard and column are loaded. If metadata is corrupted, panic early
 		// instead of proceeding with potentially destructive repartitioning.
 		s.ensureLoaded()
-		stor := s.getColumnStorageOrPanic(col, false, nil)
+		stor := s.getColumnStorageInput(col, false, s.initializedColumnInput(s.t.bindColumnInput(nil)), nil)
 		// snapshot main_count without holding lock; guard indices and skip if inconsistent
 		mc := s.main_count
 		if mc > 0 {
@@ -898,6 +885,7 @@ func (t *table) repartition(shardCandidates []shardDimension) {
 }
 
 func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maintenanceLease *RAMLease) {
+	columnInput := t.bindColumnInput(nil)
 	// Safety-net: if somehow called directly without the flag being set.
 	if t.maintenanceKind == 2 && t.PShards != nil {
 		return
@@ -1166,7 +1154,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 							// Old shard has plain storage for this column — read values directly
 							func() {
 								defer oldShard.mu.RUnlock()
-								reader := oldShard.ColumnReaderTx(nil, col.Name, true, ReadAuto).GetValue
+								reader := oldShard.ColumnReaderTx(nil, col.Name, true, ReadAuto, columnInput).GetValue
 								for _, item := range items {
 									val := reader(uint32(item))
 									newProxy.setDeltaValueLocked(newIdx, val)
@@ -1193,7 +1181,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension, maint
 						func() {
 							oldShard.mu.RLock()
 							defer oldShard.mu.RUnlock()
-							reader := oldShard.ColumnReaderTx(nil, col.Name, true, ReadAuto).GetValue
+							reader := oldShard.ColumnReaderTx(nil, col.Name, true, ReadAuto, columnInput).GetValue
 							for _, item := range items {
 								values[i] = reader(uint32(item))
 								i++

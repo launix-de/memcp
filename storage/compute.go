@@ -67,14 +67,14 @@ func projectionColumnReadHints(col ColumnStorage, rows int, tx *TxContext) Colum
 // Do not strip runtime overlays here: generic scan/read paths must still see
 // user-visible values (for example OverlayBlob must dereference its hash marker
 // back to the persisted blob payload after restart).
-func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked bool, hints ColumnReadHints, source *table) ColumnReader {
+func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked bool, hints ColumnReadHints, source *table, columnInput *nativeTableInput) ColumnReader {
 	operatorOwned := hints&readOperatorOwned != 0
 	hints &^= readOperatorOwned
 	if provider, ok := col.(TxColumnReaderProvider); ok {
 		if operatorOwned {
 			hints |= readOperatorOwned
 		}
-		return provider.GetCachedReaderTx(tx, alreadyLocked, hints)
+		return provider.GetCachedReaderTx(tx, alreadyLocked, hints, columnInput)
 	}
 	// Without a statement owner, automatic reads retain no shared decoded
 	// dictionary. Explicit ReadDecoded consumers own and release their reader.
@@ -432,12 +432,12 @@ func (t *table) initORCShard(s *storageShard, name string) {
 // The invalidation scan (run by triggers) has already set validMask bits to 0
 // for affected rows. This function finds the earliest invalid row's sort key,
 // predicts the accumulator from the last valid predecessor, and scans forward.
-func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard, requestIdx uint32) {
+func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard, requestIdx uint32, currentTx *TxContext, columnInput *nativeTableInput) {
 	recomputeStart := time.Now()
 	defer func() {
 		// Record recompute cost for invalidation telemetry
 		recomputeNs := time.Since(recomputeStart).Nanoseconds()
-		for _, s := range t.maintenanceShards() {
+		for _, s := range columnInput.topology.shards {
 			s.mu.RLock()
 			if proxy, ok := s.columns[name].(*StorageComputeProxy); ok {
 				proxy.ResetInvalidationTelemetry(recomputeNs)
@@ -450,9 +450,9 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	defer atomic.AddInt32(&t.orcRecomputing, -1)
 
 	var col *column
-	for i := range t.Columns {
-		if t.Columns[i].Name == name {
-			col = t.Columns[i]
+	for _, declared := range columnInput.names.declarations {
+		if declared.Name == name {
+			col = declared
 			break
 		}
 	}
@@ -492,7 +492,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		// Read partition key of the requested row
 		partCols = col.OrcSortCols[:partCount]
 		partKeys = make([]scm.Scmer, partCount)
-		initializedColumns := requestShard.initializedColumnInput(nil)
+		initializedColumns := requestShard.initializedColumnInput(columnInput)
 		for i, pc := range partCols {
 			// Retain the existing column-directory ownership for both main and
 			// delta evaluation; only the delta row directory is published atomically.
@@ -533,7 +533,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 			limit uint32
 		}
 		proxies := make([]filteredProxy, 0)
-		for _, s := range t.maintenanceShards() {
+		for _, s := range columnInput.topology.shards {
 			s.mu.RLock()
 			proxy, ok := s.columns[name].(*StorageComputeProxy)
 			limit := s.main_count + uint32(len(s.deltaRows()))
@@ -560,21 +560,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		scanCallbackCols := make([]string, 0, 1+len(col.OrcMapCols))
 		scanCallbackCols = append(scanCallbackCols, "$set:"+name)
 		scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
-		t.scan_order(
-			nil,
-			newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
-			col.OrcFilterCols, domainCondFn,
-			sortcolsScmer, sortdirsFns,
-			0, 0, -1,
-			scanCallbackCols,
-			col.OrcMapReduceFn,
-			col.OrcReduceInit,
-			false,
-			col.OrcReduceInit,
-			nil,
-			scm.NewNil(),
-			nil,
-		)
+		scanOrderMulti(currentTx, []scanOrderTableSpec{{table: t, dataTx: currentTx, dataBound: true, columnInput: columnInput, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1), accessValues: nil, conditionCols: col.OrcFilterCols, condition: domainCondFn, sortcols: sortcolsScmer, callbackCols: scanCallbackCols, callback: col.OrcMapReduceFn, perTableOffset: -1, perTableLimit: -1}}, sortdirsFns, 0, 0, -1, col.OrcReduceInit, false, col.OrcReduceInit)
 		// Speculative callback-column prefetch may read rows rejected by the
 		// predicate. Publish those holes as valid nils after every accepted row
 		// has been written, so it never starts a second domain rebuild.
@@ -632,21 +618,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		return newAcc
 	})
 
-	t.scan_order(
-		nil,
-		newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
-		condCols, condFn,
-		sortcolsScmer, sortdirsFns,
-		0, 0, -1,
-		scanCallbackCols,
-		scanMapReduceFn,
-		col.OrcReduceInit,
-		false,
-		col.OrcReduceInit,
-		nil,
-		scm.NewNil(),
-		nil,
-	)
+	scanOrderMulti(currentTx, []scanOrderTableSpec{{table: t, dataTx: currentTx, dataBound: true, columnInput: columnInput, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1), accessValues: nil, conditionCols: condCols, condition: condFn, sortcols: sortcolsScmer, callbackCols: scanCallbackCols, callback: scanMapReduceFn, perTableOffset: -1, perTableLimit: -1}}, sortdirsFns, 0, 0, -1, col.OrcReduceInit, false, col.OrcReduceInit)
 }
 
 // invalidateORCFromSortKey clears validMask bits for rows affected by a mutation.
@@ -764,6 +736,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	}
 
 	// Parallel invalidation across shards using index-accelerated iteration.
+	columnInput := t.bindColumnInput(nil)
 	shards := t.maintenanceShards()
 	var wg sync.WaitGroup
 	wg.Add(len(shards))
@@ -783,13 +756,15 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			}
 			s.ensureLoaded()
 			s.ensureMainCount(false, nil)
-			initializedColumns := s.initializedColumnInput(nil)
+			initializedColumns := s.initializedColumnInput(columnInput)
 			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
 			// Retain index and column-directory ownership during invalidation.
 			// Delta rows and deletion bits have independent atomic publication.
 			s.mu.RLock()
-			s.iterateIndex(nil, runtimeScanAccess(bounds), len(s.deltaRows()), buf[:], 1, nil, func(batch []uint32) bool {
+			access := runtimeScanAccess(bounds)
+			access.columnInput = columnInput
+			s.iterateIndex(nil, access, len(s.deltaRows()), buf[:], 1, nil, func(batch []uint32) bool {
 				for _, idx := range batch {
 					if s.deletions.Get(uint(idx)) {
 						continue

@@ -248,7 +248,7 @@ func TestNativeACIDUpdatesSurviveRestart(t *testing.T) {
 				sh := reopened.tables.Get(original.Name).ActiveShards()[0]
 				sh.ensureLoaded()
 				found := 0
-				read := sh.ColumnReaderTx(nil, "payload", false, ReadAuto)
+				read := sh.ColumnReaderTx(nil, "payload", false, ReadAuto, sh.t.bindColumnInput(nil))
 				for id := uint32(0); id < sh.main_count+uint32(len(sh.deltaRows())); id++ {
 					if !sh.deletions.Get(uint(id)) {
 						found++

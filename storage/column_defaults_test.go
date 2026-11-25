@@ -21,7 +21,7 @@ func assertInitializedColumn(t *testing.T, tbl *table, column string, value scm.
 	count := 0
 	for _, shard := range tbl.ActiveShards() {
 		release := shard.GetRead(nil, false)
-		read := shard.ColumnReaderTx(nil, storageColumn, false, ReadAuto).GetValue
+		read := shard.ColumnReaderTx(nil, storageColumn, false, ReadAuto, shard.t.bindColumnInput(nil)).GetValue
 		shard.mu.RLock()
 		for i := uint32(0); i < shard.main_count+uint32(len(shard.deltaRows())); i++ {
 			if !shard.deletions.Get(uint(i)) {
@@ -189,7 +189,7 @@ func TestAddedDefaultNullableAdapterPolicy(t *testing.T) {
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("new")}}, nil, scm.NewNil(), false, nil)
 	reloaded := reloadTableFromPersistence(t, "taddeddefaultpolicy", persistence)
 	shard := reloaded.ActiveShards()[0]
-	read := shard.ColumnReaderTx(nil, "optional", false, ReadAuto).GetValue
+	read := shard.ColumnReaderTx(nil, "optional", false, ReadAuto, shard.t.bindColumnInput(nil)).GetValue
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	if !read(0).IsNil() || read(1).Int() != 4 {
@@ -422,7 +422,7 @@ func TestAddedNullableFreshColumnKeepsSparseColdShard(t *testing.T) {
 	if shard.state() != COLD || shard.plannerMainRows.Load() != 0 || shard.plannerDeltaRows.Load() != 0 {
 		t.Fatal("fresh nullable ADD loaded old rows")
 	}
-	if _, sparse := shard.getColumnStorageOrPanic("fresh", false, nil).(*StorageSparse); !sparse {
+	if _, sparse := shard.getColumnStorageInput("fresh", false, shard.initializedColumnInput(shard.t.bindColumnInput(nil)), nil).(*StorageSparse); !sparse {
 		t.Fatal("fresh nullable ADD did not use existing sparse storage")
 	}
 	assertInitializedColumn(t, reloaded, "fresh", scm.NewNil(), 2)
@@ -487,7 +487,7 @@ func TestAddedDefaultExpressionSurvivesNilConstantOption(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	release := shard.GetRead(nil, false)
 	defer release.Release()
-	read := shard.ColumnReaderTx(nil, "created", false, ReadAuto).GetValue
+	read := shard.ColumnReaderTx(nil, "created", false, ReadAuto, shard.t.bindColumnInput(nil)).GetValue
 	value := func() scm.Scmer {
 		shard.mu.RLock()
 		defer shard.mu.RUnlock()

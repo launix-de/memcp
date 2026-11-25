@@ -273,10 +273,31 @@ func (scope *relationScope) retireDataOperations() {
 	}
 }
 
+// nativeTableInput is an invocation-owned immutable column/topology binding.
+// Adaptive indexes retain only its physical initialization facts, never this input.
+type nativeTableInput struct {
+	table     *table
+	names     *tableColumnNamesSnapshot
+	committed *tableColumnNamesSnapshot
+	topology  *tableShardTopology
+}
+
+// Existing maintenance/writer owners bind metadata without admitting a new scan.
+// Reader admission pins topology first, then performs this final lifetime check.
+func (t *table) bindColumnInput(tx *TxContext) *nativeTableInput {
+	committed := t.columnNamesSnapshot.Load()
+	names := tx.columnDeclarationSnapshot(t)
+	if names == nil {
+		names = committed
+	}
+	t.requireCatalogDataVisibility(tx)
+	return &nativeTableInput{table: t, names: names, committed: committed}
+}
+
 // A read input gets a separate CS view only for an explicitly independent
 // private relation. Nested native inputs reuse it; ordinary source callbacks
 // keep their original lexical caller context and public transaction snapshot.
-func (t *table) readDataContext(tx *TxContext) (*TxContext, func()) {
+func (t *table) readDataContext(tx *TxContext) (*TxContext, *nativeTableInput, func()) {
 	finishScope := t.beginCallerInput(tx)
 	scopeTransferred := false
 	defer func() {
@@ -291,7 +312,15 @@ func (t *table) readDataContext(tx *TxContext) (*TxContext, func()) {
 			finish()
 		}
 	}()
-	t.requireCatalogDataVisibility(read)
+	topology := t.pinActiveTopology()
+	inputBound := false
+	defer func() {
+		if !inputBound {
+			topology.releaseOperation()
+		}
+	}()
+	input := t.bindColumnInput(read)
+	input.topology = topology
 	t.enterPendingCatalogData(read, nil)
 	t.recordSerializableRead(read)
 	ready = true
@@ -300,7 +329,10 @@ func (t *table) readDataContext(tx *TxContext) (*TxContext, func()) {
 		finish = func() { defer finishScope(); dataFinish() }
 	}
 	scopeTransferred = true
-	return read, finish
+	dataFinish := finish
+	finish = func() { defer topology.releaseOperation(); dataFinish() }
+	inputBound = true
+	return read, input, finish
 }
 
 func (t *table) readDataOwner(tx *TxContext) (*TxContext, func()) {

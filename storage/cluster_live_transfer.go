@@ -474,7 +474,7 @@ func (capture *liveShardTransfer) write(writer io.Writer) error {
 			if header.ColumnReferences[name] {
 				continue
 			}
-			shard.getColumnStorageOrPanic(name, false, nil).Serialize(columnFrameWriter{writer})
+			shard.getColumnStorageInput(name, false, shard.initializedColumnInput(shard.t.bindColumnInput(nil)), nil).Serialize(columnFrameWriter{writer})
 			if err := binary.Write(writer, binary.LittleEndian, uint32(0)); err != nil {
 				return err
 			}

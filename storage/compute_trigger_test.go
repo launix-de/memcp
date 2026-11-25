@@ -605,7 +605,7 @@ func TestLookupInvalidationIncludesComputedDeltaRows(t *testing.T) {
 		scm.Apply(args[1])
 		return args[0]
 	})
-	mr := shard.OpenMapReducer([]string{"$invalidate:cached"}, mapReduceFn, false, 0, nil, nil)
+	mr := shard.OpenMapReducer([]string{"$invalidate:cached"}, mapReduceFn, false, 0, nil, nil, shard.t.bindColumnInput(nil))
 	mr.processDeltaBlock(scm.NewNil(), []uint32{1})
 	mr.FlushSideEffects()
 

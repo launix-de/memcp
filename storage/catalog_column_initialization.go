@@ -246,20 +246,6 @@ func (tx *TxContext) pendingAppendedColumns(t *table) map[string]*column {
 	}
 	return nil
 }
-func (tx *TxContext) pendingAppendedColumn(t *table, name string) *column {
-	return tx.pendingAppendedColumns(t)[name]
-}
-func (s *storageShard) pendingAppendedStorage(tx *TxContext, name string) ColumnStorage {
-	if tx.pendingAppendedColumn(s.t, name) != nil {
-		if input := s.initializedColumnInput(tx); input != nil {
-			if c, ok := input.fields[name]; ok {
-				return c.main
-			}
-		}
-		return new(StorageSparse)
-	}
-	return nil
-}
 
 // The caller supplies its already-bound immutable descriptor, never a fresh
 // per-row transaction/catalog lookup. The captured original prefix is immutable.
@@ -281,25 +267,21 @@ func (s *storageShard) getDeltaInput(idx int, name string, input *nativeColumnIn
 	return s.getDelta(idx, name)
 }
 
-func (s *storageShard) initializedColumnInput(tx *TxContext) *nativeColumnInitialInput {
-	if names := s.t.columnNamesForTx(tx); names != nil {
+func (s *storageShard) initializedColumnInput(input *nativeTableInput) *nativeColumnInitialInput {
+	if input == nil || input.table != s.t {
+		panic("column input belongs to another native table")
+	}
+	return s.initializedColumnNames(input.names)
+}
+
+func (s *storageShard) initializedColumnNames(names *tableColumnNamesSnapshot) *nativeColumnInitialInput {
+	if names != nil {
 		if input := names.initialByShard[s.uuid]; input != nil {
 			return input
 		}
 		return names.appendedInitialInput
 	}
 	return nil
-}
-
-// Logical row copies reuse the same input as the producer. An old physical
-// column keeps its original storage path; initialized main input was built cold.
-func (s *storageShard) getColumnStorageInput(name string, alreadyLocked bool, input *nativeColumnInitialInput) ColumnStorage {
-	if input != nil {
-		if value, ok := input.fields[name]; ok {
-			return value.main
-		}
-	}
-	return s.getColumnStorageOrPanic(name, alreadyLocked, nil)
 }
 
 func initialColumnValue(input *nativeColumnInitialInput, name string, delta int) (scm.Scmer, bool) {

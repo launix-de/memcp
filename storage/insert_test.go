@@ -311,7 +311,7 @@ func testInsertCollisionRMW(t *testing.T, before bool) {
 			var total int64
 			for _, shard := range tbl.ActiveShards() {
 				access := shard.GetRead(nil, false)
-				reader := access.shard.ColumnReaderTx(nil, "val", false, ReadAuto)
+				reader := access.shard.ColumnReaderTx(nil, "val", false, ReadAuto, access.shard.t.bindColumnInput(nil))
 				for id := uint32(0); id < access.shard.main_count+uint32(len(access.shard.deltaRows())); id++ {
 					if !access.shard.deletions.Get(uint(id)) {
 						total += reader.GetValue(id).Int()
@@ -373,7 +373,7 @@ func TestInsertCollisionDifferentUniqueKeysShareRow(t *testing.T) {
 	close(start)
 	done.Wait()
 	shard := tbl.ActiveShards()[0]
-	reader := shard.ColumnReaderTx(nil, "val", false, ReadAuto)
+	reader := shard.ColumnReaderTx(nil, "val", false, ReadAuto, shard.t.bindColumnInput(nil))
 	var total int64
 	for id := uint32(0); id < shard.main_count+uint32(len(shard.deltaRows())); id++ {
 		if !shard.deletions.Get(uint(id)) {
@@ -861,7 +861,7 @@ func TestInsertCollisionAndUpdateShareAtomicRow(t *testing.T) {
 	done.Wait()
 	var total int64
 	for _, s := range tbl.ActiveShards() {
-		r := s.ColumnReaderTx(nil, "val", false, ReadAuto)
+		r := s.ColumnReaderTx(nil, "val", false, ReadAuto, s.t.bindColumnInput(nil))
 		for id := uint32(0); id < s.main_count+uint32(len(s.deltaRows())); id++ {
 			if !s.deletions.Get(uint(id)) {
 				total += r.GetValue(id).Int()
@@ -1204,7 +1204,7 @@ func TestUniqueNodePoolNestedTriggerHashCollision(t *testing.T) {
 	for _, tbl := range []*table{outer, inner} {
 		shard := tbl.ActiveShards()[0]
 		var total int64
-		reader := shard.ColumnReaderTx(nil, "val", false, ReadAuto)
+		reader := shard.ColumnReaderTx(nil, "val", false, ReadAuto, shard.t.bindColumnInput(nil))
 		for id := uint32(0); id < shard.main_count+uint32(len(shard.deltaRows())); id++ {
 			if !shard.deletions.Get(uint(id)) {
 				total += reader.GetValue(id).Int()
@@ -1259,7 +1259,7 @@ func BenchmarkUniqueNodeThroughput(b *testing.B) {
 			var total int64
 			for _, tbl := range tables {
 				for _, shard := range tbl.ActiveShards() {
-					reader := shard.ColumnReaderTx(nil, "val", false, ReadAuto)
+					reader := shard.ColumnReaderTx(nil, "val", false, ReadAuto, shard.t.bindColumnInput(nil))
 					for id := uint32(0); id < shard.main_count+uint32(len(shard.deltaRows())); id++ {
 						if !shard.deletions.Get(uint(id)) {
 							total += reader.GetValue(id).Int()

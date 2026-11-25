@@ -302,12 +302,21 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 
 	source.projectionCols = append(append([]string(nil), source.projectionCols...), callbackCols...)
 	var finishData func()
+	defer func() {
+		if finishData != nil {
+			finishData()
+		}
+	}()
 	if scanMutates(callbackCols) {
 		currentTx, finishData = source.backingTable().writeDataContext(currentTx)
+		topology := source.backingTable().pinActiveTopology()
+		defer topology.releaseOperation()
+		source.columnInput = source.backingTable().bindColumnInput(currentTx)
+		source.columnInput.topology = topology
 	} else {
-		currentTx, finishData = source.backingTable().readDataContext(currentTx)
+		currentTx, source.columnInput, finishData = source.backingTable().readDataContext(currentTx)
 	}
-	defer finishData()
+	source.dataTx, source.dataBound = currentTx, true
 	if scanMutates(callbackCols) {
 		if slices.Contains(callbackCols, "$update") {
 			source.backingTable().admitCheckMutation(currentTx, "ordered UPDATE/DELETE")
@@ -358,7 +367,7 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 				}
 			}
 			reads[shard] = shard.acquireSnapshotRead(currentTx)
-			mapper = shard.OpenMapReducer(callbackCols, mapReduce, false, 0, nil, currentTx)
+			mapper = shard.OpenMapReducer(callbackCols, mapReduce, false, 0, nil, currentTx, source.columnInput)
 			mapper.exactUpdate = mapper.exactUpdate || source.producerInput.exactUpdateFor(shard.t, currentTx)
 			mappers[shard] = mapper
 		}

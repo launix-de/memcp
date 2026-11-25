@@ -147,12 +147,12 @@ func (s *StorageIndex) deltaReaderSlot(column string, storage ColumnStorage) int
 // Persistent index boundaries must not retain a view into an evictable decoded
 // dictionary. Eligible raw text keeps its stable compressed handle. Other
 // string representations own a copied boundary rather than pinning the cache.
-func (g colGetter) persistentValue(recid uint32, tx *TxContext) scm.Scmer {
+func (g colGetter) persistentValue(recid uint32, tx *TxContext, columnInput *nativeTableInput) scm.Scmer {
 	var value scm.Scmer
 	if g.source != nil {
 		// Index construction already owns the shard lock. Preserve that
 		// capability and the caller's visibility for computed source readers.
-		reader := newCachedColumnReaderTx(g.source, tx, true, ReadCompressed, nil)
+		reader := newCachedColumnReaderTx(g.source, tx, true, ReadCompressed, nil, columnInput)
 		defer ReleaseColumnReader(reader)
 		value = reader.GetValue(recid)
 	} else {
@@ -371,7 +371,7 @@ func releaseIndexGetters(getters []colGetter) {
 // shard under its currently-held read or write lock. Recursive computed
 // readers must use that same lock instead of entering it again. The caller
 // releases all returned readers through releaseIndexGetters.
-func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGetter {
+func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter, columnInput *nativeTableInput) []colGetter {
 	var getters []colGetter
 	if cap(storage) >= len(s.Cols) {
 		getters = storage[:len(s.Cols)]
@@ -385,7 +385,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 			releaseIndexGetters(getters)
 		}
 	}()
-	input := s.t.initializedColumnInput(tx)
+	input := s.columnInput
 	for i, col := range s.Cols {
 		if !s.columnIsSorted(i) && isScanPseudoColName(col) {
 			continue
@@ -402,32 +402,32 @@ func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter) []colGet
 					mapColReaders[j] = ColumnReaderFunc(func(uint32) scm.Scmer { return scm.NewNil() })
 					continue
 				}
-				cs := s.t.getColumnStorageRLocked(mc, tx)
+				cs := s.t.getColumnStorageRLocked(mc, input)
 				mapSources[j] = cs
 				deltaSlots[j] = s.deltaReaderSlot(mc, cs)
-				mapColReaders[j] = newCachedColumnReaderTx(cs, tx, true, ReadAuto|readOperatorOwned, s.t.t)
+				mapColReaders[j] = newCachedColumnReaderTx(cs, tx, true, ReadAuto|readOperatorOwned, s.t.t, columnInput)
 				if usesInitialColumn(input, mc) {
 					deltaSlots[j] = -1
 					ReleaseColumnReader(mapColReaders[j])
 					mapColReaders[j] = nil
-					mapColReaders[j] = s.t.ColumnReaderTx(tx, mc, true, ReadAuto|readOperatorOwned)
+					mapColReaders[j] = s.t.ColumnReaderTx(tx, mc, true, ReadAuto|readOperatorOwned, columnInput)
 				}
 			}
 			mapFn := s.ColMapFn[i]
 			fn := scm.PrepareSerialProc(mapFn)
 			getters[i] = colGetter{mapSources: mapSources, mapCols: mapColReaders, mapFn: &fn, mapArgs: make([]scm.Scmer, len(mapColReaders)), deltaSlots: deltaSlots}
 		} else {
-			cs := s.t.getColumnStorageRLocked(col, tx)
+			cs := s.t.getColumnStorageRLocked(col, input)
 			hints := ReadAuto
 			if !s.columnIsSorted(i) {
 				hints = ReadCompressed
 			}
-			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true, hints|readOperatorOwned, s.t.t), source: cs, deltaSlot: s.deltaReaderSlot(col, cs)}
+			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx, true, hints|readOperatorOwned, s.t.t, columnInput), source: cs, deltaSlot: s.deltaReaderSlot(col, cs)}
 			if usesInitialColumn(input, col) {
 				getters[i].deltaSlot = -1
 				ReleaseColumnReader(getters[i].raw)
 				getters[i].raw = nil
-				getters[i].raw = s.t.ColumnReaderTx(tx, col, true, hints|readOperatorOwned)
+				getters[i].raw = s.t.ColumnReaderTx(tx, col, true, hints|readOperatorOwned, columnInput)
 			}
 		}
 	}
@@ -443,7 +443,7 @@ func (s *StorageIndex) computedRevisionsRLocked(tx *TxContext) []computedRevisio
 		if isScanPseudoColName(col) {
 			return
 		}
-		proxy, ok := s.t.getColumnStorageRLocked(col, tx).(*StorageComputeProxy)
+		proxy, ok := s.t.getColumnStorageRLocked(col, s.columnInput).(*StorageComputeProxy)
 		if !ok {
 			return
 		}
@@ -864,7 +864,11 @@ func effectiveBoundaryInclusiveness(cols scanAccess, indexBounds *scanIndexBound
 
 func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
 	privateInput := false
-	if columns := tx.pendingAppendedColumns(t.t); len(columns) != 0 {
+	var columns map[string]nativeColumnInitialValue
+	if names := cols.columnInput.names; names != nil && names.appendedInitialInput != nil {
+		columns = names.appendedInitialInput.fields
+	}
+	if len(columns) != 0 {
 		for i := 0; i < cols.len(); i++ {
 			_, direct := columns[cols.boundaryColumn(i)]
 			privateInput = privateInput || direct
@@ -989,11 +993,11 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 		}
 		index := new(StorageIndex)
 		if privateInput {
-			index.columnInput = t.initializedColumnInput(tx)
+			index.columnInput = t.initializedColumnInput(cols.columnInput)
 		} else {
 			// Public indices retain committed input only, even when a query over
 			// old columns runs beside this transaction's private declaration.
-			index.columnInput = t.initializedColumnInput(nil)
+			index.columnInput = t.initializedColumnNames(cols.columnInput.committed)
 		}
 		index.Cols = make([]string, indexCols)
 		index.ColMapCols = make([][]string, indexCols)
@@ -1207,9 +1211,9 @@ func rebuildRepartitionIndexes(candidates []*StorageIndex, shard *storageShard) 
 			continue
 		}
 		func() {
-			getters := index.buildGetters(nil, nil)
+			getters := index.buildGetters(nil, nil, shard.t.bindColumnInput(nil))
 			defer releaseIndexGetters(getters)
-			index.buildIndex(getters, nil)
+			index.buildIndex(getters, nil, shard.t.bindColumnInput(nil))
 		}()
 		warmed++
 	}
@@ -1371,7 +1375,7 @@ func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, matchers []Ind
 // buildIndex constructs the shared index data structures.
 // cols must contain value getters for each index column in order.
 // The caller must hold s.mu.Lock() or have exclusive access.
-func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext) {
+func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext, columnInput *nativeTableInput) {
 	state := new(storageIndexState)
 	// Build privately. A panic leaves the published state untouched; all
 	// unpublished allocations are reclaimed through ordinary Go ownership.
@@ -1449,7 +1453,7 @@ func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext) {
 			// decode. Keep this lease through sorting and failure cleanup, never
 			// retain the decoded reader in the published index getters.
 			if g.source != nil {
-				reader := newCachedColumnReaderTx(g.source, tx, true, ReadDecoded, s.t.t)
+				reader := newCachedColumnReaderTx(g.source, tx, true, ReadDecoded, s.t.t, columnInput)
 				defer ReleaseColumnReader(reader)
 				g.raw = reader
 			}
@@ -1534,8 +1538,8 @@ func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext) {
 				if !s.columnIsSorted(i) {
 					continue
 				}
-				state.minVals[i] = g.persistentValue(tmp[0], tx)
-				state.maxVals[i] = g.persistentValue(tmp[len(tmp)-1], tx)
+				state.minVals[i] = g.persistentValue(tmp[0], tx, columnInput)
+				state.maxVals[i] = g.persistentValue(tmp[len(tmp)-1], tx, columnInput)
 			}
 		}
 	} else if s.t.main_count > 0 {
@@ -1546,8 +1550,8 @@ func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext) {
 			if !s.columnIsSorted(i) {
 				continue
 			}
-			state.minVals[i] = g.persistentValue(0, tx)
-			state.maxVals[i] = g.persistentValue(s.t.main_count-1, tx)
+			state.minVals[i] = g.persistentValue(0, tx, columnInput)
+			state.maxVals[i] = g.persistentValue(s.t.main_count-1, tx, columnInput)
 		}
 	}
 
@@ -2000,7 +2004,7 @@ func (s *StorageIndex) bindRowMatchers(tx *TxContext, bounds scanAccess, indexBo
 			if alignedWithIndex && colIdx < len(cols) {
 				reader = cols[colIdx].raw
 			} else if _, mapFn := bounds.boundaryMap(colIdx); !isScanPseudoColName(column) && mapFn.IsNil() {
-				reader = newCachedColumnReaderTx(s.t.getColumnStorageRLocked(column, tx), tx, true, ReadCompressed, nil)
+				reader = newCachedColumnReaderTx(s.t.getColumnStorageRLocked(column, s.columnInput), tx, true, ReadCompressed, nil, bounds.columnInput)
 			}
 			hook = analyzer.Deploy(IndexDeployContext{
 				MainCount: s.t.main_count,
@@ -2041,7 +2045,7 @@ func (s *StorageIndex) bindColdRangeMatcher(tx *TxContext, bounds scanAccess, in
 	// iterate owns these readers until the synchronous matcher has finished.
 	for col := 0; col < cmpCols; col++ {
 		if s.columnIsSorted(col) && cols[col].source != nil {
-			reader := newCachedColumnReaderTx(cols[col].source, tx, true, ReadDecoded, s.t.t)
+			reader := newCachedColumnReaderTx(cols[col].source, tx, true, ReadDecoded, s.t.t, bounds.columnInput)
 			ReleaseColumnReader(cols[col].raw)
 			cols[col].raw = reader
 		}
@@ -2124,10 +2128,10 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBoundsValu
 
 	// Build column getters — use RLocked variant because the caller
 	// (scan, scan_order, GetRecordidForUnique) already holds s.t.mu.RLock().
-	// Re-acquiring RLock via getColumnStorageOrPanic would deadlock when a
+	// Re-acquiring RLock via getColumnStorageInput would deadlock when a
 	// concurrent writer is waiting for s.t.mu.Lock() (write-preferring RWMutex).
 	getterScratch := indexGetterScratchPool.Get().(*indexGetterScratch)
-	cols := s.buildGetters(tx, getterScratch.getters[:])
+	cols := s.buildGetters(tx, getterScratch.getters[:], bounds.columnInput)
 	getterScratch.access = bounds
 	getterScratch.indexBounds = indexBoundsValue
 	getterScratch.indexBounds.access = &getterScratch.access
@@ -2234,7 +2238,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds scanAccess, indexBoundsValu
 				// Error propagation must not strand the shared index mutex:
 				// every later scan snapshots state under this same lock.
 				defer s.mu.Unlock()
-				s.buildIndex(cols, tx)
+				s.buildIndex(cols, tx, bounds.columnInput)
 			}()
 			// register with CacheManager
 			GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)

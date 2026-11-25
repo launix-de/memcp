@@ -345,13 +345,13 @@ func TestOpenMapReducerAllocatesMutationMetadataLazily(t *testing.T) {
 	shard := tbl.Shards[0]
 	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })
 
-	readMapper := shard.OpenMapReducer([]string{"id"}, mapReduceFn, false, 0, nil, nil)
+	readMapper := shard.OpenMapReducer([]string{"id"}, mapReduceFn, false, 0, nil, nil, shard.t.bindColumnInput(nil))
 	defer readMapper.Close()
 	if readMapper.isUpdate != nil || readMapper.isIncrement != nil || readMapper.setClosureFn != nil {
 		t.Fatal("read mapper allocated mutation-only metadata")
 	}
 
-	mutationMapper := shard.OpenMapReducer([]string{"$update"}, mapReduceFn, false, 0, nil, nil)
+	mutationMapper := shard.OpenMapReducer([]string{"$update"}, mapReduceFn, false, 0, nil, nil, shard.t.bindColumnInput(nil))
 	defer mutationMapper.Close()
 	if len(mutationMapper.isUpdate) != 1 || !mutationMapper.isUpdate[0] || len(mutationMapper.setClosureFn) != 1 {
 		t.Fatal("mutation mapper did not initialize mutation metadata")
@@ -391,7 +391,7 @@ func TestReadMapReducerWorkspaceMainDeltaAndWideProjection(t *testing.T) {
 	var inlineMapper ShardMapReducer
 	var inlineWorkspace shardMapReducerWorkspace
 	prepareReadMapReducerStorage(&inlineMapper, &inlineWorkspace, 2)
-	shard.initReadMapReducer(&inlineMapper, columns[:2], mapReduceLast, false, nil)
+	shard.initReadMapReducer(&inlineMapper, columns[:2], mapReduceLast, false, nil, shard.t.bindColumnInput(nil))
 	inlineMapper.mapProgram = scm.PrepareSerialProc(mapLast)
 	inlineMapper.Stream(scm.NewNil(), []uint32{0}, nil)
 	if got := inlineMapper.MapOne(1).Int(); got != mainRows[1][1].Int() {
@@ -403,7 +403,7 @@ func TestReadMapReducerWorkspaceMainDeltaAndWideProjection(t *testing.T) {
 	var mapper ShardMapReducer
 	var workspace shardMapReducerWorkspace
 	prepareReadMapReducerStorage(&mapper, &workspace, len(columns))
-	shard.initReadMapReducer(&mapper, columns, mapReduceLast, false, nil)
+	shard.initReadMapReducer(&mapper, columns, mapReduceLast, false, nil, shard.t.bindColumnInput(nil))
 	mapper.mapProgram = scm.PrepareSerialProc(mapLast)
 	if got := mapper.Stream(scm.NewNil(), []uint32{0}, nil).Int(); got != mainRows[0][len(columns)-1].Int() {
 		t.Fatalf("wide main-row projection = %d, want %d", got, mainRows[0][len(columns)-1].Int())

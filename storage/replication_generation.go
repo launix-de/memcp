@@ -540,7 +540,7 @@ func (r *replicationManager) sendResource(peer *mosiPeer, header mosiPacket, tra
 			if column.Computor.IsNil() {
 				var reader io.ReadCloser
 				if volatile {
-					reader = replicaColumnStream(shard.getColumnStorageOrPanic(column.Name, false, nil))
+					reader = replicaColumnStream(shard.getColumnStorageInput(column.Name, false, shard.initializedColumnInput(shard.t.bindColumnInput(nil)), nil))
 				} else {
 					reader = transfer.engine.ReadColumn(header.Content, column.Name)
 				}
@@ -561,7 +561,7 @@ func (r *replicationManager) sendResource(peer *mosiPeer, header mosiPacket, tra
 		if volatile {
 			for _, column := range transfer.columns {
 				if column.Computor.IsNil() {
-					appendColumnBlobReferences(shard.getColumnStorageOrPanic(column.Name, false, nil), references, shard.main_count)
+					appendColumnBlobReferences(shard.getColumnStorageInput(column.Name, false, shard.initializedColumnInput(shard.t.bindColumnInput(nil)), nil), references, shard.main_count)
 				}
 			}
 		} else if !transfer.blobTable {
