@@ -699,12 +699,13 @@ type table struct {
 	schema                         *database
 	Name                           string
 	Columns                        []*column
-	Unique                         []uniqueKey          // unique keys
-	Foreign                        []foreignKey         // foreign keys
-	Checks                         []*checkDeclaration  `json:",omitempty"`
-	Triggers                       []TriggerDescription // triggers on this table
-	triggerMemoryBytes             atomic.Uint64        // producer-owned container + optional finite FK program estimates
-	statementTriggerEvents         atomic.Uint32        // event mask derived by the trigger declaration owner
+	LogicalIndexes                 []logicalIndexDeclaration `json:"-"`
+	Unique                         []uniqueKey               // unique keys
+	Foreign                        []foreignKey              // foreign keys
+	Checks                         []*checkDeclaration       `json:",omitempty"`
+	Triggers                       []TriggerDescription      // triggers on this table
+	triggerMemoryBytes             atomic.Uint64             // producer-owned container + optional finite FK program estimates
+	statementTriggerEvents         atomic.Uint32             // event mask derived by the trigger declaration owner
 	hasNonStatementTriggers        atomic.Bool
 	synchronousRowMutationEvents   atomic.Uint32
 	cascadingForeignMutationEvents atomic.Uint32
@@ -2074,6 +2075,10 @@ func (t *table) metadataMemory() uint {
 	for edge := t.cacheTriggerSources.Load(); edge != nil; edge = edge.next {
 		size += uint(unsafe.Sizeof(*edge))
 	}
+	size += uint(cap(t.LogicalIndexes)) * uint(unsafe.Sizeof(logicalIndexDeclaration{}))
+	for _, index := range t.LogicalIndexes {
+		size += index.memory()
+	}
 	size += uint(cap(t.Unique)) * uint(unsafe.Sizeof(uniqueKey{}))
 	for _, key := range t.Unique {
 		size += uint(cap(key.Cols)) * uint(unsafe.Sizeof(""))
@@ -2188,6 +2193,9 @@ func (t *table) metadataMemory() uint {
 			chargeRows(fields[1])
 		}
 
+		if rows := snapshot.metadata.indexRows; rows.IsSlice() {
+			size += scm.ComputeSize(rows)
+		}
 		if snapshot.metadata.constraints != emptyTableConstraints {
 			// The field is already included in the wrapper; only its retained
 			// payload belongs here. Empty metadata is one shared package value.
@@ -2287,6 +2295,8 @@ type tableShowColumnsSnapshot struct {
 }
 
 type tableShowColumnsSnapshotMetadata struct {
+	logicalIndexes            []logicalIndexDeclaration
+	indexRows                 scm.Scmer
 	catalogVersion            uint64
 	catalogPrevious           *tableShowColumnsSnapshot
 	plannerColumnsFingerprint uint64
@@ -2460,6 +2470,8 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint, columnNames *tableCol
 		snapshot.metadata.catalogVersion = current.metadata.catalogVersion
 		snapshot.metadata.catalogPrevious = current.metadata.catalogPrevious
 		snapshot.metadata.statistics = current.metadata.statistics
+		snapshot.metadata.logicalIndexes = current.metadata.logicalIndexes
+		snapshot.metadata.indexRows = current.metadata.indexRows
 		snapshot.metadata.constraints = current.metadata.constraints
 		snapshot.metadata.storageConstraints = current.metadata.storageConstraints
 		snapshot.metadata.foreignByID = current.metadata.foreignByID
@@ -2657,6 +2669,11 @@ func (t *table) buildConstraintMetadata(foreignDeclarations []foreignKey) scm.Sc
 		return emptyTableConstraints
 	}
 	keys := uniqueConstraintMetadata(t.Unique)
+	for i, key := range t.Unique {
+		if indexOwnsKey(t.LogicalIndexes, key.Id) {
+			keys[i] = scm.NewSlice(append(keys[i].Slice(), scm.NewString("standalone_index"), scm.NewBool(true)))
+		}
+	}
 	constraints := []scm.Scmer{
 		scm.NewString("Unique"), scm.NewSlice(keys),
 		scm.NewString("ForeignKeys"), t.buildForeignConstraintMetadata(foreignDeclarations),
@@ -2728,6 +2745,8 @@ func (t *table) publishShowColumnsSnapshot(constraintsChanged bool) scm.Scmer {
 		current := t.showColumnsSnapshot.Load()
 		snapshot := t.buildShowColumnsSnapshot(t.CountEstimate(), nil)
 		if constraintsChanged {
+			snapshot.metadata.logicalIndexes = t.LogicalIndexes
+			snapshot.metadata.indexRows = logicalIndexRows(t.LogicalIndexes, snapshot.metadata.columnNames)
 			snapshot.metadata.constraints = t.buildConstraintMetadata(t.Foreign)
 			snapshot.metadata.storageConstraints = snapshot.metadata.constraints
 			snapshot.metadata.foreignByID = buildForeignMetadataDirectory(snapshot.metadata.constraints)

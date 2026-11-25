@@ -21,6 +21,7 @@ type relationSchemaLayout struct {
 	lease   *tableWriteLease
 	view    *tableShowColumnsSnapshot
 	retired map[string]bool
+	keys    []uniqueKey
 }
 
 type relationSchemaLayoutChange struct {
@@ -117,44 +118,7 @@ func (tx *TxContext) alterScopedColumn(t *table, name, operation string, ifExist
 	releaseScope := scope.beginUse()
 	defer releaseScope()
 	tx.requireDeclarationEndpoint(t, maintenanceAlter)
-	tx.getOrComputeResource(fmt.Sprintf("relation-schema-retirement/%p", scope), scm.NewFunc(func(...scm.Scmer) scm.Scmer {
-		return scm.NewAny(&relationSchemaRetirement{scope})
-	}))
-	// The actual endpoint owner upgrades only this already-attested scoped
-	// transaction's completed writer. A raw retained callback or active producer
-	// refuses the change before any header publication, without waiting on T.
-	value := tx.getOrComputeResource(fmt.Sprintf("relation-schema-layout/%p", t), scm.NewFunc(func(...scm.Scmer) scm.Scmer {
-		lease, err := t.writeAdmission.admit(scanQueryContext(tx, context.Background()), tx.transactionState, tableScopedDeclarationAdmission, false)
-		if err != nil {
-			panic(err)
-		}
-		ready := false
-		defer func() {
-			if !ready {
-				_ = lease.Close()
-			}
-		}()
-		lease.retainDDL(t, tx.transactionState)
-		tx.requireScopedColumnOwner(t)
-		layout := &relationSchemaLayout{table: t, scope: scope, lease: lease, view: t.catalogVisibleMetadata()}
-		// Even a later validation refusal retains this exact endpoint resource
-		// through T. Its baseline journal entry keeps scope close from waiting
-		// for that resource before the original decision can release it.
-		scope.mu.Lock()
-		scope.schemaDecisions++
-		scope.mu.Unlock()
-		tx.mu.Lock()
-		tx.relationSchemaChanges = append(tx.relationSchemaChanges, &relationSchemaChange{scope: scope,
-			layout: &relationSchemaLayoutChange{layout, layout}})
-		tx.storeScopedRelationLayout(layout)
-		tx.mu.Unlock()
-		ready = true
-		return scm.NewAny(lease)
-	}))
-	lease, ok := value.Any().(*tableWriteLease)
-	if !ok || lease == nil || lease.owner != &t.writeAdmission || lease.transaction != tx.transactionState {
-		panic("column declaration lost its native endpoint lease")
-	}
+	lease := tx.admitScopedRelationLayout(t, scope)
 	access := t.schema.GetWrite(tx)
 	defer access.Release()
 	tx.requireScopedColumnOwner(t)
@@ -202,7 +166,10 @@ func (tx *TxContext) alterScopedColumn(t *table, name, operation string, ifExist
 		if err := validateColumnDropShape(d); err != nil {
 			panic(err)
 		}
-		columns = t.projectStoredColumnDrop(d, columns, newCatalogNativeProjection(t.schema))
+		projection := newCatalogNativeProjection(t.schema)
+		projection.keys[t] = before.keys
+		projection.indexes[t] = before.view.metadata.logicalIndexes
+		columns = t.projectStoredColumnDrop(d, columns, projection)
 		retired = maps.Clone(before.retired)
 		if retired == nil {
 			retired = make(map[string]bool)
@@ -218,7 +185,7 @@ func (tx *TxContext) alterScopedColumn(t *table, name, operation string, ifExist
 		columns[ordinal] = c
 	}
 	view, _ := replaceStoredColumnMetadata(t, before.view, columns, t.columnNamesSnapshot.Load())
-	after := &relationSchemaLayout{table: t, scope: scope, lease: lease, view: view, retired: retired}
+	after := &relationSchemaLayout{table: t, scope: scope, lease: lease, view: view, retired: retired, keys: before.keys}
 	change := &relationSchemaChange{scope: scope, layout: &relationSchemaLayoutChange{before, after}}
 	// Reattest the completion boundary after validation: another operator may
 	// have entered while this builder was preparing its immutable header. All
@@ -303,7 +270,7 @@ func (tx *transactionState) publishScopedRelationLayouts() {
 		// A property-only change owns a selected header too. Baseline journal
 		// entries after rewind retain the exact published header and need no
 		// publication. This uses the existing immutable view, not a new tracker.
-		if layout.view.metadata.columnNames == t.columnNamesSnapshot.Load() {
+		if layout.view.metadata.columnNames == t.columnNamesSnapshot.Load() && sameLogicalIndexes(layout.view.metadata.logicalIndexes, t.LogicalIndexes) && sameUniqueKeys(layout.keys, t.Unique) {
 			continue
 		}
 		access := t.schema.GetWrite(nil)
@@ -315,6 +282,8 @@ func (tx *transactionState) publishScopedRelationLayouts() {
 				panic("relation column decision lost its native generation")
 			}
 			t.Columns = append([]*column(nil), layout.view.metadata.columnNames.declarations...)
+			t.Unique = layout.keys
+			t.LogicalIndexes = layout.view.metadata.logicalIndexes
 			if len(layout.retired) != 0 && t.DroppedColumns == nil {
 				t.DroppedColumns = make(map[string]bool)
 			}
@@ -324,4 +293,47 @@ func (tx *transactionState) publishScopedRelationLayouts() {
 			t.publishShowColumnsSnapshot(true)
 		}()
 	}
+}
+
+// Shared finite scoped-header setup, owned by the existing native schema journal.
+func (tx *TxContext) admitScopedRelationLayout(t *table, scope *relationScope) *tableWriteLease {
+	tx.getOrComputeResource(fmt.Sprintf("relation-schema-retirement/%p", scope), scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		return scm.NewAny(&relationSchemaRetirement{scope})
+	}))
+	// The actual endpoint owner upgrades only this already-attested scoped
+	// transaction's completed writer. A raw retained callback or active producer
+	// refuses the change before any header publication, without waiting on T.
+	value := tx.getOrComputeResource(fmt.Sprintf("relation-schema-layout/%p", t), scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		lease, err := t.writeAdmission.admit(scanQueryContext(tx, context.Background()), tx.transactionState, tableScopedDeclarationAdmission, false)
+		if err != nil {
+			panic(err)
+		}
+		ready := false
+		defer func() {
+			if !ready {
+				_ = lease.Close()
+			}
+		}()
+		lease.retainDDL(t, tx.transactionState)
+		tx.requireScopedColumnOwner(t)
+		layout := &relationSchemaLayout{table: t, scope: scope, lease: lease, view: t.catalogVisibleMetadata(), keys: append([]uniqueKey(nil), t.Unique...)}
+		// Even a later validation refusal retains this exact endpoint resource
+		// through T. Its baseline journal entry keeps scope close from waiting
+		// for that resource before the original decision can release it.
+		scope.mu.Lock()
+		scope.schemaDecisions++
+		scope.mu.Unlock()
+		tx.mu.Lock()
+		tx.relationSchemaChanges = append(tx.relationSchemaChanges, &relationSchemaChange{scope: scope,
+			layout: &relationSchemaLayoutChange{layout, layout}})
+		tx.storeScopedRelationLayout(layout)
+		tx.mu.Unlock()
+		ready = true
+		return scm.NewAny(lease)
+	}))
+	lease, ok := value.Any().(*tableWriteLease)
+	if !ok || lease == nil || lease.owner != &t.writeAdmission || lease.transaction != tx.transactionState {
+		panic("column declaration lost its native endpoint lease")
+	}
+	return lease
 }

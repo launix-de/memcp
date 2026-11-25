@@ -817,6 +817,7 @@ func invalidateComputedRows(proxy *StorageComputeProxy, recids map[uint32]struct
 }
 
 func Init(en scm.Env) {
+	initLogicalIndexes(&en)
 	initCatalogColumnInitialization(&en)
 	initIOInstrumentation(&en)
 	initRelationScopes(&en)
@@ -2881,7 +2882,7 @@ func Init(en scm.Env) {
 			// Explicit transactions use their original catalog decision. Auto-DDL
 			// retains its existing native schema/MOSI publication owner.
 			if currentTx != nil && !currentTx.autoCommit && !t.Ephemeral && !t.ScopedSchema && t.PersistencyMode != Cache {
-				return scm.NewBool(currentTx.stagePublicKey(t, "add", key))
+				return scm.NewBool(currentTx.stagePublicKey(t, "add", key, nil))
 			}
 			requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
 			return scm.NewBool(createTableKey(t, key, currentTx))
@@ -2909,6 +2910,9 @@ func Init(en scm.Env) {
 			}
 			requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
 			t.schema.GetRead(currentTx).Release()
+			if indexOwnsKey(t.logicalIndexesForTx(currentTx), name) {
+				panic("standalone index requires DROP INDEX")
+			}
 			if !t.mayHaveUniqueDeclaration(name, currentTx) {
 				return scm.NewBool(false)
 			}
@@ -2929,7 +2933,7 @@ func Init(en scm.Env) {
 			// Explicit transactions use their original catalog decision. Auto-DDL
 			// retains its existing native schema/MOSI publication owner.
 			if currentTx != nil && !currentTx.autoCommit && !t.Ephemeral && !t.ScopedSchema && t.PersistencyMode != Cache {
-				return scm.NewBool(currentTx.stagePublicKey(t, "drop", uniqueKey{Id: name}))
+				return scm.NewBool(currentTx.stagePublicKey(t, "drop", uniqueKey{Id: name}, nil))
 			}
 			defer t.admitNativeMaintenance()()
 
@@ -4347,8 +4351,11 @@ func Init(en scm.Env) {
 					t.NativeIdentity(tx)
 					return t.statementTriggerDeclarations(tx)
 				}
-				if len(a) == 3 && a[1].IsString() && (a[1].String() == "constraints" || a[1].String() == "declarations") {
+				if len(a) == 3 && a[1].IsString() && (a[1].String() == "constraints" || a[1].String() == "declarations" || a[1].String() == "logical_indexes") {
 					tx := scmerToTxContext(a[2])
+					if a[1].String() == "logical_indexes" {
+						return t.declarationMetadataForTx(tx).metadata.indexRows
+					}
 					if a[1].String() == "constraints" {
 						return t.declarationMetadataForTx(tx).metadata.constraints
 					}
@@ -4386,6 +4393,9 @@ func Init(en scm.Env) {
 						return showBuildMemory(t.residentMemory())
 					}
 
+					if a[1].IsString() && a[1].String() == "logical_indexes" {
+						return t.declarationMetadataForTx(nil).metadata.indexRows
+					}
 					if a[1].IsString() && a[1].String() == "declarations" {
 						return t.Declarations(nil)
 					}
@@ -4456,6 +4466,9 @@ func Init(en scm.Env) {
 				}
 				if a[2].IsString() && scm.String(a[2]) == "memory" {
 					return showBuildMemory(t.residentMemory())
+				}
+				if a[2].IsString() && a[2].String() == "logical_indexes" {
+					return t.declarationMetadataForTx(nil).metadata.indexRows
 				}
 				if a[2].IsString() && a[2].String() == "declarations" {
 					return t.Declarations(nil)
@@ -6295,6 +6308,9 @@ func uniqueKeyOptions(key uniqueKey, options scm.Scmer) uniqueKey {
 // createTableKey publishes validated uniqueness metadata. Callers enforce user
 // maintenance policy; the fixed bootstrap key list is initialized before serving.
 func createTableKey(t *table, key uniqueKey, currentTx *TxContext) bool {
+	if logicalIndexPosition(t.logicalIndexesForTx(currentTx), key.Id) >= 0 {
+		panic("key name belongs to standalone index")
+	}
 	t, schemaAccess := t.schemaWrite()
 	defer schemaAccess.Release()
 	defer t.admitNativeMaintenance()()

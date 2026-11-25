@@ -207,7 +207,15 @@ func checkedCatalogWriters(history []catalogDeclarationAmendment, statements, co
 	}
 	for _, entry := range history {
 		if key := entry.publicKey; key != nil {
-			result[key.table] = nativeDeclarationRowInput
+			if key.index != nil && key.index.Index.Key == nil {
+				// Advisory names do not alter row enforcement. Preserve any actual
+				// key/layout veto already selected by the same chronological history.
+				if result[key.table] != nativeDeclarationRowInput {
+					result[key.table] = nativeColumnBindingRowInput
+				}
+			} else {
+				result[key.table] = nativeDeclarationRowInput
+			}
 		}
 		if drop := entry.foreignDrop; drop != nil {
 			for _, t := range drop.endpoints {
@@ -309,7 +317,10 @@ func (tx *TxContext) catalogCreationRowSource(t *table) bool {
 }
 
 func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, event nativeMutationEvent) *nativeMutationInput {
-	if source == nil {
+	layout := tx.scopedRelationLayout(t)
+	if source == nil && layout != nil {
+		tx.requireScopedColumnOwner(t)
+	} else if source == nil {
 		if !tx.catalogCreationRowSource(t) {
 			panic("native mutation input lost its original creation source")
 		}
@@ -342,7 +353,7 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 	owner := &t.writeAdmission
 	owner.mu.Lock()
 	valid := owner.statement == lease && lease.transaction == tx.transactionState &&
-		(source != nil && owner.declaration == tx.transactionState || source == nil && owner.declaration == nil)
+		(source != nil && owner.declaration == tx.transactionState || source == nil && owner.declaration == nil || layout != nil && layout.lease.transaction == tx.transactionState && owner.declaration == tx.transactionState)
 	owner.mu.Unlock()
 	if !valid {
 		panic("private declaration input lost its actual endpoint lease")
@@ -354,6 +365,9 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 	var keys []uniqueKey
 	if source != nil {
 		history, selected, keys = source.history, source.tables[t], uniqueKeysInView(t, source.keys)
+	} else if layout != nil {
+		tx.requireScopedColumnOwner(t)
+		selected, keys = layout.view, layout.keys
 	} else {
 		// Use the same original-T declaration selector as SHOW/source binding,
 		// under its actual statement lease. Never guess from a fresh SQL name.

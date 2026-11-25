@@ -20,6 +20,8 @@ type catalogKeyDeclaration struct {
 
 type catalogPublicKeyAmendment struct {
 	operation     string
+	index         *catalogIndexDeclaration
+	indexes       []logicalIndexDeclaration
 	declaration   catalogKeyDeclaration
 	table         *table
 	keys          []uniqueKey
@@ -76,13 +78,13 @@ func validateCatalogKey(db *database, declaration catalogKeyDeclaration, views m
 	return t
 }
 
-func (tx *TxContext) stagePublicKey(t *table, operation string, key uniqueKey) bool {
+func (tx *TxContext) stagePublicKey(t *table, operation string, key uniqueKey, index *logicalIndexDeclaration) bool {
 	if tx == nil || tx.transactionState == nil || tx.State != TxActive || tx.decisionStarted {
 		panic("unique declaration requires an active native transaction")
 	}
 	// A committed or already-owned positive name is an ordinary create miss;
 	// avoid allocating an otherwise empty catalog authority for that no-op.
-	if operation == "add" && (t.mayHaveUniqueDeclaration(key.Id, tx) || key.ConstraintName != "" && t.mayHaveUniqueDeclaration(key.ConstraintName, tx)) {
+	if index == nil && operation == "add" && (t.mayHaveUniqueDeclaration(key.Id, tx) || key.ConstraintName != "" && t.mayHaveUniqueDeclaration(key.ConstraintName, tx)) {
 		return false
 	}
 	finish := tx.beginCatalogConstruction(catalogValidationConstruction, nil, t)
@@ -90,10 +92,10 @@ func (tx *TxContext) stagePublicKey(t *table, operation string, key uniqueKey) b
 	if tx.replicationActive || tx.replicationWriting || tx.relationData != nil || tx.coordinator != nil || tx.clusterNumber.Load() != 0 || tx.remoteObject != nil || tx.remoteInvocation || (tx.catalogIntents.Load() != nil || tx.hasTableDrops()) && !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) || t.Ephemeral || t.ScopedSchema || t.PersistencyMode == Cache {
 		panic("public unique declaration requires a local committed native table")
 	}
-	return tx.stagePublicCatalogDeclaration(t.schema, catalogPublicKeyKind, nil, func(changes *publicCatalogChanges) bool { return changes.stageKey(tx, t, operation, key) })
+	return tx.stagePublicCatalogDeclaration(t.schema, catalogPublicKeyKind, nil, func(changes *publicCatalogChanges) bool { return changes.stageKey(tx, t, operation, key, index) })
 }
 
-func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation string, key uniqueKey) bool {
+func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation string, key uniqueKey, index *logicalIndexDeclaration) bool {
 	changes.mu.Lock()
 	defer changes.mu.Unlock()
 	defer changes.refreshMemoryLocked()
@@ -132,6 +134,8 @@ func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation
 	var declaration catalogKeyDeclaration
 	var observed *tableShowColumnsSnapshot
 	var keys []uniqueKey
+	var indexes []logicalIndexDeclaration
+	var logical *catalogIndexDeclaration
 	func() {
 		access := db.GetWrite(tx)
 		defer access.Release()
@@ -143,41 +147,63 @@ func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation
 			panic("unique declaration endpoint generation was replaced")
 		}
 		current := uniqueKeysInView(t, tx.publicUniqueKeys())
-		switch operation {
-		case "add":
-			for _, existing := range current {
-				if existing.matchesName(key.Id) || key.ConstraintName != "" && existing.matchesName(key.ConstraintName) {
-					return
-				}
-			}
-			key.Cols = append([]string(nil), key.Cols...)
-			declaration = catalogKeyDeclaration{t.Name, t.RuntimeIdentity, key}
-			validateCatalogKey(db, declaration, tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState}, nil)
-			if keyNameConflict(db, t, key, tx.publicUniqueKeys(), tx.publicForeignAmendments()) {
-				panic("declaration name already exists: " + key.Id)
-			}
-			keys = append(append([]uniqueKey(nil), current...), key)
-		case "drop":
-			found := -1
-			for i, existing := range current {
-				if existing.matchesName(key.Id) {
-					found = i
-					key = existing
-					break
-				}
-			}
-			if found < 0 {
+		if index != nil {
+			p := tx.indexProjection(t)
+			if operation == "add" && logicalIndexPosition(indexesInView(t, p.indexes), index.Name) >= 0 {
 				return
 			}
-			declaration = catalogKeyDeclaration{t.Name, t.RuntimeIdentity, key}
-			validateCatalogKey(db, declaration, tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState}, nil)
-			keys = append([]uniqueKey(nil), current...)
-			keys = slices.Delete(keys, found, found+1)
-			if dependency := foreignKeyRequiresUnique(t, keys, tx.publicForeignAmendments()); dependency != "" {
-				panic("unique declaration is required by foreign key " + dependency + ": " + key.Id + "; drop the foreign key constraint first")
+			d := catalogIndexDeclaration{t.Name, t.RuntimeIdentity, *index}
+			db.projectIndexDeclaration(&d, operation, p, tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState})
+			keys, indexes, logical = p.keys[t], p.indexes[t], &d
+			if index.Key != nil {
+				key = *index.Key
+			} else {
+				key = uniqueKey{Id: index.Name, Cols: index.Columns}
 			}
-		default:
-			panic("invalid public unique declaration operation")
+			declaration = catalogKeyDeclaration{t.Name, t.RuntimeIdentity, key}
+		} else {
+			if operation == "drop" && indexOwnsKey(t.logicalIndexesForTx(tx), key.Id) {
+				panic("standalone index requires DROP INDEX")
+			}
+			if operation == "add" && logicalIndexPosition(t.logicalIndexesForTx(tx), key.Id) >= 0 {
+				panic("key name belongs to a standalone index")
+			}
+			switch operation {
+			case "add":
+				for _, existing := range current {
+					if existing.matchesName(key.Id) || key.ConstraintName != "" && existing.matchesName(key.ConstraintName) {
+						return
+					}
+				}
+				key.Cols = append([]string(nil), key.Cols...)
+				declaration = catalogKeyDeclaration{t.Name, t.RuntimeIdentity, key}
+				validateCatalogKey(db, declaration, tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState}, nil)
+				if keyNameConflict(db, t, key, tx.publicUniqueKeys(), tx.publicForeignAmendments()) {
+					panic("declaration name already exists: " + key.Id)
+				}
+				keys = append(append([]uniqueKey(nil), current...), key)
+			case "drop":
+				found := -1
+				for i, existing := range current {
+					if existing.matchesName(key.Id) {
+						found = i
+						key = existing
+						break
+					}
+				}
+				if found < 0 {
+					return
+				}
+				declaration = catalogKeyDeclaration{t.Name, t.RuntimeIdentity, key}
+				validateCatalogKey(db, declaration, tx.publicDeclarationViews(), catalogForeignEndpointScope{owner: tx.transactionState}, nil)
+				keys = append([]uniqueKey(nil), current...)
+				keys = slices.Delete(keys, found, found+1)
+				if dependency := foreignKeyRequiresUnique(t, keys, tx.publicForeignAmendments()); dependency != "" {
+					panic("unique declaration is required by foreign key " + dependency + ": " + key.Id + "; drop the foreign key constraint first")
+				}
+			default:
+				panic("invalid public unique declaration operation")
+			}
 		}
 		observed = t.showColumnsSnapshot.Load()
 	}()
@@ -186,7 +212,7 @@ func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation
 	}
 	// All data callbacks and index preparation run outside schema/table/shard
 	// locks. The native declaration lease retains the complete validation cut.
-	if operation == "add" {
+	if operation == "add" && (index == nil || index.Key != nil) {
 		t.enterPendingCatalogData(tx, changes.leases[t])
 		validateExistingUniqueRows(tx, t, key)
 	}
@@ -197,8 +223,16 @@ func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation
 		base = observed
 	}
 	view, bytes := replaceUniqueMetadata(base, keys, false)
-	amendment := &catalogPublicKeyAmendment{operation: operation, declaration: declaration, table: t, keys: keys, previous: previous}
-	amendment.retainedBytes = uint(unsafe.Sizeof(*amendment)) + uint(cap(keys))*uint(unsafe.Sizeof(uniqueKey{})) + bytes
+	if logical != nil {
+		var owned uint
+		view, owned = replaceLogicalIndexMetadata(view, indexes)
+		bytes += owned
+	}
+	amendment := &catalogPublicKeyAmendment{index: logical, indexes: indexes, operation: operation, declaration: declaration, table: t, keys: keys, previous: previous}
+	amendment.retainedBytes = uint(cap(indexes))*uint(unsafe.Sizeof(logicalIndexDeclaration{})) + uint(unsafe.Sizeof(*amendment)) + uint(cap(keys))*uint(unsafe.Sizeof(uniqueKey{})) + bytes
+	if logical != nil && operation == "add" {
+		amendment.retainedBytes += logical.memory()
+	}
 	if operation == "add" {
 		amendment.retainedBytes += uniqueKeyPayloadBytes(key)
 	}
@@ -313,10 +347,16 @@ func replaceUniqueMetadata(base *tableShowColumnsSnapshot, keys []uniqueKey, pub
 		result, metadata = *base, *base.metadata
 	} else {
 		metadata.columnNames, metadata.columnRows = base.metadata.columnNames, base.metadata.columnRows
+		metadata.logicalIndexes, metadata.indexRows = base.metadata.logicalIndexes, base.metadata.indexRows
 	}
 	result.metadata = &metadata
 	constraints := append([]scm.Scmer(nil), base.nativeConstraints().Slice()...)
 	rows := uniqueConstraintMetadata(keys)
+	for i, key := range keys {
+		if indexOwnsKey(base.metadata.logicalIndexes, key.Id) {
+			rows[i] = scm.NewSlice(append(rows[i].Slice(), scm.NewString("standalone_index"), scm.NewBool(true)))
+		}
+	}
 	constraints[1] = scm.NewSlice(rows)
 	metadata.constraints = scm.NewSlice(constraints)
 	metadata.storageConstraints = metadata.constraints
@@ -431,6 +471,18 @@ func keySnapshotContainers(snapshot *tableShowColumnsSnapshot, containers map[sc
 		return
 	}
 	keyMetadataContainers(snapshot.metadata.columnRows, scm.NewNil(), containers)
+	if rows := snapshot.metadata.indexRows; rows.IsSlice() {
+		containers[rows] = uint(cap(rows.Slice())) * uint(unsafe.Sizeof(scm.Scmer{}))
+		for _, row := range rows.Slice() {
+			containers[row] = uint(cap(row.Slice())) * uint(unsafe.Sizeof(scm.Scmer{}))
+			for j := 1; j < len(row.Slice()); j += 2 {
+				v := row.Slice()[j]
+				if v.IsSlice() {
+					containers[v] = uint(cap(v.Slice())) * uint(unsafe.Sizeof(scm.Scmer{}))
+				}
+			}
+		}
+	}
 	if declarations := snapshot.metadata.declarations; declarations.IsSlice() {
 		fields := declarations.Slice()
 		keyMetadataContainers(fields[1], fields[3].Slice()[1], containers)

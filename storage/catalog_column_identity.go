@@ -184,7 +184,7 @@ func (record *catalogDecisionRecord) validateIdentityAppendProfile() error {
 		if d.GeneratedIDs == nil {
 			continue
 		}
-		if record.Format != 31 || d.GeneratedIDs.validate() != nil || d.Type.Nullable || d.Initialization != nil || d.RowInitialization != nil || seen[d.Identity] {
+		if record.Format != 31 && record.Format != 32 || d.GeneratedIDs.validate() != nil || d.Type.Nullable || d.Initialization != nil || d.RowInitialization != nil || seen[d.Identity] {
 			return fmt.Errorf("invalid required generated-ID append profile")
 		}
 		seen[d.Identity] = true

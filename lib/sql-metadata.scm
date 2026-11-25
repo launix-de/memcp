@@ -323,7 +323,7 @@ carries a generic default Collation field. */
 (define info_schema_key_column_usage_for_table (close_procedure ((lambda (info_schema_unique_column_rows info_schema_fk_column_rows)
 	(lambda (schema tbl tx) (begin
 		(define meta (show (table schema false tbl false tx) "constraints" tx))
-		(define unique_rows (merge (map (meta "Unique") (lambda (key)
+		(define unique_rows (merge (map (filter (meta "Unique") (lambda (key) (not (coalesceNil (key "standalone_index") false)))) (lambda (key)
 			(info_schema_unique_column_rows schema tbl key (key "Cols") 1)))))
 		(define foreign_rows (merge (map (filter (meta "ForeignKeys") (lambda (fk)
 			(equal? (fk "Role") "referencing"))) (lambda (fk)
@@ -397,7 +397,7 @@ query rows, synthetic constraints, or automatic access indexes enter them. */
 							"table_catalog" "def" "table_schema" database "table_name" name
 							"constraint_type" type "enforced" (if enabled "YES" "NO"))))
 					(merge (list
-						(map (constraints "Unique") (lambda (key)
+						(map (filter (constraints "Unique") (lambda (key) (not (coalesceNil (key "standalone_index") false)))) (lambda (key)
 							(row (sql_key_constraint_name key) (if (equal? (key "Id") "PRIMARY") "PRIMARY KEY" "UNIQUE") true)))
 						(map (filter (constraints "ForeignKeys") (lambda (key) (equal? (key "Role") "referencing")))
 							(lambda (key) (row (key "Id") "FOREIGN KEY" (if (has_assoc? key "Enabled") (key "Enabled") true))))

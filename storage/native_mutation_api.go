@@ -87,6 +87,12 @@ func withNativeTableMutation(targets []*table, descriptor nativeMutationDescript
 			// Only the actual checked invocation below may borrow the pending
 			// layout's retained DDL lease. The raw parent grants no row rights.
 			parent.requireScopedRelationOwner(target)
+			if layout := parent.scopedRelationLayout(target); !sameUniqueKeys(layout.keys, target.Unique) {
+				if declarationTarget != nil && declarationTarget != target {
+					panic("private declaration input requires one checked native target")
+				}
+				declarationTarget = target
+			}
 			checked = true
 		} else if source := parent.privateMutationSource(target); source != nil {
 			if declarationTarget != nil && declarationTarget != target {

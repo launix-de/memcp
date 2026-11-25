@@ -568,6 +568,9 @@ func (tx *TxContext) prepareCatalogDecision() error {
 			return err
 		}
 	}
+	if record.hasLogicalIndexes() {
+		record.Format = 32
+	}
 	encoded := encodeCatalogDecision(record)
 	db.schemalock.Unlock()
 	frozen, err := decodeCatalogDecision(encoded)

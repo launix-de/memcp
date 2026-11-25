@@ -35,7 +35,7 @@ func (scope catalogForeignEndpointScope) retires(t *table) bool {
 // Caller has decoded and accepted the complete decision, registered these exact
 // generations, and retained the predecessor catalog version until publication.
 func recoveredForeignEndpointScope(db *database, record *catalogDecisionRecord) catalogForeignEndpointScope {
-	if record.Format != 22 && record.Format != 23 && record.Format != 24 && record.Format != 25 && record.Format != 26 && record.Format != 28 && record.Format != 29 && record.Format != 30 && record.Format != 31 {
+	if record.Format != 22 && record.Format != 23 && record.Format != 24 && record.Format != 25 && record.Format != 26 && record.Format != 28 && record.Format != 29 && record.Format != 30 && record.Format != 31 && record.Format != 32 {
 		return catalogForeignEndpointScope{}
 	}
 	if record.Database != db.Name || record.Incarnation != db.incarnationID() || record.Version != db.catalogVersion+1 {
@@ -48,7 +48,7 @@ func recoveredForeignEndpointScope(db *database, record *catalogDecisionRecord) 
 		}
 		scope.recovered[t] = struct{}{}
 	}
-	if record.Format == 23 || record.Format == 26 || record.Format == 28 || record.Format == 29 || (record.Format == 30 || record.Format == 31) {
+	if record.Format == 23 || record.Format == 26 || record.Format == 28 || record.Format == 29 || (record.Format == 30 || (record.Format == 31 || record.Format == 32)) {
 		for _, d := range record.TableDrops {
 			t := db.tables.Get(d.Name)
 			if t == nil || t.RuntimeIdentity != d.Identity || !t.committedAt(db.catalogView().version) {

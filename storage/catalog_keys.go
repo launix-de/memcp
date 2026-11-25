@@ -75,6 +75,7 @@ type catalogDeclarationAmendment struct {
 	allocator        *catalogAllocatorReset
 	table            *table
 	keys             []uniqueKey
+	indexes          []logicalIndexDeclaration
 	columns          []*column
 	check            *catalogCheckAmendment
 	checkDrop        *catalogCheckDropAmendment
@@ -118,7 +119,7 @@ func (tx *TxContext) createCatalogKey(t *table, key uniqueKey) bool {
 		return scm.ToBool(value)
 	}
 	if tx.catalogDeclarationDataEntered(t) || tx.hasNameAmendments() || tx.hasTableDrops() {
-		return tx.stagePublicKey(t, "add", key)
+		return tx.stagePublicKey(t, "add", key, nil)
 	}
 	return tx.amendCatalogDeclaration(t, func(current *table) bool { return declareUnpublishedKey(current, key) })
 }
@@ -140,6 +141,9 @@ func declareUnpublishedKey(current *table, key uniqueKey) bool {
 		if column := catalogColumnInView(current, name, nil, nil); column == nil {
 			panic("unknown unique declaration column: " + name)
 		}
+	}
+	if logicalIndexPosition(current.LogicalIndexes, key.Id) >= 0 {
+		panic("declaration name belongs to a standalone index")
 	}
 	for _, existing := range current.Unique {
 		if existing.matchesName(key.Id) || (key.ConstraintName != "" && existing.matchesName(key.ConstraintName)) {
@@ -200,7 +204,7 @@ func (tx *TxContext) amendCatalogDeclaration(t *table, amend func(*table) bool) 
 	if tx.catalogDeclarationDataEntered(current) {
 		panic("transactional declaration amendments must precede native row access")
 	}
-	previous := catalogDeclarationAmendment{table: current, keys: append([]uniqueKey(nil), current.Unique...), columns: append([]*column(nil), current.Columns...)}
+	previous := catalogDeclarationAmendment{table: current, keys: append([]uniqueKey(nil), current.Unique...), indexes: append([]logicalIndexDeclaration(nil), current.LogicalIndexes...), columns: append([]*column(nil), current.Columns...)}
 	if !amend(current) {
 		return false
 	}
@@ -267,6 +271,7 @@ func (tx *TxContext) restoreCatalogDeclarations(keep int) {
 		}
 		current.ddlMu.Lock()
 		current.Unique = append([]uniqueKey(nil), amendment.keys...)
+		current.LogicalIndexes = append([]logicalIndexDeclaration(nil), amendment.indexes...)
 		current.Columns = append([]*column(nil), amendment.columns...)
 		current.publishShowColumnsSnapshot(true)
 		current.ddlMu.Unlock()

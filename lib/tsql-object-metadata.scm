@@ -588,14 +588,23 @@ use the general profile. Neither profile caches metadata rows or authority. */
 				(lambda (row) (list (nth row 0) (nth row 3) (nth row 1)
 					(if (has? '("PK" "UQ") (nth row 1)) "K" (nth row 1)) 1 (nth row 4))))
 			(error "unsupported T-SQL object metadata source" kind))))))
-(define tsql_catalog_declaration_rows_factory (close_procedure (lambda (object_rows defaults triggers default_comment definition metadata_rows constraint_id)
+(define tsql_catalog_declaration_rows_factory (close_procedure (lambda (object_rows defaults triggers default_comment definition metadata_rows constraint_id native_relation)
 	(lambda (database kind actor tx selection)
 		(if (has? '("objects" "lookup_objects" "sysobjects") kind) (object_rows database kind actor tx selection)
 			(equal? kind "defaults") (map (defaults database actor tx selection definition) (lambda (row) (append row database)))
 			(equal? kind "triggers") (map (triggers database actor tx selection) (lambda (row) (append row database)))
 			(equal? kind "syscomments") (map (defaults database actor tx selection definition)
 				(lambda (row) (list (nth row 1) (default_comment (nth row 7)))))
-			(has? '("constraints" "foreign_keys" "check_constraints" "key_constraints" "indexes") kind) (begin
+			(equal? kind "indexes") (merge (list
+				(map (object_rows database "objects" actor tx (set_assoc (coalesceNil selection '()) "kinds" '("PK" "UQ")))
+					(lambda (row) (list (nth row 0) (nth row 4) database)))
+				(merge (map (object_rows database "objects" actor tx (set_assoc (set_assoc (coalesceNil selection '()) "object" nil) "kinds" '("U")))
+					(lambda (row) (begin
+						(define handle (native_relation database (nth row 0) tx))
+						(if (nil? handle) '()
+							(map (coalesceNil (show handle "logical_indexes" tx) '())
+								(lambda (index) (list (index "Id") (nth row 3) database))))))))))
+			(has? '("constraints" "foreign_keys" "check_constraints" "key_constraints") kind) (begin
 				/* Constraint catalogs share the same finite declaration producer as
 				objects. Bind their numeric identities in that producer once per
 				invocation, before joins or scalar probes consume its table source. */
@@ -683,7 +692,7 @@ use the general profile. Neither profile caches metadata rows or authority. */
 		(define tsql_catalog_object_tuples (__runtime_capture_31 info_schema_name_matches tsql_catalog_object_name_matches? tsql_catalog_metadata_rows sql_stored_view_catalog_rows tsql_catalog_public_native_row? tsql_catalog_relation_id tsql_catalog_kind_selected? tsql_catalog_constraint_id tsql_native_object_id tsql_schema_id_value tsql_catalog_default_tuples tsql_source_catalog_entries tsql_source_module_kind tsql_catalog_module_id tsql_catalog_trigger_tuples tsql_catalog_key_tuples definition_none))
 		(define tsql_catalog_lookup_object_tuples (__runtime_capture_32 tsql_catalog_object_tuples tsql_catalog_kind_selected? tsql_virtual_catalog_names tsql_catalog_object_name_matches? tsql_object_registry_id))
 		(define object_rows (__runtime_capture_33 tsql_catalog_object_tuples tsql_catalog_lookup_object_tuples))
-		(define declaration_rows (__runtime_capture_36 object_rows tsql_catalog_default_tuples tsql_catalog_trigger_tuples tsql_catalog_default_comment tsql_catalog_default_definition tsql_catalog_metadata_rows tsql_catalog_constraint_id))
+		(define declaration_rows (__runtime_capture_36 object_rows tsql_catalog_default_tuples tsql_catalog_trigger_tuples tsql_catalog_default_comment tsql_catalog_default_definition tsql_catalog_metadata_rows tsql_catalog_constraint_id tsql_native_relation_handle))
 		(define all_rows (__runtime_capture_34 declaration_rows tsql_catalog_column_tuples))
 		(define rows (__runtime_capture_35 tsql_metadata_visible? all_rows))
 		(if (nil? database)
@@ -727,7 +736,7 @@ use the general profile. Neither profile caches metadata rows or authority. */
 		(define tsql_catalog_default_definition __runtime_capture_35)
 		(define tsql_catalog_default_comment __runtime_capture_36)
 		(define object_rows (__runtime_capture_31 tsql_catalog_object_tuples tsql_catalog_lookup_object_tuples))
-		(define declaration_rows (__runtime_capture_34 object_rows tsql_catalog_default_tuples tsql_catalog_trigger_tuples tsql_catalog_default_comment tsql_catalog_default_definition tsql_catalog_metadata_rows tsql_catalog_constraint_id))
+		(define declaration_rows (__runtime_capture_34 object_rows tsql_catalog_default_tuples tsql_catalog_trigger_tuples tsql_catalog_default_comment tsql_catalog_default_definition tsql_catalog_metadata_rows tsql_catalog_constraint_id tsql_native_relation_handle))
 		(define rows (__runtime_capture_32 tsql_metadata_visible? declaration_rows))
 		(if (nil? database)
 			(merge (map (info_schema_selected_databases selection) (lambda (database) (rows database kind actor tx selection))))

@@ -631,6 +631,7 @@ func (tx *TxContext) restorePublicDeclarations(keep int) {
 			if (catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) {
 				t.ddlMu.Lock()
 				t.Unique = append([]uniqueKey(nil), before.keys...)
+				t.LogicalIndexes = append([]logicalIndexDeclaration(nil), before.indexes...)
 				t.Columns = append([]*column(nil), before.columns...)
 				t.publishShowColumnsSnapshot(true)
 				t.ddlMu.Unlock()
@@ -829,6 +830,8 @@ type publicForeignEndpoint struct {
 	columns              []*column
 	retiredColumns       map[string]bool
 	keys                 []uniqueKey
+	indexes              []logicalIndexDeclaration
+	indexChanged         bool
 	keyChanged           bool
 	keyBaselineBytes     uint
 	checks               []*checkDeclaration
@@ -866,6 +869,7 @@ func appendConstraintMetadata(t *table, base *tableShowColumnsSnapshot, addition
 		// constraints; native consumers borrow this directory by point lookup.
 		metadata.columnNames = base.metadata.columnNames
 		metadata.columnRows = base.metadata.columnRows
+		metadata.logicalIndexes, metadata.indexRows = base.metadata.logicalIndexes, base.metadata.indexRows
 	}
 	rows := t.buildForeignConstraintMetadata(additions).Slice()
 	if version == 0 {
@@ -924,12 +928,14 @@ func appendConstraintMetadata(t *table, base *tableShowColumnsSnapshot, addition
 func (db *database) preparePublicConstraintPublication(checks []catalogCheckDeclaration, defaults []catalogColumnDefaultDeclaration, columns []catalogColumnDeclaration, appends []catalogColumnAppend, properties []catalogColumnPropertyRemoval, drops []catalogCheckDeclaration, nativeDeclarations []catalogNativeDeclaration, version uint64, programs map[string][]foreignKeyTrigger, changes *publicCatalogChanges) *publicForeignPublication {
 	var declarations, foreignDrops []catalogForeignDeclaration
 	var keyProjection map[*table][]uniqueKey
+	var indexProjection map[*table][]logicalIndexDeclaration
 	var propertyProjection map[*table][]*column
 	var tableNames map[*table]string
 	if len(nativeDeclarations) > 0 {
 		projection := db.projectNativeDeclarations(nativeDeclarations, (&TxContext{transactionState: changes.owner}).publicDeclarationViews(), catalogNativeCurrent, catalogForeignEndpointScope{owner: changes.owner})
 		declarations, foreignDrops, keyProjection, propertyProjection = projection.foreignAdds, projection.foreignDrops, projection.keys, projection.propertyColumns
 		tableNames = projection.tableNames
+		indexProjection = projection.indexes
 	}
 	publication := &publicForeignPublication{changes: changes, tableNames: tableNames}
 	endpoints := make(map[*table]*publicForeignEndpoint)
@@ -1039,6 +1045,20 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 			publication.endpoints = append(publication.endpoints, endpoint)
 		}
 		endpoint.keys, endpoint.keyChanged = keys, true
+		if indexes, ok := indexProjection[t]; ok {
+			endpoint.indexes, endpoint.indexChanged = indexes, true
+			for _, old := range t.LogicalIndexes {
+				at := logicalIndexPosition(indexes, old.Name)
+				if at < 0 || !sameLogicalIndex(old, indexes[at]) {
+					publication.retiredKeyBytes += old.memory()
+				}
+			}
+			for _, index := range indexes {
+				if a := lastKeys[t][scm.CaseFoldKey(index.Name)]; a != nil && a.index != nil && a.operation == "add" && sameLogicalIndex(index, a.index.Index) {
+					publication.keyTransferBytes += index.memory()
+				}
+			}
+		}
 		publication.retiredKeyBytes += retiredUniquePayloads(t.Unique, keys)
 		publication.keyTransferBytes += publicUniqueTransfer(lastKeys[t], keys)
 	}
@@ -1118,6 +1138,11 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 			endpoint.snapshot, keyBytes = replaceUniqueMetadata(endpoint.snapshot, endpoint.keys, true)
 			snapshotBytes += keyBytes
 		}
+		if endpoint.indexChanged {
+			var owned uint
+			endpoint.snapshot, owned = replaceLogicalIndexMetadata(endpoint.snapshot, endpoint.indexes)
+			snapshotBytes += owned
+		}
 		if input := columnInputs[endpoint.table]; input.columns != nil {
 			var columnBytes uint
 			endpoint.columns = input.columns
@@ -1136,7 +1161,7 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 			publication.columnPayloadBytes += input.payloadBytes
 		}
 		bytes += columnRetirementMapBytes(endpoint.retiredColumns)
-		bytes += uint(unsafe.Sizeof(*endpoint)) + uint(cap(endpoint.foreign))*uint(unsafe.Sizeof(foreignKey{})) + uint(cap(endpoint.keys))*uint(unsafe.Sizeof(uniqueKey{})) + uint(cap(endpoint.checks)+cap(endpoint.checkDrops))*uint(unsafe.Sizeof((*checkDeclaration)(nil))) + uint(cap(endpoint.foreignDrops))*uint(unsafe.Sizeof(catalogForeignDeclaration{})) + snapshotBytes
+		bytes += uint(unsafe.Sizeof(*endpoint)) + uint(cap(endpoint.foreign))*uint(unsafe.Sizeof(foreignKey{})) + uint(cap(endpoint.keys))*uint(unsafe.Sizeof(uniqueKey{})) + uint(cap(endpoint.indexes))*uint(unsafe.Sizeof(logicalIndexDeclaration{})) + uint(cap(endpoint.checks)+cap(endpoint.checkDrops))*uint(unsafe.Sizeof((*checkDeclaration)(nil))) + uint(cap(endpoint.foreignDrops))*uint(unsafe.Sizeof(catalogForeignDeclaration{})) + snapshotBytes
 	}
 	bytes += publication.projectNameMetadata()
 	publication.retainKeyBaselineContainers()
@@ -1171,6 +1196,9 @@ func (publication *publicForeignPublication) apply() {
 			if endpoint.table.Name == fk.Tbl1 {
 				removeFKTriggers(endpoint.table, publication.changes.db.tables.Get(fk.Tbl2), fk)
 			}
+		}
+		if endpoint.indexChanged {
+			endpoint.table.LogicalIndexes = endpoint.indexes
 		}
 		if endpoint.keyChanged {
 			endpoint.table.Unique = endpoint.keys
@@ -1256,6 +1284,7 @@ func (publication *publicForeignPublication) retirePrevious() {
 		endpoint.columns = nil
 		endpoint.retiredColumns = nil
 		endpoint.keys = nil
+		endpoint.indexes = nil
 		endpoint.foreign = nil
 		endpoint.checks = nil
 		endpoint.checkDrops = nil

@@ -9,13 +9,20 @@ import "context"
 // scoped CREATE/DROP. It contains native metadata only, never frontend syntax,
 // rows, callbacks, sessions or another transaction decision.
 type relationSchemaKeyDeclaration struct {
-	table *table
-	keys  []uniqueKey
+	table   *table
+	keys    []uniqueKey
+	indexes []logicalIndexDeclaration
 }
 
 func (tx *TxContext) createScopedRelationKey(t *table, key uniqueKey) bool {
 	if tx == nil || tx.State != TxActive || tx.decisionStarted || !tx.ownsScopedTable(t) || t.committedAt(t.schema.catalogView().version) {
 		panic("scoped key declaration requires its active constructor transaction")
+	}
+	if tx.scopedRelationLayout(t) != nil {
+		if t.CountExact() != 0 {
+			panic("scoped key declaration requires an empty constructor-owned generation")
+		}
+		return tx.mutateScopedIndexOrKey(t, nil, key, "add")
 	}
 	scope := t.relationLifetime
 	if scope == nil || !scope.transactionalSchema || tx.coordinator != nil {
@@ -50,7 +57,7 @@ func (tx *TxContext) createScopedRelationKey(t *table, key uniqueKey) bool {
 	defer db.schemalock.Unlock()
 	current.ddlMu.Lock()
 	defer current.ddlMu.Unlock()
-	previous := &relationSchemaKeyDeclaration{table: current, keys: append([]uniqueKey(nil), current.Unique...)}
+	previous := &relationSchemaKeyDeclaration{table: current, keys: append([]uniqueKey(nil), current.Unique...), indexes: append([]logicalIndexDeclaration(nil), current.LogicalIndexes...)}
 	if !declareUnpublishedKey(current, key) {
 		return false
 	}
@@ -84,5 +91,6 @@ func (tx *transactionState) restoreScopedRelationKeys(previous *relationSchemaKe
 	current.ddlMu.Lock()
 	defer current.ddlMu.Unlock()
 	current.Unique = append([]uniqueKey(nil), previous.keys...)
+	current.LogicalIndexes = append([]logicalIndexDeclaration(nil), previous.indexes...)
 	current.publishShowColumnsSnapshot(true)
 }

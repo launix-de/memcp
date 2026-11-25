@@ -2613,6 +2613,11 @@ runtime errors are never caught and classified by their message text. */
 (define tsql_negate_expr (lambda (value)
 	(tsql_arithmetic_expr (list (quote sql_compile_expr) (quote tsql_compile_negate) value))))
 (define tsql_key_placement (parser (? (or tsql_keyword_clustered tsql_keyword_nonclustered))))
+/* Logical index declarations retain directions; native autoindex selection is unchanged. */
+(define tsql_index_columns (parser (define columns (+ (parser '(
+	(define name tsql_identifier)
+	(define direction (? (or (parser tsql_keyword_asc "asc") (parser tsql_keyword_desc "desc")))))
+	(list name (equal? direction "desc"))) ",")) columns))
 (define tsql_key_columns (parser (define columns (+ (parser '(
 	(define name tsql_identifier) (? (or tsql_keyword_asc tsql_keyword_desc))) name) ",")) columns))
 /* Physical access preferences are accepted as syntax only. They do not
@@ -6996,40 +7001,37 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(define definitions tsql_cte_definitions)
 		(define statement (or tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete))
 	) (lambda () (statement (tsql_finalize_sources definitions "definitions" '() '())))))
-	/* Only UNIQUE declarations publish native keys. Ordinary acceleration
-	declarations carry no catalog state: the common planner owns autoindexes. */
+	/* SQL names are native logical declarations. Physical autoindexes remain
+	under the common planner and never establish a name's ownership. */
 	(define tsql_create_index (parser '(
-		tsql_keyword_create (define unique (? tsql_keyword_unique)) tsql_key_placement
+		tsql_keyword_create (define unique (? tsql_keyword_unique))
+		(define placement (? (or (parser tsql_keyword_clustered "clustered") (parser tsql_keyword_nonclustered "nonclustered"))))
 		tsql_keyword_index (define name tsql_identifier) tsql_keyword_on
 		(? (define schema2 tsql_schema_identifier)) (define tbl tsql_identifier)
-		"(" (define columns tsql_key_columns) ")"
+		"(" (define definitions tsql_index_columns) ")"
 		(? tsql_keyword_include "(" (define included (+ tsql_identifier ",")) ")")
 		(? tsql_keyword_where (define predicate tsql_expression))
-		(? (define options tsql_index_options))
-		(? tsql_index_location)
+		(? (define options tsql_index_options)) (? tsql_index_location)
 	) (lambda () (begin
-			(if compile_only (tsql_command_binding 'create-index (list schema2 tbl name columns included predicate options) '()) (begin
+			(if compile_only (tsql_command_binding 'create-index (list schema2 tbl name definitions included predicate options) '()) (begin
 				(define database (tsql_temporary_database (tsql_qualifier_database schema2 schema frontend_options) tbl frontend_options tx))
 				(define tbl (tsql_table_name database tbl planning_session tx))
 				(if policy (policy database tbl true) true)
 				(require_action database tbl "ALTER")
-				(if (and unique predicate) (error "filtered UNIQUE requires native filtered-key support") true)
+				(if predicate (error "filtered index requires native filtered declaration support") true)
 				(tsql_check_index_options options unique)
-				/* PRIMARY is a reserved native key identity, not an index alias. */
-				(if (and unique (equal? (toUpper name) "PRIMARY"))
-					(error "index name PRIMARY is reserved") true)
 				(define declarations (get_schema database tbl tx))
-				(define columns (map columns (lambda (name) (begin
+				(define bind (lambda (name) (begin
 					(define declaration (find declarations (lambda (column) (equal?? (column "Field") name)) nil))
-					(if declaration (sql_column_storage_name declaration) (error "unknown index column: " name))))))
-				(map included (lambda (name) (if (find declarations (lambda (column) (equal?? (column "Field") name)))
-					true (error "unknown included column: " name))))
-				(reduce columns (lambda (seen name)
-					(if (has? seen name) (error "duplicate index column: " name) (cons name seen))) '())
-				(if (not unique) true (list (quote if)
-					(list (quote createkey) (list (quote table) database false tbl false (quote tx)) name true
-						(cons (quote list) columns) (quote tx) (list (quote list) "nulls_not_distinct" true))
-					true (list (quote error) "index already exists: " name)))))))))
+					(if declaration (sql_column_storage_name declaration) (error "unknown index column: " name)))))
+				(define columns (map definitions (lambda (entry) (bind (car entry)))))
+				(define includes (map (coalesceNil included '()) bind))
+				(define directions (map definitions cadr))
+				(list 'if
+					(list 'create_index (list 'table database false tbl false 'tx) name (cons 'list columns)
+						(not (nil? unique)) 'tx (list 'list "included" (cons 'list includes)
+							"descending" (cons 'list directions) "placement" (coalesceNil placement "") "nulls_not_distinct" true))
+					true (list 'error "index already exists: " name))))))))
 	(define tsql_alter_index (parser '(
 		tsql_keyword_alter tsql_keyword_index (or tsql_keyword_all tsql_identifier) tsql_keyword_on
 		(? (define schema2 tsql_schema_identifier)) (define tbl tsql_identifier)
@@ -7046,19 +7048,17 @@ that context explicitly; stored views refuse this scalar before publication. */
 				true))))))
 	(define tsql_drop_index (parser '(
 		tsql_keyword_drop tsql_keyword_index
-		(? tsql_keyword_if tsql_keyword_exists)
+		(define ifexists (? tsql_keyword_if tsql_keyword_exists))
 		(define name tsql_identifier) tsql_keyword_on
 		(? (define schema2 tsql_schema_identifier)) (define tbl tsql_identifier)
 		(? tsql_index_options)
 	) (lambda () (begin
-			(if compile_only (tsql_command_binding 'drop-index (list schema2 tbl name) '()) (begin
-				(if policy (policy (tsql_qualifier_database schema2 schema frontend_options) tbl true) true)
-				(require_action (tsql_qualifier_database schema2 schema frontend_options) tbl "ALTER")
-				(if (equal? (toUpper name) "PRIMARY") (error "PRIMARY is a constraint, not an acceleration index") true)
-				/* A physical name carries no catalog state. Until native key removal
-				protects referenced constraints, do not guess whether this name owns
-				a real key or run a metadata check followed by an unsafe drop. */
-				(error "DROP INDEX requires native constraint-safe key removal")))))))
+			(if compile_only (tsql_command_binding 'drop-index (list schema2 tbl name ifexists) '()) (begin
+				(define database (tsql_temporary_database (tsql_qualifier_database schema2 schema frontend_options) tbl frontend_options tx))
+				(define tbl (tsql_table_name database tbl planning_session tx))
+				(if policy (policy database tbl true) true)
+				(require_action database tbl "ALTER")
+				(list 'drop_index (list 'table database false tbl false 'tx) name 'tx (not (nil? ifexists)))))))))
 	(define tsql_foreign_key_mode (parser (or
 		(parser '(tsql_keyword_no tsql_keyword_action) "restrict")
 		(parser tsql_keyword_cascade "cascade")

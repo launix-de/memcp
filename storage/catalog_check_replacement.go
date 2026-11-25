@@ -65,7 +65,7 @@ func (record *catalogDecisionRecord) validateCheckReplacementProfile() error {
 }
 
 func (record *catalogDecisionRecord) replacesCheck(d catalogCheckDeclaration) bool {
-	if record.Format != 30 && record.Format != 31 || d.Check == nil {
+	if record.Format != 30 && record.Format != 31 && record.Format != 32 || d.Check == nil {
 		return false
 	}
 	for _, selected := range record.Checks {

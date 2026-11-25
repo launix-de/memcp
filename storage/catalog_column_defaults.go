@@ -579,6 +579,8 @@ func replaceStoredColumnMetadata(t *table, base *tableShowColumnsSnapshot, colum
 			}
 			names := t.buildColumnNamesSnapshot(columns, public)
 			result := t.buildShowColumnsSnapshot(base.rowEstimate, names)
+			result.metadata.logicalIndexes = base.metadata.logicalIndexes
+			result.metadata.indexRows = logicalIndexRows(base.metadata.logicalIndexes, names)
 			result.metadata.catalogVersion, result.metadata.catalogPrevious = base.metadata.catalogVersion, base.metadata.catalogPrevious
 			result.metadata.statistics = base.metadata.statistics
 			result.metadata.constraints, result.metadata.foreignByID = base.nativeConstraints(), base.metadata.foreignByID
@@ -592,6 +594,8 @@ func replaceStoredColumnMetadata(t *table, base *tableShowColumnsSnapshot, colum
 	if len(columns) < len(base.metadata.columnNames.declarations) {
 		names := t.buildColumnNamesSnapshot(columns, public)
 		result := t.buildShowColumnsSnapshot(base.rowEstimate, names)
+		result.metadata.logicalIndexes = base.metadata.logicalIndexes
+		result.metadata.indexRows = logicalIndexRows(base.metadata.logicalIndexes, names)
 		result.metadata.catalogVersion, result.metadata.catalogPrevious = base.metadata.catalogVersion, base.metadata.catalogPrevious
 		result.metadata.statistics = base.metadata.statistics
 		result.metadata.constraints, result.metadata.storageConstraints, result.metadata.foreignByID = base.nativeConstraints(), base.nativeConstraints(), base.metadata.foreignByID
@@ -606,6 +610,8 @@ func replaceStoredColumnMetadata(t *table, base *tableShowColumnsSnapshot, colum
 		prefix, prefixBytes := replaceStoredColumnMetadata(t, base, columns[:len(base.metadata.columnNames.declarations)], public)
 		names := t.buildColumnNamesSnapshot(columns, public)
 		result := t.buildShowColumnsSnapshot(base.rowEstimate, names)
+		result.metadata.logicalIndexes = base.metadata.logicalIndexes
+		result.metadata.indexRows = logicalIndexRows(base.metadata.logicalIndexes, names)
 		result.metadata.catalogVersion, result.metadata.catalogPrevious = base.metadata.catalogVersion, base.metadata.catalogPrevious
 		result.metadata.statistics = base.metadata.statistics
 		rows := append([]scm.Scmer(nil), result.metadata.columnRows.Slice()...)

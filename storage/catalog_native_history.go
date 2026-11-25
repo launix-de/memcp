@@ -14,6 +14,7 @@ import "github.com/launix-de/memcp/scm"
 // Keys and their FK consumers share one ordered inert declaration program.
 // A recipe is not a second catalog, row payload or independently accepted Tx.
 type catalogNativeDeclaration struct {
+	Index       *catalogIndexDeclaration         `json:"index,omitempty"`
 	Operation   string                           `json:"operation"`
 	Key         *catalogKeyDeclaration           `json:"key,omitempty"`
 	Foreign     *catalogForeignDeclaration       `json:"foreign,omitempty"`
@@ -84,6 +85,10 @@ func (tx *TxContext) publicNativeDeclarations(history []catalogDeclarationAmendm
 			result = append(result, catalogNativeDeclaration{Operation: operation, Property: entry.column.propertyChange})
 		}
 		if key := entry.publicKey; key != nil {
+			if key.index != nil {
+				result = append(result, catalogNativeDeclaration{Operation: "index_" + key.operation, Index: key.index})
+				continue
+			}
 			d := key.declaration
 			result = append(result, catalogNativeDeclaration{Operation: "key_" + key.operation, Key: &d})
 		}
@@ -141,6 +146,7 @@ func effectiveForeignDeclarations(db *database, history []catalogDeclarationAmen
 }
 
 type catalogNativeProjection struct {
+	indexes         map[*table][]logicalIndexDeclaration
 	keys            map[*table][]uniqueKey
 	foreign         map[catalogForeignIdentity][]catalogForeignDeclaration
 	changedForeign  map[catalogForeignIdentity]bool
@@ -151,7 +157,7 @@ type catalogNativeProjection struct {
 }
 
 func newCatalogNativeProjection(db *database) *catalogNativeProjection {
-	p := &catalogNativeProjection{tableNames: make(map[*table]string), propertyColumns: make(map[*table][]*column), keys: make(map[*table][]uniqueKey), foreign: make(map[catalogForeignIdentity][]catalogForeignDeclaration), changedForeign: make(map[catalogForeignIdentity]bool)}
+	p := &catalogNativeProjection{indexes: make(map[*table][]logicalIndexDeclaration), tableNames: make(map[*table]string), propertyColumns: make(map[*table][]*column), keys: make(map[*table][]uniqueKey), foreign: make(map[catalogForeignIdentity][]catalogForeignDeclaration), changedForeign: make(map[catalogForeignIdentity]bool)}
 	p.foreign = nativeForeignDirectory(effectiveForeignDeclarations(db, nil))
 	return p
 }
@@ -194,6 +200,9 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 	}
 	added := make(map[catalogForeignIdentity]int)
 	for index, action := range actions {
+		if action.Index != nil && action.Operation != "index_add" && action.Operation != "index_drop" {
+			panic("index payload on a different native action")
+		}
 		if action.TableRename != nil && action.Operation != "table_rename" {
 			panic("table rename payload on a different native action")
 		}
@@ -207,6 +216,11 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 			panic("column retirement payload on another native action")
 		}
 		switch action.Operation {
+		case "index_add", "index_drop":
+			if domain != catalogNativeCurrent || action.Index == nil || action.Key != nil || action.Foreign != nil || action.Property != nil || action.Rename != nil || action.TableRename != nil || action.Declaration != nil || action.Drop != nil || action.Default != nil {
+				panic("invalid native index action")
+			}
+			db.projectIndexDeclaration(action.Index, strings.TrimPrefix(action.Operation, "index_"), p, views, scope)
 		case "column_drop":
 			if action.Drop == nil || action.Default != nil || action.Declaration != nil || action.Rename != nil || action.TableRename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
 				panic("invalid native column retirement action")
@@ -314,6 +328,12 @@ func (db *database) projectNativeDeclarations(actions []catalogNativeDeclaration
 			d := *action.Key
 			t := validateCatalogKey(db, d, views, scope, retirementInputs)
 			keys := uniqueKeysInView(t, p.keys)
+			if action.Operation == "key_drop" && indexOwnsKey(indexesInView(t, p.indexes), d.Key.Id) {
+				panic("standalone index requires native index retirement")
+			}
+			if action.Operation == "key_add" && logicalIndexPosition(indexesInView(t, p.indexes), d.Key.Id) >= 0 {
+				panic("key name belongs to a standalone index")
+			}
 			if action.Operation == "key_add" {
 				if nativeKeyNameConflict(db, t, d.Key, p.keys, p.foreign) {
 					panic("native unique addition conflicts with another declaration")
@@ -410,6 +430,20 @@ func (db *database) recoverNativeDeclarations(actions []catalogNativeDeclaration
 	db.projectNativeDeclarations(actions, nil, domain, scope)
 	for _, action := range actions {
 		switch action.Operation {
+		case "index_add":
+			d := action.Index
+			t := db.tables.Get(d.Table)
+			t.LogicalIndexes = append(slices.Clone(t.LogicalIndexes), d.Index)
+			if d.Index.Key != nil {
+				t.Unique = append(slices.Clone(t.Unique), *d.Index.Key)
+			}
+		case "index_drop":
+			d := action.Index
+			t := db.tables.Get(d.Table)
+			t.LogicalIndexes = slices.DeleteFunc(t.LogicalIndexes, func(i logicalIndexDeclaration) bool { return sameLogicalIndex(i, d.Index) })
+			if d.Index.Key != nil {
+				t.Unique = slices.DeleteFunc(t.Unique, func(k uniqueKey) bool { return sameUniqueKey(k, *d.Index.Key) })
+			}
 		case "column_drop":
 			d := action.Drop
 			t := db.tables.Get(d.Table)
@@ -470,6 +504,8 @@ func validateNativeDeclarationShape(actions []catalogNativeDeclaration) error {
 	if len(actions) == 0 {
 		return fmt.Errorf("native declaration history is empty")
 	}
+	indexSeen := make(map[string]bool)
+	indexCurrent := make(map[string]*catalogIndexDeclaration)
 	keySeen := make(map[string]bool)
 	keyCurrent := make(map[string]catalogKeyDeclaration)
 	foreignSeen := make(map[catalogForeignIdentity]bool)
@@ -518,6 +554,9 @@ func validateNativeDeclarationShape(actions []catalogNativeDeclaration) error {
 		return true
 	}
 	for _, action := range actions {
+		if action.Index != nil && action.Operation != "index_add" && action.Operation != "index_drop" {
+			return fmt.Errorf("index payload on another native action")
+		}
 		var identity, physical string
 		switch {
 		case action.Drop != nil:
@@ -551,6 +590,28 @@ func validateNativeDeclarationShape(actions []catalogNativeDeclaration) error {
 			return fmt.Errorf("stored declaration payload on a different native action")
 		}
 		switch action.Operation {
+		case "index_add", "index_drop":
+			d := action.Index
+			if d == nil || action.Key != nil || action.Foreign != nil || action.Property != nil || action.Rename != nil || action.TableRename != nil || action.Declaration != nil || action.Drop != nil || action.Default != nil || !validName(d.Table) || !validIdentity(d.Identity) {
+				return fmt.Errorf("invalid native index action")
+			}
+			if err := validateLogicalIndex(d.Index); err != nil {
+				return err
+			}
+			identity := d.Identity + "/" + scm.CaseFoldKey(d.Index.Name)
+			prior, present := indexCurrent[identity]
+			if action.Operation == "index_add" {
+				if indexSeen[identity] && present {
+					return fmt.Errorf("repeated native index addition")
+				}
+				indexCurrent[identity] = d
+			} else {
+				if indexSeen[identity] && (!present || prior.Table != d.Table || !sameLogicalIndex(prior.Index, d.Index)) {
+					return fmt.Errorf("native index retirement lost its exact predecessor")
+				}
+				delete(indexCurrent, identity)
+			}
+			indexSeen[identity] = true
 		case "column_drop":
 			if action.Drop == nil || action.Default != nil || action.Declaration != nil || action.Rename != nil || action.TableRename != nil || action.Property != nil || action.Key != nil || action.Foreign != nil {
 				return fmt.Errorf("invalid native column retirement action")

@@ -122,6 +122,11 @@ func (t *table) projectStoredColumnDrop(d *catalogColumnDrop, columns []*column,
 			panic("column retirement is required by a native computation")
 		}
 	}
+	for _, index := range indexesInView(t, projection.indexes) {
+		if slices.Contains(index.Columns, d.Storage) || slices.Contains(index.Included, d.Storage) {
+			panic("column retirement is required by a declared index")
+		}
+	}
 	for _, key := range uniqueKeysInView(t, projection.keys) {
 		if slices.Contains(key.Cols, d.Storage) {
 			panic("column retirement is required by a native key")

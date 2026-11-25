@@ -222,6 +222,7 @@ func replaceConstraintStateMetadata(base *tableShowColumnsSnapshot, updates map[
 	result := &tableShowColumnsSnapshot{metadata: &tableShowColumnsSnapshotMetadata{}}
 	result.metadata.columnNames = base.metadata.columnNames
 	result.metadata.columnRows = base.metadata.columnRows
+	result.metadata.logicalIndexes, result.metadata.indexRows = base.metadata.logicalIndexes, base.metadata.indexRows
 	old := base.nativeConstraints().Slice()
 	constraints := append([]scm.Scmer(nil), old...)
 	var ownedRows uint
