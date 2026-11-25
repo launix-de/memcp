@@ -925,7 +925,7 @@ func extendScanAccessWithSortCols(access scanAccess, sortcols []scm.Scmer, sortd
 	if len(inserted) != 0 {
 		// Invocation segments may already own mandatory join constraints. Do
 		// not replace or move them to manufacture an ORDER prefix.
-		if sortedEnd > access.compiledCount || (access.runtime != nil && len(access.runtime.inserted.items) != 0) {
+		if sortedEnd > int(access.compiledCount) || (access.runtime != nil && len(access.runtime.inserted.items) != 0) {
 			return access, false
 		}
 		runtime := access.ensureRuntime()

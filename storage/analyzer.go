@@ -213,10 +213,12 @@ type scanAccess struct {
 	feedback      *filterObservation   // invocation-local identity; immutable across shard workers
 	schema        []scm.Scmer
 	values        []scm.Scmer
-	compiledCount int
 	firstBoundary *scanBoundaryBox
 	runtime       *scanAccessRuntime
 	batchValues   *scm.Scmer
+	// The existing schema header bounds this count to 12 bits. Keep it beside
+	// the scalar flags so the immutable access view remains a compact value.
+	compiledCount uint16
 	// plannerFilterCovered records the complete-subtree proof encoded in a
 	// static access schema. Mutating scans still retain their callback.
 	plannerFilterCovered bool
@@ -257,16 +259,16 @@ func (a scanAccess) useScratch(scratch *scanAnalyzeScratch) scanAccess {
 
 func (a scanAccess) len() int {
 	if a.runtime == nil {
-		return a.compiledCount
+		return int(a.compiledCount)
 	}
-	return a.compiledCount + len(a.runtime.inserted.items) + len(a.runtime.suffix.items) + len(a.runtime.extra.items)
+	return int(a.compiledCount) + len(a.runtime.inserted.items) + len(a.runtime.suffix.items) + len(a.runtime.extra.items)
 }
 
 // boundaryParts resolves one Scheme boundary item and the adjacent value
 // segment addressed by its slots. Runtime order/RecSet segments use exactly
 // the same representation as the planner-owned prefix.
 func (a scanAccess) boundaryParts(index int) (*scanBoundaryBox, []scm.Scmer) {
-	compiled := a.compiledCount
+	compiled := int(a.compiledCount)
 	insertAt := compiled
 	var inserted, suffix, extra scanAccessSegment
 	if a.runtime != nil {
@@ -519,7 +521,7 @@ func scanAccessFromScheme(schemaValue scm.Scmer, values []scm.Scmer, suffix *sca
 			computedMapCols = boundary.MapColumns()
 		}
 	}
-	access := scanAccess{schema: schema, values: values, compiledCount: count,
+	access := scanAccess{schema: schema, values: values, compiledCount: uint16(count),
 		plannerFilterCovered: meta.consumer == scanAccessConsumerCoveredScan}
 	if count > 0 {
 		access.firstBoundary = (*scanBoundaryBox)(schema[scanAccessSchemaHeaderSize].Custom(TagScanBoundary))

@@ -85,7 +85,7 @@ func executeCompiledScanLookup(t *table, currentTx *TxContext, schemaValue, valu
 			return scanLookupMiss(meta.consumer != "exists")
 		}
 		projectionAt := scanAccessSchemaHeaderSize + scanAccessBoundaryStride
-		access := scanAccess{schema: schema, values: values, compiledCount: 1, exactAdjacent: true}
+		access := scanAccess{schema: schema, values: values, compiledCount: uint16(1), exactAdjacent: true}
 		switch meta.consumer {
 		case "exists":
 			if len(schema) == projectionAt && meta.projections == 0 {
