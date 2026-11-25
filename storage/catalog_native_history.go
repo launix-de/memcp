@@ -27,6 +27,15 @@ type catalogNativeDeclaration struct {
 
 func (tx *TxContext) publicNativeDeclarations(history []catalogDeclarationAmendment) []catalogNativeDeclaration {
 	var result []catalogNativeDeclaration
+	// Liveness belongs to this supplied immutable program. Constructors also
+	// project their prospective suffix before publication; consulting the live
+	// view here would retain a rename whose endpoint that suffix retires.
+	dropped := make(map[*table]bool)
+	for _, entry := range history {
+		if entry.tableDrop != nil {
+			dropped[entry.tableDrop.table] = true
+		}
+	}
 	properties := tx.hasColumnPropertyClaims(history)
 	orderedColumns := tx.validatedDeclarationTables(history)
 	retiring := tx.columnRetirementTables(history)
@@ -50,10 +59,10 @@ func (tx *TxContext) publicNativeDeclarations(history []catalogDeclarationAmendm
 		}
 	}
 	for _, entry := range history {
-		if a := entry.column; a != nil && a.declaration != nil && orderedColumns[a.table] && !tx.ownsTableDrop(a.table) {
+		if a := entry.column; a != nil && a.declaration != nil && orderedColumns[a.table] && !dropped[a.table] {
 			result = append(result, catalogNativeDeclaration{Operation: "column_declaration", Declaration: a.declaration})
 		}
-		if a := entry.column; a != nil && !tx.ownsTableDrop(a.table) {
+		if a := entry.column; a != nil && !dropped[a.table] {
 			if a.drop != nil {
 				result = append(result, catalogNativeDeclaration{Operation: "column_drop", Drop: a.drop})
 			} else if retiring[a.table] && a.rename == nil && !a.nameMetadataOnly && a.declaration == nil && a.propertyRemoval == nil && a.propertyChange == nil && a.appendDeclaration == nil {
@@ -61,13 +70,13 @@ func (tx *TxContext) publicNativeDeclarations(history []catalogDeclarationAmendm
 				result = append(result, catalogNativeDeclaration{Operation: "column_default", Default: &d})
 			}
 		}
-		if a := entry.tableRename; a != nil && !tx.ownsTableDrop(a.table) {
+		if a := entry.tableRename; a != nil && !dropped[a.table] {
 			result = append(result, catalogNativeDeclaration{Operation: "table_rename", TableRename: a.declaration})
 		}
-		if a := entry.column; a != nil && a.rename != nil && !tx.ownsTableDrop(a.table) {
+		if a := entry.column; a != nil && a.rename != nil && !dropped[a.table] {
 			result = append(result, catalogNativeDeclaration{Operation: "column_rename", Rename: a.rename})
 		}
-		if properties && entry.column != nil && entry.column.propertyChange != nil && !tx.ownsTableDrop(entry.column.table) {
+		if properties && entry.column != nil && entry.column.propertyChange != nil && !dropped[entry.column.table] {
 			operation := "column_property_claim"
 			if entry.column.propertyRemoval != nil {
 				operation = "column_property_drop"

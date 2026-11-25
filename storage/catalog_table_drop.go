@@ -128,8 +128,10 @@ func (tx *TxContext) dropCatalogTable(db *database, name string, ifexists bool) 
 		}
 		panic("Table " + db.Name + "." + name + " does not exist")
 	}
-	if len(tx.publicColumnAppends()) != 0 {
-		panic("nullable append cannot share a table retirement decision")
+	prospective := appendCatalogDeclarationHistory(tx.publicForeignAmendments(), catalogDeclarationAmendment{
+		tableDrop: &catalogTableDropAmendment{table: t, declaration: catalogTableDropDeclaration{t.Name, t.RuntimeIdentity}}})
+	if err := tx.validateColumnAppendTableProgram(prospective, tx.catalogIntentTables()); err != nil {
+		panic(err)
 	}
 	requireTableMaintenance(db.Name, name, maintenanceDrop)
 	if t.Ephemeral || t.ScopedSchema || tx.ownsPendingTable(t) ||
@@ -166,8 +168,10 @@ func (changes *publicCatalogChanges) stageTableDrop(tx *TxContext, t *table, lea
 	defer changes.refreshMemoryLocked()
 	// Re-attest under the amendment owner: an append constructor can publish
 	// after the caller's cold check while waiting for its existing DDL lease.
-	if len(tx.publicColumnAppends()) != 0 {
-		panic("column append cannot share a table retirement decision")
+	prospective := appendCatalogDeclarationHistory(tx.publicForeignAmendments(), catalogDeclarationAmendment{
+		tableDrop: &catalogTableDropAmendment{table: t, declaration: catalogTableDropDeclaration{t.Name, t.RuntimeIdentity}}})
+	if err := tx.validateColumnAppendTableProgram(prospective, tx.catalogIntentTables()); err != nil {
+		panic(err)
 	}
 	if tx.hasSurvivingColumnPropertiesExcept(t) {
 		panic("table removal cannot join surviving column property amendments")

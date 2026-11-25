@@ -1,0 +1,1006 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Existing original owned namespace decisions compose disjoint nullable prefix appends and checked rows without
+    broadening old journal domains
+setup:
+- sql: DROP TABLE IF EXISTS joint_append_source
+- sql: DROP TABLE IF EXISTS joint_append_progress
+- sql: CREATE TABLE joint_append_source(id INT PRIMARY KEY,token UNIQUEIDENTIFIER NULL)
+- sql: INSERT joint_append_source VALUES(1,'00000000-0000-4000-8000-000000000001'),(2,NULL)
+- sql: CREATE TABLE joint_append_progress(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_progress VALUES(1,0)
+- sql: DROP TABLE IF EXISTS joint_append_commit_new_a
+- sql: DROP TABLE IF EXISTS joint_append_commit_new_b
+- sql: DROP TABLE IF EXISTS joint_append_commit_old_a
+- sql: DROP TABLE IF EXISTS joint_append_commit_old_b
+- sql: DROP TABLE IF EXISTS joint_append_commit_target
+- sql: CREATE TABLE joint_append_commit_old_a(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_commit_old_a VALUES(1,11)
+- sql: CREATE TABLE joint_append_commit_old_b(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_commit_old_b VALUES(2,22)
+- sql: CREATE TABLE joint_append_commit_target(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_commit_target VALUES(1,10),(2,20)
+- sql: DROP TABLE IF EXISTS joint_append_rollback_new_a
+- sql: DROP TABLE IF EXISTS joint_append_rollback_new_b
+- sql: DROP TABLE IF EXISTS joint_append_rollback_old_a
+- sql: DROP TABLE IF EXISTS joint_append_rollback_old_b
+- sql: DROP TABLE IF EXISTS joint_append_rollback_target
+- sql: CREATE TABLE joint_append_rollback_old_a(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_rollback_old_a VALUES(1,11)
+- sql: CREATE TABLE joint_append_rollback_old_b(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_rollback_old_b VALUES(2,22)
+- sql: CREATE TABLE joint_append_rollback_target(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_rollback_target VALUES(1,10),(2,20)
+- sql: DROP TABLE IF EXISTS joint_append_save_new_a
+- sql: DROP TABLE IF EXISTS joint_append_save_new_b
+- sql: DROP TABLE IF EXISTS joint_append_save_old_a
+- sql: DROP TABLE IF EXISTS joint_append_save_old_b
+- sql: DROP TABLE IF EXISTS joint_append_save_target
+- sql: CREATE TABLE joint_append_save_old_a(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_save_old_a VALUES(1,11)
+- sql: CREATE TABLE joint_append_save_old_b(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_save_old_b VALUES(2,22)
+- sql: CREATE TABLE joint_append_save_target(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_save_target VALUES(1,10),(2,20)
+- sql: DROP TABLE IF EXISTS joint_append_cancel_new_a
+- sql: DROP TABLE IF EXISTS joint_append_cancel_new_b
+- sql: DROP TABLE IF EXISTS joint_append_cancel_old_a
+- sql: DROP TABLE IF EXISTS joint_append_cancel_old_b
+- sql: DROP TABLE IF EXISTS joint_append_cancel_target
+- sql: CREATE TABLE joint_append_cancel_old_a(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_cancel_old_a VALUES(1,11)
+- sql: CREATE TABLE joint_append_cancel_old_b(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_cancel_old_b VALUES(2,22)
+- sql: CREATE TABLE joint_append_cancel_target(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_cancel_target VALUES(1,10),(2,20)
+- sql: DROP TABLE IF EXISTS joint_append_crash_new_a
+- sql: DROP TABLE IF EXISTS joint_append_crash_new_b
+- sql: DROP TABLE IF EXISTS joint_append_crash_old_a
+- sql: DROP TABLE IF EXISTS joint_append_crash_old_b
+- sql: DROP TABLE IF EXISTS joint_append_crash_target
+- sql: CREATE TABLE joint_append_crash_old_a(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_crash_old_a VALUES(1,11)
+- sql: CREATE TABLE joint_append_crash_old_b(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_crash_old_b VALUES(2,22)
+- sql: CREATE TABLE joint_append_crash_target(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_crash_target VALUES(1,10),(2,20)
+- sql: DROP TABLE IF EXISTS joint_append_unaccepted_new_a
+- sql: DROP TABLE IF EXISTS joint_append_unaccepted_new_b
+- sql: DROP TABLE IF EXISTS joint_append_unaccepted_old_a
+- sql: DROP TABLE IF EXISTS joint_append_unaccepted_old_b
+- sql: DROP TABLE IF EXISTS joint_append_unaccepted_target
+- sql: CREATE TABLE joint_append_unaccepted_old_a(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_unaccepted_old_a VALUES(1,11)
+- sql: CREATE TABLE joint_append_unaccepted_old_b(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_unaccepted_old_b VALUES(2,22)
+- sql: CREATE TABLE joint_append_unaccepted_target(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_unaccepted_target VALUES(1,10),(2,20)
+- sql: DROP TABLE IF EXISTS joint_append_owned_new_a
+- sql: DROP TABLE IF EXISTS joint_append_owned_new_b
+- sql: DROP TABLE IF EXISTS joint_append_owned_old_a
+- sql: DROP TABLE IF EXISTS joint_append_owned_old_b
+- sql: DROP TABLE IF EXISTS joint_append_owned_target
+- sql: CREATE TABLE joint_append_owned_old_a(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_owned_old_a VALUES(1,11)
+- sql: CREATE TABLE joint_append_owned_old_b(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_owned_old_b VALUES(2,22)
+- sql: CREATE TABLE joint_append_owned_target(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_owned_target VALUES(1,10),(2,20)
+- sql: DROP TABLE IF EXISTS joint_append_bare_old
+- sql: CREATE TABLE joint_append_bare_old(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_bare_old VALUES(3,33)
+- sql: DROP TABLE IF EXISTS joint_append_bare_target
+- sql: CREATE TABLE joint_append_bare_target(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_bare_target VALUES(1,10),(2,20)
+- sql: DROP TABLE IF EXISTS joint_append_name_support
+- sql: CREATE TABLE joint_append_name_support(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_name_support VALUES(8,88)
+- sql: DROP TABLE IF EXISTS joint_append_name_support_renamed
+- sql: DROP TABLE IF EXISTS joint_append_name_old
+- sql: CREATE TABLE joint_append_name_old(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_name_old VALUES(3,33)
+- sql: DROP TABLE IF EXISTS joint_append_name_target
+- sql: CREATE TABLE joint_append_name_target(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_name_target VALUES(1,10)
+- sql: DROP TABLE IF EXISTS joint_append_private_support
+- sql: DROP TABLE IF EXISTS joint_append_private_old
+- sql: CREATE TABLE joint_append_private_old(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_private_old VALUES(3,33)
+- sql: DROP TABLE IF EXISTS joint_append_private_target
+- sql: CREATE TABLE joint_append_private_target(id INT PRIMARY KEY,value INT)
+- sql: INSERT joint_append_private_target VALUES(1,10)
+cleanup:
+- sql: DROP TABLE IF EXISTS joint_append_source
+- sql: DROP TABLE IF EXISTS joint_append_progress
+- sql: DROP TABLE IF EXISTS joint_append_commit_new_a
+- sql: DROP TABLE IF EXISTS joint_append_commit_new_b
+- sql: DROP TABLE IF EXISTS joint_append_commit_old_a
+- sql: DROP TABLE IF EXISTS joint_append_commit_old_b
+- sql: DROP TABLE IF EXISTS joint_append_commit_target
+- sql: DROP TABLE IF EXISTS joint_append_rollback_new_a
+- sql: DROP TABLE IF EXISTS joint_append_rollback_new_b
+- sql: DROP TABLE IF EXISTS joint_append_rollback_old_a
+- sql: DROP TABLE IF EXISTS joint_append_rollback_old_b
+- sql: DROP TABLE IF EXISTS joint_append_rollback_target
+- sql: DROP TABLE IF EXISTS joint_append_save_new_a
+- sql: DROP TABLE IF EXISTS joint_append_save_new_b
+- sql: DROP TABLE IF EXISTS joint_append_save_old_a
+- sql: DROP TABLE IF EXISTS joint_append_save_old_b
+- sql: DROP TABLE IF EXISTS joint_append_save_target
+- sql: DROP TABLE IF EXISTS joint_append_cancel_new_a
+- sql: DROP TABLE IF EXISTS joint_append_cancel_new_b
+- sql: DROP TABLE IF EXISTS joint_append_cancel_old_a
+- sql: DROP TABLE IF EXISTS joint_append_cancel_old_b
+- sql: DROP TABLE IF EXISTS joint_append_cancel_target
+- sql: DROP TABLE IF EXISTS joint_append_crash_new_a
+- sql: DROP TABLE IF EXISTS joint_append_crash_new_b
+- sql: DROP TABLE IF EXISTS joint_append_crash_old_a
+- sql: DROP TABLE IF EXISTS joint_append_crash_old_b
+- sql: DROP TABLE IF EXISTS joint_append_crash_target
+- sql: DROP TABLE IF EXISTS joint_append_unaccepted_new_a
+- sql: DROP TABLE IF EXISTS joint_append_unaccepted_new_b
+- sql: DROP TABLE IF EXISTS joint_append_unaccepted_old_a
+- sql: DROP TABLE IF EXISTS joint_append_unaccepted_old_b
+- sql: DROP TABLE IF EXISTS joint_append_unaccepted_target
+- sql: DROP TABLE IF EXISTS joint_append_owned_new_a
+- sql: DROP TABLE IF EXISTS joint_append_owned_new_b
+- sql: DROP TABLE IF EXISTS joint_append_owned_old_a
+- sql: DROP TABLE IF EXISTS joint_append_owned_old_b
+- sql: DROP TABLE IF EXISTS joint_append_owned_target
+- sql: DROP TABLE IF EXISTS joint_append_bare_old
+- sql: DROP TABLE IF EXISTS joint_append_bare_target
+- sql: DROP TABLE IF EXISTS joint_append_name_support
+- sql: DROP TABLE IF EXISTS joint_append_name_support_renamed
+- sql: DROP TABLE IF EXISTS joint_append_name_old
+- sql: DROP TABLE IF EXISTS joint_append_name_target
+- sql: DROP TABLE IF EXISTS joint_append_private_support
+- sql: DROP TABLE IF EXISTS joint_append_private_old
+- sql: DROP TABLE IF EXISTS joint_append_private_target
+test_cases:
+- name: Two unrelated replacement programs and a public nullable append publish one original decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE joint_append_progress SET value=1 WHERE id=1
+    - connection: owner
+      sql: CREATE TABLE joint_append_commit_new_a(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT joint_append_commit_new_a SELECT id,value FROM joint_append_commit_old_a
+    - connection: owner
+      sql: UPDATE joint_append_commit_new_a SET value=111
+    - connection: owner
+      sql: DROP TABLE joint_append_commit_old_a
+    - connection: owner
+      sql: EXEC sp_rename N'joint_append_commit_new_a',N'joint_append_commit_old_a',N'OBJECT'
+    - connection: owner
+      sql: CREATE TABLE joint_append_commit_new_b(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT joint_append_commit_new_b SELECT id,value FROM joint_append_commit_old_b
+    - connection: owner
+      sql: UPDATE joint_append_commit_new_b SET value=222
+    - connection: owner
+      sql: DROP TABLE joint_append_commit_old_b
+    - connection: owner
+      sql: EXEC sp_rename N'joint_append_commit_new_b',N'joint_append_commit_old_b',N'OBJECT'
+    - connection: owner
+      sql: ALTER TABLE joint_append_commit_target ADD link UNIQUEIDENTIFIER NULL
+    - connection: owner
+      sql: SELECT id,value,link FROM joint_append_commit_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+          link: null
+        - id: 2
+          value: 20
+          link: null
+    - connection: owner
+      sql: UPDATE joint_append_commit_target SET link=(SELECT token FROM joint_append_source WHERE joint_append_source.id=joint_append_commit_target.id)
+        WHERE link IS NULL
+    - connection: owner
+      sql: INSERT joint_append_commit_target(id,value) VALUES(3,30)
+    - connection: owner
+      sql: INSERT joint_append_commit_target(id,value,link) VALUES(4,40,'00000000-0000-4000-8000-000000000002')
+    - connection: owner
+      sql: SELECT id,value,link FROM joint_append_commit_target ORDER BY id
+      expect:
+        rows: 4
+        data:
+        - id: 1
+          value: 10
+          link: 00000000-0000-4000-8000-000000000001
+        - id: 2
+          value: 20
+          link: null
+        - id: 3
+          value: 30
+          link: null
+        - id: 4
+          value: 40
+          link: 00000000-0000-4000-8000-000000000002
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'joint_append_commit_target',N'link') AS width
+      expect:
+        rows: 1
+        data:
+        - width: null
+    - connection: observer
+      sql: SELECT id,value FROM joint_append_commit_old_a ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - connection: observer
+      sql: SELECT id,value FROM joint_append_commit_old_b ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          value: 22
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM joint_append_progress
+      expect:
+        rows: 1
+        data:
+        - value: 1
+          depth: 1
+    - connection: observer
+      sql: SELECT value FROM joint_append_progress
+      expect:
+        rows: 1
+        data:
+        - value: 0
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,value,link FROM joint_append_commit_target ORDER BY id
+      expect:
+        rows: 4
+        data:
+        - id: 1
+          value: 10
+          link: 00000000-0000-4000-8000-000000000001
+        - id: 2
+          value: 20
+          link: null
+        - id: 3
+          value: 30
+          link: null
+        - id: 4
+          value: 40
+          link: 00000000-0000-4000-8000-000000000002
+    - connection: observer
+      sql: SELECT id,value FROM joint_append_commit_old_a ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 111
+    - connection: observer
+      sql: SELECT id,value FROM joint_append_commit_old_b ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          value: 222
+    - connection: owner
+      sql: SELECT default_object_id,CAST(is_nullable AS INT) AS nullable_flag FROM sys.columns WHERE object_id=OBJECT_ID(N'joint_append_commit_target')
+        AND name=N'link'
+      expect:
+        rows: 1
+        data:
+        - default_object_id: 0
+          nullable_flag: 1
+- name: Full rollback restores replaced tables original rows nullable header and progress together
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE joint_append_progress SET value=2 WHERE id=1
+    - connection: owner
+      sql: CREATE TABLE joint_append_rollback_new_a(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT joint_append_rollback_new_a SELECT id,value FROM joint_append_rollback_old_a
+    - connection: owner
+      sql: UPDATE joint_append_rollback_new_a SET value=111
+    - connection: owner
+      sql: DROP TABLE joint_append_rollback_old_a
+    - connection: owner
+      sql: EXEC sp_rename N'joint_append_rollback_new_a',N'joint_append_rollback_old_a',N'OBJECT'
+    - connection: owner
+      sql: CREATE TABLE joint_append_rollback_new_b(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT joint_append_rollback_new_b SELECT id,value FROM joint_append_rollback_old_b
+    - connection: owner
+      sql: UPDATE joint_append_rollback_new_b SET value=222
+    - connection: owner
+      sql: DROP TABLE joint_append_rollback_old_b
+    - connection: owner
+      sql: EXEC sp_rename N'joint_append_rollback_new_b',N'joint_append_rollback_old_b',N'OBJECT'
+    - connection: owner
+      sql: ALTER TABLE joint_append_rollback_target ADD link UNIQUEIDENTIFIER NULL
+    - connection: owner
+      sql: UPDATE joint_append_rollback_target SET link=(SELECT token FROM joint_append_source WHERE joint_append_source.id=joint_append_rollback_target.id)
+        WHERE link IS NULL
+    - connection: owner
+      sql: SELECT id,value,link FROM joint_append_rollback_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+          link: 00000000-0000-4000-8000-000000000001
+        - id: 2
+          value: 20
+          link: null
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: observer
+      sql: SELECT id,value FROM joint_append_rollback_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'joint_append_rollback_target',N'link') AS width
+      expect:
+        rows: 1
+        data:
+        - width: null
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_rollback_old_a ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_rollback_old_b ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          value: 22
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'joint_append_rollback_new_a',N'U') AS new_a,OBJECT_ID(N'joint_append_rollback_new_b',N'U') AS
+        new_b,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - new_a: null
+          new_b: null
+          depth: 0
+    - connection: owner
+      sql: SELECT value FROM joint_append_progress
+      expect:
+        rows: 1
+        data:
+        - value: 1
+- name: Savepoint after replacements rewinds only nullable header and rows then permits checked retry
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: CREATE TABLE joint_append_save_new_a(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT joint_append_save_new_a SELECT id,value FROM joint_append_save_old_a
+    - connection: owner
+      sql: UPDATE joint_append_save_new_a SET value=111
+    - connection: owner
+      sql: DROP TABLE joint_append_save_old_a
+    - connection: owner
+      sql: EXEC sp_rename N'joint_append_save_new_a',N'joint_append_save_old_a',N'OBJECT'
+    - connection: owner
+      sql: CREATE TABLE joint_append_save_new_b(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT joint_append_save_new_b SELECT id,value FROM joint_append_save_old_b
+    - connection: owner
+      sql: UPDATE joint_append_save_new_b SET value=222
+    - connection: owner
+      sql: DROP TABLE joint_append_save_old_b
+    - connection: owner
+      sql: EXEC sp_rename N'joint_append_save_new_b',N'joint_append_save_old_b',N'OBJECT'
+    - connection: owner
+      sql: SAVE TRAN after_replacements
+    - connection: owner
+      sql: ALTER TABLE joint_append_save_target ADD link UNIQUEIDENTIFIER NULL
+    - connection: owner
+      sql: UPDATE joint_append_save_target SET link=(SELECT token FROM joint_append_source WHERE joint_append_source.id=joint_append_save_target.id)
+        WHERE link IS NULL
+    - connection: owner
+      sql: SELECT id,value,link FROM joint_append_save_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+          link: 00000000-0000-4000-8000-000000000001
+        - id: 2
+          value: 20
+          link: null
+    - connection: owner
+      sql: ROLLBACK TRAN after_replacements
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'joint_append_save_target',N'link') AS width
+      expect:
+        rows: 1
+        data:
+        - width: null
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_save_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_save_old_a ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 111
+    - connection: observer
+      sql: SELECT id,value FROM joint_append_save_old_a ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - connection: owner
+      sql: ALTER TABLE joint_append_save_target ADD link UNIQUEIDENTIFIER NULL
+    - connection: owner
+      sql: UPDATE joint_append_save_target SET link=(SELECT token FROM joint_append_source WHERE joint_append_source.id=joint_append_save_target.id)
+        WHERE link IS NULL
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,value,link FROM joint_append_save_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+          link: 00000000-0000-4000-8000-000000000001
+        - id: 2
+          value: 20
+          link: null
+    - connection: observer
+      sql: SELECT id,value FROM joint_append_save_old_a ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 111
+- name: A real savepoint cancels the supporting constructor and dependent append while retaining a valid drop prefix
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: DROP TABLE joint_append_cancel_old_a
+    - connection: owner
+      sql: SAVE TRAN before_constructor
+    - connection: owner
+      sql: CREATE TABLE joint_append_cancel_new_a(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT joint_append_cancel_new_a VALUES(7,77)
+    - connection: owner
+      sql: EXEC sp_rename N'joint_append_cancel_new_a',N'joint_append_cancel_old_a',N'OBJECT'
+    - connection: owner
+      sql: ALTER TABLE joint_append_cancel_target ADD link UNIQUEIDENTIFIER NULL
+    - connection: owner
+      sql: UPDATE joint_append_cancel_target SET link=(SELECT token FROM joint_append_source WHERE joint_append_source.id=joint_append_cancel_target.id)
+        WHERE link IS NULL
+    - connection: owner
+      sql: SELECT id,value,link FROM joint_append_cancel_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+          link: 00000000-0000-4000-8000-000000000001
+        - id: 2
+          value: 20
+          link: null
+    - connection: owner
+      sql: ROLLBACK TRAN before_constructor
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'joint_append_cancel_target',N'link') AS width
+      expect:
+        rows: 1
+        data:
+        - width: null
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_cancel_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'joint_append_cancel_new_a',N'U') AS constructor,OBJECT_ID(N'joint_append_cancel_old_a',N'U')
+        AS retired,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - constructor: null
+          retired: null
+          depth: 1
+    - connection: observer
+      sql: SELECT id,value FROM joint_append_cancel_old_a ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'joint_append_cancel_old_a',N'U') AS retired,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - retired: null
+          depth: 0
+    - connection: observer
+      sql: SELECT id,value FROM joint_append_cancel_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+- name: Retiring the sole supporting name action is refused before changing private or public state
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: EXEC sp_rename N'joint_append_name_support',N'joint_append_name_support_renamed',N'OBJECT'
+    - connection: owner
+      sql: DROP TABLE joint_append_name_old
+    - connection: owner
+      sql: ALTER TABLE joint_append_name_target ADD link UNIQUEIDENTIFIER NULL
+    - connection: owner
+      sql: DROP TABLE joint_append_name_support_renamed
+      expect:
+        error: true
+        contains:
+        - nullable append and table retirement require an existing owned namespace decision
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_name_support_renamed ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 8
+          value: 88
+    - connection: owner
+      sql: SELECT id,value,link FROM joint_append_name_target ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+          link: null
+    - connection: observer
+      sql: SELECT id,value FROM joint_append_name_support ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 8
+          value: 88
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_name_support ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 8
+          value: 88
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_name_old ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 3
+          value: 33
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'joint_append_name_target',N'link') AS width
+      expect:
+        rows: 1
+        data:
+        - width: null
+- name: Dropping the sole unpublished constructor is refused without losing the recognized original program
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: CREATE TABLE joint_append_private_support(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT joint_append_private_support VALUES(8,88)
+    - connection: owner
+      sql: DROP TABLE joint_append_private_old
+    - connection: owner
+      sql: ALTER TABLE joint_append_private_target ADD link UNIQUEIDENTIFIER NULL
+    - connection: owner
+      sql: DROP TABLE joint_append_private_support
+      expect:
+        error: true
+        contains:
+        - transactional table removal requires a local committed public table
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_private_support ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 8
+          value: 88
+    - connection: owner
+      sql: SELECT id,value,link FROM joint_append_private_target ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+          link: null
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'joint_append_private_support',N'U') AS constructor,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - constructor: null
+          depth: 0
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_private_old ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 3
+          value: 33
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'joint_append_private_target',N'link') AS width
+      expect:
+        rows: 1
+        data:
+        - width: null
+- name: Bare unrelated DROP then append preserves its existing unsupported boundary before effects
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: DROP TABLE joint_append_bare_old
+    - connection: owner
+      sql: ALTER TABLE joint_append_bare_target ADD link UNIQUEIDENTIFIER NULL
+      expect:
+        error: true
+        contains:
+        - nullable append and table retirement require an existing owned namespace decision
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_bare_old ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 3
+          value: 33
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_bare_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'joint_append_bare_target',N'link') AS width
+      expect:
+        rows: 1
+        data:
+        - width: null
+- name: Append then bare unrelated DROP preserves its existing unsupported boundary before effects
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: ALTER TABLE joint_append_bare_target ADD link UNIQUEIDENTIFIER NULL
+    - connection: owner
+      sql: DROP TABLE joint_append_bare_old
+      expect:
+        error: true
+        contains:
+        - nullable append and table retirement require an existing owned namespace decision
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_bare_old ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 3
+          value: 33
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_bare_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'joint_append_bare_target',N'link') AS width
+      expect:
+        rows: 1
+        data:
+        - width: null
+- name: Native retained target handles cannot combine append with their own whole-table retirement in either order
+  scm: |
+    (begin
+      (define run (lambda (append_first) (begin
+        (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+        (define tx (owner "__memcp_tx"))
+        (define target (table "memcp-tests" false "joint_append_bare_target" false tx))
+        (if append_first (createcolumn target "probe" "INT" (list) (list "null" true) nil nil tx)
+          (droptable "memcp-tests" "joint_append_bare_target" false tx))
+        (define rejected (try (lambda () (begin
+          (if append_first (droptable "memcp-tests" "joint_append_bare_target" false tx)
+            (createcolumn target "probe" "INT" (list) (list "null" true) nil nil tx)) false))
+          (lambda (cause) (strlike (string (failure_value cause))
+            (if append_first "%retirement of its endpoint%" "%nullable append requires a local committed native table%")))))
+        (define state (tx_state tx))
+        (define observed (scan nil target (list) (list) (list) (lambda () true) '("id" "value")
+          (lambda (rows id value) (set_assoc rows id value)) (list) merge_assoc))
+        (tx_rollback owner)
+        (list rejected state (nil? (show target "column" "probe" false nil))
+          (get_assoc observed 1) (get_assoc observed 2)))))
+      (list (run true) (run false)))
+  expect:
+    result:
+    - - true
+      - active
+      - true
+      - 10
+      - 20
+    - - true
+      - active
+      - true
+      - 10
+      - 20
+- name: Accepted mixed replacement and checked nullable rows are ready for abrupt loss
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: CREATE TABLE joint_append_crash_new_a(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT joint_append_crash_new_a SELECT id,value FROM joint_append_crash_old_a
+    - connection: owner
+      sql: UPDATE joint_append_crash_new_a SET value=111
+    - connection: owner
+      sql: DROP TABLE joint_append_crash_old_a
+    - connection: owner
+      sql: EXEC sp_rename N'joint_append_crash_new_a',N'joint_append_crash_old_a',N'OBJECT'
+    - connection: owner
+      sql: CREATE TABLE joint_append_crash_new_b(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT joint_append_crash_new_b SELECT id,value FROM joint_append_crash_old_b
+    - connection: owner
+      sql: UPDATE joint_append_crash_new_b SET value=222
+    - connection: owner
+      sql: DROP TABLE joint_append_crash_old_b
+    - connection: owner
+      sql: EXEC sp_rename N'joint_append_crash_new_b',N'joint_append_crash_old_b',N'OBJECT'
+    - connection: owner
+      sql: ALTER TABLE joint_append_crash_target ADD link UNIQUEIDENTIFIER NULL
+    - connection: owner
+      sql: UPDATE joint_append_crash_target SET link=(SELECT token FROM joint_append_source WHERE joint_append_source.id=joint_append_crash_target.id)
+        WHERE link IS NULL
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: owner
+      sql: SELECT id,value,link FROM joint_append_crash_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+          link: 00000000-0000-4000-8000-000000000001
+        - id: 2
+          value: 20
+          link: null
+- name: Crash the accepted joint owned namespace decision
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart the accepted joint owned namespace decision
+  action: restart
+- name: Recovery restores renamed private tables and original committed target values
+  sql: SELECT id,value FROM joint_append_crash_old_a ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 111
+- name: Recovery reconstructs nullable header and checked typed cells in the same accepted decision
+  sql: SELECT id,value,link FROM joint_append_crash_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 10
+      link: 00000000-0000-4000-8000-000000000001
+    - id: 2
+      value: 20
+      link: null
+- name: A recovered prefix supplies NULL to a future omitted input without inventing a default
+  sql: INSERT joint_append_crash_target(id,value) VALUES(3,30); SELECT id,value,link FROM joint_append_crash_target ORDER
+    BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 10
+      link: 00000000-0000-4000-8000-000000000001
+    - id: 2
+      value: 20
+      link: null
+    - id: 3
+      value: 30
+      link: null
+- name: An existing V22 private CREATE and unrelated public append retain the same native decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: CREATE TABLE joint_append_owned_new_a(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT joint_append_owned_new_a VALUES(7,77)
+    - connection: owner
+      sql: ALTER TABLE joint_append_owned_target ADD link UNIQUEIDENTIFIER NULL
+    - connection: owner
+      sql: UPDATE joint_append_owned_target SET link=(SELECT token FROM joint_append_source WHERE joint_append_source.id=joint_append_owned_target.id)
+        WHERE link IS NULL
+    - connection: owner
+      sql: SELECT id,value,link FROM joint_append_owned_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+          link: 00000000-0000-4000-8000-000000000001
+        - id: 2
+          value: 20
+          link: null
+    - connection: owner
+      sql: SELECT id,value FROM joint_append_owned_new_a ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          value: 77
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'joint_append_owned_target',N'link') AS width
+      expect:
+        rows: 1
+        data:
+        - width: null
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,value,link FROM joint_append_owned_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+          link: 00000000-0000-4000-8000-000000000001
+        - id: 2
+          value: 20
+          link: null
+    - connection: observer
+      sql: SELECT id,value FROM joint_append_owned_new_a ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          value: 77
+- name: An unaccepted mixed namespace and appended rows remain private before loss
+  session_id: joint-append-unaccepted
+  steps:
+  - sql: BEGIN TRAN
+    session_id: joint-append-unaccepted
+  - sql: CREATE TABLE joint_append_unaccepted_new_a(id INT PRIMARY KEY,value INT)
+    session_id: joint-append-unaccepted
+  - sql: INSERT joint_append_unaccepted_new_a SELECT id,value FROM joint_append_unaccepted_old_a
+    session_id: joint-append-unaccepted
+  - sql: DROP TABLE joint_append_unaccepted_old_a
+    session_id: joint-append-unaccepted
+  - sql: EXEC sp_rename N'joint_append_unaccepted_new_a',N'joint_append_unaccepted_old_a',N'OBJECT'
+    session_id: joint-append-unaccepted
+  - sql: CREATE TABLE joint_append_unaccepted_new_b(id INT PRIMARY KEY,value INT)
+    session_id: joint-append-unaccepted
+  - sql: INSERT joint_append_unaccepted_new_b SELECT id,value FROM joint_append_unaccepted_old_b
+    session_id: joint-append-unaccepted
+  - sql: DROP TABLE joint_append_unaccepted_old_b
+    session_id: joint-append-unaccepted
+  - sql: EXEC sp_rename N'joint_append_unaccepted_new_b',N'joint_append_unaccepted_old_b',N'OBJECT'
+    session_id: joint-append-unaccepted
+  - sql: ALTER TABLE joint_append_unaccepted_target ADD link UNIQUEIDENTIFIER NULL
+    session_id: joint-append-unaccepted
+  - sql: UPDATE joint_append_unaccepted_target SET link=(SELECT token FROM joint_append_source WHERE joint_append_source.id=joint_append_unaccepted_target.id)
+      WHERE link IS NULL
+    session_id: joint-append-unaccepted
+  - sql: SELECT id,value,link FROM joint_append_unaccepted_target ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: 10
+        link: 00000000-0000-4000-8000-000000000001
+      - id: 2
+        value: 20
+        link: null
+    session_id: joint-append-unaccepted
+- name: Crash without accepting the mixed namespace decision
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart without the unaccepted joint append program
+  action: restart
+- name: Recovery retains the exact predecessors of an unaccepted mixed program
+  sql: SELECT id,value FROM joint_append_unaccepted_target ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 10
+    - id: 2
+      value: 20
+- name: Recovery excludes an unaccepted appended header and restores both retired source tables
+  sql: SELECT COL_LENGTH(N'joint_append_unaccepted_target',N'link') AS width,(SELECT value FROM joint_append_unaccepted_old_a)
+    AS a_value,(SELECT value FROM joint_append_unaccepted_old_b) AS b_value,OBJECT_ID(N'joint_append_unaccepted_new_a',N'U')
+    AS constructor
+  expect:
+    rows: 1
+    data:
+    - width: null
+      a_value: 11
+      b_value: 22
+      constructor: null

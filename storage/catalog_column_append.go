@@ -103,7 +103,7 @@ func (d *catalogColumnAppend) memory() uint {
 func (tx *TxContext) appendPublicColumn(t *table, name, typ string, dimensions []int, options []scm.Scmer) bool {
 	finish := tx.beginCatalogConstruction(catalogValidationConstruction, nil, t)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
-	if tx.State != TxActive || tx.decisionStarted || tx.coordinator != nil || tx.remoteObject != nil || tx.remoteInvocation || tx.catalogIntents.Load() != nil || tx.hasTableDrops() || t.Ephemeral || t.ScopedSchema || t.PersistencyMode == Cache || !localCatalogRowDatabase(t.schema) {
+	if tx.State != TxActive || tx.decisionStarted || tx.coordinator != nil || tx.remoteObject != nil || tx.remoteInvocation || tx.ownsTableDrop(t) || !t.committedAt(t.schema.catalogView().version) || GetDatabase(t.schema.Name) != t.schema || t.schema.tables.Get(t.Name) != t || t.Ephemeral || t.ScopedSchema || t.PersistencyMode == Cache || !localCatalogRowDatabase(t.schema) {
 		panic("nullable append requires a local committed native table")
 	}
 	for i := 0; i+1 < len(options); i += 2 {
@@ -142,8 +142,8 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 	if initializer != nil && initializer.rowBased && len(tx.publicColumnPropertyRemovals(tx.publicForeignAmendments())) != 0 {
 		panic("row-initialized append cannot share unordered property retirement")
 	}
-	if tx.hasTableDrops() {
-		panic("column append cannot share a table retirement decision")
+	if tx.ownsTableDrop(t) {
+		panic("column append cannot share retirement of its endpoint")
 	}
 	defer changes.refreshMemoryLocked()
 	accepted := false
@@ -183,8 +183,8 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 	if initializer != nil && initializer.rowBased && len(tx.publicColumnPropertyRemovals(tx.publicForeignAmendments())) != 0 {
 		panic("row-initialized append cannot share unordered property retirement")
 	}
-	if tx.hasTableDrops() {
-		panic("column append cannot share a table retirement decision")
+	if tx.ownsTableDrop(t) {
+		panic("column append cannot share retirement of its endpoint")
 	}
 	// Metadata/generations and retained guards can change during maintenance or
 	// another same-T constructor. Re-attest before publishing the private input.
@@ -307,6 +307,9 @@ func (changes *publicCatalogChanges) stageColumnAppend(tx *TxContext, t *table, 
 		}
 	}
 	history := appendCatalogDeclarationHistory(tx.publicForeignAmendments(), catalogDeclarationAmendment{column: amendment})
+	if err := tx.validateColumnAppendTableProgram(history, tx.catalogIntentTables()); err != nil {
+		panic(err)
+	}
 	changes.requireColumnPropertyDecision(tx, history)
 	views := maps.Clone(changes.views.Load().tables)
 	views[t] = view
@@ -427,8 +430,57 @@ func validateCatalogColumnAppend(db *database, d catalogColumnAppend, columns []
 	return t
 }
 
+// This is the same finite declaration program used by the original decision,
+// including a constructor's not-yet-published suffix. Existing surviving CREATE
+// intents were attested by the common declaration entry; savepoint retirement
+// removes canceled intents from that exact directory.
+func (tx *TxContext) validateColumnAppendTableProgram(history []catalogDeclarationAmendment, intents []*table) error {
+	var record catalogDecisionRecord
+	for _, entry := range history {
+		if entry.column != nil && entry.column.appendDeclaration != nil {
+			record.ColumnAppends = append(record.ColumnAppends, *entry.column.appendDeclaration)
+		}
+		if entry.tableDrop != nil {
+			record.TableDrops = append(record.TableDrops, entry.tableDrop.declaration)
+		}
+	}
+	if len(record.ColumnAppends) == 0 || len(record.TableDrops) == 0 {
+		return nil
+	}
+	record.Tables = intents
+	record.NativeDeclarations = tx.publicNativeDeclarations(history)
+	return record.validateColumnAppendTableProfile()
+}
+
+// V19 appends and whole-table retirements can commute only on disjoint native
+// endpoints inside an already recognized V23 owned/name decision. No old reader
+// gains a new domain, and neither a fake name action nor a second Tx supplies
+// this proof. V22 already owns unrelated CREATE+append without table retirement.
+func (record *catalogDecisionRecord) validateColumnAppendTableProfile() error {
+	if len(record.ColumnAppends) == 0 || len(record.TableDrops) == 0 {
+		return nil
+	}
+	for _, declaration := range record.ColumnAppends {
+		if !declaration.Type.Nullable || declaration.Initialization == nil || declaration.RowInitialization != nil || declaration.GeneratedIDs != nil {
+			return fmt.Errorf("table retirement requires an ordinary nullable prefix append")
+		}
+		for _, drop := range record.TableDrops {
+			if declaration.Table == drop.Name || declaration.Identity == drop.Identity {
+				return fmt.Errorf("column append cannot share retirement of its endpoint")
+			}
+		}
+	}
+	if len(record.Tables) == 0 && !record.hasNameDeclarationActions() && !record.hasOwnedKeyDeclarationActions() {
+		return fmt.Errorf("nullable append and table retirement require an existing owned namespace decision")
+	}
+	return nil
+}
+
 func (changes *publicCatalogChanges) validateColumnAppendsLocked() error {
 	tx := &TxContext{transactionState: changes.owner}
+	if err := tx.validateColumnAppendTableProgram(tx.publicForeignAmendments(), tx.catalogIntentTables()); err != nil {
+		return err
+	}
 	columns := make(map[*table][]*column)
 	for _, d := range tx.publicColumnAppends() {
 		t := changes.db.tables.Get(d.Table)

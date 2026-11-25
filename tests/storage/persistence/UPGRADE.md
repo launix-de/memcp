@@ -1,6 +1,31 @@
 <!-- Copyright (C) 2026 Carl-Philip Hänsch -->
 # Upgrade compatibility contract
 
+## Joint owned namespace and nullable append decisions
+
+Ordinary nullable prefix appends may join unrelated private CREATE operations
+in the existing V22 decision and unrelated whole-table retirements in an already
+recognized V23 owned/name decision. Native table names and UUIDs must be disjoint
+between append and retirement endpoints. The actual surviving constructor list
+and canonical projected name/key program supply the existing format proof.
+Bare DROP plus append without that proof remains unsupported; realized/generated
+append profiles retain their earlier boundaries.
+
+Admission validates a prospective immutable declaration history before effects.
+A later DROP cannot erase its sole supporting name action. Constructor discard
+validates the candidate surviving directory before retiring storage; a real
+savepoint removes dependent append history with that constructor. The drained
+decision repeats validation. No reader domain or encoding changes: recovery
+installs accepted private tables, applies append headers to exact existing
+physical generations, replays ordered native actions, then retires old tables
+before publishing the one namespace cut.
+
+`joint-owned-nullable-append.yaml` covers copied replacements, checked typed
+rows, unrelated progress, observers, rollback, savepoints, supported V22/V23
+compositions, refusal of unsupported compositions and accepted/unaccepted
+crash recovery. Native controls also exercise prospective name loss and the
+actual partial constructor-discard rejection without changing selected inputs.
+
 ## Nullable historical prefixes and checked writes
 
 New ordinary nullable appends capture their actual main/delta generation extents

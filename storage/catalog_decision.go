@@ -772,6 +772,14 @@ func (tx *TxContext) discardCatalogIntents(keep int) {
 	if tx.coordinator != nil {
 		panic("private catalog retirement requires its native coordinator")
 	}
+	// The restore owner has already selected its declaration prefix. Check that
+	// exact program against the prospective surviving constructor directory
+	// before retiring any native generation or its storage. A real savepoint
+	// removes its dependent append suffix too; an inconsistent partial cancel
+	// cannot remove the sole owner of a surviving joint append/drop decision.
+	if err := tx.validateColumnAppendTableProgram(tx.publicForeignAmendments(), (*intents)[:keep]); err != nil {
+		panic(err)
+	}
 	identity := tx.catalogIdentity.Load()
 	db := GetDatabase(identity.Database)
 	if db == nil || db != identity.database || db.incarnationID() != identity.Incarnation {
