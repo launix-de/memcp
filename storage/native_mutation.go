@@ -39,8 +39,9 @@ type nativeMutationOperation struct {
 	replacementTarget *table                   // direct completion invocation only; not inherited by nested producers
 	replacementEvent  nativeMutationEvent
 	transitionEffects bool
-	rowTriggerChild   *nativeMutationOperation
-	parent            *nativeMutationOperation // immutable; sibling links use parent.mu
+	rowTriggerInputs  map[*table]*nativeMutationOperation // one existing child per actual trigger input
+	cacheInput        *nativeCacheMutationTarget          // immutable native dispatch grant, never a public database
+	parent            *nativeMutationOperation            // immutable; sibling links use parent.mu
 	firstChild        *nativeMutationOperation
 	nextSibling       *nativeMutationOperation
 	previousSibling   *nativeMutationOperation
@@ -353,6 +354,7 @@ func (operation *nativeMutationOperation) release() {
 	operation.replacementTarget = nil
 	operation.replacementEvent = 0
 	operation.columnInitializer = nil
+	operation.cacheInput = nil
 	operation.effects = nil
 	operation.effectOrder = nil
 	operation.effectScope = nil

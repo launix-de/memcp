@@ -116,6 +116,7 @@ func newNestedNativeMutationBinding(parent *TxContext, executionSession scm.Scme
 	binding.queryActive.Store(true)
 	child := newNativeMutationOperationLocked(state, binding)
 	child.localOrigin, child.undoOwner, child.completionRoot = outer.localOrigin, undo, outer.completionRoot
+	child.cacheInput = outer.cacheInput
 	outer.linkChildLocked(child)
 	if !parent.retainQueryWorkLocked(child.close) {
 		outer.unlinkChildLocked(child)

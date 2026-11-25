@@ -12027,26 +12027,28 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 				(list (quote OLD) (quote NEW) (quote session) (physical_query_tx_symbol))
 				body)))))
 
-(define prejoin_create_trigger_plan (lambda (src name timing body)
+(define prejoin_create_trigger_plan (lambda (src target name timing body)
 	(list (quote createtrigger)
 		(source_native_table_expr src (quote tx))
-		name timing "" "" (prejoin_deferred_trigger body) false)))
+		name timing "" "" (prejoin_deferred_trigger body) false target)))
 
 (define prejoin_trigger_registration_plans (lambda (block table_name)
-	(merge (map (qb_sources block) (lambda (src)
-		(begin
-			(define prefix (concat ".prejoin:" table_name "|" (source_relation src) "|"))
-			(define delete_body (prejoin_trigger_delete_plan block table_name src (quote OLD)))
-			(define insert_body (prejoin_trigger_insert_plan block table_name src (quote NEW)))
-			(list
-				(prejoin_create_trigger_plan src (concat prefix "after_delete") "after_delete" delete_body)
-				(prejoin_create_trigger_plan src (concat prefix "after_insert") "after_insert" insert_body)
-				(prejoin_create_trigger_plan src (concat prefix "after_update") "after_update"
-					(list (quote !begin) delete_body insert_body))
-				(prejoin_create_trigger_plan src (concat prefix "after_drop_table") "after_drop_table"
-					(list (quote droptable) (qb_schema block) table_name true))
-				(prejoin_create_trigger_plan src (concat prefix "after_drop_column") "after_drop_column"
-					(list (quote droptable) (qb_schema block) table_name true)))))))))
+	(begin
+		(define target (list (quote table) (qb_schema block) false table_name false (quote tx)))
+		(merge (map (qb_sources block) (lambda (src)
+			(begin
+				(define prefix (concat ".prejoin:" table_name "|" (source_relation src) "|"))
+				(define delete_body (prejoin_trigger_delete_plan block table_name src (quote OLD)))
+				(define insert_body (prejoin_trigger_insert_plan block table_name src (quote NEW)))
+				(list
+					(prejoin_create_trigger_plan src target (concat prefix "after_delete") "after_delete" delete_body)
+					(prejoin_create_trigger_plan src target (concat prefix "after_insert") "after_insert" insert_body)
+					(prejoin_create_trigger_plan src target (concat prefix "after_update") "after_update"
+						(list (quote !begin) delete_body insert_body))
+					(prejoin_create_trigger_plan src target (concat prefix "after_drop_table") "after_drop_table"
+						(list (quote droptable) (qb_schema block) table_name true))
+					(prejoin_create_trigger_plan src target (concat prefix "after_drop_column") "after_drop_column"
+						(list (quote droptable) (qb_schema block) table_name true))))))))))
 
 (define prejoin_lookup_computed_column_plan (lambda (block table_name sources src col)
 	(begin

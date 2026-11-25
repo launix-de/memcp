@@ -5025,6 +5025,11 @@ func Init(en scm.Env) {
 				Hidden:   !visible,
 				Priority: 0,
 			}
+			if len(a) > 7 && !a[7].IsNil() {
+				// Runtime cache metadata keeps the existing native/MOSI publisher.
+				// This pin is not a local public-catalog declaration or a wire grant.
+				defer trigger.bindCacheTarget(TableFromScmer(a[7]))()
+			}
 			finalizeTriggerCompilation(&trigger)
 			defer db.GetWrite(nil).Release()
 			t.ddlMu.Lock()
@@ -5052,6 +5057,7 @@ func Init(en scm.Env) {
 				{Kind: "string", Label: "language", Description: "registered source language, or empty when body is the durable definition"},
 				{Kind: "any", Label: "body", Description: "trigger body (parsed Scheme expression)"},
 				{Kind: "bool", Label: "visible", Description: "true = user trigger (shown in SHOW TRIGGERS), false = internal trigger (hidden)"},
+				{Kind: "table", Label: "cache_target", Optional: true, Description: "actual native cache target for compiled hidden AFTER maintenance; nil for ordinary triggers"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},

@@ -696,7 +696,7 @@ func (tx *TxContext) admitCatalogMutation(table *table) {
 	if tx == nil {
 		return
 	}
-	tx.requireMutationBinding()
+	cache := tx.requireMutationBinding()
 	// Append has no private physical slot. This veto precedes every native
 	// writer grant, including a checked KEY/FK input on the same endpoint.
 	if len(tx.pendingNullColumns(table)) != 0 {
@@ -704,6 +704,12 @@ func (tx *TxContext) admitCatalogMutation(table *table) {
 	}
 	if tx.decisionStarted {
 		panic("transaction commit outcome is unknown; retry COMMIT")
+	}
+	if cache != nil && cache.target == table && cache.owner == tx.transactionState {
+		// A derived runtime cache is not an additional public catalog row phase.
+		// Actual operator setup still admits this target under the original
+		// statement's leases and Undo before the first row effect.
+		return
 	}
 	if identity := tx.catalogIdentity.Load(); identity != nil {
 		// Scope-owned RAM relations retain their existing native transaction and

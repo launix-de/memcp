@@ -52,34 +52,39 @@ func (operation *nativeMutationOperation) beginStatement(db *database) {
 func (operation *nativeMutationOperation) admitStatementTable(t *table) {
 	operation.mu.Lock()
 	outer, completion, invocation := operation.undoOwner, operation.completionRoot, operation.invocation
+	cache := operation.cacheInput
 	operation.mu.Unlock()
 	if outer != nil {
-		outer.admitCompletionStatementTable(t, completion, operation, invocation)
+		outer.admitCompletionStatementTable(t, completion, operation, invocation, cache)
 		return
 	}
-	operation.admitCompletionStatementTable(t, nil, operation, invocation)
+	operation.admitCompletionStatementTable(t, nil, operation, invocation, cache)
 }
 
 // Only a private completion-derived child may join targets while its outer
 // producer is sealed. Old producer/frame capabilities receive no such grant.
-func (operation *nativeMutationOperation) admitCompletionStatementTable(t *table, completion, admitting *nativeMutationOperation, invocation *TxContext) {
+func (operation *nativeMutationOperation) admitCompletionStatementTable(t *table, completion, admitting *nativeMutationOperation, invocation *TxContext, cache *nativeCacheMutationTarget) {
 	operation.mu.Lock()
 	defer operation.mu.Unlock()
 	statement := operation.statement
 	if operation.closed && !(operation.completing && completion == operation) || statement == nil || statement.finished || t == nil {
 		panic("native statement target is outside its admitted database")
 	}
-	if statement.tables[t] != nil {
-		return
-	}
 	if t.schema != statement.database {
+		cacheTarget := cache != nil && cache.target == t && cache.owner == operation.state
 		// The statement still owns only one PUBLIC database. Actual query-owned
 		// MEMORY inputs may use another namespace, but never a SQL temporary
-		// generation, cache table or independent data operation.
+		// generation or independent data operation. A pinned native trigger child
+		// may also join ONLY its exact derived cache, under this SAME row Undo.
 		scope := t.relationLifetime
-		if !t.Ephemeral || t.PersistencyMode != Memory || t.ScopedSchema || t.dataOwner != nil ||
-			scope == nil || scope.dataPolicy != relationCallerData {
+		if !cacheTarget && (!t.Ephemeral || t.PersistencyMode != Memory || t.ScopedSchema || t.dataOwner != nil ||
+			scope == nil || scope.dataPolicy != relationCallerData) {
 			panic("native statement target is outside its admitted database")
+		}
+		// The target's first admission already retained its mode lease. A
+		// repeated row still proves the exact input, without a new resource call.
+		if statement.tables[t] != nil {
+			return
 		}
 		admission := func() *standaloneMutationAdmission {
 			operation.mu.Unlock()
@@ -89,7 +94,7 @@ func (operation *nativeMutationOperation) admitCompletionStatementTable(t *table
 			// or resource factory executes under the operation/table owners.
 			leave := admitting.borrowMutation(invocation)
 			defer leave(nil)
-			if invocation.Session.IsNil() || scope.owner != relationScopeOwnerFor(invocation.Session) || !scope.owns(t) {
+			if !cacheTarget && (invocation.Session.IsNil() || scope.owner != relationScopeOwnerFor(invocation.Session) || !scope.owns(t)) {
 				panic("native statement scratch belongs to another scope owner")
 			}
 			return invocation.admitStandaloneMutation(t.schema)
@@ -99,9 +104,11 @@ func (operation *nativeMutationOperation) admitCompletionStatementTable(t *table
 			admission.transaction != operation.state || admission.database != t.schema {
 			panic("native statement scratch lost its admitted owner")
 		}
-		if statement.tables[t] != nil {
-			return
-		}
+	}
+	// Target membership does not grant a different sibling a foreign input.
+	// Validate its actual child profile above even after a legitimate admission.
+	if statement.tables[t] != nil {
+		return
 	}
 	lease, err := t.admitStatement(operation)
 	if err != nil {
@@ -155,14 +162,14 @@ func (operation *nativeMutationOperation) borrowMutation(binding *TxContext) fun
 
 // Called only at stored-data mutation admission. It grants no right to bypass
 // a frame's borrowed UNIQUE/batch lifetime and performs no reader hot-loop work.
-func (tx *TxContext) requireMutationBinding() {
+func (tx *TxContext) requireMutationBinding() *nativeCacheMutationTarget {
 	if operation := tx.mutationOperation; operation != nil {
 		operation.mu.Lock()
 		defer operation.mu.Unlock()
 		if operation.closed || operation.state == nil || operation.state != tx.transactionState || operation.invocation != tx {
 			panic("native mutation invocation has finished")
 		}
-		return
+		return operation.cacheInput
 	}
 	tx.mu.Lock()
 	busy := tx.checkedMutation != nil
@@ -170,6 +177,7 @@ func (tx *TxContext) requireMutationBinding() {
 	if busy {
 		panic(newNativeMutationBusyError(tx.transactionState, "row mutation"))
 	}
+	return nil
 }
 
 // All initial targets are admitted before this call. The standalone resource

@@ -1,0 +1,114 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Actual generated-cache inputs share original row Undo without granting another public database
+setup:
+  - sql: DROP TABLE IF EXISTS native_cache_source
+  - sql: CREATE TABLE native_cache_source(id INT PRIMARY KEY,value INT)
+  - scm: |-
+      (begin
+      	(createdatabase "native-cache-maintenance-target" true)
+      	(droptable "native-cache-maintenance-target" ".native_cache_owned" true)
+      	(createtable "native-cache-maintenance-target" ".native_cache_owned"
+      		(list (list "column" "id" "INT" (list) (list)) (list "column" "value" "INT" (list) (list)))
+      		(list "engine" "cache") false nil)
+      	(createtrigger (table "memcp-tests" false "native_cache_source" false nil)
+      		"native_cache_copy" "after_insert" "" ""
+      		(lambda (OLD NEW session tx)
+      			(insert (table "native-cache-maintenance-target" false ".native_cache_owned" false tx)
+      				(list "id" "value") (list (list (get_assoc NEW "id") (get_assoc NEW "value")))
+      				(list) nil false nil tx)) false
+      		(table "native-cache-maintenance-target" false ".native_cache_owned" false nil)))
+cleanup:
+  - sql: DROP TABLE IF EXISTS native_cache_source
+  - scm: (droptable "native-cache-maintenance-target" ".native_cache_owned" true)
+test_cases:
+  - name: Foreign cache rows follow the original savepoint and full rollback
+    scm: |-
+      (begin
+      	(define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      	(define tx (owner "__memcp_tx"))
+      	(define source (table "memcp-tests" false "native_cache_source" false tx))
+      	(define cache (table "native-cache-maintenance-target" false ".native_cache_owned" false tx))
+      	(define rows (lambda (handle input) (sort
+      		(scan input handle (list) (list) (list) (lambda () true) (list "id" "value")
+      			(lambda (acc id value) (append acc (list id value))) (list)
+      			(lambda (left right) (merge (list left right))) false)
+      		(lambda (left right) (< (car left) (car right))))))
+      	(define write (lambda (id value) (with_query_request owner nil 0 "cache original insert" "acid"
+      		(lambda (statement) (statement "cache original insert" false (lambda (input)
+      			(with_table_mutation (list source) (list "insert" (list)) input owner
+      				(lambda (bound) (insert source (list "id" "value") (list (list id value)) (list) nil false nil bound)))))))))
+      	(write 1 11)
+      	(define sp (tx_savepoint tx))
+      	(write 2 22)
+      	(define both (list (rows source tx) (rows cache tx) (rows source nil) (rows cache nil)))
+      	(tx_rollback_to_savepoint tx sp)
+      	(define suffix (list (rows source tx) (rows cache tx) (tx_state tx)))
+      	(tx_rollback owner)
+      	(list both suffix (rows source nil) (rows cache nil)))
+    expect:
+      result: [[[[1, 11], [2, 22]], [[1, 11], [2, 22]], [], []], [[[1, 11]], [[1, 11]], active], [], []]
+  - name: The original decision publishes source and derived cache together
+    scm: |-
+      (begin
+      	(define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      	(define tx (owner "__memcp_tx"))
+      	(define source (table "memcp-tests" false "native_cache_source" false tx))
+      	(define cache (table "native-cache-maintenance-target" false ".native_cache_owned" false tx))
+      	(define rows (lambda (handle input) (sort
+      		(scan input handle (list) (list) (list) (lambda () true) (list "id" "value")
+      			(lambda (acc id value) (append acc (list id value))) (list)
+      			(lambda (left right) (merge (list left right))) false)
+      		(lambda (left right) (< (car left) (car right))))))
+      	(with_query_request owner nil 0 "cache original commit" "acid" (lambda (statement)
+      		(statement "cache original commit" false (lambda (input)
+      			(with_table_mutation (list source) (list "insert" (list)) input owner
+      				(lambda (bound) (insert source (list "id" "value") (list (list 3 33) (list 4 44)) (list) nil false nil bound)))))))
+      	(define before (list (rows source tx) (rows cache tx) (rows source nil) (rows cache nil)))
+      	(tx_commit owner)
+      	(list before (rows source nil) (rows cache nil)))
+    expect:
+      result: [[[[3, 33], [4, 44]], [[3, 33], [4, 44]], [], []], [[3, 33], [4, 44]], [[3, 33], [4, 44]]]
+  - name: An unrelated sibling cannot borrow an already admitted foreign cache
+    scm: |-
+      (begin
+      	(define source (table "memcp-tests" false "native_cache_source" false nil))
+      	(define cache (table "native-cache-maintenance-target" false ".native_cache_owned" false nil))
+      	(createtrigger source "native_cache_unrelated" "after_insert" "" ""
+      		(lambda (OLD NEW session tx)
+      			(insert (table "native-cache-maintenance-target" false ".native_cache_owned" false tx)
+      				(list "id" "value") (list (list 99 999)) (list) nil false nil tx)) false nil)
+      	(define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      	(define tx (owner "__memcp_tx"))
+      	(define rows (lambda (handle input) (sort
+      		(scan input handle (list) (list) (list) (lambda () true) (list "id" "value")
+      			(lambda (acc id value) (append acc (list id value))) (list)
+      			(lambda (left right) (merge (list left right))) false)
+      		(lambda (left right) (< (car left) (car right))))))
+      	(define failed (try (lambda () (begin
+      		(with_query_request owner nil 0 "reject cache sibling" "acid" (lambda (statement)
+      			(statement "reject cache sibling" false (lambda (input)
+      				(with_table_mutation (list source) (list "insert" (list)) input owner
+      					(lambda (bound) (insert source (list "id" "value") (list (list 5 55)) (list) nil false nil bound))))
+      				(lambda (_cause _completion) "preserve")))) false))
+      		(lambda (failure) (if (strlike (concat failure) "%outside its admitted database%") true (error failure)))))
+      	(define kept (list failed (tx_state tx) (rows source tx) (rows cache tx) (rows source nil) (rows cache nil)))
+      	(tx_rollback owner)
+      	(droptrigger "memcp-tests" "native_cache_unrelated" false)
+      	kept)
+    expect:
+      result: [true, active, [[3, 33], [4, 44]], [[3, 33], [4, 44]], [[3, 33], [4, 44]], [[3, 33], [4, 44]]]
+  - name: A public table cannot be registered as an internal cache target
+    scm: |-
+      (begin
+      	(define source (table "memcp-tests" false "native_cache_source" false nil))
+      	(define rejected (try (lambda () (begin
+      		(createtrigger source "native_cache_public_grant" "after_insert" "" ""
+      			(lambda (OLD NEW session tx) true) false source) false))
+      		(lambda (failure) (if (strlike (concat failure) "%actual cache target%") true (error failure)))))
+      	(list rejected (count (filter (coalesceNil (get_assoc (show "memcp-tests" "native_cache_source" true) "triggers") (list))
+      		(lambda (header) (equal? (get_assoc header "name") "native_cache_public_grant"))))))
+    expect:
+      result: [true, 0]

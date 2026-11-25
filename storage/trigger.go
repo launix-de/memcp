@@ -220,6 +220,9 @@ type TriggerDescription struct {
 	preservesUpdateValues bool `json:"-"`
 	checkDefinition       *checkDeclaration
 	statementDefinition   *statementTriggerDefinition
+	// Filled only in a selected header copy by the native AFTER dispatcher.
+	// Published definitions and persisted headers never retain invocations.
+	invocation *TxContext
 }
 
 // cacheTriggerSource is an immutable reverse edge for a runtime cache target.
@@ -784,6 +787,7 @@ func (t *table) addTriggerLocked(trigger TriggerDescription) {
 // publishers admit the mutation first; an accepted FK decision already owns
 // its exact names through the native declaration lease.
 func (t *table) insertTriggerLocked(trigger TriggerDescription) {
+	trigger.invocation = nil
 	trigger.cacheTarget.rememberCacheTriggerSource(t)
 	// Keep trigger list ordered by priority (lower = earlier). For equal
 	// priorities preserve registration order by inserting after existing ties.
@@ -1000,10 +1004,8 @@ func (t *table) beforeInsertOutputColumns(dict scm.Scmer, columns []string, decl
 // on panic the savepoint is rolled back before re-panicking.
 // Triggers with Async=true are launched in a background goroutine (fire-and-forget).
 func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset, tx *TxContext, input *nativeMutationInput) {
-	triggers := t.mutationTriggers(timing, input, tx)
-	if len(triggers) != 0 {
-		tx = nativeRowTriggerInvocation(tx)
-	}
+	triggers, release := nativeRowTriggerInvocations(tx, t.mutationTriggers(timing, input, tx), input != nil)
+	defer release()
 	session := txSessionScmer(tx)
 	for _, tr := range triggers {
 		if tr.Func.IsNil() {
@@ -1044,12 +1046,9 @@ func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset, tx
 			}()
 			continue
 		}
-		if !tr.acquireTarget(tx) {
-			continue
-		}
 		// Execute trigger with savepoint for proper rollback
 		func() {
-			defer tr.releaseTarget()
+			tx := tr.invocation
 			var sp Savepoint
 			hasSavepoint := false
 			if tx != nil && !tx.hasStatementUndo() {
@@ -1086,8 +1085,8 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 		}
 		return
 	}
-	triggers := t.mutationTriggers(timing, input, tx)
-	tx = nativeRowTriggerInvocation(tx)
+	triggers, release := nativeRowTriggerInvocations(tx, t.mutationTriggers(timing, input, tx), input != nil)
+	defer release()
 	for _, tr := range triggers {
 		if tr.Func.IsNil() {
 			continue
@@ -1117,11 +1116,8 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 			}
 			continue
 		}
-		if !tr.acquireTarget(tx) {
-			continue
-		}
 		func() {
-			defer tr.releaseTarget()
+			tx := tr.invocation
 			// Check for vectorized trigger (VectorFunc set)
 			if !tr.VectorFunc.IsNil() && !tx.hasStatementUndo() {
 				// Build columnar dict-of-lists: {"col1": [v1,v2,...], "col2": [v1,v2,...]}
@@ -1236,7 +1232,11 @@ func (t *table) ExecuteTableLifecycleTriggers(timing TriggerTiming, tx *TxContex
 		if tr.Func.IsNil() {
 			continue
 		}
+		if !tr.acquireTarget(tx) {
+			continue
+		}
 		func() {
+			defer tr.releaseTarget()
 			defer func() {
 				if r := recover(); r != nil {
 					// lifecycle triggers are best-effort; log but don't propagate
@@ -1305,7 +1305,7 @@ func (t *table) invokeBeforeInsertTrigger(trigger TriggerDescription, newDict sc
 // Trigger selection and declarations belong to the same admitted native input;
 // a private column must not be normalized through the public table header.
 func (t *table) executeBeforeInsertTriggerRow(columns []string, row dataset, triggers []TriggerDescription, isIgnore bool, tx *TxContext, declarations []*column) ([]string, dataset, bool) {
-	tx = nativeRowTriggerInvocation(tx)
+	tx = nativeRowTriggerInvocation(tx, nil)
 	if len(triggers) == 0 {
 		return columns, row, true
 	}
@@ -1401,7 +1401,7 @@ func (t *table) validateFinalInsertRows(columns []string, values [][]scm.Scmer, 
 // Returns the modified newRow. Panics from triggers propagate to the caller.
 func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset, tx *TxContext, input *nativeMutationInput, declarations []*column) (dataset, []TriggerDescription) {
 	triggers := t.mutationTriggers(BeforeUpdate, input, tx)
-	tx = nativeRowTriggerInvocation(tx)
+	tx = nativeRowTriggerInvocation(tx, nil)
 	if len(triggers) == 0 {
 		return newRow, nil
 	}
@@ -1456,7 +1456,7 @@ func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset, tx *TxContex
 // Returns true if delete should proceed, false to abort.
 // Panics from triggers propagate to the caller.
 func (t *table) ExecuteBeforeDeleteTriggers(oldRow dataset, tx *TxContext, input *nativeMutationInput, declarations []*column) bool {
-	tx = nativeRowTriggerInvocation(tx)
+	tx = nativeRowTriggerInvocation(tx, nil)
 	triggers := t.mutationTriggers(BeforeDelete, input, tx)
 	if len(triggers) == 0 {
 		return true
