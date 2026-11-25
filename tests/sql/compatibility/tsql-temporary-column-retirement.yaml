@@ -218,9 +218,10 @@ test_cases:
 - name: Default-bearing retired cells do not enter later implicit insert columns
   tds:
     statements:
-    - sql: 'CREATE TABLE #layout_default(id INT,kept INT,discarded INT DEFAULT(7))'
+    - sql: 'CREATE TABLE #layout_default(id INT,kept INT,discarded INT CONSTRAINT DF_layout_default_discarded DEFAULT(7))'
     - sql: 'INSERT INTO #layout_default(id,kept) VALUES(1,11)'
     - sql: BEGIN TRANSACTION
+    - sql: 'ALTER TABLE #layout_default DROP CONSTRAINT DF_layout_default_discarded'
     - sql: 'ALTER TABLE #layout_default DROP COLUMN discarded'
     - sql: 'INSERT INTO #layout_default VALUES(2,22)'
     - sql: 'SELECT * FROM #layout_default ORDER BY id'
