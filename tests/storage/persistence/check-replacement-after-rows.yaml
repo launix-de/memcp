@@ -23,7 +23,6 @@ setup:
 - sql: INSERT check_row_probe VALUES(1,1),(2,2)
 - sql: INSERT check_row_unconstrained VALUES(1,1)
 - sql: INSERT check_row_marker VALUES(1,0)
-- scm: (registerprocedurelanguage "check-input-literal" (lambda (source _context) (lambda () (simplify source))))
 cleanup:
 - sql: DROP TABLE IF EXISTS check_row_appended
 - scm: (dropprocedure "memcp-tests" "check_row_prefix" true)
@@ -455,6 +454,7 @@ test_cases:
 - name: A retained source prefix and rewind before DROP restore exact baseline CHECK input and original row Undo
   scm: |-
     (begin
+      (registerprocedurelanguage "check-input-literal" (lambda (source _context) (lambda () (simplify source))))
       (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
       (define tx (owner "__memcp_tx"))
       (define target (table "memcp-tests" false "check_row_probe" false tx))
