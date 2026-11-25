@@ -191,7 +191,7 @@ test_cases:
     - connection: owner
       sql: ALTER TABLE joint_append_commit_target ADD link UNIQUEIDENTIFIER NULL
     - connection: owner
-      sql: SELECT id,value,link FROM joint_append_commit_target ORDER BY id
+      sql: SELECT id,value,CONVERT(VARCHAR(36),link) AS link FROM joint_append_commit_target ORDER BY id
       expect:
         rows: 2
         data:
@@ -209,7 +209,7 @@ test_cases:
     - connection: owner
       sql: INSERT joint_append_commit_target(id,value,link) VALUES(4,40,'00000000-0000-4000-8000-000000000002')
     - connection: owner
-      sql: SELECT id,value,link FROM joint_append_commit_target ORDER BY id
+      sql: SELECT id,value,CONVERT(VARCHAR(36),link) AS link FROM joint_append_commit_target ORDER BY id
       expect:
         rows: 4
         data:
@@ -261,7 +261,7 @@ test_cases:
     - connection: owner
       sql: COMMIT TRAN
     - connection: observer
-      sql: SELECT id,value,link FROM joint_append_commit_target ORDER BY id
+      sql: SELECT id,value,CONVERT(VARCHAR(36),link) AS link FROM joint_append_commit_target ORDER BY id
       expect:
         rows: 4
         data:
@@ -332,7 +332,7 @@ test_cases:
       sql: UPDATE joint_append_rollback_target SET link=(SELECT token FROM joint_append_source WHERE joint_append_source.id=joint_append_rollback_target.id)
         WHERE link IS NULL
     - connection: owner
-      sql: SELECT id,value,link FROM joint_append_rollback_target ORDER BY id
+      sql: SELECT id,value,CONVERT(VARCHAR(36),link) AS link FROM joint_append_rollback_target ORDER BY id
       expect:
         rows: 2
         data:
@@ -421,7 +421,7 @@ test_cases:
       sql: UPDATE joint_append_save_target SET link=(SELECT token FROM joint_append_source WHERE joint_append_source.id=joint_append_save_target.id)
         WHERE link IS NULL
     - connection: owner
-      sql: SELECT id,value,link FROM joint_append_save_target ORDER BY id
+      sql: SELECT id,value,CONVERT(VARCHAR(36),link) AS link FROM joint_append_save_target ORDER BY id
       expect:
         rows: 2
         data:
@@ -470,7 +470,7 @@ test_cases:
     - connection: owner
       sql: COMMIT TRAN
     - connection: observer
-      sql: SELECT id,value,link FROM joint_append_save_target ORDER BY id
+      sql: SELECT id,value,CONVERT(VARCHAR(36),link) AS link FROM joint_append_save_target ORDER BY id
       expect:
         rows: 2
         data:
@@ -508,7 +508,7 @@ test_cases:
       sql: UPDATE joint_append_cancel_target SET link=(SELECT token FROM joint_append_source WHERE joint_append_source.id=joint_append_cancel_target.id)
         WHERE link IS NULL
     - connection: owner
-      sql: SELECT id,value,link FROM joint_append_cancel_target ORDER BY id
+      sql: SELECT id,value,CONVERT(VARCHAR(36),link) AS link FROM joint_append_cancel_target ORDER BY id
       expect:
         rows: 2
         data:
@@ -596,7 +596,7 @@ test_cases:
         - id: 8
           value: 88
     - connection: owner
-      sql: SELECT id,value,link FROM joint_append_name_target ORDER BY id
+      sql: SELECT id,value,CONVERT(VARCHAR(36),link) AS link FROM joint_append_name_target ORDER BY id
       expect:
         rows: 1
         data:
@@ -661,7 +661,7 @@ test_cases:
         - id: 8
           value: 88
     - connection: owner
-      sql: SELECT id,value,link FROM joint_append_private_target ORDER BY id
+      sql: SELECT id,value,CONVERT(VARCHAR(36),link) AS link FROM joint_append_private_target ORDER BY id
       expect:
         rows: 1
         data:
@@ -834,7 +834,7 @@ test_cases:
     - connection: owner
       sql: COMMIT TRAN
     - connection: owner
-      sql: SELECT id,value,link FROM joint_append_crash_target ORDER BY id
+      sql: SELECT id,value,CONVERT(VARCHAR(36),link) AS link FROM joint_append_crash_target ORDER BY id
       expect:
         rows: 2
         data:
@@ -898,7 +898,7 @@ test_cases:
       sql: UPDATE joint_append_owned_target SET link=(SELECT token FROM joint_append_source WHERE joint_append_source.id=joint_append_owned_target.id)
         WHERE link IS NULL
     - connection: owner
-      sql: SELECT id,value,link FROM joint_append_owned_target ORDER BY id
+      sql: SELECT id,value,CONVERT(VARCHAR(36),link) AS link FROM joint_append_owned_target ORDER BY id
       expect:
         rows: 2
         data:
@@ -924,7 +924,7 @@ test_cases:
     - connection: owner
       sql: COMMIT TRAN
     - connection: observer
-      sql: SELECT id,value,link FROM joint_append_owned_target ORDER BY id
+      sql: SELECT id,value,CONVERT(VARCHAR(36),link) AS link FROM joint_append_owned_target ORDER BY id
       expect:
         rows: 2
         data:
