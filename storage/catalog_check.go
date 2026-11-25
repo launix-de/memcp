@@ -33,6 +33,9 @@ func (tx *TxContext) stageCatalogCheck(t *table, definition *checkDeclaration) b
 	if tx == nil || tx.transactionState == nil {
 		panic("check declaration requires an active native transaction")
 	}
+	if t.Ephemeral || t.ScopedSchema {
+		panic("check declaration requires an ordinary public table")
+	}
 	requireCheckInvocation(tx)
 	rowInput := tx.publicCheckRowInput(t)
 	profile, kind := catalogEnforcementConstruction, catalogEnforcementKind

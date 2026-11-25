@@ -241,3 +241,26 @@ test_cases:
     )\n"
   expect:
     result: true
+- name: A later scoped transaction cannot publish a CHECK in the public catalog journal
+  scm: "(begin\n\t(define owner (newsession)) (owner \"username\" \"root\")\n\t(define scope (new_relation_scope\
+    \ owner nil \"transactional\"))\n\t(define name (concat \".column-layout:\" (uuid)))\n\t(tx_begin_acid owner)\
+    \ (define tx (owner \"__memcp_tx\"))\n\t(createtable \"memcp-tests\" name\n\t\t(list (list \"column\" \"id\"\
+    \ \"INT\" (list) (list))\n\t\t\t(list \"column\" \"kept\" \"INT\" (list) (list)))\n\t\t(list \"engine\" \"memory\"\
+    \ \"ephemeral\" true \"scope\" scope \"scope_key\" \"probe\") false tx)\n\t(define source (table \"memcp-tests\"\
+    \ false name false tx))\n\t(insert source '(\"id\" \"kept\") (list (list 1 17) (list 2 29)) (list) nil false\
+    \ nil tx)\n\t(tx_commit owner)\n\t(tx_begin_acid owner) (set tx (owner \"__memcp_tx\"))\n\t(define constraints\
+    \ (show source \"constraints\" tx))\n\t(define header (show source \"column\" \"kept\" false tx))\n\t(define\
+    \ rejected (try (lambda () (begin\n\t\t(createcheck source \"CK_scoped_public_boundary\" \"tsql-check\" \"kept\
+    \ >= 0\" '(\"kept\") tx owner) false))\n\t\t(lambda (cause) (strlike (string (failure_value cause)) \"%check\
+    \ declaration requires an ordinary public table%\"))))\n\t(define unchanged (and (equal? (tx_state tx) \"active\"\
+    )\n\t\t(expression_equal? constraints (show source \"constraints\" tx))\n\t\t(expression_equal? header (show\
+    \ source \"column\" \"kept\" false tx))\n\t\t(equal? (count (coalesceNil ((show source \"constraints\" tx) \"\
+    Checks\") (list))) 0)))\n\t(tx_rollback owner)\n\t(tx_begin_acid owner) (set tx (owner \"__memcp_tx\"))\n\t\
+    (define rows (scan tx source (list) (list) (list) (lambda () true) '(\"id\" \"kept\")\n\t\t(lambda (result id\
+    \ value) (set_assoc result id value)) (list) merge_assoc))\n\t(define rollback_intact (and (expression_equal?\
+    \ constraints (show source \"constraints\" tx))\n\t\t(expression_equal? header (show source \"column\" \"kept\"\
+    \ false tx))\n\t\t(equal? (count (coalesceNil ((show source \"constraints\" tx) \"Checks\") (list))) 0)\n\t\t\
+    (expression_equal? (get_assoc rows 1) 17) (expression_equal? (get_assoc rows 2) 29)))\n\t(tx_rollback owner)\
+    \ (close_relation_scope scope)\n\t(and rejected unchanged rollback_intact)\n)\n"
+  expect:
+    result: true
