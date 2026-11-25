@@ -33,7 +33,7 @@ func (tx *TxContext) noteStatementMutation(target *table) {
 	if tx.failurePolicyExecuting.Load() {
 		panic(newNativeMutationBusyError(tx.transactionState, "failure policy mutation"))
 	}
-	if target != nil && target.callerExecutionRelation() && !target.ScopedSchema {
+	if target != nil && !target.ScopedSchema && target.callerExecutionRelation() {
 		return
 	}
 	if err := tx.requireCommittable(); err != nil {

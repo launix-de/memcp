@@ -64,12 +64,18 @@ func (tx *TxContext) requireDeclarationEndpoint(t *table, operation maintenanceO
 	if t == nil || t.schema == nil || t.schema.tables.Get(t.Name) != t {
 		panic("catalog declaration endpoint generation was replaced")
 	}
-	if t.committedAt(t.schema.catalogView().version) {
+	if t.ScopedSchema {
+		// A lexical MEMORY generation may be unpublished or belong to a later
+		// transaction in the same connection. Its actual slot/session owner,
+		// rather than public-name visibility or constructor identity, attests it.
+		tx.requireScopedRelationOwner(t)
+	} else if t.committedAt(t.schema.catalogView().version) {
 		requireTableMaintenance(t.schema.Name, t.Name, operation)
 		return
+	} else if !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) {
+		panic("catalog declaration requires its original native endpoint owner")
 	}
-	if !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) ||
-		!declaredTableMaintenanceCapabilities(t.schema.Name, t.Name).allows(operation) {
+	if !declaredTableMaintenanceCapabilities(t.schema.Name, t.Name).allows(operation) {
 		panic("catalog declaration requires its original native endpoint owner")
 	}
 }

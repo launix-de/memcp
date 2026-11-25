@@ -108,7 +108,7 @@ func (tx *TxContext) dropScopedColumn(t *table, name string, ifExists bool, expe
 	defer finish()
 	releaseScope := scope.beginUse()
 	defer releaseScope()
-	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+	tx.requireDeclarationEndpoint(t, maintenanceAlter)
 	tx.getOrComputeResource(fmt.Sprintf("relation-schema-retirement/%p", scope), scm.NewFunc(func(...scm.Scmer) scm.Scmer {
 		return scm.NewAny(&relationSchemaRetirement{scope})
 	}))
