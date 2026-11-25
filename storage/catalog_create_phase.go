@@ -18,11 +18,16 @@ func (tx *TxContext) validateLateCreateOwnerLocked(db *database, participants bo
 		// participant proof and writer restrictions while adding private names.
 		return tx.validateLatePublicOwnerLocked(db, participants, nil)
 	}
+	// Savepoint retirement can close every public resource and private intent
+	// while preserving earlier original-T row work and the monotone entered
+	// flag. That historical flag is not a live public declaration owner. Keep
+	// its enforcement meaning; re-attest the actual owner and private input
+	// profile instead of resetting history or admitting a read-only shortcut.
 	if tx.Mode != TxACID || tx.State != TxActive || tx.decisionStarted || tx.prepared != nil ||
 		tx.catalogCommit != nil || tx.coordinator != nil || tx.clusterNumber.Load() != 0 || tx.clusterID != "" ||
 		len(tx.participants) != 0 || len(tx.endpoints) != 0 || tx.readViews.Load() != nil ||
 		tx.remoteActive != 0 || tx.mutationOperations != 0 || tx.checkedMutation != nil || tx.relationDataOrigins != 0 ||
-		tx.publicCatalogEntered.Load() || tx.publicCatalogChanges() != nil ||
+		tx.publicCatalogChanges() != nil ||
 		db.incarnationID() == "" || GetDatabase(db.Name) != db ||
 		sharedClusterDatabase(db.Name) || activeReplication(db) != nil {
 		return errors.New("late private declarations require an unprepared local ACID transaction")

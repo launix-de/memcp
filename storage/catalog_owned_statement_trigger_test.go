@@ -4,11 +4,15 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 package storage
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/launix-de/memcp/scm"
 )
 
 func retainedOwnedStatementSlot(t *testing.T, changes *publicCatalogChanges, target *table, name string) *catalogStatementTriggerSlot {
@@ -197,4 +201,114 @@ func TestOwnedStatementInputDoesNotBroadenTableRetirementInEitherOrder(t *testin
 	}
 	changes.views.Store(&publicCatalogViews{tables: before.tables, dropped: map[*table]struct{}{dropped: {}}})
 	refused(func() { tx.beginCatalogDeclaration(changes.db, catalogStatementTriggerKind, nil) })
+}
+
+// Exercise the actual resource retirement owner, not a synthetic false/true
+// flag pair: the same original T keeps a real native row writer while its
+// headless source slot and constructor generation retire before a new CREATE.
+func TestRetiredOwnedStatementPhaseAllowsOriginalPrivateCreateAgain(t *testing.T) {
+	tx, changes, constructor, _, _ := cancelledCatalogInputFixture(t)
+	tx.Mode = TxACID
+	identity := *tx.catalogIdentity.Load()
+	identity.lateCreates = true
+	tx.catalogIdentity.Store(&identity)
+	tx.publicCatalogEntered.Store(true)
+	tx.rowAccessed.Store(true)
+	retainedOwnedStatementSlot(t, changes, constructor, "rewound_owned_statement")
+	selected := []catalogDeclarationAmendment{}
+	tx.catalogAmendments.Store(&selected)
+	changes.publishViews(selected, changes.views.Load().tables)
+
+	// The surviving writer is a different public endpoint, admitted by the
+	// actual native writer owner and retained in the SAME resource directory.
+	prior := &table{Name: "original_prior_rows", RuntimeIdentity: "33333333-3333-4333-8333-333333333333", schema: changes.db}
+	prior.CatalogVersion.Store(1)
+	changes.db.catalogVersion = 1
+	changes.db.tables.Set(prior.Name, prior)
+	rowLease, err := prior.writeAdmission.admit(context.Background(), tx.transactionState, tableRowWriteAdmission, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rowLease.Close() })
+	tx.getOrComputeResource("original-prior-row-input", scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewAny(rowLease) }))
+	tx.getOrComputeResource(publicDeclarationResourceKey, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewAny(changes) }))
+	modePin := changes.db.admitLocalCatalog(false)
+	t.Cleanup(func() { _ = modePin.Close() })
+	tx.getOrComputeResource(lateCreateResourceKey, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewAny(modePin) }))
+	originalResource := tx.resourceScope().entries["original-prior-row-input"]
+
+	// This is the same exact headless-input retirement used by the savepoint
+	// discard owner before removing the canceled generation's storage.
+	validateCancelledCatalogIntents(tx, changes.db, []*table{constructor}, selected)
+	changes.retireCancelledCatalogInputs(tx, []*table{constructor})
+	changes.db.tables.Remove(constructor.Name)
+	tx.catalogIntents.Store(nil)
+	db := changes.db
+	tx.beginResourceDecision()
+	func() {
+		defer tx.finishResourceDecision()
+		tx.retireEmptyPublicCatalogPhase()
+		tx.retireEmptyLateCreatePhase()
+	}()
+	if !tx.publicCatalogEntered.Load() || tx.publicCatalogChanges() != nil || tx.catalogIdentity.Load() != nil ||
+		tx.catalogIntents.Load() != nil || db.tables.Get(constructor.Name) != nil || len(constructor.Triggers) != 0 ||
+		rowLease.owner != &prior.writeAdmission || prior.writeAdmission.writers[tx.transactionState].leases != 1 ||
+		tx.resourceScope().entries["original-prior-row-input"] != originalResource || db.localCatalogPins.Load() != 0 {
+		t.Fatal("source retirement lost the original native writer or retained an actual declaration generation")
+	}
+	validate := func() error {
+		tx.mu.Lock()
+		defer tx.mu.Unlock()
+		return tx.validateLateCreateOwnerLocked(db, true)
+	}
+	if err := validate(); err != nil {
+		t.Fatalf("retired public source history blocked the same original private owner: %v", err)
+	}
+	scope := tx.resourceScope()
+	scope.mu.Lock()
+	tx.mu.Lock()
+	readOnly := tx.catalogReadOnlyLocked(false)
+	tx.mu.Unlock()
+	scope.mu.Unlock()
+	if readOnly {
+		t.Fatal("retained native writer was mistaken for a read-only catalog admission")
+	}
+	refused := func() {
+		t.Helper()
+		if err := validate(); err == nil {
+			t.Fatal("retired flag widened an unsupported private declaration owner")
+		}
+		if !tx.publicCatalogEntered.Load() || rowLease.owner != &prior.writeAdmission ||
+			tx.resourceScope().entries["original-prior-row-input"] != originalResource {
+			t.Fatal("refused owner changed prior original work or the monotone boundary")
+		}
+	}
+	tx.Mode = TxCursorStability
+	refused()
+	tx.Mode = TxACID
+	tx.decisionStarted = true
+	refused()
+	tx.decisionStarted = false
+	tx.remoteActive = 1
+	refused()
+	tx.remoteActive = 0
+	tx.checkedMutation = &nativeMutationOperation{}
+	refused()
+	tx.checkedMutation = nil
+	// The private participant proof is still narrower than the public phase:
+	// a different durable data/recovery database cannot join this new CREATE.
+	foreignDB := newDatabase()
+	foreignDB.Name = "another_private_input_database"
+	foreignShard := &storageShard{t: &table{schema: foreignDB}}
+	journal := &sync.Map{}
+	journal.Store(foreignShard, &storageShardTransaction{transaction: tx.transactionState, clusterShard: foreignShard})
+	tx.shards.Store(journal)
+	refused()
+	journal.Delete(foreignShard)
+	tx.recoveryDecisionDatabases.Store(foreignDB, true)
+	refused()
+	tx.recoveryDecisionDatabases.Delete(foreignDB)
+	if err := validate(); err != nil {
+		t.Fatalf("valid original owner did not survive the negative controls: %v", err)
+	}
 }
