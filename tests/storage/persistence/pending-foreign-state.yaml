@@ -110,21 +110,31 @@ test_cases:
       (and (checked "Enabled") (checked "Trusted") (not (disabled "Enabled"))
         (not (disabled "Trusted")) (equal? value 7) (initial "Enabled") (initial "Trusted") gone))
   expect: {result: true}
-- name: ALL rejects a mixed committed and pending target set before changing either declaration
+- name: ALL changes both private endpoint states and rollback restores the original committed cohort and complete rows
   scm: |
     (begin
       (define child (table "memcp-tests" false "state_mixed" false nil))
       (define parent (table "memcp-tests" false "state_parent" false nil))
       (define owner (newsession)) (owner "username" "root") (tx_begin owner)
       (define tx (owner "__memcp_tx"))
-      (createforeignkey child "FK_state_new" '("parent_id") parent '("id") "restrict" "restrict" tx)
-      (define before (show child "declarations" tx))
-      (define rejected (try (lambda () (begin (constraint_state child true false false tx owner) false))
-        (lambda (failure) (strlike (concat failure) "%not an owned pending declaration%"))))
-      (define unchanged (identical? before (show child "declarations" tx)))
-      (tx_rollback owner)
-      (and rejected unchanged (equal? (count ((show child "constraints") "ForeignKeys")) 1)))
-  expect: {result: true}
+      (try (lambda () (begin
+        (createforeignkey child "FK_state_new" '("parent_id") parent '("id") "restrict" "restrict" tx)
+        (constraint_state child true false false tx owner)
+        (define states (lambda (handle read)
+          (sort (map (filter ((show handle "constraints" read) "ForeignKeys")
+              (lambda (row) (has? (list "FK_state_committed" "FK_state_new") (row "Id"))))
+            (lambda (row) (list (row "Id") (coalesceNil (row "Enabled") true) (coalesceNil (row "Trusted") true))))
+            (lambda (left right) (< (car left) (car right))))))
+        (define rows (lambda (read)
+          (scan read child '() '() '() (lambda () true) '("id" "parent_id")
+            (lambda (acc id value) (append acc (list id value))) '() (lambda (left right) (merge (list left right))) false)))
+        (define private (list (states child tx) (states parent tx) (states child nil)
+          (rows tx) (rows nil) (tx_state tx) (identical? tx (owner "__memcp_tx"))))
+        (tx_rollback owner)
+        (list private (states child nil) (states parent nil) (rows nil))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: [[[[FK_state_committed, false, false], [FK_state_new, false, false]], [[FK_state_committed, false, false], [FK_state_new, false, false]], [[FK_state_committed, true, true]], [[20, 1]], [[20, 1]], active, true], [[FK_state_committed, true, true]], [[FK_state_committed, true, true]], [[20, 1]]]
 - name: Named missing and incoming-mirror targets reject the whole operation without partial state
   scm: |
     (begin
