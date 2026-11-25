@@ -10,7 +10,7 @@ import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 
 // Kinds distinguish declaration admission from SQL spelling. Defaults and
-// immutable callable sources and guarded validation can join local ACID rows;
+// immutable callable sources and guarded FK inputs can join local ACID rows;
 // other enforcement declarations retain their earlier validation boundary.
 type catalogDeclarationKind uint8
 
@@ -27,7 +27,7 @@ const (
 	catalogStatementTriggerKind
 	catalogOwnedForeignKind
 	catalogAllocatorResetKind
-	catalogValidatedForeignKind
+	catalogRowForeignKind
 )
 
 // Identity is allocated before the first unpublished declaration. It is part of
@@ -132,10 +132,10 @@ func (scope *transactionResources) catalogReadOnlyLocked() bool {
 }
 
 func (tx *TxContext) beginCatalogDeclaration(db *database, kind catalogDeclarationKind, initializer *nativeColumnInitializer) {
-	public := kind == catalogAllocatorResetKind || kind == catalogDefaultKind || kind == catalogSourceKind || kind == catalogTableDropKind || kind == catalogForeignDropKind || kind == catalogForeignReplacementKind || kind == catalogPublicKeyKind || kind == catalogColumnKind || kind == catalogStatementTriggerKind || kind == catalogOwnedForeignKind || kind == catalogValidatedForeignKind
+	public := kind == catalogAllocatorResetKind || kind == catalogDefaultKind || kind == catalogSourceKind || kind == catalogTableDropKind || kind == catalogForeignDropKind || kind == catalogForeignReplacementKind || kind == catalogPublicKeyKind || kind == catalogColumnKind || kind == catalogStatementTriggerKind || kind == catalogOwnedForeignKind || kind == catalogRowForeignKind
 	privateCreate := kind == catalogCreateKind
 
-	if tx.hasTableDrops() && (!public && !privateCreate || kind == catalogStatementTriggerKind || kind == catalogValidatedForeignKind) {
+	if tx.hasTableDrops() && (!public && !privateCreate || kind == catalogStatementTriggerKind || kind == catalogRowForeignKind) {
 		panic("table removal phase admits only default or source declarations")
 	}
 	// Construction admission owns effect policy. Merely preparing a private

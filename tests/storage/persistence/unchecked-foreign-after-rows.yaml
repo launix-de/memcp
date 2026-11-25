@@ -1,0 +1,489 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Unchecked public FK declarations retain original row overlays without historical trust and enforce future writes
+setup:
+- sql: DROP TABLE IF EXISTS unchecked_row_child
+- sql: DROP TABLE IF EXISTS unchecked_probe_child
+- sql: DROP TABLE IF EXISTS unchecked_row_parent
+- sql: DROP TABLE IF EXISTS unchecked_row_marker
+- sql: CREATE TABLE unchecked_row_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE unchecked_row_child(id INT PRIMARY KEY,parent_id INT,value INT)
+- sql: CREATE TABLE unchecked_probe_child(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE unchecked_row_marker(id INT PRIMARY KEY,value INT)
+- sql: INSERT unchecked_row_parent VALUES(1)
+- sql: INSERT unchecked_row_child VALUES(1,99,7),(2,1,8),(3,NULL,9)
+- sql: INSERT unchecked_probe_child VALUES(1,99),(2,1)
+- sql: INSERT unchecked_row_marker VALUES(1,0)
+cleanup:
+- sql: DROP TABLE IF EXISTS unchecked_row_child
+- sql: DROP TABLE IF EXISTS unchecked_probe_child
+- sql: DROP TABLE IF EXISTS unchecked_row_parent
+- sql: DROP TABLE IF EXISTS unchecked_row_marker
+test_cases:
+- name: NOCHECK after original rows retains historical orphans and commits one private enforcement decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE unchecked_row_marker SET value=1 WHERE id=1
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE unchecked_row_child SET value=18 WHERE id=2
+    - connection: owner
+      sql: INSERT unchecked_row_parent VALUES(2)
+    - connection: owner
+      sql: INSERT unchecked_row_child VALUES(4,2,10)
+    - connection: owner
+      sql: ALTER TABLE unchecked_row_child WITH NOCHECK ADD CONSTRAINT unchecked_row_rule FOREIGN KEY(parent_id) REFERENCES unchecked_row_parent(id)
+    - connection: owner
+      sql: UPDATE unchecked_row_marker SET value=2 WHERE id=1
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM unchecked_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 2
+          depth: 1
+    - connection: owner
+      sql: SELECT id,parent_id,value FROM unchecked_row_child ORDER BY id
+      expect:
+        rows: 4
+        data:
+        - id: 1
+          parent_id: 99
+          value: 7
+        - id: 2
+          parent_id: 1
+          value: 18
+        - id: 3
+          parent_id: null
+          value: 9
+        - id: 4
+          parent_id: 2
+          value: 10
+    - connection: owner
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name='unchecked_row_rule'
+      expect:
+        rows: 1
+        data:
+        - name: unchecked_row_rule
+          disabled: 0
+          untrusted: 1
+    - connection: observer
+      sql: SELECT id,parent_id,value FROM unchecked_row_child ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          parent_id: 99
+          value: 7
+        - id: 2
+          parent_id: 1
+          value: 8
+        - id: 3
+          parent_id: null
+          value: 9
+    - connection: observer
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name='unchecked_row_rule'
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: SELECT value FROM unchecked_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 0
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,parent_id,value FROM unchecked_row_child ORDER BY id
+      expect:
+        rows: 4
+        data:
+        - id: 1
+          parent_id: 99
+          value: 7
+        - id: 2
+          parent_id: 1
+          value: 18
+        - id: 3
+          parent_id: null
+          value: 9
+        - id: 4
+          parent_id: 2
+          value: 10
+    - connection: observer
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name='unchecked_row_rule'
+      expect:
+        rows: 1
+        data:
+        - name: unchecked_row_rule
+          disabled: 0
+          untrusted: 1
+    - connection: observer
+      sql: SELECT id FROM unchecked_row_parent ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+        - id: 2
+    - connection: observer
+      sql: SELECT value FROM unchecked_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 2
+- name: Untrusted FK rejects a future orphan INSERT
+  sql: INSERT unchecked_row_child VALUES(5,123,5)
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Untrusted FK rejects a future invalid child UPDATE
+  sql: UPDATE unchecked_row_child SET parent_id=123 WHERE id=2
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Untrusted FK protects a referenced parent DELETE
+  sql: DELETE FROM unchecked_row_parent WHERE id=1
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Untrusted FK protects a referenced parent UPDATE
+  sql: UPDATE unchecked_row_parent SET id=123 WHERE id=1
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: The accepted original row and unchecked FK decision survives a process crash
+  scm: |-
+    (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart the original decision recovery owner
+  action: restart
+- name: Recovery retains orphan NULL full values untrusted metadata and future enforcement
+  tds:
+    statements:
+    - connection: owner
+      sql: SELECT id,parent_id,value FROM unchecked_row_child ORDER BY id
+      expect:
+        rows: 4
+        data:
+        - id: 1
+          parent_id: 99
+          value: 7
+        - id: 2
+          parent_id: 1
+          value: 18
+        - id: 3
+          parent_id: null
+          value: 9
+        - id: 4
+          parent_id: 2
+          value: 10
+    - connection: owner
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name='unchecked_row_rule'
+      expect:
+        rows: 1
+        data:
+        - name: unchecked_row_rule
+          disabled: 0
+          untrusted: 1
+    - connection: owner
+      sql: SELECT id FROM unchecked_row_parent ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+        - id: 2
+    - connection: owner
+      sql: SELECT value FROM unchecked_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 2
+    - connection: owner
+      sql: INSERT unchecked_row_child VALUES(5,123,5)
+      expect:
+        error: true
+        contains:
+        - foreign key constraint
+    - connection: owner
+      sql: UPDATE unchecked_row_child SET parent_id=123 WHERE id=2
+      expect:
+        error: true
+        contains:
+        - foreign key constraint
+    - connection: owner
+      sql: DELETE FROM unchecked_row_parent WHERE id=1
+      expect:
+        error: true
+        contains:
+        - foreign key constraint
+    - connection: owner
+      sql: SELECT id,parent_id,value FROM unchecked_row_child ORDER BY id
+      expect:
+        rows: 4
+        data:
+        - id: 1
+          parent_id: 99
+          value: 7
+        - id: 2
+          parent_id: 1
+          value: 18
+        - id: 3
+          parent_id: null
+          value: 9
+        - id: 4
+          parent_id: 2
+          value: 10
+- name: Savepoint rewinds unchecked admission and its writer guard while preserving earlier original rows
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE unchecked_row_marker SET value=7 WHERE id=1
+    - connection: owner
+      sql: INSERT unchecked_probe_child VALUES(3,999)
+    - connection: owner
+      sql: SAVE TRAN before_unchecked
+    - connection: owner
+      sql: ALTER TABLE unchecked_probe_child WITH NOCHECK ADD CONSTRAINT unchecked_probe_rewind FOREIGN KEY(parent_id) REFERENCES unchecked_row_parent(id)
+    - connection: owner
+      sql: UPDATE unchecked_row_marker SET value=8 WHERE id=1
+    - connection: owner
+      sql: ROLLBACK TRAN before_unchecked
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='unchecked_probe_rewind'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: INSERT unchecked_probe_child VALUES(4,888)
+    - connection: owner
+      sql: SELECT id,parent_id FROM unchecked_probe_child ORDER BY id
+      expect:
+        rows: 4
+        data:
+        - id: 1
+          parent_id: 99
+        - id: 2
+          parent_id: 1
+        - id: 3
+          parent_id: 999
+        - id: 4
+          parent_id: 888
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM unchecked_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 7
+          depth: 1
+    - connection: observer
+      sql: SELECT id,parent_id FROM unchecked_probe_child ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 99
+        - id: 2
+          parent_id: 1
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: observer
+      sql: SELECT id,parent_id FROM unchecked_probe_child ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 99
+        - id: 2
+          parent_id: 1
+    - connection: observer
+      sql: SELECT value FROM unchecked_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 2
+- name: Rollback discards unchecked declaration prior rows and heartbeat together
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE unchecked_row_marker SET value=9 WHERE id=1
+    - connection: owner
+      sql: INSERT unchecked_probe_child VALUES(3,999)
+    - connection: owner
+      sql: ALTER TABLE unchecked_probe_child WITH NOCHECK ADD CONSTRAINT unchecked_probe_abort FOREIGN KEY(parent_id) REFERENCES unchecked_row_parent(id)
+    - connection: owner
+      sql: UPDATE unchecked_row_marker SET value=10 WHERE id=1
+    - connection: owner
+      sql: SELECT id,parent_id FROM unchecked_probe_child ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          parent_id: 99
+        - id: 2
+          parent_id: 1
+        - id: 3
+          parent_id: 999
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: observer
+      sql: SELECT id,parent_id FROM unchecked_probe_child ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 99
+        - id: 2
+          parent_id: 1
+    - connection: observer
+      sql: SELECT value FROM unchecked_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 2
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='unchecked_probe_abort'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+- name: CHECK trust validation rejects real historical orphans without changing the pending original owner
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (try (lambda () (begin
+        (define child (table "memcp-tests" false "unchecked_probe_child" false tx))
+        (define parent (table "memcp-tests" false "unchecked_row_parent" false tx))
+        (define rows (lambda (input) (sort (scan input child '() '() '() (lambda () true) '("id" "parent_id")
+          (lambda (acc a b) (append acc (list a b))) '() (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+        (insert child '("id" "parent_id") (list (list 3 999)) '() nil false nil tx)
+        (createforeignkey child "unchecked_probe_native" '("parent_id") parent '("id") "restrict" "restrict" tx (list "validate_existing" false))
+        (define rejected (try (lambda () (begin
+          (constraint_state child '("unchecked_probe_native") true true tx owner) false))
+          (lambda (failure) (if (strlike (concat failure) "%existing child row has no parent%") true (error failure)))))
+        (define own (car ((show child "constraints" tx) "ForeignKeys")))
+        (define mirror (find ((show parent "constraints" tx) "ForeignKeys") (lambda (row) (equal? (row "Id") "unchecked_probe_native"))))
+        (define before (list rejected (tx_state tx) (equal? tx (owner "__memcp_tx")) (own "Enabled") (own "Trusted")
+          (mirror "Enabled") (mirror "Trusted") (rows tx) (rows nil)))
+        (tx_rollback owner)
+        (list before (rows nil) (count ((show child "constraints") "ForeignKeys")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - - true
+      - active
+      - true
+      - true
+      - false
+      - true
+      - false
+      - - - 1
+          - 99
+        - - 2
+          - 1
+        - - 3
+          - 999
+      - - - 1
+          - 99
+        - - 2
+          - 1
+    - - - 1
+        - 99
+      - - 2
+        - 1
+    - 0
+- name: Unchecked admission retains the same endpoint mutation guard until original rollback
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (try (lambda () (begin
+        (define child (table "memcp-tests" false "unchecked_probe_child" false tx))
+        (define parent (table "memcp-tests" false "unchecked_row_parent" false tx))
+        (define rows (lambda (input) (sort (scan input child '() '() '() (lambda () true) '("id" "parent_id")
+          (lambda (acc a b) (append acc (list a b))) '() (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+        (insert child '("id" "parent_id") (list (list 3 999)) '() nil false nil tx)
+        (createforeignkey child "unchecked_probe_native" '("parent_id") parent '("id") "restrict" "restrict" tx (list "validate_existing" false))
+        (define rejected (try (lambda () (begin
+          (insert child '("id" "parent_id") (list (list 4 1)) '() nil false nil tx) false))
+          (lambda (failure) (if (strlike (concat failure) "%metadata-only%") true (error failure)))))
+        (define before (list rejected (tx_state tx) (rows tx) (rows nil) (count ((show child "constraints" tx) "ForeignKeys"))))
+        (tx_rollback owner)
+        (list before (rows nil) (count ((show child "constraints") "ForeignKeys")))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - - true
+      - active
+      - - - 1
+          - 99
+        - - 2
+          - 1
+        - - 3
+          - 999
+      - - - 1
+          - 99
+        - - 2
+          - 1
+      - 1
+    - - - 1
+        - 99
+      - - 2
+        - 1
+    - 0
+- name: Unchecked declaration rejects a different retained writer before prospective enforcement publication
+  scm: |
+    (begin
+        (define writer (newsession)) (writer "username" "root") (tx_begin_acid writer)
+        (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+        (define tx (owner "__memcp_tx"))
+        (try (lambda () (begin
+            (define child (table "memcp-tests" false "unchecked_probe_child" false tx))
+            (define parent (table "memcp-tests" false "unchecked_row_parent" false tx))
+            (insert parent '("id") (list (list 88)) '() nil false nil (writer "__memcp_tx"))
+            (insert child '("id" "parent_id") (list (list 3 1)) '() nil false nil tx)
+            (define rejected (try (lambda () (begin
+                (createforeignkey child "unchecked_probe_busy" '("parent_id") parent '("id") "restrict" "restrict" tx (list "validate_existing" false))
+                false)) (lambda (failure) (if (strlike (concat failure) "%active table writer%") true (error failure)))))
+            (define before (list rejected (tx_state tx) (tx_state (writer "__memcp_tx"))
+                (scan tx child '() '() '() (lambda () true) '("id") + 0 +)
+                (scan nil child '() '() '() (lambda () true) '("id") + 0 +)
+                (count ((show child "constraints" tx) "ForeignKeys"))))
+            (tx_rollback writer)
+            (createforeignkey child "unchecked_probe_busy" '("parent_id") parent '("id") "restrict" "restrict" tx (list "validate_existing" false))
+            (define corrected (count ((show child "constraints" tx) "ForeignKeys")))
+            (tx_rollback owner)
+            (list before corrected
+                (scan nil child '() '() '() (lambda () true) '("id") + 0 +)
+                (scan nil parent '() '() '() (lambda () true) '("id") + 0 +))))
+            (lambda (failure) (begin (tx_rollback writer) (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - - true
+      - active
+      - active
+      - 6
+      - 3
+      - 0
+    - 1
+    - 3
+    - 3

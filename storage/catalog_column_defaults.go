@@ -474,7 +474,7 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 			blocked[key.table] = struct{}{}
 		}
 		if amendment := entry.foreign; amendment != nil {
-			guardedInput := amendment.validatedInput || ownedForeignAddition(changes.owner, amendment)
+			guardedInput := amendment.rowInput || ownedForeignAddition(changes.owner, amendment)
 			for _, t := range amendment.endpoints {
 				if t != nil {
 					blocked[t] = struct{}{}
