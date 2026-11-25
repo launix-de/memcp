@@ -157,6 +157,257 @@ test_cases:
     - session_id: scoped_new_postgresql
       sql: ROLLBACK
     - sql: DROP TABLE IF EXISTS scoped_lock_new_postgresql
+  - name: Shared cache admission uses actual caller scope and preserves native foreign-read refusal
+    scm: |
+      (begin
+        (define owner (newsession)) (owner "username" "root")
+        (define scope (new_relation_scope owner nil "transactional"))
+        (define name (concat ".cache-input:" (uuid)))
+        (tx_begin_acid owner) (define constructor (owner "__memcp_tx"))
+        (createtable "memcp-tests" name
+          (list (list "column" "id" "INT" (list) (list))
+            (list "column" "value" "INT" (list) (list)))
+          (list "engine" "memory" "ephemeral" true "scope" scope "scope_key" "input") false constructor)
+        (define source (table "memcp-tests" false name false constructor))
+        (insert source '("id" "value") (list (list 1 17) (list 2 29)) (list) nil false nil constructor)
+        (tx_commit owner)
+        (define state (newsession)) (state "shared" 0) (state "direct" 0)
+        (define shared (lambda () (begin (state "shared" (+ (state "shared") 1)) "shared")))
+        (define read_rows (lambda (tx) (scan tx source (list) (list) (list) (lambda () true)
+          '("id" "value") (lambda (rows id value) (set_assoc rows id value)) (list) merge_assoc)))
+        (define actual (with_autocommit owner nil 0 "committed scoped cache input" (lambda (tx)
+          (with_cache_sources tx (list source) shared (lambda () (begin
+            (state "direct" (+ (state "direct") 1))
+            (define rows (read_rows tx)) (list (get_assoc rows 1) (get_assoc rows 2))))))))
+        (define other (newsession)) (other "username" "root")
+        (define denied (try (lambda () (begin
+          (with_autocommit other nil 0 "foreign scoped cache input" (lambda (tx)
+            (with_cache_sources tx (list source) shared (lambda () (read_rows tx))))) false))
+          (lambda (cause) (strlike (string (failure_value cause)) "%another native relation scope owner%"))))
+        (define public (with_autocommit owner nil 0 "public cache input" (lambda (tx)
+          (with_cache_sources tx (list (table "memcp-tests" false "scoped_lock_targets" false tx))
+            shared (lambda () "unexpected-direct")))))
+        (define intact (with_autocommit owner nil 0 "retained scoped input" read_rows))
+        (close_relation_scope scope)
+        (list actual denied public (state "shared") (state "direct")
+          (list (get_assoc intact 1) (get_assoc intact 2))))
+    expect:
+      result:
+      - - 17
+        - 29
+      - true
+      - shared
+      - 1
+      - 1
+      - - 17
+        - 29
+  - name: Committed current-scope aggregate inputs remain fresh across explicit and implicit transactions
+    tds:
+      statements:
+      - connection: scope_owner
+        sql: 'DROP TABLE IF EXISTS #cache_scope_input'
+      - connection: scope_owner
+        sql: BEGIN TRAN
+      - connection: scope_owner
+        sql: 'CREATE TABLE #cache_scope_input(id INT PRIMARY KEY,value INT NULL)'
+      - connection: scope_owner
+        sql: 'INSERT #cache_scope_input VALUES(1,10),(2,20),(3,NULL)'
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 30
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: 'SELECT id,value FROM #cache_scope_input ORDER BY id'
+        expect:
+          rows: 3
+          data:
+          - id: 1
+            value: 10
+          - id: 2
+            value: 20
+          - id: 3
+            value: null
+      - connection: scope_owner
+        sql: COMMIT TRAN
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 30
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: 'UPDATE #cache_scope_input SET value=40 WHERE id=1'
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 60
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: 'SELECT id,value FROM #cache_scope_input ORDER BY id'
+        expect:
+          rows: 3
+          data:
+          - id: 1
+            value: 40
+          - id: 2
+            value: 20
+          - id: 3
+            value: null
+      - connection: scope_owner
+        sql: BEGIN TRAN
+      - connection: scope_owner
+        sql: 'UPDATE #cache_scope_input SET value=50 WHERE id=1'
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 70
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: 'SELECT id,value FROM #cache_scope_input ORDER BY id'
+        expect:
+          rows: 3
+          data:
+          - id: 1
+            value: 50
+          - id: 2
+            value: 20
+          - id: 3
+            value: null
+      - connection: scope_foreign
+        sql: 'SELECT id,value FROM #cache_scope_input'
+        expect:
+          error: true
+          contains: 'local temporary table does not exist: #cache_scope_input'
+      - connection: scope_owner
+        sql: ROLLBACK TRAN
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 60
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: 'SELECT id,value FROM #cache_scope_input ORDER BY id'
+        expect:
+          rows: 3
+          data:
+          - id: 1
+            value: 40
+          - id: 2
+            value: 20
+          - id: 3
+            value: null
+      - connection: scope_owner
+        sql: SELECT @@TRANCOUNT AS depth
+        expect:
+          rows: 1
+          data:
+          - depth: 0
+  - name: Two fresh scoped generations with the same SQL names retain their own complete rows
+    tds:
+      statements:
+      - connection: scope_owner
+        sql: 'DROP TABLE IF EXISTS #cache_scope_input'
+      - connection: scope_owner
+        sql: BEGIN TRAN
+      - connection: scope_owner
+        sql: 'CREATE TABLE #cache_scope_input(id INT PRIMARY KEY,value INT NULL)'
+      - connection: scope_owner
+        sql: 'INSERT #cache_scope_input VALUES(1,7),(2,NULL),(3,7)'
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 14
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: COMMIT TRAN
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 14
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: 'SELECT id,value FROM #cache_scope_input ORDER BY id'
+        expect:
+          rows: 3
+          data:
+          - id: 1
+            value: 7
+          - id: 2
+            value: null
+          - id: 3
+            value: 7
+      - connection: scope_owner
+        sql: SELECT @@TRANCOUNT AS depth
+        expect:
+          rows: 1
+          data:
+          - depth: 0
+      - connection: scope_owner
+        sql: 'DROP TABLE IF EXISTS #cache_scope_input'
+      - connection: scope_owner
+        sql: BEGIN TRAN
+      - connection: scope_owner
+        sql: 'CREATE TABLE #cache_scope_input(id INT PRIMARY KEY,value INT NULL)'
+      - connection: scope_owner
+        sql: 'INSERT #cache_scope_input VALUES(1,101),(2,202),(3,NULL)'
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 303
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: COMMIT TRAN
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 303
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: 'SELECT id,value FROM #cache_scope_input ORDER BY id'
+        expect:
+          rows: 3
+          data:
+          - id: 1
+            value: 101
+          - id: 2
+            value: 202
+          - id: 3
+            value: null
+      - connection: scope_owner
+        sql: SELECT @@TRANCOUNT AS depth
+        expect:
+          rows: 1
+          data:
+          - depth: 0
+      - connection: scope_owner
+        sql: 'DROP TABLE #cache_scope_input'
 cleanup:
   - sql: DROP TABLE IF EXISTS scoped_lock_targets
   - sql: DROP TABLE IF EXISTS scoped_lock_sites

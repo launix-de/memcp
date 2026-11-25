@@ -1169,15 +1169,28 @@ func Init(en scm.Env) {
 			if txRequiresQueryLocalCache(currentTx) {
 				return scm.Apply(a[3])
 			}
+			sources := mustScmerSlice(a[1], "cache source tables")
+			tables := make([]*table, len(sources))
+			callerInput := false
+			for i, source := range sources {
+				tables[i] = TableFromScmer(source)
+				callerInput = callerInput || tables[i].callerRelationScope() != nil
+			}
+			// A committed lexical source still requires its actual caller input.
+			// Maintained computed recipes read independently with nil execution;
+			// they cannot consume this source even after its schema commits. Use
+			// the existing direct producer before shared rights or cache effects.
+			// Its normal readDataContext/beginCallerInput retains and attests the
+			// current invocation; a handle alone grants no scope or row authority.
+			if callerInput {
+				return scm.Apply(a[3])
+			}
 			ss := SessionStateFromTx(currentTx)
 			if ss == nil {
 				ss = &scm.SessionState{}
 			}
-			sources := mustScmerSlice(a[1], "cache source tables")
-			tables := make([]*table, len(sources))
-			for i, source := range sources {
-				tables[i] = TableFromScmer(source)
-				if !tables[i].acquireCacheSourceRights(currentTx) {
+			for _, source := range tables {
+				if !source.acquireCacheSourceRights(currentTx) {
 					return scm.Apply(a[3])
 				}
 			}
