@@ -473,7 +473,22 @@ func (t *table) bindMutationInput(tx *TxContext, source *publicCatalogViews, eve
 			sort.SliceStable(programs, func(i, j int) bool { return programs[i].Priority < programs[j].Priority })
 		}
 	}
-	if tx.privateMutationSource(t) != source || source == nil && (!tx.catalogCreationRowSource(t) ||
+	if source == nil && layout != nil {
+		// The same scoped header selected before program preparation must still
+		// belong to this original caller and its actual retained endpoint lease.
+		// A nil public source alone never grants scoped declaration authority.
+		tx.requireScopedColumnOwner(t)
+		owner.mu.Lock()
+		valid := tx.scopedRelationLayout(t) == layout && layout.table == t &&
+			layout.scope == t.relationLifetime && layout.view == selected && sameUniqueKeys(layout.keys, keys) &&
+			layout.lease != nil && layout.lease.owner == owner && layout.lease.transaction == tx.transactionState &&
+			layout.lease.declaration && layout.lease.ddlTable.Load() == t &&
+			owner.declaration == tx.transactionState && owner.statement == lease && lease.transaction == tx.transactionState
+		owner.mu.Unlock()
+		if !valid || tx.privateMutationSource(t) != nil || t.declarationMetadataForTx(tx) != selected {
+			panic("scoped declaration input changed while preparing its programs")
+		}
+	} else if tx.privateMutationSource(t) != source || source == nil && (!tx.catalogCreationRowSource(t) ||
 		t.declarationMetadataForTx(tx).metadata.declarations != selected.metadata.declarations) {
 		panic("private declaration input changed while preparing its programs")
 	}

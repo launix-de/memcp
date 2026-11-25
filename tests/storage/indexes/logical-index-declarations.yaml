@@ -172,15 +172,23 @@ test_cases:
     - connection: tempunique
       sql: 'INSERT #logical_unique VALUES(1,10),(2,20)'
     - connection: tempunique
+      sql: SET XACT_ABORT OFF
+    - connection: tempunique
       sql: BEGIN TRANSACTION
     - connection: tempunique
       sql: SAVE TRANSACTION before_unique
     - connection: tempunique
       sql: 'CREATE UNIQUE INDEX UX_temp ON #logical_unique(payload)'
     - connection: tempunique
-      sql: 'INSERT #logical_unique VALUES(3,10)'
+      sql: "BEGIN TRY INSERT #logical_unique VALUES(3,10); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS number,CASE WHEN ERROR_MESSAGE() LIKE N'%UX_temp%' THEN 1 ELSE 0 END AS declared_index,@@TRANCOUNT AS depth,XACT_STATE() AS state; END CATCH"
       expect:
-        error: true
+        rows: 1
+        data: [{number: 1062,declared_index: 1,depth: 1,state: 1}]
+    - connection: tempunique
+      sql: 'SELECT id,payload,@@TRANCOUNT AS depth,XACT_STATE() AS state FROM #logical_unique ORDER BY id'
+      expect:
+        rows: 2
+        data: [{id: 1,payload: 10,depth: 1,state: 1},{id: 2,payload: 20,depth: 1,state: 1}]
     - connection: tempunique
       sql: ROLLBACK TRANSACTION before_unique
     - connection: tempunique
