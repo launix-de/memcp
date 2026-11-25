@@ -559,6 +559,11 @@ func decodeCatalogDecision(value string) (*catalogDecisionRecord, error) {
 		}
 	}
 	if record.Format == 32 {
+		// This new required family preserves the existing original-T nullable
+		// append/namespace profile; index metadata is not namespace authority.
+		if err := record.validateColumnAppendTableProfile(); err != nil {
+			return nil, err
+		}
 		validShape = prefix == catalogIndexDeclarationJournalPrefix && record.Namespace == "" && validLocalCatalogTransaction(record.Transaction, record.Boot) && record.hasLogicalIndexes() && len(record.ForeignKeys) == 0 && len(record.ForeignDrops) == 0 && len(record.ForeignHistory) == 0 && ((len(record.Participants) == 0 && record.AuthorityStorage == "") || (record.AuthorityStorage != "" && len(record.Participants) > 1))
 		if err := record.validateIdentityAppendProfile(); err != nil {
 			return nil, err
