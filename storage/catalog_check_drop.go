@@ -214,7 +214,7 @@ func (tx *TxContext) publicCheckDrops() []catalogCheckDeclaration {
 }
 
 func validateCatalogCheckDrop(db *database, declaration catalogCheckDeclaration) (*table, *checkDeclaration) {
-	validateCatalogCheck(db, declaration)
+	validateCatalogCheck(db, declaration, nil)
 	t := db.tables.Get(declaration.Table)
 	for _, definition := range t.Checks {
 		if definition.Id == declaration.Check.Id && definition.Language == declaration.Check.Language &&

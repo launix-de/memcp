@@ -96,11 +96,7 @@ func (t *table) checkColumnDependency(name string) *checkDeclaration {
 
 // The caller owns declaration admission or an unpublished loader. Column
 // resolution is through the existing immutable native point directory.
-func validateCheckColumns(t *table, definition *checkDeclaration) {
-	validateCheckColumnsUsing(definition, t.columnNamesSnapshot.Load())
-}
-
-func validateCheckColumnsUsing(definition *checkDeclaration, names *tableColumnNamesSnapshot) {
+func validateCheckColumns(definition *checkDeclaration, names *tableColumnNamesSnapshot) {
 	if err := definition.validate(); err != nil {
 		panic(err)
 	}
@@ -121,12 +117,8 @@ func validateCheckColumnsUsing(definition *checkDeclaration, names *tableColumnN
 
 // The trusted source compiler receives native semantic data only. Defaults,
 // statistics, physical storage and caller capabilities are not compile inputs.
-func checkCompilerContext(t *table, definition *checkDeclaration) scm.Scmer {
-	return checkCompilerContextUsing(t, definition, t.columnNamesSnapshot.Load())
-}
-
-func checkCompilerContextUsing(t *table, definition *checkDeclaration, names *tableColumnNamesSnapshot) scm.Scmer {
-	validateCheckColumnsUsing(definition, names)
+func checkCompilerContext(t *table, definition *checkDeclaration, names *tableColumnNamesSnapshot) scm.Scmer {
+	validateCheckColumns(definition, names)
 	columns := make([]scm.Scmer, len(definition.Columns))
 	for i, name := range definition.Columns {
 		row := names.declarations[names.exact[name].ordinal].show("", 0, 0, nil)
@@ -169,7 +161,7 @@ func checkTriggerHeader(definition *checkDeclaration, timing TriggerTiming) Trig
 
 func compileCheckProgram(t *table, definition *checkDeclaration, names *tableColumnNamesSnapshot) scm.Scmer {
 	compiler := checkLanguageCompiler(definition.Language)
-	value := scm.Apply(compiler, scm.NewString(definition.Source), checkCompilerContextUsing(t, definition, names)).WithoutSourceInfo()
+	value := scm.Apply(compiler, scm.NewString(definition.Source), checkCompilerContext(t, definition, names)).WithoutSourceInfo()
 	predicate, plan := unwrapDeferredTriggerBody(value)
 	if predicate.IsNil() && !plan.IsNil() {
 		predicate = evaluateTriggerPlan(plan)
@@ -186,11 +178,7 @@ func compileCheckProgram(t *table, definition *checkDeclaration, names *tableCol
 	return scm.CompileJIT(scm.CloseProcedure(evaluateTriggerPlan(program)), true)
 }
 
-func buildCheckTriggers(t *table, definition *checkDeclaration) []foreignKeyTrigger {
-	return buildCheckTriggersUsing(t, definition, t.columnNamesSnapshot.Load())
-}
-
-func buildCheckTriggersUsing(t *table, definition *checkDeclaration, names *tableColumnNamesSnapshot) []foreignKeyTrigger {
+func buildCheckTriggers(t *table, definition *checkDeclaration, names *tableColumnNamesSnapshot) []foreignKeyTrigger {
 	program := compileCheckProgram(t, definition, names)
 	insert, update := checkTriggerHeader(definition, BeforeInsert), checkTriggerHeader(definition, BeforeUpdate)
 	insert.Func, update.Func = program, program
@@ -204,7 +192,7 @@ func buildCheckTriggersUsing(t *table, definition *checkDeclaration, names *tabl
 // Source compilation occurs outside all table/schema/shard mutation locks.
 // Publish both headers only while the exact same immutable recipe remains live.
 func (t *table) compileCheckForUse(trigger TriggerDescription) TriggerDescription {
-	programs := buildCheckTriggers(t, trigger.checkDefinition)
+	programs := buildCheckTriggers(t, trigger.checkDefinition, t.columnNamesSnapshot.Load())
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var current *TriggerDescription
@@ -252,7 +240,7 @@ func rebuildCheckTriggersAfterLoad(db *database) {
 		}
 		seen := make(map[string]bool, len(t.Checks))
 		for _, definition := range t.Checks {
-			validateCheckColumns(t, definition)
+			validateCheckColumns(definition, t.columnNamesSnapshot.Load())
 			key := strings.ToLower(definition.Id)
 			if seen[key] {
 				panic("duplicate native check declaration: " + definition.Id)

@@ -716,7 +716,9 @@ func (tx *TxContext) restorePublicDeclarations(keep int) {
 		if amendment := history[i].check; amendment != nil {
 			delete(changes.constraintStates, amendment.declaration.Check.Id)
 			changes.amendmentBytes -= amendment.retainedBytes
-			releaseForeignTriggerPrograms(tx.transactionState, amendment.programs)
+			// Replacement programs borrow the predecessor DROP's reservations.
+			// Rewind releases only slots acquired by this exact ADD amendment.
+			releaseForeignTriggerPrograms(tx.transactionState, amendment.reservations)
 			if amendment.previous == nil {
 				delete(views, amendment.table)
 			} else {
@@ -973,8 +975,12 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 	}
 	checkAdditions := make(map[*table][]*checkDeclaration)
 	for _, declaration := range checks {
-		validateCatalogCheck(db, declaration)
 		t := db.tables.Get(declaration.Table)
+		var names *tableColumnNamesSnapshot
+		if view := changes.views.Load().tables[t]; view != nil {
+			names = view.metadata.columnNames
+		}
+		validateCatalogCheck(db, declaration, names)
 		endpoint := endpoints[t]
 		if endpoint == nil {
 			endpoint = &publicForeignEndpoint{table: t, checks: append([]*checkDeclaration(nil), t.Checks...), foreign: append([]foreignKey(nil), t.Foreign...), baselineWrapperBytes: changes.baselines[t].wrapperBytes}

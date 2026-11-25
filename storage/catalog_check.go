@@ -74,7 +74,7 @@ func (changes *publicCatalogChanges) stageCheck(tx *TxContext, t *table, definit
 	}()
 	// The exclusive native declaration lease holds the actual dependency
 	// contract stable. Compile/scan/measure privately, outside schema/shard locks.
-	programs := buildCheckTriggersUsing(t, definition, t.columnNamesForTx(tx))
+	programs := buildCheckTriggers(t, definition, t.columnNamesForTx(tx))
 	if rowInput {
 		t.enterPendingCatalogData(tx, changes.leases[t])
 	}
@@ -130,7 +130,7 @@ func (changes *publicCatalogChanges) stageCheck(tx *TxContext, t *table, definit
 // Caller owns schema publication and this transaction's amendment producer.
 func (changes *publicCatalogChanges) validateCheckStageLocked(tx *TxContext, t *table, declaration catalogCheckDeclaration) {
 	changes.validateConstraintStateEndpointsLocked(tx)
-	validateCatalogCheckUsing(changes.db, declaration, t.columnNamesForTx(tx))
+	validateCatalogCheck(changes.db, declaration, t.columnNamesForTx(tx))
 	requireTableMaintenance(changes.db.Name, declaration.Table, maintenanceAlter)
 	if changes.db.hasDeclarationNameLocked(declaration.Check.Id, nil, tx.publicDeclarationViews()) || tx.pendingUniqueDeclarationName(declaration.Check.Id) {
 		panic("declaration name already exists: " + declaration.Check.Id)
@@ -143,11 +143,7 @@ func (changes *publicCatalogChanges) validateCheckStageLocked(tx *TxContext, t *
 	}
 }
 
-func validateCatalogCheck(db *database, declaration catalogCheckDeclaration) {
-	validateCatalogCheckUsing(db, declaration, nil)
-}
-
-func validateCatalogCheckUsing(db *database, declaration catalogCheckDeclaration, names *tableColumnNamesSnapshot) {
+func validateCatalogCheck(db *database, declaration catalogCheckDeclaration, names *tableColumnNamesSnapshot) {
 	if _, err := uuid.Parse(declaration.Identity); err != nil {
 		panic("invalid check endpoint identity")
 	}
@@ -158,7 +154,7 @@ func validateCatalogCheckUsing(db *database, declaration catalogCheckDeclaration
 	if names == nil {
 		names = t.columnNamesSnapshot.Load()
 	}
-	validateCheckColumnsUsing(declaration.Check, names)
+	validateCheckColumns(declaration.Check, names)
 }
 
 func validateExistingCheckRows(tx *TxContext, t *table, definition *checkDeclaration, predicate scm.Scmer) {
@@ -186,7 +182,7 @@ func (tx *TxContext) publicCheckDeclarations() []catalogCheckDeclaration {
 // The decoded durable envelope and actual live catalog own distinct allocations.
 func (db *database) recoverPublicCheckDeclarations(declarations []catalogCheckDeclaration) {
 	for _, declaration := range declarations {
-		validateCatalogCheck(db, declaration)
+		validateCatalogCheck(db, declaration, nil)
 		if db.hasDeclarationNameLocked(declaration.Check.Id, nil, nil) {
 			panic("check recovery declaration name already exists")
 		}
@@ -229,7 +225,11 @@ func (state *catalogConstraintState) validate(db *database, keys map[*table][]un
 	if state.addition != nil {
 		validateCatalogForeign(db, state.addition.declaration, keys, views, scope, nil)
 	} else {
-		validateCatalogCheck(db, state.check.declaration)
+		var names *tableColumnNamesSnapshot
+		if view := views[state.check.table]; view != nil {
+			names = view.metadata.columnNames
+		}
+		validateCatalogCheck(db, state.check.declaration, names)
 	}
 }
 
@@ -238,7 +238,7 @@ func (tx *TxContext) validatePublicChecks(db *database) error {
 		if entry.check == nil {
 			continue
 		}
-		validateCatalogCheckUsing(db, entry.check.declaration, entry.check.table.columnNamesForTx(tx))
+		validateCatalogCheck(db, entry.check.declaration, entry.check.table.columnNamesForTx(tx))
 		var predecessor *checkDeclaration
 		if drop := tx.retiredCheck(entry.check.table, entry.check.declaration.Check.Id); drop != nil {
 			_, predecessor = validateCatalogCheckDrop(db, drop.declaration)

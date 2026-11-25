@@ -6,6 +6,7 @@ metadata:
   requires_tds: true
   description: Committed CHECK retirement and validated same-ID replacement use the original guarded row view and one durable decision
 setup:
+- sql: DROP TABLE IF EXISTS check_row_appended
 - scm: (dropprocedure "memcp-tests" "check_row_prefix" true)
 - sql: DROP TABLE IF EXISTS check_row_values
 - sql: DROP TABLE IF EXISTS check_row_probe
@@ -22,6 +23,7 @@ setup:
 - sql: INSERT check_row_marker VALUES(1,0)
 - scm: (registerprocedurelanguage "check-input-literal" (lambda (source _context) (lambda () (simplify source))))
 cleanup:
+- sql: DROP TABLE IF EXISTS check_row_appended
 - scm: (dropprocedure "memcp-tests" "check_row_prefix" true)
 - sql: DROP TABLE IF EXISTS check_row_values
 - sql: DROP TABLE IF EXISTS check_row_probe
@@ -708,6 +710,36 @@ test_cases:
         - -9
     - - - 1
         - 3
+- name: CHECK publication uses the admitted appended header and enforces its selected stored column
+  tds:
+    statements:
+    - sql: DROP TABLE IF EXISTS check_row_appended
+    - sql: CREATE TABLE check_row_appended(id INT PRIMARY KEY)
+    - sql: BEGIN TRAN
+    - sql: INSERT check_row_appended VALUES(1)
+    - sql: ALTER TABLE check_row_appended ADD checked_v INT NULL DEFAULT(7)
+    - sql: ALTER TABLE check_row_appended ADD CONSTRAINT CK_check_row_appended CHECK(checked_v IS NULL OR checked_v>=0)
+    - sql: COMMIT TRAN
+    - sql: SELECT id,checked_v FROM check_row_appended ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          checked_v: 7
+    - sql: INSERT check_row_appended(id) VALUES(2)
+    - sql: INSERT check_row_appended VALUES(3,-1)
+      expect:
+        error: true
+        error_contains: CK_check_row_appended
+    - sql: SELECT id,checked_v FROM check_row_appended ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          checked_v: 7
+        - id: 2
+          checked_v: 7
+    - sql: DROP TABLE check_row_appended
 - name: Repeated valid SQL replacement cycles retain their requested final data and CHECK recipe
   noncritical: true
   tds:
