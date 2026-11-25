@@ -292,7 +292,7 @@ are inferred from acceleration indexes or registry slots. */
 	(list "name" "NVARCHAR" '(128) false) (list "object_id" "INT" '() false)
 	(list "parent_object_id" "INT" '() false) (list "schema_id" "INT" '() false)
 	(list "type" "CHAR" '(2) false) (list "type_desc" "NVARCHAR" '(60) false)))
-(define tsql_foreign_catalog_columns (append tsql_constraint_catalog_columns
+(define tsql_constraint_state_catalog_columns (append tsql_constraint_catalog_columns
 	(list "is_disabled" "BIT" '() false) (list "is_not_trusted" "BIT" '() false)))
 (define tsql_default_catalog_columns (append tsql_constraint_catalog_columns
 	(list "parent_column_id" "INT" '() false) (list "definition" "NVARCHAR" '(-1) false)))
@@ -312,12 +312,12 @@ https://learn.microsoft.com/sql/relational-databases/system-catalog-views/sys-tr
 		(list "database_principals" tsql_principal_catalog_columns)
 		(list "server_principals" tsql_principal_catalog_columns)
 		(list "database_role_members" tsql_role_member_catalog_columns)
-		(list "foreign_keys" tsql_foreign_catalog_columns)
+		(list "foreign_keys" tsql_constraint_state_catalog_columns)
 		/* The native owner exposes the inherited declaration facts. Physical
 		index ordinals and generated-name provenance are not fabricated.
 		https://learn.microsoft.com/sql/relational-databases/system-catalog-views/sys-key-constraints-transact-sql */
 		(list "key_constraints" tsql_constraint_catalog_columns)
-		(list "check_constraints" tsql_constraint_catalog_columns)
+		(list "check_constraints" tsql_constraint_state_catalog_columns)
 		(list "default_constraints" tsql_default_catalog_columns)
 		(list "indexes" tsql_index_catalog_columns)
 		(list "triggers" tsql_trigger_catalog_columns)
@@ -620,7 +620,12 @@ use the general profile. Neither profile caches metadata rows or authority. */
 							(if (equal? kind "foreign_keys") (begin
 								(define state (foreign_states (nth row 3)))
 								(if (nil? state) (error "foreign declaration validation state is unavailable")
-									(append fields (car state) (cadr state)))) fields))) database))))
+									(append fields (car state) (cadr state))))
+								(equal? kind "check_constraints")
+								/* Native CHECK construction validates all historical rows and
+								installs enforcement in the same decision. Its supported
+								declaration has no disabled or untrusted state. */
+								(append fields false false) fields))) database))))
 			(error "unsupported T-SQL metadata source" kind))))))
 (define tsql_catalog_all_rows_factory (close_procedure (lambda (declarations columns)
 	(lambda (database kind actor tx selection)
@@ -757,7 +762,7 @@ use the general profile. Neither profile caches metadata rows or authority. */
 (define tsql_catalog_constraints_query (lambda (database kind selection)
 	(tsql_catalog_runtime_query database kind
 		(append (if (equal? kind "indexes") tsql_index_catalog_columns
-			(equal? kind "foreign_keys") tsql_foreign_catalog_columns tsql_constraint_catalog_columns)
+			(has? '("foreign_keys" "check_constraints") kind) tsql_constraint_state_catalog_columns tsql_constraint_catalog_columns)
 			(list "__database" "NVARCHAR" '(128) false)) '() selection)))
 (define tsql_catalog_columns_query (lambda (database include_system)
 	(tsql_catalog_runtime_query database (if include_system "all_columns" "columns")
