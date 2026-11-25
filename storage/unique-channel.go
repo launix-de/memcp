@@ -17,7 +17,7 @@ import "github.com/launix-de/memcp/storage/mosi"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
 type uniqueNativeShard struct {
-	columnInput *nativeTableInput
+	columnInput nativeTableInput
 	shard       *storageShard
 	guard       *uniqueWriteGuard
 	tx          *TxContext

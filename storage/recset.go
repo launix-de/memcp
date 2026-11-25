@@ -485,7 +485,7 @@ type recSetKeyResult struct {
 
 func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer) *recSet {
 	currentTx, columnInput, finishData := t.readDataContext(currentTx)
-	defer finishData()
+	defer finishData.release()
 
 	atomic.StoreUint64(&t.lastAccessed, uint64(time.Now().UnixNano()))
 	ss := SessionStateFromTx(currentTx)
@@ -1013,7 +1013,7 @@ func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []st
 
 func (r *recSet) collectKeys(currentTx *TxContext, sourceKeyCols []string, ss *scm.SessionState, identity *recSetKeyIdentity) recSetProjectKeys {
 	currentTx, columnInput, finishData := r.table.readDataContext(currentTx)
-	defer finishData()
+	defer finishData.release()
 	atomic.StoreUint64(&r.table.lastAccessed, uint64(time.Now().UnixNano()))
 	querySeq := querySeqFromTx(currentTx)
 	values := make(chan recSetKeyResult, len(r.shards))
@@ -1081,7 +1081,7 @@ func (r *recSet) collectKeys(currentTx *TxContext, sourceKeyCols []string, ss *s
 	return keys
 }
 
-func (t *storageShard) collectKeys(part *recSetShard, sourceKeyCols []string, currentTx *TxContext, ss *scm.SessionState, dst []scm.Scmer, includeNull bool, columnInput *nativeTableInput) int {
+func (t *storageShard) collectKeys(part *recSetShard, sourceKeyCols []string, currentTx *TxContext, ss *scm.SessionState, dst []scm.Scmer, includeNull bool, columnInput nativeTableInput) int {
 	initializedColumns := t.initializedColumnInput(columnInput)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
@@ -1179,7 +1179,7 @@ func (t *storageShard) collectKeys(part *recSetShard, sourceKeyCols []string, cu
 
 func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState) *recSet {
 	currentTx, columnInput, finishData := t.readDataContext(currentTx)
-	defer finishData()
+	defer finishData.release()
 
 	atomic.StoreUint64(&t.lastAccessed, uint64(time.Now().UnixNano()))
 	result := &recSet{table: t}
@@ -1285,7 +1285,7 @@ func (t *storageShard) hasEqualityIndexPrefix(currentTx *TxContext, cols []strin
 // With alreadyLocked, the caller owns shard concurrency rights and a read or
 // write lock and has loaded the key columns. No lazy load or lock wait is safe
 // inside that critical section.
-func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState, numeric bool, alreadyLocked bool, columnInput *nativeTableInput) recSetShard {
+func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState, numeric bool, alreadyLocked bool, columnInput nativeTableInput) recSetShard {
 	initializedColumns := t.initializedColumnInput(columnInput)
 	if !alreadyLocked {
 		t.ensureLoaded()
@@ -1446,7 +1446,7 @@ func (r *recSet) scanExists(currentTx *TxContext, accessSchema scm.Scmer, access
 	return r.table.scanExistsFrom(currentTx, r, accessSchema, accessValues, conditionCols, condition)
 }
 
-func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool, columnInput *nativeTableInput) bool {
+func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool, columnInput nativeTableInput) bool {
 	initializedColumns := t.initializedColumnInput(columnInput)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
@@ -1534,7 +1534,7 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 	return found
 }
 
-func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, currentTx *TxContext, ss *scm.SessionState, columnInput *nativeTableInput) (scm.Scmer, int64) {
+func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, currentTx *TxContext, ss *scm.SessionState, columnInput nativeTableInput) (scm.Scmer, int64) {
 	initializedColumns := t.initializedColumnInput(columnInput)
 	conditionFn := scm.PrepareSerialProc(condition)
 	t.ensureLoaded()
@@ -1830,7 +1830,7 @@ func (r *recSet) filterToRecSet(currentTx *TxContext, conditionCols []string, co
 		return nil
 	}
 	currentTx, columnInput, finishData := r.table.readDataContext(currentTx)
-	defer finishData()
+	defer finishData.release()
 	atomic.StoreUint64(&r.table.lastAccessed, uint64(time.Now().UnixNano()))
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)

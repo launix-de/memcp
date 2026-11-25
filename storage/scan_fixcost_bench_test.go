@@ -313,7 +313,7 @@ func benchmarkGetRecordIDForUnique(b *testing.B, value int64) {
 	values := []scm.Scmer{scm.NewInt(value)}
 	access := exactScanAccess(newExactScanAccessSchema(columns), values)
 	_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
-	defer finishInputUnique()
+	defer finishInputUnique.release()
 	access.columnInput = columnInputUnique
 	// Cross the adaptive threshold before measuring the steady-state lookup.
 	shard.GetRecordidForUnique(access, nil, false, nil)

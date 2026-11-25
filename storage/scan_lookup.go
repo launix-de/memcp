@@ -285,7 +285,7 @@ func (t *table) scanLookupMap(currentTx *TxContext, access scanAccess, mapCols [
 
 func (t *table) scanLookupMapOne(currentTx *TxContext, access scanAccess, mapCols []string) ([]scm.Scmer, int) {
 	currentTx, columnInput, finishData := t.readDataContext(currentTx)
-	defer finishData()
+	defer finishData.release()
 	access.columnInput = columnInput
 
 	if t.hasTableLock() {
@@ -401,7 +401,7 @@ func (t *storageShard) scanLookupMapOne(access scanAccess, mapCols []string, cur
 	return values, matches
 }
 
-func (t *storageShard) prepareScanLookupMapReaders(mapCols []string, readers []scanLookupMapReader, currentTx *TxContext, columnInput *nativeTableInput) {
+func (t *storageShard) prepareScanLookupMapReaders(mapCols []string, readers []scanLookupMapReader, currentTx *TxContext, columnInput nativeTableInput) {
 	input := t.initializedColumnInput(columnInput)
 	for i, col := range mapCols {
 		readers[i].input = input
@@ -430,7 +430,7 @@ func (t *storageShard) scanLookupMapValues(recid, mainCount uint32, mapCols []st
 
 func (t *table) scanLookupOne(currentTx *TxContext, access scanAccess, resultCol string, returnValue bool) scm.Scmer {
 	currentTx, columnInput, finishData := t.readDataContext(currentTx)
-	defer finishData()
+	defer finishData.release()
 	access.columnInput = columnInput
 
 	if t.hasTableLock() {
@@ -592,7 +592,7 @@ func scanLookupColumns(access scanAccess, inline []string) []string {
 
 func (t *table) scanLookupMany(currentTx *TxContext, access scanAccess, resultCol string, returnValue bool) scm.Scmer {
 	currentTx, columnInput, finishData := t.readDataContext(currentTx)
-	defer finishData()
+	defer finishData.release()
 	access.columnInput = columnInput
 
 	if t.hasTableLock() {
@@ -758,7 +758,7 @@ func (t *storageShard) scanLookupMany(access scanAccess, resultCol string, retur
 
 func (t *table) scanLookupMapMany(currentTx *TxContext, access scanAccess, mapCols []string) ([]scm.Scmer, int) {
 	currentTx, columnInput, finishData := t.readDataContext(currentTx)
-	defer finishData()
+	defer finishData.release()
 	access.columnInput = columnInput
 
 	if t.hasTableLock() {

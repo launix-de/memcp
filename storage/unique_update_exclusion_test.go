@@ -22,7 +22,7 @@ func TestUniqueProbeExclusionContinuesAfterItsExactPhysicalRecord(t *testing.T) 
 	shard := tbl.ActiveShards()[0]
 	access := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(7)})
 	_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
-	defer finishInputUnique()
+	defer finishInputUnique.release()
 	access.columnInput = columnInputUnique
 	first, found := shard.GetRecordidForUnique(access, nil, true, nil)
 	if !found {
@@ -74,7 +74,7 @@ func TestRepeatedUniqueUpdatesPreserveOriginalRowsAndRealCollisions(t *testing.T
 					t.Helper()
 					access := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(id)})
 					_, columnInputUnique, finishInputUnique := shard.t.readDataContext(reader)
-					defer finishInputUnique()
+					defer finishInputUnique.release()
 					access.columnInput = columnInputUnique
 					recid, found := shard.GetRecordidForUnique(access, reader, false, nil)
 					if !found {

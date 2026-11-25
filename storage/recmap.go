@@ -200,7 +200,7 @@ func (r *recMap) partForSourceShard(shard *storageShard) *recMapShard {
 // Guarded CASE/short-circuit consumers keep their row-bound probes. A general
 // batch conversion must preserve filtering and LIMIT before projection-only work.
 func recMapReadTarget(currentTx *TxContext, target recMapTarget, columns []string,
-	mapper, ifNull scm.Scmer, columnInput *nativeTableInput) scm.Scmer {
+	mapper, ifNull scm.Scmer, columnInput nativeTableInput) scm.Scmer {
 	if target.shard == nil {
 		return scm.Apply(ifNull)
 	}
@@ -277,13 +277,13 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 	}
 	type boundInput struct {
 		tx      *TxContext
-		columns *nativeTableInput
+		columns nativeTableInput
 	}
 	inputs := make(map[*table]boundInput)
 	for shard := range groups {
 		if _, exists := inputs[shard.t]; !exists {
 			tx, columns, finish := shard.t.readDataContext(currentTx)
-			defer finish()
+			defer finish.release()
 			inputs[shard.t] = boundInput{tx, columns}
 		}
 	}
@@ -382,8 +382,8 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 func recMapCallClosure(shard *storageShard, currentTx *TxContext) (*func(uint32, ...scm.Scmer) scm.Scmer, func()) {
 	type dataInput struct {
 		context *TxContext
-		columns *nativeTableInput
-		finish  func()
+		columns nativeTableInput
+		finish  nativeTableReadRelease
 	}
 	type cachedLookup struct {
 		mapping *recMap
@@ -448,7 +448,7 @@ func recMapCallClosure(shard *storageShard, currentTx *TxContext) (*func(uint32,
 		inputsMu.Unlock()
 		var first any
 		for _, input := range pending {
-			if input.finish == nil {
+			if input.finish.topology == nil {
 				continue
 			}
 			func() {
@@ -457,8 +457,8 @@ func recMapCallClosure(shard *storageShard, currentTx *TxContext) (*func(uint32,
 						first = failure
 					}
 				}()
-				input.finish()
-				input.finish, input.context = nil, nil
+				input.finish.release()
+				input.finish, input.context = nativeTableReadRelease{}, nil
 			}()
 		}
 		if first != nil {
@@ -922,7 +922,7 @@ func (r *recMap) orderRecSet(currentTx *TxContext, sortSides, sortColumns []stri
 		return result
 	}
 	inputs := make(map[*table]*TxContext, 2)
-	columnInputs := make(map[*table]*nativeTableInput, 2)
+	columnInputs := make(map[*table]nativeTableInput, 2)
 	for _, source := range []*table{r.source, r.target} {
 		if _, bound := inputs[source]; bound {
 			continue
@@ -930,7 +930,7 @@ func (r *recMap) orderRecSet(currentTx *TxContext, sortSides, sortColumns []stri
 		dataTx, columnInput, finishData := source.readDataContext(currentTx)
 		inputs[source] = dataTx
 		columnInputs[source] = columnInput
-		defer finishData()
+		defer finishData.release()
 	}
 	rows := make([]recMapOrderRow, 0, r.count)
 	for partIndex := range r.shards {
@@ -995,7 +995,7 @@ func (r *recMap) orderRecSet(currentTx *TxContext, sortSides, sortColumns []stri
 	return result
 }
 
-func fillRecMapOrderValues(inputs map[*table]*TxContext, columnInputs map[*table]*nativeTableInput, rows []recMapOrderRow, sides, columns []string) {
+func fillRecMapOrderValues(inputs map[*table]*TxContext, columnInputs map[*table]nativeTableInput, rows []recMapOrderRow, sides, columns []string) {
 	for column, side := range sides {
 		groups := make(map[*storageShard][]int)
 		for rowIndex := range rows {
@@ -1170,7 +1170,7 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 	}
 	result.source = previous.source
 	sourceTx, sourceColumns, finishSource := previous.source.readDataContext(currentTx)
-	defer finishSource()
+	defer finishSource.release()
 	rows := make([]recMapSourceRow, 0, previous.count)
 	targetPositions := make(map[*storageShard][]int)
 	for partIndex := range previous.shards {
@@ -1212,13 +1212,13 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 	}
 	type boundTarget struct {
 		tx      *TxContext
-		columns *nativeTableInput
+		columns nativeTableInput
 	}
 	targetInputs := make(map[*table]boundTarget)
 	for shard := range targetPositions {
 		if _, exists := targetInputs[shard.t]; !exists {
 			tx, columns, finish := shard.t.readDataContext(currentTx)
-			defer finish()
+			defer finish.release()
 			targetInputs[shard.t] = boundTarget{tx, columns}
 		}
 	}
@@ -1307,7 +1307,7 @@ func (r *recSet) collectRecMapRows(currentTx *TxContext, sourceKeyCols []string,
 		return nil
 	}
 	currentTx, columnInput, finishData := r.table.readDataContext(currentTx)
-	defer finishData()
+	defer finishData.release()
 	atomic.StoreUint64(&r.table.lastAccessed, uint64(time.Now().UnixNano()))
 	rows := make([]recMapSourceRow, 0, r.count)
 	ss := SessionStateFromTx(currentTx)
@@ -1396,7 +1396,7 @@ func (r *recMap) image(currentTx *TxContext) *recSet {
 		return &recSet{}
 	}
 	currentTx, _, finishData := r.target.readDataContext(currentTx)
-	defer finishData()
+	defer finishData.release()
 	result := &recSet{table: r.target}
 	byShard := make(map[*storageShard][]uint32)
 	for _, part := range r.shards {

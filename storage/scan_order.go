@@ -633,7 +633,7 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 
 // scanOrderTableSpec holds per-table parameters for scanOrderMulti.
 type scanOrderTableSpec struct {
-	columnInput   *nativeTableInput
+	columnInput   nativeTableInput
 	producerInput *nativeMutationInput // explicit local producer input, not compiled or serialized
 
 	dataTx          *TxContext // selected once for this actual native input
@@ -1103,21 +1103,23 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		if tables[index].dataBound {
 			continue
 		}
-		var finishData func()
+		var finishRead nativeTableReadRelease
+		var finishWrite func()
 		defer func() {
-			if finishData != nil {
-				finishData()
+			defer finishRead.release()
+			if finishWrite != nil {
+				finishWrite()
 			}
 		}()
 		input := tables[index].backingTable()
 		if scanMutates(tables[index].callbackCols) {
-			tables[index].dataTx, finishData = input.writeDataContext(currentTx)
+			tables[index].dataTx, finishWrite = input.writeDataContext(currentTx)
 			topology := input.pinActiveTopology()
 			defer topology.releaseOperation()
 			tables[index].columnInput = input.bindColumnInput(tables[index].dataTx)
 			tables[index].columnInput.topology = topology
 		} else {
-			tables[index].dataTx, tables[index].columnInput, finishData = input.readDataContext(currentTx)
+			tables[index].dataTx, tables[index].columnInput, finishRead = input.readDataContext(currentTx)
 		}
 		tables[index].dataBound = true
 	}
@@ -1903,20 +1905,22 @@ func runDirectSingleShardOrder(currentTx *TxContext, topology *tableShardTopolog
 
 func (t *table) scanOrderSingle(currentTx *TxContext, spec scanOrderTableSpec, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols, offset, limit int, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) (scm.Scmer, bool) {
 	if !spec.dataBound {
-		var finishData func()
+		var finishRead nativeTableReadRelease
+		var finishWrite func()
 		defer func() {
-			if finishData != nil {
-				finishData()
+			defer finishRead.release()
+			if finishWrite != nil {
+				finishWrite()
 			}
 		}()
 		if scanMutates(spec.callbackCols) {
-			currentTx, finishData = t.writeDataContext(currentTx)
+			currentTx, finishWrite = t.writeDataContext(currentTx)
 			topology := t.pinActiveTopology()
 			defer topology.releaseOperation()
 			spec.columnInput = t.bindColumnInput(currentTx)
 			spec.columnInput.topology = topology
 		} else {
-			currentTx, spec.columnInput, finishData = t.readDataContext(currentTx)
+			currentTx, spec.columnInput, finishRead = t.readDataContext(currentTx)
 		}
 	} else {
 		currentTx = spec.dataTx
@@ -1980,21 +1984,23 @@ func (t *table) scanOrderSingle(currentTx *TxContext, spec scanOrderTableSpec, s
 // scan_order dispatches a single relevant shard directly and reserves the
 // queue/channel merge machinery for actual fanout.
 func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer, producerInput *nativeMutationInput) scm.Scmer {
-	var finishData func()
+	var finishRead nativeTableReadRelease
+	var finishWrite func()
 	defer func() {
-		if finishData != nil {
-			finishData()
+		defer finishRead.release()
+		if finishWrite != nil {
+			finishWrite()
 		}
 	}()
-	var columnInput *nativeTableInput
+	var columnInput nativeTableInput
 	if scanMutates(callbackCols) {
-		currentTx, finishData = t.writeDataContext(currentTx)
+		currentTx, finishWrite = t.writeDataContext(currentTx)
 		topology := t.pinActiveTopology()
 		defer topology.releaseOperation()
 		columnInput = t.bindColumnInput(currentTx)
 		columnInput.topology = topology
 	} else {
-		currentTx, columnInput, finishData = t.readDataContext(currentTx)
+		currentTx, columnInput, finishRead = t.readDataContext(currentTx)
 	}
 
 	if scanMutates(callbackCols) {
@@ -2037,7 +2043,7 @@ func (t *table) scan_order(currentTx *TxContext, accessSchema scm.Scmer, accessV
 // scanOrderFirst is the no-order LIMIT 1 specialization of scan_order. It
 // preserves the scan operator contract while avoiding the queues, channels,
 // and global merge needed by the general ordered multi-shard implementation.
-func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer, producerInput *nativeMutationInput, columnInput *nativeTableInput) scm.Scmer {
+func (t *table) scanOrderFirst(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer, producerInput *nativeMutationInput, columnInput nativeTableInput) scm.Scmer {
 	// scan_order owns this exact source input throughout the specialization.
 	if contributionMutationColumns(callbackCols) {
 		t.beginContributionMutation()

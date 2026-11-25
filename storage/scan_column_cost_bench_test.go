@@ -87,7 +87,7 @@ func TestEstimateFilteredRowsRecognizesCompleteCappedIndexRange(t *testing.T) {
 	for range 2 {
 		shard.mu.RLock()
 		_, columnInput1, finishColumnInput1 := shard.t.readDataContext(nil)
-		defer finishColumnInput1()
+		defer finishColumnInput1.release()
 		columnAccess1 := runtimeScanAccess(bounds)
 		columnAccess1.columnInput = columnInput1
 		shard.iterateIndex(nil, columnAccess1, len(shard.deltaRows()), buf[:], 1, nil,
@@ -132,7 +132,7 @@ func TestScanSelectivityEstimateScalesIndexCandidatesByShardPopulation(t *testin
 		var buf [128]uint32
 		shard.mu.RLock()
 		_, columnInput2, finishColumnInput2 := shard.t.readDataContext(nil)
-		defer finishColumnInput2()
+		defer finishColumnInput2.release()
 		columnAccess2 := runtimeScanAccess(bounds)
 		columnAccess2.columnInput = columnInput2
 		shard.iterateIndex(nil, columnAccess2, len(shard.deltaRows()), buf[:], 100, nil,
@@ -533,7 +533,7 @@ func BenchmarkFilterBufferLocalScan(b *testing.B) {
 			values[row] = scm.NewInt(int64(row + i))
 		}
 		storage := buildStorageInt(values)
-		readers[i] = newCachedColumnReaderTx(storage, nil, false, ReadAuto, nil, nil)
+		readers[i] = newCachedColumnReaderTx(storage, nil, false, ReadAuto, nil, nativeTableInput{})
 		emitters[i] = storage.JITEmit
 		valueTypes[i] = storage.JITValueType()
 	}
@@ -722,7 +722,7 @@ func TestTypedFilterMixedMainDelta(t *testing.T) {
 	shard.publishDeltaRows([][]scm.Scmer{{scm.NewFloat(3.5)}, {scm.NewNil()}})
 	shard.mu.Unlock()
 	column := shard.getColumnStorageInput("amount", false, shard.initializedColumnInput(shard.t.bindColumnInput(nil)), nil)
-	readers := []ColumnReader{newCachedColumnReaderTx(column, nil, false, ReadAuto, nil, nil)}
+	readers := []ColumnReader{newCachedColumnReaderTx(column, nil, false, ReadAuto, nil, nativeTableInput{})}
 	predicate := benchmarkMapReduceFusionProc(t, "(lambda (a) (> a 2))")
 	kernel := scm.CompileJITFilterBuffer(predicate.Proc(), []uint8{column.JITValueType()})
 	if kernel == nil {

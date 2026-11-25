@@ -2904,7 +2904,7 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 				upper: scm.NewString("row-00000001"), upperInclusive: true,
 			}})
 			_, columnInput101, finishColumnInput101 := shard.t.readDataContext(nil)
-			defer finishColumnInput101()
+			defer finishColumnInput101.release()
 			columnAccess101 := access
 			columnAccess101.columnInput = columnInput101
 			shard.ensureScanAccessColumns(columnAccess101, false, nil)
@@ -2935,7 +2935,7 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 			if engine == Safe {
 				release = shard.GetRead(nil, false)
 				_, columnInput102, finishColumnInput102 := shard.t.readDataContext(nil)
-				defer finishColumnInput102()
+				defer finishColumnInput102.release()
 				columnAccess102 := access
 				columnAccess102.columnInput = columnInput102
 				shard.ensureScanAccessColumns(columnAccess102, false, nil)

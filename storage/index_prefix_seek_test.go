@@ -38,7 +38,7 @@ func deltaPrefixSeek(shard *storageShard, parent int64, inclusive bool) []uint32
 	var buf [8]uint32
 	var rows []uint32
 	_, columnInput101, finishColumnInput101 := shard.t.readDataContext(nil)
-	defer finishColumnInput101()
+	defer finishColumnInput101.release()
 	columnAccess101 := bounds
 	columnAccess101.columnInput = columnInput101
 	shard.iterateIndexForce(nil, columnAccess101, len(shard.deltaRows()), buf[:], false, func(batch []uint32) bool { rows = append(rows, batch...); return true })

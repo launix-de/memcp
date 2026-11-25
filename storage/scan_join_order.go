@@ -123,7 +123,7 @@ type scanJoinOrderColumn struct {
 // is the ORDER BY driver. Every later input joins targetKeyCols against values
 // taken from the already assembled tuple through sourceKeyCols.
 type scanJoinOrderInput struct {
-	columnInput   *nativeTableInput
+	columnInput   nativeTableInput
 	dataTx        *TxContext
 	producerInput *nativeMutationInput
 	table         *table
@@ -1620,9 +1620,9 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 		if spec.inputs[i].table == nil {
 			panic("scan_join_order: input table is nil")
 		}
-		var finish func()
+		var finish nativeTableReadRelease
 		spec.inputs[i].dataTx, spec.inputs[i].columnInput, finish = spec.inputs[i].table.readDataContext(currentTx)
-		defer finish()
+		defer finish.release()
 	}
 	for index := range spec.inputs {
 		spec.inputs[index].producerInput = spec.producerInput

@@ -324,9 +324,9 @@ func TestScanJoinOrderPrunesCompatibleJoinKeyShardPairs(t *testing.T) {
 	}
 	streams := func() [][]*scanJoinOrderShardStream {
 		for i := range spec.inputs {
-			var finishInput func()
+			var finishInput nativeTableReadRelease
 			spec.inputs[i].dataTx, spec.inputs[i].columnInput, finishInput = spec.inputs[i].table.readDataContext(nil)
-			defer finishInput()
+			defer finishInput.release()
 		}
 		prepareScanJoinOrderSpec(nil, &spec)
 		streams := make([][]*scanJoinOrderShardStream, 2)
@@ -472,9 +472,9 @@ func TestScanJoinOrderCandidateInputPrunesBeforeProjection(t *testing.T) {
 	}, limit: -1, mapCols: []scanJoinOrderColumn{{table: 1, column: "amount"}}}
 	streams := func() [][]*scanJoinOrderShardStream {
 		for i := range spec.inputs {
-			var finishInput func()
+			var finishInput nativeTableReadRelease
 			spec.inputs[i].dataTx, spec.inputs[i].columnInput, finishInput = spec.inputs[i].table.readDataContext(nil)
-			defer finishInput()
+			defer finishInput.release()
 		}
 		prepareScanJoinOrderSpec(nil, &spec)
 		streams := make([][]*scanJoinOrderShardStream, 2)

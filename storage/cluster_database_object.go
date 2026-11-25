@@ -47,7 +47,7 @@ func (database *database) executeClusterRequest(ctx context.Context, call scm.Cl
 			return nil, fmt.Errorf("unknown or ephemeral remote table")
 		}
 		_, columnInput, finishData := tbl.readDataContext(nil)
-		defer finishData()
+		defer finishData.release()
 		result := make(remoteScanDescription, 0)
 		var scanErr any
 		var mu sync.Mutex

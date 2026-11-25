@@ -2615,7 +2615,7 @@ func (r *shardColumnReader) GetValueRange(start, count uint32, target []scm.Scme
 
 func (r *shardColumnReader) release() { ReleaseColumnReader(r.main) }
 
-func (t *storageShard) ColumnReaderTx(tx *TxContext, col string, alreadyLocked bool, hints ColumnReadHints, columnInput *nativeTableInput) ColumnReader {
+func (t *storageShard) ColumnReaderTx(tx *TxContext, col string, alreadyLocked bool, hints ColumnReadHints, columnInput nativeTableInput) ColumnReader {
 	// Computed readers recursively bind their input columns. A mutation scan
 	// initializes them while holding this shard's write lock, recorded explicitly
 	// on the transaction, so re-entering the RWMutex here would self-deadlock.
@@ -2720,7 +2720,7 @@ type ShardMapReducer struct {
 	assignments       nativeMutationAssignments
 	mutationInput     *nativeMutationInput
 	columnInput       *nativeColumnInitialInput
-	readInput         *nativeTableInput
+	readInput         nativeTableInput
 	mutationColumns   []*column            // one effective declaration contract per native input
 	exactUpdate       bool                 // bound once from the actual admitted mutation event
 	dataInputReleases []func()             // operator-owned target data views, never row-owned leases
@@ -2792,7 +2792,7 @@ func prepareMapReducerCallFrame(mr *ShardMapReducer) {
 
 // initReadMapReducer initializes an ordinary read-only mapper without the
 // per-column closures required by pseudo-column and mutation scans.
-func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, currentTx *TxContext, columnInput *nativeTableInput) {
+func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, currentTx *TxContext, columnInput nativeTableInput) {
 	mr.readInput = columnInput
 	mr.columnInput = t.initializedColumnInput(columnInput)
 	mr.shard = t
@@ -2975,7 +2975,7 @@ func (m *ShardMapReducer) callMutationMapper(body func() scm.Scmer) scm.Scmer {
 
 // initMapReducer initializes the general mapper, including pseudo-columns and
 // mutation metadata. Retained operators allocate it through OpenMapReducer.
-func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext, columnInput *nativeTableInput) {
+func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext, columnInput nativeTableInput) {
 	*mr = ShardMapReducer{
 		readInput:        columnInput,
 		columnInput:      t.initializedColumnInput(columnInput),
@@ -3290,7 +3290,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 
 // OpenMapReducer creates a retained MapReducer for operators whose mapper
 // outlives one synchronous shard call.
-func (t *storageShard) OpenMapReducer(cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext, columnInput *nativeTableInput) *ShardMapReducer {
+func (t *storageShard) OpenMapReducer(cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext, columnInput nativeTableInput) *ShardMapReducer {
 	mr := new(ShardMapReducer)
 	t.initMapReducer(mr, cols, mapReduceFn, alreadyLocked, stride, batchdata, currentTx, columnInput)
 	return mr
@@ -3298,7 +3298,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapReduceFn scm.Scmer, alre
 
 // OpenMapper creates a retained mapper for materialization and predicates that
 // do not participate in a reduction.
-func (t *storageShard) OpenMapper(cols []string, mapFn scm.Scmer, alreadyLocked bool, currentTx *TxContext, columnInput *nativeTableInput) *ShardMapReducer {
+func (t *storageShard) OpenMapper(cols []string, mapFn scm.Scmer, alreadyLocked bool, currentTx *TxContext, columnInput nativeTableInput) *ShardMapReducer {
 	mr := new(ShardMapReducer)
 	t.initMapReducer(mr, cols, scm.NewNil(), alreadyLocked, 0, nil, currentTx, columnInput)
 	mr.mapProgram = scm.PrepareSerialProc(mapFn)
@@ -3905,7 +3905,7 @@ func (m *ShardMapReducer) Close() {
 		mapReducerBulkBufferPools[width-1].Put(m.mainBulkBuffer)
 		m.mainBulkBuffer = nil
 	}
-	m.readInput = nil
+	m.readInput = nativeTableInput{}
 	m.columnInput = nil
 	m.bufferReduceFn = nil
 	m.bufferReduceProc = nil
@@ -4605,7 +4605,7 @@ type filteredRowEstimate struct {
 	coverage   string
 }
 
-func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition scm.Scmer, limit int, currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, columnInput *nativeTableInput) filteredRowEstimate {
+func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition scm.Scmer, limit int, currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, columnInput nativeTableInput) filteredRowEstimate {
 	initializedColumns := t.initializedColumnInput(columnInput)
 	if limit <= 0 {
 		limit = 1024

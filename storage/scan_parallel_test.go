@@ -349,7 +349,7 @@ func TestIterateShardsParallelMarksFreeSingleShardSolo(t *testing.T) {
 	calls := 0
 	sawSolo := false
 	_, columnInput1, finishColumnInput1 := tbl.readDataContext(nil)
-	defer finishColumnInput1()
+	defer finishColumnInput1.release()
 	columnAccess1 := scanAccess{}
 	columnAccess1.columnInput = columnInput1
 	done := tbl.iterateShardsParallel(nil, columnAccess1, nil, func(s *storageShard, solo bool, acquisitionFailure any) {
@@ -383,7 +383,7 @@ func TestIterateShardsParallelReleasesFreeShardRegistrationOnPanic(t *testing.T)
 			}
 		}()
 		_, columnInput2, finishColumnInput2 := tbl.readDataContext(nil)
-		defer finishColumnInput2()
+		defer finishColumnInput2.release()
 		columnAccess2 := scanAccess{}
 		columnAccess2.columnInput = columnInput2
 		tbl.iterateShardsParallel(nil, columnAccess2, nil, func(_ *storageShard, _ bool, acquisitionFailure any) {
@@ -421,7 +421,7 @@ func TestRepartitionPublishesWhileOldGenerationReaderRuns(t *testing.T) {
 	go func() {
 		defer close(readerDone)
 		_, columnInput3, finishColumnInput3 := tbl.readDataContext(nil)
-		defer finishColumnInput3()
+		defer finishColumnInput3.release()
 		columnAccess3 := scanAccess{}
 		columnAccess3.columnInput = columnInput3
 		tbl.iterateShardsParallel(nil, columnAccess3, nil, func(_ *storageShard, _ bool, acquisitionFailure any) {
@@ -581,7 +581,7 @@ func TestIterateShardsParallelMarksPartitionSingleShardSolo(t *testing.T) {
 	calls := 0
 	sawSolo := false
 	_, columnInput4, finishColumnInput4 := tbl.readDataContext(nil)
-	defer finishColumnInput4()
+	defer finishColumnInput4.release()
 	columnAccess4 := runtimeScanAccess(analyzedBoundaries{{
 		col:            "id",
 		matcher:        EqualMatcher,
@@ -624,7 +624,7 @@ func TestIterateShardsParallelMarksPartitionMultiShardNonSolo(t *testing.T) {
 	var calls atomic.Int32
 	var sawSolo atomic.Bool
 	_, columnInput5, finishColumnInput5 := tbl.readDataContext(nil)
-	defer finishColumnInput5()
+	defer finishColumnInput5.release()
 	columnAccess5 := scanAccess{}
 	columnAccess5.columnInput = columnInput5
 	done := tbl.iterateShardsParallel(nil, columnAccess5, nil, func(s *storageShard, solo bool, acquisitionFailure any) {
@@ -665,7 +665,7 @@ func TestIterateShardsParallelMarksSynchronousMultiShardNonSolo(t *testing.T) {
 	calls := 0
 	sawSolo := false
 	_, columnInput6, finishColumnInput6 := tbl.readDataContext(tx)
-	defer finishColumnInput6()
+	defer finishColumnInput6.release()
 	columnAccess6 := scanAccess{}
 	columnAccess6.columnInput = columnInput6
 	done := tbl.iterateShardsParallel(tx, columnAccess6, nil, func(_ *storageShard, solo bool, acquisitionFailure any) {
@@ -725,8 +725,8 @@ func TestScanResultCollectorUsesPinnedDomainAfterTopologyGrowth(t *testing.T) {
 			go func() {
 				_, columnInput7, finishColumnInput7 := tbl.readDataContext(tx)
 				defer func() {
-					if finishColumnInput7 != nil {
-						finishColumnInput7()
+					if finishColumnInput7.topology != nil {
+						finishColumnInput7.release()
 					}
 				}()
 				columnAccess7 := scanAccess{}
@@ -735,8 +735,8 @@ func TestScanResultCollectorUsesPinnedDomainAfterTopologyGrowth(t *testing.T) {
 					collector.send(solo, scanResult{outCount: 1, err: scanError{r: failure}})
 				})
 				collector.finish(done)
-				finishColumnInput7()
-				finishColumnInput7 = nil
+				finishColumnInput7.release()
+				finishColumnInput7 = nativeTableReadRelease{}
 				close(finished)
 			}()
 			select {
@@ -779,7 +779,7 @@ func TestIterateShardsParallelPreparationPanicReleasesDomain(t *testing.T) {
 	func() {
 		defer func() { failure = recover() }()
 		_, columnInput8, finishColumnInput8 := tbl.readDataContext(nil)
-		defer finishColumnInput8()
+		defer finishColumnInput8.release()
 		columnAccess8 := scanAccess{}
 		columnAccess8.columnInput = columnInput8
 		tbl.iterateShardsParallel(nil, columnAccess8, func(shards int) {
@@ -826,7 +826,7 @@ func TestIterateShardsParallelAutocommitUsesExplicitContext(t *testing.T) {
 	var missingSessionState atomic.Bool
 	var missingQuerySeq atomic.Bool
 	_, columnInput9, finishColumnInput9 := tbl.readDataContext(tx)
-	defer finishColumnInput9()
+	defer finishColumnInput9.release()
 	columnAccess9 := scanAccess{}
 	columnAccess9.columnInput = columnInput9
 	done := tbl.iterateShardsParallel(tx, columnAccess9, nil, func(s *storageShard, solo bool, acquisitionFailure any) {
@@ -1388,7 +1388,7 @@ func TestUniqueReservationLifecycle(t *testing.T) {
 			func() {
 				access := exactScanAccess(newExactScanAccessSchema(cols), rows[0])
 				_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
-				defer finishInputUnique()
+				defer finishInputUnique.release()
 				access.columnInput = columnInputUnique
 				if _, present := shard.GetRecordidForUnique(access, nil, false, nil); present {
 					t.Fatal("ordinary key lookup exposed an uncommitted row")
@@ -1519,7 +1519,7 @@ func TestUniqueReservationOwnKeyReplacementCycle(t *testing.T) {
 	func() {
 		access := exactScanAccess(newExactScanAccessSchema(cols), []scm.Scmer{scm.NewInt(8)})
 		_, columnInputUnique, finishInputUnique := shard.t.readDataContext(tx)
-		defer finishInputUnique()
+		defer finishInputUnique.release()
 		access.columnInput = columnInputUnique
 		recid, present := shard.GetRecordidForUnique(access, tx, false, nil)
 		if !present {

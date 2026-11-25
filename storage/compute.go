@@ -67,7 +67,7 @@ func projectionColumnReadHints(col ColumnStorage, rows int, tx *TxContext) Colum
 // Do not strip runtime overlays here: generic scan/read paths must still see
 // user-visible values (for example OverlayBlob must dereference its hash marker
 // back to the persisted blob payload after restart).
-func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked bool, hints ColumnReadHints, source *table, columnInput *nativeTableInput) ColumnReader {
+func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked bool, hints ColumnReadHints, source *table, columnInput nativeTableInput) ColumnReader {
 	operatorOwned := hints&readOperatorOwned != 0
 	hints &^= readOperatorOwned
 	if provider, ok := col.(TxColumnReaderProvider); ok {
@@ -432,7 +432,7 @@ func (t *table) initORCShard(s *storageShard, name string) {
 // The invalidation scan (run by triggers) has already set validMask bits to 0
 // for affected rows. This function finds the earliest invalid row's sort key,
 // predicts the accumulator from the last valid predecessor, and scans forward.
-func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard, requestIdx uint32, currentTx *TxContext, columnInput *nativeTableInput) {
+func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard, requestIdx uint32, currentTx *TxContext, columnInput nativeTableInput) {
 	recomputeStart := time.Now()
 	defer func() {
 		// Record recompute cost for invalidation telemetry

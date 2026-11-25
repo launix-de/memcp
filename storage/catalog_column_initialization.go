@@ -267,8 +267,8 @@ func (s *storageShard) getDeltaInput(idx int, name string, input *nativeColumnIn
 	return s.getDelta(idx, name)
 }
 
-func (s *storageShard) initializedColumnInput(input *nativeTableInput) *nativeColumnInitialInput {
-	if input == nil || input.table != s.t {
+func (s *storageShard) initializedColumnInput(input nativeTableInput) *nativeColumnInitialInput {
+	if input.table == nil || input.table != s.t {
 		panic("column input belongs to another native table")
 	}
 	return s.initializedColumnNames(input.names)

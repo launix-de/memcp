@@ -301,7 +301,7 @@ func runSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shar
 // to execute without an escaping callback frame.
 func (t *table) pinSingleShardForScan(access scanAccess) (*tableShardTopology, *storageShard, bool) {
 	input := access.columnInput
-	if input == nil || input.table != t || input.topology == nil {
+	if input.table == nil || input.table != t || input.topology == nil {
 		panic("scan requires its admitted native input")
 	}
 	topology := input.topology
@@ -390,7 +390,7 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, access scanAccess, p
 	// perform another resource acquisition from inside the callback.
 	for {
 		input := access.columnInput
-		if input == nil || input.table != t || input.topology == nil {
+		if input.table == nil || input.table != t || input.topology == nil {
 			panic("scan requires its admitted native input")
 		}
 		topology := input.topology

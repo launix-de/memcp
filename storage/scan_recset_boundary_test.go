@@ -85,7 +85,7 @@ func buildRankOrderIndex(t *testing.T, tbl *table) func(...scm.Scmer) scm.Scmer 
 	defer shard.mu.RUnlock()
 	var buf [8]uint32
 	_, columnInput101, finishColumnInput101 := shard.t.readDataContext(nil)
-	defer finishColumnInput101()
+	defer finishColumnInput101.release()
 	columnAccess101 := runtimeScanAccess(bounds)
 	columnAccess101.columnInput = columnInput101
 	shard.iterateIndexForce(nil, columnAccess101, len(shard.deltaRows()), buf[:], false,
@@ -352,7 +352,7 @@ func TestSparseOrderedRecSetAppliesNativeIndexRange(t *testing.T) {
 		defer shard.mu.RUnlock()
 		var buffer [8]uint32
 		_, columnInput102, finishColumnInput102 := shard.t.readDataContext(nil)
-		defer finishColumnInput102()
+		defer finishColumnInput102.release()
 		columnAccess102 := access
 		columnAccess102.columnInput = columnInput102
 		shard.iterateIndexForce(nil, columnAccess102, len(shard.deltaRows()), buffer[:], false, func([]uint32) bool { return false })

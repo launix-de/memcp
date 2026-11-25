@@ -41,9 +41,9 @@ type orderedBatchPart struct {
 // a RecSet itself deliberately carries membership, not order.
 func collectOrderedCandidateBatch(currentTx *TxContext, source scanOrderTableSpec, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, offset int, limit int) ([]orderedBatchRecord, *recSet) {
 	if !source.dataBound {
-		var finishInput func()
+		var finishInput nativeTableReadRelease
 		source.dataTx, source.columnInput, finishInput = source.backingTable().readDataContext(currentTx)
-		defer finishInput()
+		defer finishInput.release()
 		source.dataBound = true
 	}
 	currentTx = source.dataTx
@@ -130,7 +130,7 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 
 	table := source.table
 	input := source.columnInput
-	if !source.dataBound || input == nil || input.table != table || input.topology == nil {
+	if !source.dataBound || input.table == nil || input.table != table || input.topology == nil {
 		panic("partition ordered scan requires its admitted native input")
 	}
 	currentTx = source.dataTx
@@ -307,20 +307,22 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 	}
 
 	source.projectionCols = append(append([]string(nil), source.projectionCols...), callbackCols...)
-	var finishData func()
+	var finishRead nativeTableReadRelease
+	var finishWrite func()
 	defer func() {
-		if finishData != nil {
-			finishData()
+		defer finishRead.release()
+		if finishWrite != nil {
+			finishWrite()
 		}
 	}()
 	if scanMutates(callbackCols) {
-		currentTx, finishData = source.backingTable().writeDataContext(currentTx)
+		currentTx, finishWrite = source.backingTable().writeDataContext(currentTx)
 		topology := source.backingTable().pinActiveTopology()
 		defer topology.releaseOperation()
 		source.columnInput = source.backingTable().bindColumnInput(currentTx)
 		source.columnInput.topology = topology
 	} else {
-		currentTx, source.columnInput, finishData = source.backingTable().readDataContext(currentTx)
+		currentTx, source.columnInput, finishRead = source.backingTable().readDataContext(currentTx)
 	}
 	source.dataTx, source.dataBound = currentTx, true
 	if scanMutates(callbackCols) {

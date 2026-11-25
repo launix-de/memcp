@@ -355,7 +355,7 @@ func TestStorageStringPreparedFilterReaderIsConsumed(t *testing.T) {
 	// Early-exit scans reuse an already admitted cache without decoding a cold one.
 	shard := tbl.ActiveShards()[0]
 	_, columnInput1, finishColumnInput1 := shard.t.readDataContext(tx)
-	defer finishColumnInput1()
+	defer finishColumnInput1.release()
 	columnAccess1 := scanAccess{}
 	columnAccess1.columnInput = columnInput1
 	if _, found := shard.scanFirstRecord(columnAccess1, []string{"label"}, condition, tx, nil, nil); !found {
@@ -365,7 +365,7 @@ func TestStorageStringPreparedFilterReaderIsConsumed(t *testing.T) {
 		return scm.NewBool(args[0].IsString() && args[0].String() == "delta label")
 	})
 	_, columnInput2, finishColumnInput2 := shard.t.readDataContext(tx)
-	defer finishColumnInput2()
+	defer finishColumnInput2.release()
 	columnAccess2 := scanAccess{}
 	columnAccess2.columnInput = columnInput2
 	if id, found := shard.scanFirstRecord(columnAccess2, []string{"label"}, deltaCondition, tx, nil, nil); !found || id != 2048 {
@@ -580,7 +580,7 @@ type jitCapabilityTextStorage struct {
 	calls  int
 }
 
-func (s *jitCapabilityTextStorage) GetCachedReaderTx(_ *TxContext, locked bool, hints ColumnReadHints, _ *nativeTableInput) ColumnReader {
+func (s *jitCapabilityTextStorage) GetCachedReaderTx(_ *TxContext, locked bool, hints ColumnReadHints, _ nativeTableInput) ColumnReader {
 	s.locked, s.hints = locked, hints
 	s.calls++
 	return s.StorageString.GetCachedReader(hints)

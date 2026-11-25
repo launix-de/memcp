@@ -29,7 +29,7 @@ import "github.com/launix-de/NonLockingReadMap"
 import "unsafe"
 
 type computeProxyReader struct {
-	columnInput   *nativeTableInput
+	columnInput   nativeTableInput
 	proxy         *StorageComputeProxy
 	tx            *TxContext
 	alreadyLocked bool
@@ -46,7 +46,7 @@ func (r *computeProxyReader) release() {
 	r.mainReader = nil
 	r.mainSource = nil
 	r.values = nil
-	r.columnInput = nil
+	r.columnInput = nativeTableInput{}
 	r.tx = nil
 }
 
@@ -58,7 +58,7 @@ func (r *computeProxyReader) readerForMain(main ColumnStorage) ColumnReader {
 }
 
 type orderedComputeProxyReader struct {
-	columnInput   *nativeTableInput
+	columnInput   nativeTableInput
 	proxy         *StorageComputeProxy
 	tx            *TxContext
 	alreadyLocked bool
@@ -66,7 +66,7 @@ type orderedComputeProxyReader struct {
 
 // This reader borrows its parent's input; it owns no topology admission.
 func (r *orderedComputeProxyReader) release() {
-	r.columnInput = nil
+	r.columnInput = nativeTableInput{}
 	r.tx = nil
 }
 
@@ -290,8 +290,8 @@ func (r *computeProxyReader) GetValueMulti(recids []uint32, target []scm.Scmer, 
 	}
 }
 
-func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext, alreadyLocked bool, hints ColumnReadHints, columnInput *nativeTableInput) ColumnReader {
-	if p.shard == nil || columnInput == nil || columnInput.table != p.shard.t {
+func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext, alreadyLocked bool, hints ColumnReadHints, columnInput nativeTableInput) ColumnReader {
+	if p.shard == nil || columnInput.table == nil || columnInput.table != p.shard.t {
 		panic("computed reader requires its captured native column input")
 	}
 	p.synchronizeVisibilityCache()
@@ -513,7 +513,7 @@ func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32, alreadyLocke
 	}
 	if p.isOrdered {
 		tx, columnInput, finish := p.shard.t.readDataContext(tx)
-		defer finish()
+		defer finish.release()
 		return p.computeValueFromInput(tx, idx, alreadyLocked, hints, columnInput)
 	}
 	if len(p.inputCols) == 0 {
@@ -527,7 +527,7 @@ func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32, alreadyLocke
 
 // valueFromInput is the prepared native reader entry. Its mandatory input was
 // bound at operator setup; a miss must never resolve a live column header.
-func (p *StorageComputeProxy) valueFromInput(tx *TxContext, idx uint32, alreadyLocked bool, hints ColumnReadHints, columnInput *nativeTableInput) scm.Scmer {
+func (p *StorageComputeProxy) valueFromInput(tx *TxContext, idx uint32, alreadyLocked bool, hints ColumnReadHints, columnInput nativeTableInput) scm.Scmer {
 	if value, found := p.cachedValue(idx, nil); found {
 		return value
 	}
@@ -580,7 +580,7 @@ func (p *StorageComputeProxy) orderedValue(idx uint32) scm.Scmer {
 // computeValueFromInput is the common miss kernel. Input binding is explicit:
 // the direct entry binds once after its cache miss; prepared readers supply
 // their already captured input. There is no nil-to-live-header fallback here.
-func (p *StorageComputeProxy) computeValueFromInput(tx *TxContext, idx uint32, alreadyLocked bool, hints ColumnReadHints, columnInput *nativeTableInput) scm.Scmer {
+func (p *StorageComputeProxy) computeValueFromInput(tx *TxContext, idx uint32, alreadyLocked bool, hints ColumnReadHints, columnInput nativeTableInput) scm.Scmer {
 	if p.isOrdered {
 		p.repairOrderedValue(idx, tx, columnInput)
 		return p.orderedValue(idx)
@@ -608,11 +608,14 @@ func (p *StorageComputeProxy) computeValue(idx uint32, values []scm.Scmer) scm.S
 
 // repairOrderedValue retains the existing dependency-repair owner. A failed
 // repair propagates unchanged and leaves the invalid row retryable.
-func (p *StorageComputeProxy) repairOrderedValue(idx uint32, tx *TxContext, columnInput *nativeTableInput) {
+func (p *StorageComputeProxy) repairOrderedValue(idx uint32, tx *TxContext, columnInput nativeTableInput) {
+	if p.shard == nil || columnInput.table == nil || columnInput.table != p.shard.t {
+		panic("ordered repair requires its captured native column input")
+	}
 	if columnInput.topology == nil {
-		var finish func()
+		var finish nativeTableReadRelease
 		tx, columnInput, finish = p.shard.t.readDataContext(tx)
-		defer finish()
+		defer finish.release()
 	}
 	p.shard.t.orcMu.Lock()
 	defer p.shard.t.orcMu.Unlock()

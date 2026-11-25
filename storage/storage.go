@@ -129,7 +129,7 @@ func (f ColumnReaderFunc) GetValueRange(recid uint32, count uint32, target []scm
 // the legacy GetCachedReader path. The boolean records an already-held shard
 // lock and must propagate when binding computed-column dependencies.
 type TxColumnReaderProvider interface {
-	GetCachedReaderTx(*TxContext, bool, ColumnReadHints, *nativeTableInput) ColumnReader
+	GetCachedReaderTx(*TxContext, bool, ColumnReadHints, nativeTableInput) ColumnReader
 }
 
 func scmerToTxContext(v scm.Scmer) *TxContext {
@@ -1336,7 +1336,7 @@ func Init(en scm.Env) {
 				return scm.NewNil()
 			}
 			currentTx, columnInput, finishData := t.readDataContext(currentTx)
-			defer finishData()
+			defer finishData.release()
 			conditionCols := scmerSliceToStrings(mustScmerSlice(a[4], "condition columns"))
 			condition := a[5]
 			limit := scm.ToInt(a[6])

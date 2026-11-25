@@ -1096,7 +1096,7 @@ func TestClusterMutationScanBorrowsAcquiredWriter(t *testing.T) {
 	go func() {
 		defer func() { done <- recover() }()
 		_, columnInput1, finishColumnInput1 := shard.t.readDataContext(nil)
-		defer finishColumnInput1()
+		defer finishColumnInput1.release()
 		columnAccess1 := scanAccess{}
 		columnAccess1.columnInput = columnInput1
 		value, count, _ := shard.scan(columnAccess1, nil, scm.NewBool(true), []string{"value", "$update"}, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
@@ -1178,7 +1178,7 @@ func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 	id, found := func() (uint32, bool) {
 		accessUnique := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)})
 		_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
-		defer finishInputUnique()
+		defer finishInputUnique.release()
 		accessUnique.columnInput = columnInputUnique
 		return shard.GetRecordidForUnique(accessUnique, nil, true, nil)
 	}()
@@ -1196,7 +1196,7 @@ func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 	id, found = func() (uint32, bool) {
 		accessUnique := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)})
 		_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
-		defer finishInputUnique()
+		defer finishInputUnique.release()
 		accessUnique.columnInput = columnInputUnique
 		return shard.GetRecordidForUnique(accessUnique, nil, true, nil)
 	}()
@@ -1533,7 +1533,7 @@ func TestClusterLocalUniqueUpdaterCannotEscapeReservation(t *testing.T) {
 	defer lease.Release()
 	accessUnique := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)})
 	_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
-	defer finishInputUnique()
+	defer finishInputUnique.release()
 	accessUnique.columnInput = columnInputUnique
 	id, found := shard.GetRecordidForUnique(accessUnique, nil, true, nil)
 	reader := shard.ColumnReaderTx(nil, "value", false, ReadAuto, shard.t.bindColumnInput(nil))
@@ -1625,7 +1625,7 @@ func TestClusterUniqueKeyChangeChecksAppendedLane(t *testing.T) {
 				lease := shard.GetRead(nil, false)
 				accessUnique := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)})
 				_, columnInputUnique, finishInputUnique := lease.shard.t.readDataContext(nil)
-				defer finishInputUnique()
+				defer finishInputUnique.release()
 				accessUnique.columnInput = columnInputUnique
 				id, found := lease.shard.GetRecordidForUnique(accessUnique, nil, true, nil)
 				if found {

@@ -323,7 +323,7 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 	shard.mu.RLock()
 	var buildBuf [8]uint32
 	_, columnInput101, finishColumnInput101 := shard.t.readDataContext(nil)
-	defer finishColumnInput101()
+	defer finishColumnInput101.release()
 	columnAccess101 := runtimeScanAccess(bounds)
 	columnAccess101.columnInput = columnInput101
 	shard.iterateIndexForce(nil, columnAccess101, len(shard.deltaRows()), buildBuf[:], false,
@@ -331,7 +331,7 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 	shard.mu.RUnlock()
 	run := func(acceptCols []string, accept scm.Scmer) *shardqueue {
 		_, columnInput1, finishColumnInput1 := shard.t.readDataContext(nil)
-		defer finishColumnInput1()
+		defer finishColumnInput1.release()
 		columnAccess1 := coveredRuntimeScanAccess(bounds)
 		columnAccess1.columnInput = columnInput1
 		queue := shard.scan_order(columnAccess1,
@@ -428,7 +428,7 @@ func TestOrderedComparisonReaderLifetime(t *testing.T) {
 	sortdirs := []func(...scm.Scmer) scm.Scmer{order}
 	func() {
 		_, columnInput, finishInput := shard.t.readDataContext(nil)
-		defer finishInput()
+		defer finishInput.release()
 		run := func() *shardqueue {
 			columnAccess2 := scanAccess{}
 			columnAccess2.columnInput = columnInput
@@ -463,7 +463,7 @@ func TestOrderedComparisonReaderLifetime(t *testing.T) {
 			}
 		}()
 		_, columnInput3, finishColumnInput3 := shard.t.readDataContext(nil)
-		defer finishColumnInput3()
+		defer finishColumnInput3.release()
 		columnAccess3 := scanAccess{}
 		columnAccess3.columnInput = columnInput3
 		shard.scan_order(columnAccess3, nil, trueCondition(), nil, scm.NewNil(), sortcols,

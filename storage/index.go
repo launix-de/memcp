@@ -147,7 +147,7 @@ func (s *StorageIndex) deltaReaderSlot(column string, storage ColumnStorage) int
 // Persistent index boundaries must not retain a view into an evictable decoded
 // dictionary. Eligible raw text keeps its stable compressed handle. Other
 // string representations own a copied boundary rather than pinning the cache.
-func (g colGetter) persistentValue(recid uint32, tx *TxContext, columnInput *nativeTableInput) scm.Scmer {
+func (g colGetter) persistentValue(recid uint32, tx *TxContext, columnInput nativeTableInput) scm.Scmer {
 	var value scm.Scmer
 	if g.source != nil {
 		// Index construction already owns the shard lock. Preserve that
@@ -371,7 +371,7 @@ func releaseIndexGetters(getters []colGetter) {
 // shard under its currently-held read or write lock. Recursive computed
 // readers must use that same lock instead of entering it again. The caller
 // releases all returned readers through releaseIndexGetters.
-func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter, columnInput *nativeTableInput) []colGetter {
+func (s *StorageIndex) buildGetters(tx *TxContext, storage []colGetter, columnInput nativeTableInput) []colGetter {
 	var getters []colGetter
 	if cap(storage) >= len(s.Cols) {
 		getters = storage[:len(s.Cols)]
@@ -863,6 +863,9 @@ func effectiveBoundaryInclusiveness(cols scanAccess, indexBounds *scanIndexBound
 }
 
 func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+	if cols.columnInput.table == nil || cols.columnInput.table != t.t {
+		panic("index scan requires its captured native column input")
+	}
 	privateInput := false
 	var columns map[string]nativeColumnInitialValue
 	if names := cols.columnInput.names; names != nil && names.appendedInitialInput != nil {
@@ -1375,7 +1378,7 @@ func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, matchers []Ind
 // buildIndex constructs the shared index data structures.
 // cols must contain value getters for each index column in order.
 // The caller must hold s.mu.Lock() or have exclusive access.
-func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext, columnInput *nativeTableInput) {
+func (s *StorageIndex) buildIndex(cols []colGetter, tx *TxContext, columnInput nativeTableInput) {
 	state := new(storageIndexState)
 	// Build privately. A panic leaves the published state untouched; all
 	// unpublished allocations are reclaimed through ordinary Go ownership.

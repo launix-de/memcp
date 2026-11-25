@@ -202,9 +202,9 @@ func (s *storageShard) executeClusterRequest(ctx context.Context, r scm.ClusterR
 			}
 			return s.t.schema.executeScanTask(ctx, session, input, s)
 		case shardScanInvocation:
-			var finishInput func()
+			var finishInput nativeTableReadRelease
 			input.tx, input.access.columnInput, finishInput = s.t.readDataContext(input.tx)
-			defer finishInput()
+			defer finishInput.release()
 			// Advisory accounting follows the native generation, not a second
 			// wire snapshot. Each kernel owns its actual fixed input boundary.
 			inputCount := int64(s.plannerMainRows.Load()) + int64(s.plannerDeltaRows.Load())

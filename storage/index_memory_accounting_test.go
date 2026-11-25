@@ -61,7 +61,7 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 	var buf [8]uint32
 	shard.mu.RLock()
 	_, columnInput1, finishColumnInput1 := shard.t.readDataContext(nil)
-	defer finishColumnInput1()
+	defer finishColumnInput1.release()
 	columnAccess1 := runtimeScanAccess(bounds)
 	columnAccess1.columnInput = columnInput1
 	shard.iterateIndex(nil, columnAccess1, len(shard.deltaRows()), buf[:], 0, nil, func(batch []uint32) bool {
@@ -227,7 +227,7 @@ func TestIndexInvocationRetainsOrderingAfterOwnerEviction(t *testing.T) {
 	var selectedIndex *StorageIndex
 	count, sum := 0, int64(0)
 	_, columnInput2, finishColumnInput2 := shard.t.readDataContext(nil)
-	defer finishColumnInput2()
+	defer finishColumnInput2.release()
 	columnAccess2 := access
 	columnAccess2.columnInput = columnInput2
 	shard.iterateIndexEx(nil, columnAccess2, len(shard.deltaRows()), buffer[:], 1, true, nil, nil, nil,

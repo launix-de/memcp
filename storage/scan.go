@@ -1449,7 +1449,7 @@ func (t *table) scanExists(currentTx *TxContext, accessSchema scm.Scmer, accessV
 
 func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer) bool {
 	currentTx, columnInput, finishData := t.readDataContext(currentTx)
-	defer finishData()
+	defer finishData.release()
 
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
@@ -1604,27 +1604,29 @@ func runDirectSingleShardScan(currentTx *TxContext, topology *tableShardTopology
 }
 
 func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSchema scm.Scmer, accessValues []scm.Scmer, requiredAccess scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
-	var finishData func()
+	var finishRead nativeTableReadRelease
+	var finishWrite func()
 	defer func() {
-		if finishData != nil {
-			finishData()
+		defer finishRead.release()
+		if finishWrite != nil {
+			finishWrite()
 		}
 	}()
-	var columnInput *nativeTableInput
+	var columnInput nativeTableInput
 	if scanMutates(callbackCols) {
-		currentTx, finishData = t.writeDataContext(currentTx)
+		currentTx, finishWrite = t.writeDataContext(currentTx)
 		topology := t.pinActiveTopology()
 		defer topology.releaseOperation()
 		columnInput = t.bindColumnInput(currentTx)
 		columnInput.topology = topology
 	} else {
-		currentTx, columnInput, finishData = t.readDataContext(currentTx)
+		currentTx, columnInput, finishRead = t.readDataContext(currentTx)
 	}
 
 	return t.scanWithBatchInput(currentTx, source, accessSchema, accessValues, requiredAccess, conditionCols, condition, callbackCols, mapReduce, neutral, combine, isOuter, stride, batchdata, columnInput)
 }
 
-func (t *table) scanWithBatchInput(currentTx *TxContext, source *recSet, accessSchema scm.Scmer, accessValues []scm.Scmer, requiredAccess scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer, columnInput *nativeTableInput) scm.Scmer {
+func (t *table) scanWithBatchInput(currentTx *TxContext, source *recSet, accessSchema scm.Scmer, accessValues []scm.Scmer, requiredAccess scanAccess, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer, columnInput nativeTableInput) scm.Scmer {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	hasMutationCallback := false
