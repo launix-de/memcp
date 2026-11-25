@@ -25,7 +25,7 @@ func requireSelfForeignModes(child, parent *table, fk foreignKey) {
 func sameForeignDeclaration(a, b foreignKey) bool {
 	return a.Id == b.Id && a.Tbl1 == b.Tbl1 && a.Tbl2 == b.Tbl2 &&
 		slices.Equal(a.Cols1, b.Cols1) && slices.Equal(a.Cols2, b.Cols2) &&
-		a.Updatemode == b.Updatemode && a.Deletemode == b.Deletemode && a.Untrusted == b.Untrusted
+		a.Updatemode == b.Updatemode && a.Deletemode == b.Deletemode && a.Untrusted == b.Untrusted && a.Disabled == b.Disabled
 }
 
 func foreignMetadataValue(row scm.Scmer, name string) scm.Scmer {

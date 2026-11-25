@@ -34,14 +34,17 @@ func (tx *TxContext) publicNativeDeclarations(history []catalogDeclarationAmendm
 	// each addition's accepted validation fact once, including its matching DROP;
 	// recovery never publishes a transient pending state or a second projection.
 	trusted := make(map[*catalogForeignAmendment]bool)
+	enabled := make(map[*catalogForeignAmendment]bool)
 	for _, entry := range history {
 		if add := entry.foreign; add != nil {
 			trusted[add] = !add.declaration.Foreign.Untrusted
+			enabled[add] = !add.declaration.Foreign.Disabled
 		}
 		if state := entry.constraintState; state != nil {
 			for _, current := range state.current {
 				if current.addition != nil {
 					trusted[current.addition] = current.trusted
+					enabled[current.addition] = current.enabled
 				}
 			}
 		}
@@ -77,13 +80,15 @@ func (tx *TxContext) publicNativeDeclarations(history []catalogDeclarationAmendm
 		}
 		if add := entry.foreign; add != nil {
 			d := add.declaration
-			d.Foreign.Untrusted = !trusted[add]
+			d.Foreign.Disabled = !enabled[add]
+			d.Foreign.Untrusted = !trusted[add] || d.Foreign.Disabled
 			result = append(result, catalogNativeDeclaration{Operation: "foreign_add", Foreign: &d})
 		}
 		if drop := entry.foreignDrop; drop != nil {
 			d := drop.declaration
 			if drop.addition != nil {
-				d.Foreign.Untrusted = !trusted[drop.addition]
+				d.Foreign.Disabled = !enabled[drop.addition]
+				d.Foreign.Untrusted = !trusted[drop.addition] || d.Foreign.Disabled
 			}
 			result = append(result, catalogNativeDeclaration{Operation: "foreign_drop", Foreign: &d})
 		}

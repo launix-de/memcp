@@ -546,6 +546,11 @@ func (tx *TxContext) prepareCatalogDecision() error {
 	if record.hasColumnRetirements() {
 		record.Format = 28
 	}
+	// Enforcement state is required even when composed with newer column or
+	// allocator operations. Its strict envelope must be selected last.
+	if _, disabled := record.foreignEnforcementFacts(); disabled {
+		record.Format = 29
+	}
 	encoded := encodeCatalogDecision(record)
 	db.schemalock.Unlock()
 	frozen, err := decodeCatalogDecision(encoded)

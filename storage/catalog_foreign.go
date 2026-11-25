@@ -953,7 +953,9 @@ func (db *database) preparePublicConstraintPublication(checks []catalogCheckDecl
 		fk := declaration.Foreign
 		publication.foreignPayloadBytes += fk.payloadFootprint
 		child, parent := db.tables.Get(fk.Tbl1), db.tables.Get(fk.Tbl2)
-		publication.programs = append(publication.programs, programs[fk.Id]...)
+		if !fk.Disabled {
+			publication.programs = append(publication.programs, programs[fk.Id]...)
+		}
 		for _, t := range foreignEndpointTables(child, parent) {
 			endpoint := endpoints[t]
 			if endpoint == nil {

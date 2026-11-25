@@ -14,8 +14,8 @@ import (
 // Only a not-yet-published addition can change state in this profile. Its
 // original endpoints remain leased and blocked for row mutation; unrelated
 // row participants do not invalidate that admission. Preparation still rejects
-// disabled CHECK/FK states. An explicitly unvalidated FK addition can remain
-// enabled/untrusted; its generated write enforcement never changes.
+// disabled/untrusted CHECK states. Pending FK state is frozen into the same
+// accepted native declaration, including absence of enforcement when disabled.
 type catalogConstraintState struct {
 	addition *catalogForeignAmendment
 	check    *catalogCheckAmendment
@@ -239,12 +239,8 @@ func replaceConstraintStateMetadata(base *tableShowColumnsSnapshot, updates map[
 
 func (changes *publicCatalogChanges) validateConstraintStatesLocked() error {
 	for name, state := range changes.constraintStates {
-		if !state.enabled || !state.trusted && (state.addition == nil || !state.addition.declaration.Foreign.Untrusted) {
-			kind := "foreign"
-			if state.check != nil {
-				kind = "check"
-			}
-			return fmt.Errorf("pending %s declaration must be enabled and validated before commit: %s", kind, name)
+		if state.check != nil && (!state.enabled || !state.trusted) {
+			return fmt.Errorf("pending check declaration must be enabled and validated before commit: %s", name)
 		}
 	}
 	return nil

@@ -36,14 +36,56 @@ func sharedForeignMirror(key foreignKey) foreignKey {
 	return key
 }
 
+// Disabled enforcement changes schema meaning as well as journal meaning.
+// A mandatory numeric field carries the closed discriminator so old schema
+// import/checkpoint/transport readers fail instead of silently enabling it.
+// Enabled declarations retain their exact historical encoding.
+func (key foreignKey) MarshalJSON() ([]byte, error) {
+	type declaration foreignKey
+	if !key.Disabled {
+		return json.Marshal(declaration(key))
+	}
+	if !key.Untrusted || key.Updatemode > SETNULL || key.Deletemode > SETNULL {
+		return nil, fmt.Errorf("invalid disabled native foreign declaration")
+	}
+	return json.Marshal(struct {
+		declaration
+		Updatemode string
+	}{declaration(key), fmt.Sprintf("disabled-v1/%d", key.Updatemode)})
+}
+
 // JSON allocates distinct strings/arrays for EACH occurrence, including old
 // parent mirrors. Reconstruct those actual allocation facts before publication;
 // accounting fields never appear in the durable format or equality contract.
 func (key *foreignKey) UnmarshalJSON(data []byte) error {
 	type declaration foreignKey
 	var decoded declaration
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	wire := struct {
+		*declaration
+		Updatemode json.RawMessage
+	}{declaration: &decoded}
+	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
+	}
+	if decoded.Disabled {
+		var discriminator string
+		if err := json.Unmarshal(wire.Updatemode, &discriminator); err != nil || !decoded.Untrusted || decoded.Deletemode > SETNULL {
+			return fmt.Errorf("disabled foreign declaration requires its native enforcement discriminator and untrusted state")
+		}
+		switch discriminator {
+		case "disabled-v1/0":
+			decoded.Updatemode = RESTRICT
+		case "disabled-v1/1":
+			decoded.Updatemode = CASCADE
+		case "disabled-v1/2":
+			decoded.Updatemode = SETNULL
+		default:
+			return fmt.Errorf("invalid disabled native foreign enforcement discriminator")
+		}
+	} else if len(wire.Updatemode) != 0 {
+		if err := json.Unmarshal(wire.Updatemode, &decoded.Updatemode); err != nil {
+			return fmt.Errorf("enabled foreign declaration requires its numeric native update mode: %w", err)
+		}
 	}
 	*key = ownForeignPayload(foreignKey(decoded))
 	var fields map[string]json.RawMessage
@@ -51,6 +93,13 @@ func (key *foreignKey) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	for name, value := range fields {
+		if strings.EqualFold(name, "Disabled") {
+			var state *bool
+			if err := json.Unmarshal(value, &state); err != nil || state == nil {
+				return fmt.Errorf("invalid native foreign enforcement state")
+			}
+			key.enforcementStatePresent = true
+		}
 		if strings.EqualFold(name, "Untrusted") {
 			var state *bool
 			if err := json.Unmarshal(value, &state); err != nil || state == nil {
@@ -74,7 +123,7 @@ func (t *table) refreshForeignMemoryLocked() {
 	bytes := uint(cap(t.Foreign)) * uint(unsafe.Sizeof(foreignKey{}))
 	var events uint32
 	for _, key := range t.Foreign {
-		if key.Tbl2 == t.Name {
+		if key.Tbl2 == t.Name && !key.Disabled {
 			if key.Updatemode != RESTRICT {
 				events |= 1 << nativeMutationUpdate
 			}

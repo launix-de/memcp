@@ -262,6 +262,9 @@ func removeForeignDropMetadata(t *table, base *tableShowColumnsSnapshot, fk fore
 }
 
 func foreignDropPrograms(child, parent *table, fk foreignKey) []foreignKeyTrigger {
+	if fk.Disabled {
+		return nil
+	}
 	prefix := "__fk_" + fk.Id + "_"
 	update := BeforeUpdate
 	if fk.Updatemode != RESTRICT {
@@ -313,7 +316,7 @@ func validateCatalogForeignDrop(db *database, declaration catalogForeignDeclarat
 		matched := false
 		for _, current := range t.Foreign {
 			if current.Id == fk.Id && current.Tbl1 == fk.Tbl1 && current.Tbl2 == fk.Tbl2 &&
-				current.Updatemode == fk.Updatemode && current.Deletemode == fk.Deletemode && current.Untrusted == fk.Untrusted &&
+				current.Updatemode == fk.Updatemode && current.Deletemode == fk.Deletemode && current.Untrusted == fk.Untrusted && current.Disabled == fk.Disabled &&
 				slices.Equal(current.Cols1, fk.Cols1) && slices.Equal(current.Cols2, fk.Cols2) {
 				matched = true
 			}

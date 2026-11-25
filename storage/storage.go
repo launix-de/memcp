@@ -3132,7 +3132,7 @@ func Init(en scm.Env) {
 			defer invocation.finish()
 			return scm.NewBool(invocation.binding.stageConstraintState(TableFromScmer(a[0]), names, all, scm.ToBool(a[2]), scm.ToBool(a[3])))
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Description: "changes only owned pending native FK/CHECK declarations; commit requires enabled and validated state",
+		Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Description: "changes only owned pending native FK/CHECK declarations; CHECK commit requires enabled and validated state",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
 				{Kind: "any", Label: "names", Description: "exact native declaration names, or true for all child-owned FK/CHECK declarations"},
@@ -5676,6 +5676,9 @@ type foreignKeyTrigger struct {
 }
 
 func buildFKTriggers(db *database, t1, t2 *table, fk foreignKey) []foreignKeyTrigger {
+	if fk.Disabled {
+		return nil
+	}
 	programs := make([]foreignKeyTrigger, 0, 4)
 
 	triggerPrefix := "__fk_" + fk.Id + "_"

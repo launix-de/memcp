@@ -6,10 +6,23 @@ package storage
 // Only declaration recipes are visited, never table data, programs or shards.
 // Presence fences old journal domains; the semantic bit selects the new writer.
 func (record *catalogDecisionRecord) foreignValidationFacts() (present, untrusted bool) {
-	observe := func(key foreignKey) {
+	record.visitForeignDeclarations(func(key foreignKey) {
 		present = present || key.validationStatePresent
 		untrusted = untrusted || key.Untrusted
-	}
+	})
+	return
+}
+
+func (record *catalogDecisionRecord) foreignEnforcementFacts() (present, disabled bool) {
+	record.visitForeignDeclarations(func(key foreignKey) {
+		present = present || key.enforcementStatePresent
+		disabled = disabled || key.Disabled
+	})
+	return
+}
+
+// The same finite recipe directory is used by both strict version fences.
+func (record *catalogDecisionRecord) visitForeignDeclarations(observe func(foreignKey)) {
 	for _, table := range record.Tables {
 		if table == nil {
 			continue // the existing table-shape validator owns malformed tables
@@ -31,5 +44,4 @@ func (record *catalogDecisionRecord) foreignValidationFacts() (present, untruste
 			observe(action.Foreign.Foreign)
 		}
 	}
-	return
 }

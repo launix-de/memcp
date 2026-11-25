@@ -2,8 +2,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
   isolated: true
-  description: Pending native foreign state is genuine private metadata and cannot commit without historical validation
+  description: Pending native FK state commits its exact enforcement status while CHECK declarations require historical validation
 setup:
+- sql: DROP TABLE IF EXISTS state_disabled
+- sql: DROP TABLE IF EXISTS state_reenabled
+- sql: CREATE TABLE state_disabled(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE state_reenabled(id INT PRIMARY KEY,parent_id INT)
+- sql: INSERT INTO state_disabled VALUES(10,1)
+- sql: INSERT INTO state_reenabled VALUES(20,1)
 - sql: CREATE TABLE state_parent(id INT PRIMARY KEY)
 - sql: CREATE TABLE state_child(id INT PRIMARY KEY,parent_id INT)
 - sql: CREATE TABLE state_mixed(id INT PRIMARY KEY,parent_id INT)
@@ -15,6 +21,8 @@ setup:
 - scm: (createforeignkey (table "memcp-tests" false "state_mixed" false nil) "FK_state_committed" '("parent_id") (table "memcp-tests" false "state_parent" false nil) '("id") "restrict" "restrict")
 - scm: (registerprocedurelanguage "pending-state-literal" (lambda (source _context) (lambda () (simplify source))))
 cleanup:
+- sql: DROP TABLE IF EXISTS state_disabled
+- sql: DROP TABLE IF EXISTS state_reenabled
 - scm: (dropprocedure "memcp-tests" "state_source" true)
 - sql: DROP TABLE IF EXISTS state_orphan
 - sql: DROP TABLE IF EXISTS state_mixed
@@ -39,37 +47,45 @@ test_cases:
       (and (not (own "Enabled")) (not (own "Trusted")) (not (mirror "Enabled"))
         outside blocked (empty_list? ((show child "constraints") "ForeignKeys"))))
   expect: {result: true}
-- name: A disabled pending declaration rejects the durable decision and leaves no public FK
+- name: A disabled pending FK commits complete metadata and permits future orphan rows
   scm: |
     (begin
-      (define child (table "memcp-tests" false "state_child" false nil))
+      (define child (table "memcp-tests" false "state_disabled" false nil))
       (define parent (table "memcp-tests" false "state_parent" false nil))
       (define owner (newsession)) (owner "username" "root") (tx_begin owner)
       (define tx (owner "__memcp_tx"))
-      (createforeignkey child "FK_state_disabled" '("parent_id") parent '("id") "restrict" "restrict" tx)
-      (constraint_state child true false false tx owner)
-      (define failed (try (lambda () (begin (tx_commit owner) false))
-        (lambda (failure) (strlike (concat failure) "%enabled and validated before commit%"))))
-      (tx_rollback owner)
-      (and failed (empty_list? ((show child "constraints") "ForeignKeys"))))
-  expect: {result: true}
-- name: Reenabling alone does not manufacture historical trust
+      (try (lambda () (begin
+        (createforeignkey child "FK_state_disabled" '("parent_id") parent '("id") "restrict" "restrict" tx)
+        (constraint_state child true false false tx owner)
+        (define pending (car ((show child "constraints" tx) "ForeignKeys")))
+        (tx_commit owner)
+        (insert child '("id" "parent_id") (list (list 11 999)) '() nil false nil nil)
+        (define committed (car ((show child "constraints") "ForeignKeys")))
+        (list (pending "Enabled") (pending "Trusted") (committed "Enabled") (committed "Trusted")
+          (sort (scan nil child '() '() '() (lambda () true) '("id" "parent_id")
+            (lambda (acc id value) (append acc (list id value))) '() (lambda (left right) (merge (list left right))) false)
+            (lambda (left right) (< (car left) (car right)))))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [false, false, false, false, [[10, 1], [11, 999]]]}
+- name: Reenabling without validation preserves untrusted status instead of manufacturing historical trust
   scm: |
     (begin
-      (define child (table "memcp-tests" false "state_child" false nil))
+      (define child (table "memcp-tests" false "state_reenabled" false nil))
       (define parent (table "memcp-tests" false "state_parent" false nil))
       (define owner (newsession)) (owner "username" "root") (tx_begin owner)
       (define tx (owner "__memcp_tx"))
-      (createforeignkey child "FK_state_untrusted" '("parent_id") parent '("id") "restrict" "restrict" tx)
-      (constraint_state child true false false tx owner)
-      (constraint_state child true true false tx owner)
-      (define own (car ((show child "constraints" tx) "ForeignKeys")))
-      (define failed (try (lambda () (begin (tx_commit owner) false))
-        (lambda (failure) (strlike (concat failure) "%enabled and validated before commit%"))))
-      (tx_rollback owner)
-      (and (own "Enabled") (not (own "Trusted")) failed
-        (empty_list? ((show child "constraints") "ForeignKeys"))))
-  expect: {result: true}
+      (try (lambda () (begin
+        (createforeignkey child "FK_state_untrusted" '("parent_id") parent '("id") "restrict" "restrict" tx)
+        (constraint_state child true false false tx owner)
+        (constraint_state child true true false tx owner)
+        (define pending (car ((show child "constraints" tx) "ForeignKeys")))
+        (tx_commit owner)
+        (define committed (car ((show child "constraints") "ForeignKeys")))
+        (list (pending "Enabled") (pending "Trusted") (committed "Enabled") (committed "Trusted")
+          (scan nil child '() '() '() (lambda () true) '("id" "parent_id")
+            (lambda (acc id value) (append acc (list id value))) '() (lambda (left right) (merge (list left right))) false))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [true, false, true, false, [[20, 1]]]}
 - name: Interleaved source and state history restores exact nested savepoint views
   scm: |
     (begin
