@@ -13,7 +13,7 @@ SPDX-License-Identifier: GPL-3.0-or-later */
 			(lambda fields true))
 		(result "rows"))))
 	(define expect (lambda (text names expected) (begin
-		(define actual (map (run text) (lambda (row) (map names (lambda (name) (row name))))))
+		(define actual (map (run text) (lambda (row) (map names (lambda (name) (get_assoc row name))))))
 		(if (equal? (json_encode actual) (json_encode expected)) true
 			(error (concat "candidate identity upgrade result mismatch: " text " expected=" (json_encode expected) " actual=" (json_encode actual)))))))
 	/* Candidate fixtures are outside up_*: the complete old-writer snapshot
