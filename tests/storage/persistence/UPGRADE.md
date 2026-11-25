@@ -1,6 +1,32 @@
 <!-- Copyright (C) 2026 Carl-Philip Hänsch -->
 # Upgrade compatibility contract
 
+## Pending foreign-key enforcement state
+
+The `catalog-v10/v29/` domain records the final enabled and trusted state of
+foreign keys added by the same original transaction. A disabled foreign key
+retains its declaration, endpoint dependencies and metadata; it installs no
+enforcement programs. Disabling clears historical trust. Reenabling without
+validation preserves the untrusted state. CHECK declarations retain their
+existing requirement to be enabled and validated at commit.
+
+V29 composes the existing ordered declaration, column-retirement and allocator
+actions in one native decision. Earlier journal domains reject the enforcement
+field, including an explicit false spelling. The retained required journal
+envelope survives checkpoint compaction and storage moves. A disabled schema
+descriptor also encodes its mandatory update-mode field as the closed
+`disabled-v1/0`, `disabled-v1/1` or `disabled-v1/2` discriminator. Historical
+numeric readers therefore reject standalone schema imports as well. Enabled
+legacy descriptors keep their existing encoding.
+
+`unchecked-foreign-after-rows.yaml`, `disabled-foreign-after-rows.yaml` and
+`pending-foreign-state.yaml` cover original transaction row work, prospective
+enforcement, independent trust and enabled state, rollback, savepoints,
+dependency retention, crash recovery and checkpoint metadata. The native
+compatibility tests cover malformed descriptors and strict journal domains.
+Changing the state of an already committed foreign key remains outside the
+pending-declaration API's admitted profile.
+
 ## Candidate row-initialized column appends
 
 The proposed `catalog-v21/` domain carries ordinary column appends whose
