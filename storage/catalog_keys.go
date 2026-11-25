@@ -111,9 +111,10 @@ func (tx *TxContext) createCatalogKey(t *table, key uniqueKey) bool {
 	if tx == nil || tx.State != TxActive || tx.decisionStarted || !tx.ownsPendingTable(t) {
 		panic("unique declaration requires its active native catalog owner")
 	}
-	// A cursor-stable constructor must retain its original pre-row boundary.
-	// Only the existing local ACID validation path can join earlier row work.
-	if tx.Mode != TxACID && tx.catalogDeclarationDataEntered(t) {
+	// Raw constructor keys retain their pre-row declaration contract even when
+	// clean catalog admission promoted an original CS binding to ACID. Public
+	// validated keys and typed indexes enter their own explicit stage owner.
+	if tx.catalogDeclarationDataEntered(t) {
 		panic("transactional declaration amendments must precede native row access")
 	}
 	if tx.coordinator != nil {
@@ -123,7 +124,7 @@ func (tx *TxContext) createCatalogKey(t *table, key uniqueKey) bool {
 		}
 		return scm.ToBool(value)
 	}
-	if tx.catalogDeclarationDataEntered(t) || tx.hasNameAmendments() || tx.hasTableDrops() {
+	if tx.hasNameAmendments() || tx.hasTableDrops() {
 		return tx.stagePublicKey(t, "add", key, nil)
 	}
 	return tx.amendCatalogDeclaration(t, func(current *table) bool { return declareUnpublishedKey(current, key) })

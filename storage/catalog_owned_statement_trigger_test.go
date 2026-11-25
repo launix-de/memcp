@@ -312,3 +312,28 @@ func TestRetiredOwnedStatementPhaseAllowsOriginalPrivateCreateAgain(t *testing.T
 		t.Fatalf("valid original owner did not survive the negative controls: %v", err)
 	}
 }
+
+func TestRawOwnedKeyRetainsPreRowContractAfterCatalogPromotion(t *testing.T) {
+	for _, profile := range []struct {
+		name string
+		mode TxMode
+	}{{"cursor-stability", TxCursorStability}, {"promoted-acid", TxACID}} {
+		t.Run(profile.name, func(t *testing.T) {
+			tx, changes, constructor, _, _ := cancelledCatalogInputFixture(t)
+			tx.Mode = profile.mode
+			constructor.catalogDataEntered.Store(true)
+			before := constructor.showColumnsSnapshot.Load()
+			history, identity, views, lease := tx.catalogAmendments.Load(), tx.catalogIdentity.Load(), changes.views.Load(), changes.leases[constructor]
+			var cause any
+			func() {
+				defer func() { cause = recover() }()
+				tx.createCatalogKey(constructor, uniqueKey{Id: "raw_after_rows", Cols: []string{"id"}})
+			}()
+			if fmt.Sprint(cause) != "transactional declaration amendments must precede native row access" ||
+				constructor.showColumnsSnapshot.Load() != before || tx.catalogAmendments.Load() != history || tx.catalogIdentity.Load() != identity ||
+				changes.views.Load() != views || changes.leases[constructor] != lease || lease.owner == nil || changes.db.tables.Get(constructor.Name) != constructor {
+				t.Fatalf("raw owned key changed its pre-row boundary or original native state: %v", cause)
+			}
+		})
+	}
+}
