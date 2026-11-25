@@ -22,12 +22,17 @@ cleanup:
   - sql: DROP TABLE IF EXISTS statement_writer_target
   - sql: DROP TABLE IF EXISTS statement_writer_audit
 test_cases:
-  - name: An original transaction rejects a foreign retained writer without losing either complete view
+  - name: A rejected foreign writer ends only the competing transaction and preserves the original complete view
     tds:
       statements:
         - {connection: original, sql: BEGIN TRANSACTION}
         - {connection: original, sql: UPDATE statement_writer_target SET value=21 WHERE id=2}
         - {connection: competing, sql: BEGIN TRANSACTION}
+        - connection: competing
+          sql: SELECT id,value,@@TRANCOUNT AS depth,XACT_STATE() AS state FROM statement_writer_target ORDER BY id
+          expect:
+            rows: 2
+            data: [{id: 1, value: 10, depth: 1, state: 1}, {id: 2, value: 20, depth: 1, state: 1}]
         - connection: competing
           sql: UPDATE statement_writer_target SET value=11 WHERE id=1
           expect:
@@ -39,17 +44,18 @@ test_cases:
             rows: 2
             data: [{id: 1, value: 10, depth: 1}, {id: 2, value: 21, depth: 1}]
         - connection: competing
-          sql: SELECT id,value,@@TRANCOUNT AS depth FROM statement_writer_target ORDER BY id
+          # The existing native-origin/unrestored failure policy ends this
+          # competing original T, independently of the XACT_ABORT option.
+          sql: SELECT id,value,@@TRANCOUNT AS depth,XACT_STATE() AS state FROM statement_writer_target ORDER BY id
           expect:
             rows: 2
-            data: [{id: 1, value: 10, depth: 1}, {id: 2, value: 20, depth: 1}]
+            data: [{id: 1, value: 10, depth: 0, state: 0}, {id: 2, value: 20, depth: 0, state: 0}]
         - connection: original
           sql: SELECT id,old_value,new_value FROM statement_writer_audit ORDER BY id
           expect: {rows: 1, data: [{id: 2, old_value: 20, new_value: 21}]}
         - connection: competing
           sql: SELECT id,old_value,new_value FROM statement_writer_audit ORDER BY id
           expect: {rows: 0, data: []}
-        - {connection: competing, sql: ROLLBACK TRANSACTION}
         - {connection: original, sql: ROLLBACK TRANSACTION}
         - connection: observer
           sql: SELECT id,value,@@TRANCOUNT AS depth FROM statement_writer_target ORDER BY id
