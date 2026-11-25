@@ -89,33 +89,44 @@ func (tx *TxContext) stagePublicKey(t *table, operation string, key uniqueKey, i
 	}
 	finish := tx.beginCatalogConstruction(catalogValidationConstruction, nil, t)
 	defer func() { finish(); tx.retireUnacceptedPublicCatalogPhase() }()
-	if tx.replicationActive || tx.replicationWriting || tx.relationData != nil || tx.coordinator != nil || tx.clusterNumber.Load() != 0 || tx.remoteObject != nil || tx.remoteInvocation || index == nil && (tx.catalogIntents.Load() != nil || tx.hasTableDrops()) && !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) || t.Ephemeral || t.ScopedSchema || t.PersistencyMode == Cache {
+	if tx.replicationActive || tx.replicationWriting || tx.relationData != nil || tx.coordinator != nil || tx.clusterNumber.Load() != 0 || tx.remoteObject != nil || tx.remoteInvocation || t.Ephemeral || t.ScopedSchema || t.PersistencyMode == Cache {
 		panic("public unique declaration requires a local committed native table")
 	}
-	if index != nil {
-		tx.requireLogicalIndexEndpoint(t)
-	}
+	tx.requireKeyEndpoint(t, index)
 	return tx.stagePublicCatalogDeclaration(t.schema, catalogPublicKeyKind, nil, func(changes *publicCatalogChanges) bool { return changes.stageKey(tx, t, operation, key, index) })
 }
 
-// Only typed index actions select required V32. Their endpoint may be public
-// or belong to the SAME original constructor program; raw keys keep the old
-// transaction-wide veto. The existing common entry still attests prepared,
-// remote and native participant state under its actual declaration admission.
-func (tx *TxContext) requireLogicalIndexEndpoint(t *table) {
+// Raw keys retain the existing V22 action; typed indexes select V32. Both
+// use the same actual original endpoint and catalog admission. A raw public
+// key may join surviving constructors, but not a whole-table retirement.
+func (tx *TxContext) requireKeyEndpoint(t *table, index *logicalIndexDeclaration) {
 	if t == nil || t.schema == nil || !localCatalogRowDatabase(t.schema) ||
 		t.schema.tables.Get(t.Name) != t || t.RuntimeIdentity == "" || tx.ownsTableDrop(t) {
-		panic("logical index requires an actual local endpoint outside pending table retirement")
+		panic("unique declaration requires an actual local endpoint outside pending table retirement")
 	}
 	tx.requireDeclarationEndpoint(t, maintenanceAlter)
-	if !t.committedAt(t.schema.catalogView().version) && !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t) {
-		panic("logical index requires its original native endpoint owner")
+	scope := catalogForeignEndpointScope{owner: tx.transactionState}
+	owned := scope.owns(t)
+	if !t.committedAt(t.schema.catalogView().version) && !owned {
+		panic("unique declaration requires its original native endpoint owner")
 	}
 	if tx.catalogIntents.Load() != nil || tx.hasTableDrops() {
 		identity := tx.catalogIdentity.Load()
 		if tx.Mode != TxACID || tx.State != TxActive || tx.decisionStarted || tx.prepared != nil || tx.catalogCommit != nil || tx.rollbackOnly.Load() ||
 			identity == nil || identity.Namespace != "" || identity.database != t.schema || identity.Database != t.schema.Name || identity.Incarnation != t.schema.incarnationID() {
+			if index == nil {
+				panic("public unique declaration requires a local committed native table")
+			}
 			panic("joint logical index requires the same unprepared local ACID catalog decision")
+		}
+		intents := tx.catalogIntentTables()
+		for _, constructor := range intents {
+			if constructor == nil || constructor.schema != t.schema || !scope.owns(constructor) {
+				panic("joint unique declaration lost its surviving original constructor")
+			}
+		}
+		if index == nil && !owned && (len(intents) == 0 || tx.hasTableDrops()) {
+			panic("public unique declaration requires a local committed native table")
 		}
 	}
 }
@@ -167,11 +178,7 @@ func (changes *publicCatalogChanges) stageKey(tx *TxContext, t *table, operation
 		db.schemalock.RLock()
 		defer db.schemalock.RUnlock()
 		changes.validateConstraintStateEndpointsLocked(tx)
-		if index != nil {
-			tx.requireLogicalIndexEndpoint(t)
-		} else {
-			tx.requireDeclarationEndpoint(t, maintenanceAlter)
-		}
+		tx.requireKeyEndpoint(t, index)
 		if t.schema != db || db.tables.Get(t.Name) != t || (!t.committedAt(db.catalogView().version) && !(catalogForeignEndpointScope{owner: tx.transactionState}).owns(t)) {
 			panic("unique declaration endpoint generation was replaced")
 		}

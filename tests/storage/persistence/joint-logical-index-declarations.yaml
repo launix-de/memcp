@@ -74,24 +74,39 @@ test_cases:
     - true
     - - 0
     - 0
-- name: Raw createkey retains its existing joint constructor veto
-  scm: "(begin\n\t(define a ((globalvars \"__mixed_ix_caller\"))) (define run (globalvars \"__mixed_ix_run\"))\n\t(run a \"\
-    BEGIN TRANSACTION\") (run a \"CREATE TABLE mixed_ix_raw_support(id INT PRIMARY KEY)\")\n\t(define tx (a \"__memcp_tx\"\
-    )) (define target (table \"memcp-tests\" false \"mixed_ix_public\" false tx))\n\t(define denied ((globalvars \"__mixed_ix_refused\"\
-    )\n\t\t(lambda () (createkey target \"UQ_mixed_raw\" true (list \"value\") tx)) \"public unique declaration requires a\
-    \ local committed native table\"))\n\t(define active (equal? (tx_state tx) \"active\"))\n\t(define absent (equal? (count\
-    \ (filter ((show target \"constraints\" tx) \"Unique\")\n\t\t(lambda (key) (equal? (key \"Id\") \"UQ_mixed_raw\")))) 0))\n\
-    \t(run a \"ROLLBACK TRANSACTION\")\n\t(list denied active absent (map (run a \"SELECT id,value FROM mixed_ix_public ORDER\
-    \ BY id\") (lambda (row) (list (row \"id\") (row \"value\"))))))\n"
+- name: Raw public key joins its original ACID constructor and rolls back complete state
+  scm: "(begin\n\t(define a ((globalvars \"__mixed_ix_caller\"))) (define run (globalvars \"__mixed_ix_run\"))\n\
+    \t(run a \"BEGIN TRANSACTION\")\n\t(run a \"CREATE TABLE mixed_ix_raw_support(id INT PRIMARY KEY)\")\n\t(run\
+    \ a \"INSERT mixed_ix_raw_support VALUES(3)\")\n\t(define tx (a \"__memcp_tx\"))\n\t(define target (table \"\
+    memcp-tests\" false \"mixed_ix_public\" false tx))\n\t(define created (createkey target \"UQ_mixed_raw\" true\
+    \ (list \"value\") tx))\n\t(define active (equal? (tx_state tx) \"active\"))\n\t(define own (equal? (count (filter\
+    \ ((show target \"constraints\" tx) \"Unique\")\n\t\t(lambda (key) (equal? (key \"Id\") \"UQ_mixed_raw\"))))\
+    \ 1))\n\t(define hidden (equal? (count (filter ((show target \"constraints\") \"Unique\")\n\t\t(lambda (key)\
+    \ (equal? (key \"Id\") \"UQ_mixed_raw\")))) 0))\n\t(define ownrows (map (run a \"SELECT id FROM mixed_ix_raw_support\
+    \ ORDER BY id\") (lambda (row) (row \"id\"))))\n\t(run a \"UPDATE mixed_ix_public SET value=11 WHERE id=1\"\
+    )\n\t(define changed (map (run a \"SELECT id,value FROM mixed_ix_public ORDER BY id\")\n\t\t(lambda (row) (list\
+    \ (row \"id\") (row \"value\")))))\n\t(run a \"ROLLBACK TRANSACTION\")\n\t(define absent (equal? (count (filter\
+    \ ((show target \"constraints\") \"Unique\")\n\t\t(lambda (key) (equal? (key \"Id\") \"UQ_mixed_raw\")))) 0))\n\
+    \t(list created active own hidden ownrows changed absent\n\t\t(map (run a \"SELECT id,value FROM mixed_ix_public\
+    \ ORDER BY id\") (lambda (row) (list (row \"id\") (row \"value\"))))\n\t\t(map (run a \"SELECT OBJECT_ID('mixed_ix_raw_support','U')\
+    \ AS oid\") (lambda (row) (row \"oid\")))))\n"
   expect:
     result:
     - true
     - true
     - true
+    - true
+    - - 3
+    - - - 1
+        - 11
+      - - 2
+        - 20
+    - true
     - - - 1
         - 10
       - - 2
         - 20
+    - - null
 - name: Two replacement copies nullable public append and typed indexes share the original decision
   tds:
     statements:

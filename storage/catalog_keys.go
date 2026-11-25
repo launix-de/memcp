@@ -111,6 +111,11 @@ func (tx *TxContext) createCatalogKey(t *table, key uniqueKey) bool {
 	if tx == nil || tx.State != TxActive || tx.decisionStarted || !tx.ownsPendingTable(t) {
 		panic("unique declaration requires its active native catalog owner")
 	}
+	// A cursor-stable constructor must retain its original pre-row boundary.
+	// Only the existing local ACID validation path can join earlier row work.
+	if tx.Mode != TxACID && tx.catalogDeclarationDataEntered(t) {
+		panic("transactional declaration amendments must precede native row access")
+	}
 	if tx.coordinator != nil {
 		value, err := tx.coordinator.Call(scanQueryContext(tx, context.Background()), scm.ClusterRequest{Method: "catalog_key", Arguments: catalogKeyArguments(t, key)})
 		if err != nil {
