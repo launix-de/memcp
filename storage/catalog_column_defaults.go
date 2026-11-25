@@ -459,6 +459,9 @@ func (changes *publicCatalogChanges) publishViews(history []catalogDeclarationAm
 		// Savepoint rewind removes the epoch, not the original owner's endpoint
 		// lease. A headless slot borrows the baseline without selecting a reset.
 		for t := range previous.allocators {
+			if changes.leases[t] == nil {
+				continue // the actual constructor-cancellation owner retired this generation
+			}
 			allocators[t] = nil
 			writers[t] = struct{}{}
 		}

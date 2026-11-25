@@ -785,17 +785,37 @@ func (tx *TxContext) discardCatalogIntents(keep int) {
 	if db == nil || db != identity.database || db.incarnationID() != identity.Incarnation {
 		return
 	}
+	// Constructors take the declaration owner before database/schema admission.
+	// Savepoint retirement follows that same order, including a failed access:
+	// no retained input is changed until native database admission succeeds.
+	changes := tx.publicCatalogChanges()
+	changesHeld := changes != nil
+	if changesHeld {
+		changes.mu.Lock()
+		defer func() {
+			if changesHeld {
+				changes.mu.Unlock()
+			}
+		}()
+	}
 	access := db.GetWrite(nil)
 	defer access.Release()
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	db.schemalock.Lock()
-	var retired []replacedShardGeneration
-	for _, original := range (*intents)[keep:] {
-		table := db.tables.Get(original.Name)
-		if table == nil || table.RuntimeIdentity != original.RuntimeIdentity || table.CreatorTxID != tx.durableID() {
-			continue
+	schemaHeld := true
+	defer func() {
+		if schemaHeld {
+			db.schemalock.Unlock()
 		}
+	}()
+	cancelled := (*intents)[keep:]
+	validateCancelledCatalogIntents(tx, db, cancelled, tx.publicForeignAmendments())
+	if changes != nil {
+		changes.retireCancelledCatalogInputs(tx, cancelled)
+	}
+	var retired []replacedShardGeneration
+	for _, table := range cancelled {
 		db.tables.Remove(table.Name)
 		topology := table.activeTopology()
 		if topology != nil {
@@ -814,7 +834,14 @@ func (tx *TxContext) discardCatalogIntents(keep int) {
 		tx.catalogIntents.Store(&remaining)
 	}
 	db.publishTableNamesLocked(db.catalogView().pendingNames)
+	// Physical cleanup may drain old shard readers. Release schema publication
+	// first, as in the existing retirement owner.
 	db.schemalock.Unlock()
+	schemaHeld = false
+	if changesHeld {
+		changes.mu.Unlock()
+		changesHeld = false
+	}
 	if failures := cleanupUnpublishedCatalogGenerations(retired); len(failures) != 0 {
 		panic(fmt.Errorf("native catalog rollback cleanup: %v", failures))
 	}
