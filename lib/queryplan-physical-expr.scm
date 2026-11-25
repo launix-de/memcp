@@ -325,13 +325,14 @@ an unbound symbol in the callback when costing selects the probe alternative. */
 		(define input (gs_input stage))
 		(define fact_catalog (group_stage_lowering_catalog stage))
 		(define probe_catalog (qassoc_get (gs_facts stage) (quote probe_catalog) '()))
-		(define stage_lookup (stage_catalog_with_nested
-			(merge_stage_catalogs (list all_stages
-				(if (lowering_catalog? fact_catalog)
-					(lowering_catalog_stages fact_catalog)
-					(coalesceNil fact_catalog '()))
-				probe_catalog
-				(nested_stage_catalog stage)))))
+		(define stage_lookup (lowering_catalog_rebind all_stages
+			(stage_catalog_with_nested
+				(merge_stage_catalogs (list all_stages
+					(if (lowering_catalog? fact_catalog)
+						(lowering_catalog_stages fact_catalog)
+						(coalesceNil fact_catalog '()))
+					probe_catalog
+					(nested_stage_catalog stage))))))
 		(define direct_stages (unique_stages_by_id (merge (list
 			(qb_stages input)
 			(stage_outputs_from_sources_using stage_lookup (qb_sources input))))))
@@ -699,6 +700,7 @@ existing lazy preparation and dependency order. */
 
 (define bounded_scalar_query_probe_inline_presence_stages (lambda (closure_index stage_catalog direct_stages probe_work_rows)
 	(begin
+		(define stage_catalog (lowering_catalog_stages stage_catalog))
 		(define eligible_stages (filter direct_stages (lambda (nested_stage)
 			(and (group_stage? nested_stage)
 				(and (or (presence_probe_stage? nested_stage)
@@ -709,6 +711,7 @@ existing lazy preparation and dependency order. */
 		(define one_dependency_chain (reduce direct_stages (lambda (found root)
 			(or found
 				(begin
+					(define stage_catalog (lowering_catalog_stages stage_catalog))
 					(define closure_ids (stage_id_set
 						(get_assoc closure_index (logical_stage_key root))))
 					(reduce direct_stages (lambda (covered candidate)
@@ -725,10 +728,12 @@ existing lazy preparation and dependency order. */
 			(equal? (count eligible_stages) (count direct_stages)))
 			eligible_stages
 			(begin
+				(define stage_catalog (lowering_catalog_stages stage_catalog))
 				(define eligible_presence_stages (filter eligible_stages presence_probe_stage?))
 				(define semantic_signatures (stage_semantic_signature_index stage_catalog))
 				(filter eligible_presence_stages (lambda (stage)
 					(begin
+						(define stage_catalog (lowering_catalog_stages stage_catalog))
 						(define signature (get_assoc semantic_signatures (gs_id stage)))
 						(equal? (count (filter stage_catalog (lambda (candidate)
 							(and (group_stage? candidate)
@@ -829,7 +834,7 @@ retained or joined. */
 		(define output (nth proof 3))
 		(define condition (combine_where_terms (nth proof 4) true))
 		(define cache (group_stage_cache property))
-		(define carrier (list (quote table) (group_cache_schema cache) false (group_cache_relation cache) false (quote tx)))
+		(define carrier (group_stage_table_expr all_stages property))
 		(list (quote !begin)
 			(lower_group_stage_prepare_using all_stages all_stages property true nil)
 			(list (quote define) (quote __property_candidates)
@@ -845,7 +850,7 @@ retained or joined. */
 		/* Bind the entity key before entering compiled scan callbacks. */
 		(list (list (quote lambda) (list (quote __property_key))
 			(compile_scan_plan (quote scan) (physical_query_tx_symbol)
-				(list (quote table) (group_cache_schema cache) false (group_cache_relation cache) false (quote tx))
+				(group_stage_table_expr (group_stage_lowering_catalog stage) stage)
 				(quoted_runtime_list (list "k0"))
 				'('lambda '('__key) '('equal?? '__key '__property_key))
 				(quoted_runtime_list (list column)) '('lambda '('acc 'value) 'value)
@@ -1010,12 +1015,12 @@ read scope. In particular point-cached cannot reuse a query memo populated befor
 that scope's source revision. Ordinary caller binding grants no such ownership;
 its costed choices and memoization remain available. Preserve inherited flags. */
 (define scalar_aggregate_probe_catalog (lambda (stages contribution_mode property_cover)
-	(map stages (lambda (candidate)
+	(lowering_catalog_rebind stages (map (lowering_catalog_stages stages) (lambda (candidate)
 		(if (and (group_stage? candidate)
 			(or (not (nil? contribution_mode)) (not (nil? property_cover))))
 			(group_stage_with_facts candidate
 				(qassoc_set (gs_facts candidate) 'contribution_probe true))
-			candidate)))))
+			candidate))))))
 
 /* Aggregate probes have the same explicit invocation-domain boundary as
 scalar-first probes. Bind caller values before lowering residual predicates or
@@ -1029,9 +1034,8 @@ preparing nested stages; no free caller SQL column may enter an inner program. *
 			(qassoc_get (gs_facts stage) (quote btw2025_lookup_keys) logical_lookup) parameters))
 		(define bind_domain (lambda (node) (rewrite_scalar_query_probe_params parameter_index node)))
 		(define body (lower_scalar_aggregate_query_probe_expr_using
-			(lowering_catalog_with_planning_session
-				(make_lowering_catalog (map (lowering_catalog_stages all_stages) bind_domain))
-				(lowering_catalog_planning_session all_stages))
+			(lowering_catalog_rebind all_stages
+				(map (lowering_catalog_stages all_stages) bind_domain))
 			(bind_domain stage) (bind_domain value_expr) (map keys bind_domain) parameters
 			reduce_expr neutral_expr contribution_mode))
 		(if (empty_list? parameters) body (cons (list (quote lambda) parameters body) lookup_keys)))))
@@ -1230,7 +1234,7 @@ bound once outside row callbacks; a column reference would make that unsafe. */
 
 (define query_invariant_probe_binding_key (lambda (stage requested_col)
 	(concat "__query_invariant_probe_" (fnv_hash (concat
-		(stage_prepare_backbone_signature stage) "\n" requested_col)))))
+		(stage_prepare_backbone_signature (group_stage_lowering_catalog stage) stage) "\n" requested_col)))))
 
 (define query_invariant_probe_binding_for_col (lambda (stage requested_col)
 	(get_assoc
@@ -1277,25 +1281,20 @@ bound once outside row callbacks; a column reference would make that unsafe. */
 (define stage_lookup_with_query_invariant_probe_bindings (lambda (stages entries)
 	(begin
 		(define binding_keys (query_invariant_probe_key_set entries))
-		(lowering_catalog_with_planning_session
-			(make_lowering_catalog
-				(map (lowering_catalog_stages stages) (lambda (stage)
-					(stage_with_query_invariant_probe_binding_using binding_keys stage))))
-			(lowering_catalog_planning_session stages)))))
+		(lowering_catalog_rebind stages
+			(map (lowering_catalog_stages stages) (lambda (stage)
+				(stage_with_query_invariant_probe_binding_using binding_keys stage)))))))
 
 /* A closed physical producer cannot capture the main plan's lexical invariant
 binding. Mark only its invariant stages for an inline query-scoped probe; the
 ordinary scalar lowerer keeps its established outer-binding behavior. */
 (define stage_lookup_with_inline_query_invariant_probes (lambda (stages)
-	(lowering_catalog_with_planning_session
-		(make_lowering_catalog
-			(map (lowering_catalog_stages stages) (lambda (stage)
-				(if (query_invariant_presence_stage? stage)
-					(group_stage_with_facts stage
-						(qassoc_set (gs_facts stage)
-							(quote inline_query_invariant_probe) true))
-					stage))))
-		(lowering_catalog_planning_session stages))))
+	(lowering_catalog_rebind stages
+		(map (lowering_catalog_stages stages) (lambda (stage)
+			(if (query_invariant_presence_stage? stage)
+				(group_stage_with_facts stage
+					(qassoc_set (gs_facts stage) 'inline_query_invariant_probe true))
+				stage))))))
 
 (define query_invariant_probe_sources (lambda (stages sources)
 	(filter (coalesceNil sources '()) (lambda (src)
@@ -1512,11 +1511,11 @@ still receives every transitive dependency through this compact catalog. */
 							(not (equal? key (quote probe_catalog)))))
 					_ true)))))))
 
-(define scalar_query_probe_compact_stages (lambda (stage nested_stages)
+(define scalar_query_probe_compact_stages (lambda (stages stage nested_stages)
 	(begin
 		(define bases (unique_stages_by_id
 			(map (cons stage nested_stages) scalar_query_probe_stage_without_catalogs)))
-		(define catalog (make_lowering_catalog bases))
+		(define catalog (lowering_catalog_rebind stages bases))
 		(define cataloged (map bases (lambda (candidate)
 			(if (group_stage? candidate)
 				(group_stage_with_lowering_catalog candidate catalog)
@@ -1581,7 +1580,7 @@ still receives every transitive dependency through this compact catalog. */
 			(define consumed_ids (stage_id_set (merge (list hoisted_stages inline_owned_stages))))
 			(define prepare_stages (filter nested_stages (lambda (nested_stage)
 				(not (has_assoc? consumed_ids (gs_id nested_stage))))))
-			(define compact (scalar_query_probe_compact_stages stage nested_stages))
+			(define compact (scalar_query_probe_compact_stages stages stage nested_stages))
 			(define compact_stage (nth compact 0))
 			(define compact_nested_stages (nth compact 1))
 			(define compact_stage_for (lambda (candidate)
@@ -1831,7 +1830,8 @@ until lowering without creating a depth-proportional binary OR chain. */
 		(define branch_stages (merge (map (coalesceNil branches '()) (lambda (branch)
 			(if (query_block? branch) (qb_stages branch) '())))))
 		(define stage_lookup
-			(make_lowering_catalog (merge_stage_catalogs (list all_stages branch_stages))))
+			(lowering_catalog_rebind all_stages
+				(make_lowering_catalog (merge_stage_catalogs (list all_stages branch_stages)))))
 		(define dependency_graph (stage_dependency_graph stage_lookup))
 		(cons (quote or)
 			(map (coalesceNil branches '()) (lambda (branch)
@@ -1972,8 +1972,9 @@ through to reach the base table -- src already is it. */
 (define lower_keytable_scalar_first_probe_expr (lambda (all_stages stage requested_col resolved_lookup_key partition_limit prepared)
 	(begin
 		(define probe_catalog (qassoc_get (gs_facts stage) (quote probe_catalog) '()))
-		(define stage_catalog (stage_catalog_with_nested
-			(merge_stage_catalogs (list all_stages probe_catalog (nested_stage_catalog stage)))))
+		(define stage_catalog (lowering_catalog_rebind all_stages
+			(stage_catalog_with_nested
+				(merge_stage_catalogs (list all_stages probe_catalog (nested_stage_catalog stage))))))
 		(define physical_stage (if (empty_list? probe_catalog)
 			stage
 			(group_stage_with_stage_catalog stage stage_catalog)))
@@ -1984,7 +1985,7 @@ through to reach the base table -- src already is it. */
 			(if prepared nil (lower_group_stage_prepare_using stage_catalog stage_catalog physical_stage true nil))
 			(compile_scan_plan (quote scan_order)
 				(physical_query_tx_symbol)
-				(list (quote table) cache_schema false cache_relation false (quote tx))
+				(group_stage_table_expr stage_catalog physical_stage)
 				(cons (quote list) (list "k0"))
 				(list (quote lambda) (list (quote __kt_k0))
 					(list (quote equal??) (quote __kt_k0) resolved_lookup_key))
@@ -2105,16 +2106,18 @@ separate ownership proof before choosing that faster implementation. */
 		(equal? (string expr) expected_name))))
 
 (define lower_recset_stage_prepare_once_expr (lambda (stage_catalog stage)
-	(list
-		(physical_query_session_symbol)
-		"get_or_compute_scoped"
-		(physical_query_scope_symbol)
-		(stage_prepare_key stage)
-		(quote tx)
-		(list (quote lambda) (list (quote tx))
-			(list (quote !begin)
-				(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
-				true)))))
+	(if (invocation_group_stage? stage_catalog stage)
+		(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
+		(list
+			(physical_query_session_symbol)
+			"get_or_compute_scoped"
+			(physical_query_scope_symbol)
+			(stage_prepare_key stage)
+			(quote tx)
+			(list (quote lambda) (list (quote tx))
+				(list (quote !begin)
+					(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
+					true))))))
 
 /* A decorrelated base-table presence stage already is a semijoin relation:
 scan the child-side predicate, then let its grouping columns identify the true
@@ -2325,8 +2328,9 @@ the emitter and failing after the ordinary carrier has been discarded. */
 (define scalar_first_probe_recset_source_parts (lambda (all_stages stage requested_col share_result allow_direct_presence planning_session)
 	(begin
 		(define probe_catalog (qassoc_get (gs_facts stage) (quote probe_catalog) '()))
-		(define stage_catalog (stage_catalog_with_nested
-			(merge_stage_catalogs (list all_stages probe_catalog (nested_stage_catalog stage)))))
+		(define stage_catalog (lowering_catalog_rebind all_stages
+			(stage_catalog_with_nested
+				(merge_stage_catalogs (list all_stages probe_catalog (nested_stage_catalog stage))))))
 		(define catalog_stage (stage_by_id stage_catalog (gs_id stage)))
 		(define physical_stage (if (empty_list? probe_catalog)
 			(coalesceNil catalog_stage stage)
@@ -2382,7 +2386,7 @@ the emitter and failing after the ordinary carrier has been discarded. */
 								stage_catalog stage_catalog physical_stage true nil))
 						(compile_scan_plan (quote scan_recset)
 							(physical_query_tx_symbol)
-							(list (quote table) cache_schema false cache_relation false (quote tx))
+							(group_stage_table_expr stage_catalog physical_stage)
 							(quoted_runtime_list filtercols)
 							(list (quote lambda) (map filtercols symbol)
 								(combine_where_terms (cons value_condition domain_conditions) true)))
@@ -5097,15 +5101,16 @@ cache identity or a logical fallback. */
 			true))
 		(define raw_input (gs_input stage))
 		(define stamped_catalog (qassoc_get (gs_facts stage) (quote stage_catalog) '()))
-		(define stage_catalog (stage_catalog_with_nested
-			(merge_stage_catalogs (list stamped_catalog (nested_stage_catalog stage)
-				(if (query_block? raw_input) (query_block_stage_catalog raw_input) '())))))
+		(define stage_catalog (lowering_catalog_rebind (group_stage_lowering_catalog stage)
+			(stage_catalog_with_nested
+				(merge_stage_catalogs (list stamped_catalog (nested_stage_catalog stage)
+					(if (query_block? raw_input) (query_block_stage_catalog raw_input) '()))))))
 		(list (quote begin)
 			(if (invocation_group_stage? stage_catalog stage) true
 				(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil))
 			(compile_scan_plan (quote scan_exists)
 				(physical_query_tx_symbol)
-				(group_stage_table_expr stage)
+				(group_stage_table_expr (group_stage_lowering_catalog stage) stage)
 				(cons (quote list) filtercols)
 				(list (quote lambda)
 					(map filtercols symbol)
@@ -5184,7 +5189,7 @@ would lose nested-stage and join semantics. */
 				(lower_column_expr_for_join sources default_alias (nth lookup_keys i))))))
 		(define read (compile_scan_plan (quote scan_exists)
 			(physical_query_tx_symbol)
-			(group_stage_table_expr stage)
+			(group_stage_table_expr (group_stage_lowering_catalog stage) stage)
 			(cons (quote list) filter_key_names)
 			(list (quote lambda)
 				(map filter_key_names symbol)
@@ -5700,9 +5705,10 @@ alternative is a raw RecSet or direct probe. */
 	(begin
 		(define raw_input (gs_input stage))
 		(define stamped_catalog (qassoc_get (gs_facts stage) (quote stage_catalog) '()))
-		(define stage_catalog (stage_catalog_with_nested
-			(merge_stage_catalogs (list stamped_catalog (nested_stage_catalog stage)
-				(if (query_block? raw_input) (query_block_stage_catalog raw_input) '())))))
+		(define stage_catalog (lowering_catalog_rebind (group_stage_lowering_catalog stage)
+			(stage_catalog_with_nested
+				(merge_stage_catalogs (list stamped_catalog (nested_stage_catalog stage)
+					(if (query_block? raw_input) (query_block_stage_catalog raw_input) '()))))))
 		(list (quote begin)
 			(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
 			carrier))))
@@ -5712,7 +5718,7 @@ alternative is a raw RecSet or direct probe. */
 		(prepared_group_cache_expr stage
 			(compile_scan_plan (quote scan_recset)
 				(physical_query_tx_symbol)
-				(group_stage_table_expr stage)
+				(group_stage_table_expr (group_stage_lowering_catalog stage) stage)
 				(list (quote list))
 				(list (quote lambda) '() true))))))
 
@@ -5734,16 +5740,17 @@ alternative is a raw RecSet or direct probe. */
 					(cons (stage_recset_value_filter_term stage value_col) (nth parts 2))
 					true))
 				(define stamped_catalog (qassoc_get (gs_facts stage) (quote stage_catalog) '()))
-				(define stage_catalog (stage_catalog_with_nested
-					(merge_stage_catalogs (list stamped_catalog (nested_stage_catalog stage)
-						(if (query_block? raw_input) (query_block_stage_catalog raw_input) '())))))
+				(define stage_catalog (lowering_catalog_rebind (group_stage_lowering_catalog stage)
+					(stage_catalog_with_nested
+						(merge_stage_catalogs (list stamped_catalog (nested_stage_catalog stage)
+							(if (query_block? raw_input) (query_block_stage_catalog raw_input) '()))))))
 				(list (quote begin)
 					(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
 					(list (quote recset_project_join)
 						(physical_query_tx_symbol)
 						(compile_scan_plan (quote scan_recset)
 							(physical_query_tx_symbol)
-							(list (quote table) cache_schema false cache_relation false (quote tx))
+							(group_stage_table_expr stage_catalog stage)
 							(cons (quote list) filtercols)
 							(list (quote lambda)
 								(map filtercols symbol)
@@ -5832,10 +5839,9 @@ filters; membership does not require the source key to be unique. */
 							(stage_catalog_with_nested (merge_stage_catalogs (list
 								(qassoc_get (gs_facts stage) (quote stage_catalog) '())
 								(query_block_stage_catalog input) (list stage))))))
-						(define producer_catalog (make_indexed_lowering_catalog
+						(define producer_catalog (lowering_catalog_rebind catalog
 							(filter (stage_dependency_closure_using_graph (stage_dependency_graph catalog) stage)
-								(lambda (dependency) (not (equal? (gs_id dependency) (gs_id stage)))))
-							(lowering_catalog_planning_session catalog)))
+								(lambda (dependency) (not (equal? (gs_id dependency) (gs_id stage)))))))
 						(define parts (map (produceN (count keys)) (lambda (i)
 							(begin
 								(define lhs (direct_column_name_for_alias target (nth lookup i)))
@@ -8400,7 +8406,7 @@ otherwise unnecessary one-entry associative group. */
 	(if (not (empty_list? (coalesceNil order_items '())))
 		(if (and (runtime_group_reducers_supported? (gs_aggregates stage))
 			(runtime_group_order_supported? stage order_items))
-			(lower_runtime_rows_group_stage (group_stage_schema stage) stage fields
+			(lower_runtime_rows_group_stage (group_stage_lowering_catalog stage) (group_stage_schema stage) stage fields
 				order_items offset_value limit_value result_consumer)
 			(list 'error "query-local ordered grouping requires supported scalar reducers and direct completed-group sort columns"))
 		(empty_list? (gs_keys stage))
@@ -9549,7 +9555,7 @@ separate native state owner is implemented. */
 			(gs_id stage) input (gs_domain stage) keys ags (gs_having stage)
 			(gs_output stage) (gs_order stage) (gs_limit stage) (gs_offset stage)
 			(qassoc_set (gs_facts stage) (quote aggregate_output_columns) value_cols)))
-		(lower_runtime_group_relation schema native_stage
+		(lower_runtime_group_relation (group_stage_lowering_catalog stage) schema native_stage
 			(lambda (native_table _scope)
 				(list (quote begin)
 					(list (quote define) key_index
@@ -9652,6 +9658,10 @@ ordinary count/overflow check in the scalar consumer. */
 		((quote lowering-catalog) _stages _id_index _group_cache_index _parent) true
 		((symbol lowering-catalog) _stages _id_index _group_cache_index _parent _planning_session) true
 		((quote lowering-catalog) _stages _id_index _group_cache_index _parent _planning_session) true
+		((symbol lowering-catalog) _stages _id_index _group_cache_index _parent _planning_session _input_profile) true
+		((quote lowering-catalog) _stages _id_index _group_cache_index _parent _planning_session _input_profile) true
+		((symbol lowering-catalog) _stages _id_index _group_cache_index _parent _planning_session _input_profile _input_contracts) true
+		((quote lowering-catalog) _stages _id_index _group_cache_index _parent _planning_session _input_profile _input_contracts) true
 		_ false)))
 
 (define lowering_catalog_stages (lambda (catalog)
@@ -9670,13 +9680,71 @@ ordinary count/overflow check in the scalar consumer. */
 
 /* Diagnostics context belongs to the physical catalog handle, never to
 nested aggregate facts: those can participate in structural identities. */
+/* The input profile is immutable physical context. It is attached only after
+semantic stage/cache identities have been fixed, through the existing native
+lowering-catalog handle. Neither a logical fact nor a runtime session flag
+selects the caller's private view. A child catalog inherits this same choice. */
+(define lowering_catalog_input_profile (lambda (catalog)
+	(if (not (lowering_catalog? catalog)) nil
+		(if (> (count catalog) 6) (nth catalog 6)
+			(lowering_catalog_input_profile (lowering_catalog_parent catalog))))))
+
+/* This compile-only collector certifies materializers actually emitted by the
+selected alternative. Direct probes never register an unused stage here. It
+is carried only by the physical catalog, never by a semantic fact or runtime
+program, and the region consumes its one refusal before any effects. */
+(define lowering_catalog_input_contracts (lambda (catalog)
+	(if (not (lowering_catalog? catalog)) nil
+		(if (> (count catalog) 7) (nth catalog 7)
+			(lowering_catalog_input_contracts (lowering_catalog_parent catalog))))))
+(define lowering_catalog_with_input_contracts (lambda (catalog contracts)
+	(if (nil? contracts) catalog
+		(begin
+			(define indexed (if (lowering_catalog? catalog) catalog
+				(make_indexed_lowering_catalog (coalesceNil catalog '()) nil)))
+			(list 'lowering-catalog (nth indexed 1) (nth indexed 2)
+				(nth indexed 3) (nth indexed 4)
+				(lowering_catalog_planning_session indexed)
+				(lowering_catalog_input_profile indexed) contracts)))))
+
+(define lowering_catalog_with_input_profile (lambda (catalog profile)
+	(if (nil? profile) catalog
+		(begin
+			(define indexed (if (lowering_catalog? catalog) catalog
+				(make_indexed_lowering_catalog (coalesceNil catalog '()) nil)))
+			(lowering_catalog_with_input_contracts
+				(list 'lowering-catalog (nth indexed 1) (nth indexed 2)
+					(nth indexed 3) (nth indexed 4)
+					(lowering_catalog_planning_session indexed) profile)
+				(lowering_catalog_input_contracts indexed))))))
+
+/* Rebinding coordinates creates a new physical catalog with the same input
+owner. Its logical stages are transformed by the existing caller's projector;
+no second projector or fallback catalog can discard a selected private mode. */
+(define lowering_catalog_rebind (lambda (catalog stages)
+	(lowering_catalog_with_input_contracts
+		(lowering_catalog_with_input_profile
+			(lowering_catalog_with_planning_session (make_lowering_catalog (lowering_catalog_stages stages))
+				(lowering_catalog_planning_session catalog))
+			(lowering_catalog_input_profile catalog))
+		(lowering_catalog_input_contracts catalog))))
+
+(define lowering_catalog_caller_input? (lambda (catalog)
+	(expression_equal? (lowering_catalog_input_profile catalog) 'caller)))
+
 (define lowering_catalog_with_planning_session (lambda (catalog planning_session)
 	(if (or (nil? planning_session) (empty_list? catalog)) catalog
 		(begin
 			(define indexed (if (lowering_catalog? catalog) catalog
 				(make_indexed_lowering_catalog catalog nil)))
-			(list (quote lowering-catalog) (nth indexed 1) (nth indexed 2)
-				(nth indexed 3) (nth indexed 4) planning_session)))))
+			(lowering_catalog_with_input_contracts
+				(if (nil? (lowering_catalog_input_profile indexed))
+					(list (quote lowering-catalog) (nth indexed 1) (nth indexed 2)
+						(nth indexed 3) (nth indexed 4) planning_session)
+					(list (quote lowering-catalog) (nth indexed 1) (nth indexed 2)
+						(nth indexed 3) (nth indexed 4) planning_session
+						(lowering_catalog_input_profile indexed)))
+				(lowering_catalog_input_contracts indexed))))))
 
 (define lowering_catalog_planning_session (lambda (catalog)
 	(if (not (lowering_catalog? catalog)) nil
@@ -10817,7 +10885,7 @@ bounds. Expose that access geometry to the common RecMap candidate builder. */
 	(begin
 		(define proof (qassoc_get (gs_facts parent) (quote contribution-domain) nil))
 		(if (nil? proof) stages
-			(map stages (lambda (stage)
+			(lowering_catalog_rebind stages (map (lowering_catalog_stages stages) (lambda (stage)
 				(begin
 					(define selection (if (group_stage? stage)
 						(qassoc_get (nth proof 6) (gs_id stage) nil) nil))
@@ -10828,7 +10896,7 @@ bounds. Expose that access geometry to the common RecMap candidate builder. */
 									(list (quote get_column) (source_alias (car selection)) false (nth selection 2) false)
 									(quote range-unbounded-from) -1 (nth selection 3) 1)))
 								(quote range-invariant-condition) true)
-								(quote range-accessing-after-simple) '()))))))))))
+								(quote range-accessing-after-simple) '())))))))))))
 
 (define contribution_bounded_recmap (lambda (candidate key candidates)
 	(begin

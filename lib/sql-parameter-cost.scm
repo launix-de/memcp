@@ -56,7 +56,7 @@ specialization without a fresh candidate cost comparison. */
 		((qassoc_get info (quote observation) nil) "execution_ns" (- (nanotime) started))
 		result)))
 
-(define sql_parameter_choose_candidate (lambda (specialized entry variants parse_fn schema parse_query policy session tx)
+(define sql_parameter_choose_candidate (lambda (specialized entry variants parse_fn schema parse_query policy session tx input_lifetime compile_tx)
 	(begin
 		(define specialized_info (nth specialized 3))
 		/* A miss only permits evaluation. Neither miss count nor the existing
@@ -77,7 +77,7 @@ specialization without a fresh candidate cost comparison. */
 			(not (number? work)) (> work budget) (> observed budget)
 			(nil? (sql_parameter_candidate_cost specialized false session tx))) specialized
 			(begin
-				(define generic (sql_compile_queryplan_variant parse_fn schema parse_query policy session tx "parameterized"))
+				(define generic (sql_compile_queryplan_variant parse_fn schema parse_query policy session compile_tx "parameterized" input_lifetime (entry "cache_owner")))
 				/* Carry actual generic execution evidence across recompilation. A
 				fresh scalar cell must not erase the observation which caused this
 				miss and select the same demonstrably expensive work again. */
@@ -89,11 +89,27 @@ specialization without a fresh candidate cost comparison. */
 				(if (and (not (nil? (sql_parameter_candidate_cost candidate false session tx)))
 					(sql_parameter_reusable? info session tx)
 					(not (sql_parameter_specialization_preferred? specialized candidate false session tx)))
-					(list (sql_queryplan_compile_formula tx
-						(list (quote and)
-							(if (expression_equal? (car generic) true) true
-								(list (quote apply) (car generic)
-									(list (quote list) (quote session) (quote tx) (quote resultrow) (quote resultfields))))
-							(list (quote sql_parameter_reusable?) (list (quote quote) info) (quote session) (quote tx))))
-						(cadr generic) (nth generic 2) info)
+					(if (sql_queryplan_input_profiled? generic)
+						(begin
+							/* The dispatcher consumes the kernel aliases, not only the
+							tuple's public Proc4. Retain the same profile/source prefix in
+							both guard owners when adding ordinary generic reuse cost. */
+							(define guard_kernel (sql_queryplan_compile_formula compile_tx
+								(list 'physical-query-program (list '__physical_input_context)
+									(list 'and
+										(if (expression_equal? (sql_queryplan_guard_kernel generic) true) true
+											(list 'apply (sql_queryplan_guard_kernel generic)
+												(list 'list 'session 'tx 'resultrow 'resultfields '__physical_input_context)))
+										(list 'sql_parameter_reusable? (list 'quote info) 'session 'tx)))))
+							(define guarded_info (qassoc_set info 'input_guard guard_kernel))
+							(list (sql_queryplan_wrap_input_formula compile_tx guard_kernel
+								(qassoc_get info 'caller_lifetime false))
+								(cadr generic) (nth generic 2) guarded_info))
+						(list (sql_queryplan_compile_formula tx
+							(list (quote and)
+								(if (expression_equal? (car generic) true) true
+									(list (quote apply) (car generic)
+										(list (quote list) (quote session) (quote tx) (quote resultrow) (quote resultfields))))
+								(list (quote sql_parameter_reusable?) (list (quote quote) info) (quote session) (quote tx))))
+							(cadr generic) (nth generic 2) info))
 					specialized))))))

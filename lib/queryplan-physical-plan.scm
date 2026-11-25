@@ -24,6 +24,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(planner_direct_presence_probe_cost probe_rows)
 					(planner_presence_carrier_cost input_rows probe_rows)))))))
 
+/* Emit the existing cardinality kernel's scalar metadata reads, not a quoted
+logical input carrying native compile catalogs/sessions. This mirrors
+planner_source_row_count / planner_stage_input_rows exactly: no rows are read,
+and all stage identities, predicates and dynamic cost inequalities stay put. */
+
+
+
+
 (define stage_direct_probe_cost_preferred? (lambda (stage probe_rows_value planning_session)
 	(begin
 		/* A merged scalar stage exposes several values from the same bounded row.
@@ -41,8 +49,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(planner_guarded_choice chosen
 				(list (quote planner_direct_presence_probe_preferred?)
 					(list (quote *) probe_rows_value probe_width)
-					(list (quote planner_stage_input_rows)
-						(list (quote quote) (gs_input stage)))))
+					(if (lowering_catalog_caller_input? (group_stage_lowering_catalog stage))
+						(planner_stage_input_rows_expr (gs_input stage))
+						(list (quote planner_stage_input_rows)
+							(list (quote quote) (gs_input stage))))))
 			chosen))))
 
 (define stage_direct_probe_cost_preferred_for_limit? (lambda (stage limit_value planning_session)
@@ -633,7 +643,8 @@ unresolved executable references remain non-reusable in the common visitor. */
 		(expr_probe_stages (qb_hidden block))))))
 
 (define query_block_stage_catalog (lambda (block)
-	(qassoc_get (qb_facts block) (quote stage_catalog) (qb_stages block))))
+	(lowering_catalog_stages (coalesceNil (query_block_lowering_catalog block)
+		(qassoc_get (qb_facts block) (quote stage_catalog) (qb_stages block))))))
 
 (define query_block_lowering_catalog (lambda (block)
 	(qassoc_get (qb_facts block) (quote lowering_catalog) nil)))
@@ -665,7 +676,9 @@ unresolved executable references remain non-reusable in the common visitor. */
 		(qb_offset block)
 		(qb_hidden block)
 		(qb_stages block)
-		(query_block_facts_with_stage_catalog block stages))))
+		(query_block_facts_with_lowering_catalog block (lowering_catalog_stages stages)
+			(lowering_catalog_rebind (query_block_lowering_catalog block)
+				(lowering_catalog_stages stages))))))
 
 (define group_stage_with_lowering_catalog (lambda (stage catalog)
 	(if (not (group_stage? stage))
@@ -692,7 +705,8 @@ unresolved executable references remain non-reusable in the common visitor. */
 					(quote cache_identity_index) (lambda () signatures))))))))
 
 (define stage_shared_prepare? (lambda (stage)
-	(and (stage_result_reusable? stage)
+	(and (not (invocation_group_stage? (group_stage_lowering_catalog stage) stage))
+		(stage_result_reusable? stage)
 		(group_stage? stage)
 		(qassoc_get (gs_facts stage) (quote shared_prepare) false))))
 
@@ -702,18 +716,28 @@ unresolved executable references remain non-reusable in the common visitor. */
 		(define counts (reduce stages (lambda (found stage)
 			(if (closed_group_prepare_stage? stages dependency_graph stage)
 				(begin
-					(define key (stage_prepare_backbone_signature stage))
+					(define key (stage_prepare_backbone_signature (group_stage_lowering_catalog stage) stage))
 					(set_assoc found key (+ 1 (coalesceNil (get_assoc found key) 0))))
 				found)) '()))
 		(map stages (lambda (stage)
 			(if (and (closed_group_prepare_stage? stages dependency_graph stage)
-				(> (coalesceNil (get_assoc counts (stage_prepare_backbone_signature stage)) 0) 1))
+				(> (coalesceNil (get_assoc counts (stage_prepare_backbone_signature (group_stage_lowering_catalog stage) stage)) 0) 1))
 				(group_stage_with_facts stage
 					(qassoc_set (gs_facts stage) (quote shared_prepare) true))
 				stage))))))
 
+/* Collections which predate a query-block lookup still carry the existing
+physical handle on each selected stage. A selected cohort must never mix
+input owners; the first actual handle owns the complete immutable directory. */
+(define group_stages_lowering_catalog (lambda (stages)
+	(reduce (lowering_catalog_stages stages) (lambda (catalog stage)
+		(if (not (nil? catalog)) catalog
+			(if (group_stage? stage) (group_stage_lowering_catalog stage) nil))) nil)))
+
 (define group_stage_lowering_catalog (lambda (stage)
-	(qassoc_get (gs_facts stage) 'lowering_catalog nil)))
+	(coalesceNil (qassoc_get (gs_facts stage) 'lowering_catalog nil)
+		(begin (define catalog (qassoc_get (gs_facts stage) 'stage_catalog nil))
+			(if (lowering_catalog? catalog) catalog nil)))))
 
 /* A closed single-table group can use either the query-local group builder
 or the existing maintained keytable. Keep this physical choice out of logical
@@ -806,9 +830,10 @@ for that scan. The same prepared table is reused by every guarded variant. */
 								(lower_column_expr_for_alias carrier condition))
 							(list (quote quote) '())
 							(scan_mapreduce_expr '() (quote +) 1) 0 (quote +) false))
+						(define observation_catalog (lowering_catalog_rebind (group_stage_lowering_catalog stage) stages))
 						(define producer (list (quote !begin)
-							(lower_group_stage_prepare_using stages stages stage true nil)
-							(source_table_expr carrier)))
+							(lower_group_stage_prepare_using observation_catalog observation_catalog stage true nil)
+							(group_stage_table_expr observation_catalog stage)))
 						(define keys (planner_register_queryplan_observation decision producer metric planning_session))
 						(planner_record_physical_decision (list (list "decision" "group_join_observation")
 							(list "decision_id" decision) (list "chosen" "shared_group_cardinality")
@@ -820,7 +845,11 @@ for that scan. The same prepared table is reused by every guarded variant. */
 (define query_block_with_full_stage_catalog_using (lambda (block stages)
 	(begin
 		(define planning_session (planner_context_session (qb_facts block)))
-		(define stages (map stages (lambda (stage) (group_relation_input_choice stage block planning_session))))
+		(define inherited (query_block_lowering_catalog block))
+		(define stages (map stages (lambda (stage)
+			(group_relation_input_choice
+				(if (nil? (lowering_catalog_input_profile inherited)) stage
+					(group_stage_with_lowering_catalog stage inherited)) block planning_session))))
 		(define signatures (group_cache_identity_index stages))
 		/* Catalog lookups must return the same annotated immutable stage instances
 		that root lowering sees; otherwise nested probe copies derive old names. */
@@ -842,7 +871,13 @@ for that scan. The same prepared table is reused by every guarded variant. */
 				(if (nil? (qassoc_get (gs_facts stage) (quote contribution-domain) nil)) prepared
 					(group_stage_with_facts prepared (qassoc_set (gs_facts prepared)
 						(quote contribution_context_sources) (qb_sources block))))))))
-		(define catalog (make_lowering_catalog signature_stages))
+		(define catalog (if (nil? (lowering_catalog_input_profile inherited))
+			(make_lowering_catalog signature_stages)
+			(begin
+				(define input_catalog (lowering_catalog_rebind inherited signature_stages))
+				(lowering_catalog_rebind input_catalog
+					(map signature_stages (lambda (stage)
+						(group_stage_with_lowering_catalog stage input_catalog)))))))
 		(define cataloged_stages (map (qb_stages block) (lambda (stage)
 			(begin
 				(define cached (if (group_stage? stage) (stage_by_id catalog (gs_id stage)) nil))
@@ -1524,7 +1559,7 @@ cache scan for every output row. */
 			(replace_range_lookup_with_cache candidates (qb_hidden block))
 			(qb_stages block) (qb_facts block)))))
 
-(define group_stage_final_block (lambda (stage extra_sources)
+(define group_stage_final_block (lambda (catalog stage extra_sources)
 	(begin
 		(define src (gs_input stage))
 		(define alias (group_stage_input_alias stage))
@@ -1544,7 +1579,7 @@ cache scan for every output row. */
 		/* An invocation group has a lexical native carrier, not a maintained
 		cache. Its output alias needs only the stage's bound identity; deriving a
 		persistent source recipe would cross the child query's alias scope. */
-		(define invocation (invocation_group_stage? (nested_stage_catalog stage) stage))
+		(define invocation (invocation_group_stage? catalog stage))
 		(define cache (if invocation nil (group_stage_cache stage)))
 		(define schema (if invocation (group_stage_schema stage) (group_cache_schema cache)))
 		(define grouptbl (if invocation (concat "__invocation_group_output:" (gs_id stage))
@@ -1619,10 +1654,10 @@ cache scan for every output row. */
 columns are independent extensions of that carrier. Collect all compatible
 extensions before emitting DDL/fill code so one query has one creator and one
 key-fill recipe per carrier. */
-(define stage_prepare_backbone_signature (lambda (stage)
+(define stage_prepare_backbone_signature (lambda (catalog stage)
 	(if (not (group_stage? stage))
 		(logical_stage_key stage)
-		(invocation_group_stage? (nested_stage_catalog stage) stage)
+		(invocation_group_stage? catalog stage)
 		(concat "invocation-prepare:" (gs_id stage))
 		(begin
 			(define cache (group_stage_cache stage))
@@ -1673,14 +1708,14 @@ key-fill recipe per carrier. */
 				(quote keytable_prepare_variants)
 				(unique_stages_by_id (merge (list (group_prepare_variants target) (group_prepare_variants stage))))))))))
 
-(define collect_stage_prepares (lambda (stages)
+(define collect_stage_prepares (lambda (catalog stages)
 	(begin
 		(define collected (reduce (coalesceNil stages '()) (lambda (state stage)
 			(begin
 				(define index (nth state 0))
 				(define keys (nth state 1))
 				(define key (if (group_stage? stage)
-					(stage_prepare_backbone_signature stage)
+					(stage_prepare_backbone_signature catalog stage)
 					(concat "logical-prepare:" (logical_stage_key stage))))
 				(define previous (if (has_assoc? index key) (index key) nil))
 				(list
@@ -1694,22 +1729,22 @@ key-fill recipe per carrier. */
 		(define index (nth collected 0))
 		(map (reverse (nth collected 1)) (lambda (key) (index key))))))
 
-(define stage_prepare_backbone_set (lambda (stages)
+(define stage_prepare_backbone_set (lambda (catalog stages)
 	(reduce (coalesceNil stages '()) (lambda (keys stage)
-		(set_assoc keys (stage_prepare_backbone_signature stage) true)) '())))
+		(set_assoc keys (stage_prepare_backbone_signature catalog stage) true)) '())))
 
-(define stages_without_prepare_backbones (lambda (stages prepared)
+(define stages_without_prepare_backbones (lambda (catalog stages prepared)
 	(begin
-		(define prepared_backbones (stage_prepare_backbone_set prepared))
+		(define prepared_backbones (stage_prepare_backbone_set catalog prepared))
 		(filter (coalesceNil stages '()) (lambda (stage)
-			(not (has_assoc? prepared_backbones (stage_prepare_backbone_signature stage))))))))
+			(not (has_assoc? prepared_backbones (stage_prepare_backbone_signature catalog stage))))))))
 
-(define stage_prepare_identity (lambda (stage)
+(define stage_prepare_identity (lambda (catalog stage)
 	(if (group_stage? stage)
 		(begin
 			(define cache (group_stage_cache stage))
 			(list
-				(if (invocation_group_stage? (nested_stage_catalog stage) stage) (gs_id stage) (quote group))
+				(if (invocation_group_stage? catalog stage) (gs_id stage) (quote group))
 				(group_cache_schema cache)
 				(group_cache_relation cache)
 				(filter (gs_domain stage) query_session_read?)
@@ -1725,11 +1760,11 @@ key-fill recipe per carrier. */
 						(qassoc_get (gs_facts stage) (quote on_overflow) nil)))))
 		(logical_stage_key stage))))
 
-(define lower_unique_stage_prepares_acc (lambda (stages seen initialized_group_caches prepare)
+(define lower_unique_stage_prepares_acc (lambda (catalog stages seen initialized_group_caches prepare)
 	(match (coalesceNil stages '())
 		(cons stage rest) (begin
 			(define shared_group_cache (and (group_stage? stage) (source_is_base_table? (gs_input stage))
-				(not (invocation_group_stage? (nested_stage_catalog stage) stage))))
+				(not (invocation_group_stage? catalog stage))))
 			/* This is a selected physical prepare, not a catalog alternative. Keep
 			the canonical carrier on its immutable stage copy so all lowering readers
 			share one derivation without introducing global planner state. */
@@ -1741,25 +1776,25 @@ key-fill recipe per carrier. */
 			(define prepared_stage (if (group_stage? stage)
 				(group_stage_with_initializer_owner stage initializer_owner cache)
 				stage))
-			(define identity (stage_prepare_identity prepared_stage))
+			(define identity (stage_prepare_identity catalog prepared_stage))
 			(define next_group_caches (if (and shared_group_cache initializer_owner)
 				(set_assoc initialized_group_caches group_cache_key true)
 				initialized_group_caches))
 			(if (has_assoc? seen identity)
-				(lower_unique_stage_prepares_acc rest seen next_group_caches prepare)
+				(lower_unique_stage_prepares_acc catalog rest seen next_group_caches prepare)
 				(cons (prepare prepared_stage)
-					(lower_unique_stage_prepares_acc rest (set_assoc seen identity true) next_group_caches prepare))))
+					(lower_unique_stage_prepares_acc catalog rest (set_assoc seen identity true) next_group_caches prepare))))
 		_ '())))
 
-(define lower_unique_stage_prepares (lambda (stages prepare)
-	(lower_unique_stage_prepares_acc (collect_stage_prepares stages) '() '() prepare)))
+(define lower_unique_stage_prepares (lambda (catalog stages prepare)
+	(lower_unique_stage_prepares_acc catalog (collect_stage_prepares catalog stages) '() '() prepare)))
 
 (define lower_unique_stage_prepares_using (lambda (all_stages lookup_stages stages)
-	(lower_unique_stage_prepares stages (lambda (stage)
+	(lower_unique_stage_prepares lookup_stages stages (lambda (stage)
 		(lower_stage_prepare_using all_stages lookup_stages stage true)))))
 
 (define lower_unique_stage_prepares_with_graph (lambda (dependency_graph stage_lookup stages)
-	(lower_unique_stage_prepares stages (lambda (stage)
+	(lower_unique_stage_prepares stage_lookup stages (lambda (stage)
 		(lower_stage_prepare_using
 			(stage_dependency_closure_using_graph dependency_graph stage)
 			stage_lookup
@@ -1792,8 +1827,8 @@ a worker-pool fan-out bounded by NumCPU instead of one metric at a time. */
 		closure once, dependency-first; every local body then consumes the already
 		prepared relational output instead of copying the remaining probe suffix. */
 		(define ordered (reverse (stage_dependency_closure_many_using_graph
-			dependency_graph (collect_stage_prepares stages))))
-		(define plans (lower_unique_stage_prepares ordered (lambda (stage)
+			dependency_graph (collect_stage_prepares (group_stages_lowering_catalog stages) stages))))
+		(define plans (lower_unique_stage_prepares stage_lookup ordered (lambda (stage)
 			(lower_stage_prepare_using
 				(stage_dependency_closure_using_graph dependency_graph stage)
 				stage_lookup
@@ -1872,433 +1907,439 @@ outer joins. */
 				_ true))))))
 
 (define lower_group_stage_prepare_using (lambda (all_stages lookup_stages stage include_nested_prepares result_sink)
-	(if (and (or (scalar_cardinality_probe_contract? stage) (scalar_first_probe_contract? stage))
-		(not (scalar_probe_input_closed? stage)))
-		(neumann_fail "build_queryplan" "residual bounded scalar input requires caller-bound probing")
-		(scoped_relational_program_stage? stage)
-		true
-		(and (invocation_group_stage? lookup_stages stage) (not (equal? result_sink (quote boolean-recset))))
-		(list 'define (invocation_group_packet_symbol (gs_id stage)) (lower_runtime_group_carrier stage))
-	(if (not (nil? (qassoc_get (gs_facts stage) (quote keytable_prepare_variants) nil)))
-		(cons (quote !begin) (map (group_prepare_variants stage) (lambda (variant)
-			(lower_group_stage_prepare_using all_stages lookup_stages variant include_nested_prepares result_sink))))
-		(begin
-			(define observed_key (qassoc_get (gs_facts stage) (quote group_join_observation) nil))
-			(define logical_src (gs_input stage))
-			(define prepare_catalog (unique_stages_by_id (merge (list (list stage) all_stages))))
-			(define range_recmap_candidates (if (query_block? logical_src)
-				(select_group_range_recmap_candidate prepare_catalog stage logical_src
-					(lowering_catalog_planning_session lookup_stages)) '()))
-			(define src (reduce range_recmap_candidates
-				(lambda (block candidate) (query_block_with_group_range_recmap block candidate))
-				logical_src))
-			(define prepare_dependency_graph (stage_dependency_graph prepare_catalog))
-			(define prepare_dependencies
-				(stage_dependency_closure_using_graph prepare_dependency_graph stage))
-			(define relational_presence_chain (and (> (count prepare_dependencies) 2)
-				(reduce prepare_dependencies (lambda (eligible dependency)
-					(and eligible (and (group_stage? dependency)
-						(presence_probe_stage? dependency)))) true)))
-			(define fact_lookup (group_stage_lowering_catalog stage))
-			(define raw_stage_lookup (if (lowering_catalog? lookup_stages)
-				lookup_stages
-				(if (lowering_catalog? fact_lookup)
-					fact_lookup
-					(unique_stages_by_id
-						(merge (list
-							prepare_catalog
-							lookup_stages
-							(qassoc_get (gs_facts stage) (quote stage_catalog) '())))))))
-			/* A presence/scalar-first-probe source whose lookup domain is invariant
-			for the whole query (only literals, parameters, or session values -- no
-			outer-row column) is evaluated exactly once regardless of how many rows
-			this stage's own input scan accepts. Bind it before rewriting so
-			rewrite_scalar_first_probe_expr_using_index (via query_invariant_probe_
-			binding_for_col) replaces every reference with that one bound value
-			instead of a fresh per-row probe. Mirrors
-			prepare_simple_query_block_physical_core_chosen. */
-			(define invariant_probe_entries (query_invariant_probe_entries_for_stages raw_stage_lookup))
-			/* A boolean RecSet producer is also executed by cardinality observations,
-			before the main query's lexical bindings exist. Keep invariant probes as
-			query-scoped markers inside that closed producer; its own lowering memoizes
-			them once. Other result sinks retain the established outer binding. */
-			(define closed_boolean_sink (equal? result_sink (quote boolean-recset)))
-			(define stage_lookup (if closed_boolean_sink
-				(stage_lookup_with_inline_query_invariant_probes raw_stage_lookup)
-				(stage_lookup_with_query_invariant_probe_bindings
-					raw_stage_lookup invariant_probe_entries)))
-			(define invariant_probe_bindings (if closed_boolean_sink '()
-				(query_invariant_probe_bindings invariant_probe_entries)))
-			(define recmap_candidate (if (empty_list? range_recmap_candidates)
-				(select_nested_scalar_recmap_candidate
-					(group_stage_nested_scalar_recmap_candidate stage_lookup stage)
-					(lowering_catalog_planning_session lookup_stages)) nil))
-			(if (and (not (union_block? src)) (and (not (query_block? src)) (not (source_is_base_table? src))))
-				(neumann_fail "build_queryplan" "group-stage lowering expects a base table, query-block, or union-block input")
-				true)
-			(define cache (group_stage_cache stage))
-			(define schema (group_cache_schema cache))
-			(define tbl (group_stage_input_name stage))
-			(define alias (group_stage_input_alias stage))
-			(define query_input (or (query_block? src) (union_block? src)))
-			/* Aggregate stages own their input query block. Apply the physical
-			membership choice here too; otherwise the top-level preparation pass never
-			reaches this nested block and eagerly materializes the candidate cache. */
-			(define membership_src (if (query_block? src)
-				(query_block_with_physical_membership_using stage_lookup src)
-				src))
-			/* A nested presence chain represented as correlated scalar probes copies
-			the complete remaining probe suffix into every parent prepare. Its stage
-			caches are already dependency-ordered here, so consume those relational
-			outputs directly once the chain contains more than one dependency. */
-			(define rewritten_src (if (query_block? membership_src)
-				(if (equal? result_sink (quote boolean-recset))
-					(query_block_with_probe_markers_using_graph
-						stage_lookup prepare_dependency_graph membership_src true)
-					(if relational_presence_chain
-						membership_src
-						(query_block_with_presence_probes_using stage_lookup membership_src false)))
-				membership_src))
-			(define scalar_order_cache (if (query_block? rewritten_src)
-				(scalar_order_lookup_cache_candidate stage_lookup rewritten_src) nil))
-			(define carrier_src (if (query_block? rewritten_src)
-				(query_block_with_scalar_order_lookup_cache
-					(query_block_with_scalar_order_lookup_cache_input
-						stage_lookup rewritten_src scalar_order_cache)
-					scalar_order_cache)
-				rewritten_src))
-			/* Bounded inputs and scoped producers need the same physical probe
-			selection as a root block. A scoped output has no enumerable shared
-			carrier; select its existing bound probe before preparing dependencies.
-			Keep the dependency-ordered presence-chain preparation unchanged. */
-			(define optimized_src (if (and (query_block? carrier_src)
-				(or (not (nil? scalar_order_cache))
-					(and (not relational_presence_chain)
-						(or (query_limit_active? (qb_offset carrier_src) (qb_limit carrier_src))
-							(not (nil? (find (qb_sources carrier_src) (lambda (candidate)
-								(scoped_program_probe_stage? stage_lookup
-									(source_stage_output_stage stage_lookup candidate))) nil)))))))
-				(query_block_with_scalar_first_probes_using stage_lookup carrier_src)
-				carrier_src))
-			(define rewrite_catalog_src (if (nil? scalar_order_cache) membership_src optimized_src))
-			(define rewrite_sources (if (query_block? rewrite_catalog_src) (qb_sources rewrite_catalog_src) '()))
-			(define rewrite_default_alias (if (query_block? src)
-				(qassoc_get (qb_facts rewrite_catalog_src) (quote default_alias) (if (empty_list? rewrite_sources) nil (source_alias (car rewrite_sources))))
-				nil))
-			/* Keys and aggregate values are consumers outside the input query block.
-			Rewrite them through every probe selected above, not only presence probes;
-			otherwise removing a scalar source leaves its projected value unbound. */
-			(define retained_input_aliases (if (query_block? optimized_src)
-				(source_aliases (qb_sources optimized_src)) '()))
-			(define input_probe_sources (if (and (query_block? carrier_src) (query_block? optimized_src))
-				(filter (qb_sources carrier_src) (lambda (candidate)
-					(not (contains? retained_input_aliases (source_alias candidate)))))
-				'()))
-			(define input_probe_column_map (if (empty_list? input_probe_sources) '()
-				(stage_output_single_aggregate_columns
-					(stage_output_stage_index (lowering_catalog_stages stage_lookup)) input_probe_sources)))
-			(define stage_probe_sources_for_rewrite (if (query_block? src)
-				(merge_unique (list input_probe_sources
-					(presence_probe_output_sources stage_lookup rewrite_sources rewrite_default_alias
-						(equal? result_sink (quote boolean-recset)))))
-				'()))
-			(define keys (if (empty_list? (gs_keys stage))
-				'(1)
-				(if (query_block? src)
-					(map (gs_keys stage) (lambda (key)
-						(rewrite_scalar_first_probe_expr stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
-							(rewrite_stage_graph_expr input_probe_column_map '()
-								(rewrite_group_range_recmaps_expr range_recmap_candidates key)))))
-					(gs_keys stage))))
-			(define prepare_order_items (coalesceNil (gs_order stage) '()))
-			(define prepare_resolved_order_exprs (map prepare_order_items (lambda (item)
-				(match item '(expr _dir) (canonical_column_expr_for_alias alias expr)))))
-			(define key_index (make_group_key_index keys prepare_resolved_order_exprs))
-			(define condition (if (query_block? src)
-				(rewrite_scalar_first_probe_expr stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
-					(rewrite_group_range_recmaps_expr range_recmap_candidates
-						(rewrite_stage_graph_expr input_probe_column_map '()
-							(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))))
-				(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
-			(define needs_count_filter (and
-				(not (qassoc_get (gs_facts stage) (quote preserve_empty_domain) false))
-				(not (scalar_value_stage? stage))
-				(and (not (equal? keys '(1))) (not (equal? condition true)))))
-			(define ags (if needs_count_filter
-				(dedupe_aggregates_by_col (merge (list (gs_aggregates stage) (list aggregate_count_descriptor))))
-				(gs_aggregates stage)))
-			(define recmap_ags
-				(rewrite_group_range_recmaps_expr range_recmap_candidates
-					(rewrite_nested_scalar_recmap_expr recmap_candidate ags)))
-			(define lowering_ags (if (query_block? src)
-				(rewrite_scalar_first_probe_aggregates stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
-					(rewrite_stage_graph_expr input_probe_column_map '() recmap_ags))
-				recmap_ags))
-			(define result_sink_ags (if (and (equal? result_sink (quote boolean-recset))
-				(query_block? src))
-				(rewrite_scalar_first_probe_aggregates stage_lookup
-					(filter rewrite_sources (lambda (candidate)
-						(stage_output_relation? (source_relation candidate))))
-					rewrite_default_alias ags)
-				lowering_ags))
-			(define key_names (group_key_cols keys))
-			(define aggregate_condition (replace_group_session_expr stage keys key_names condition))
-			(define aggregate_probe_bindings
-				(coalesceNil (qassoc_get (gs_facts stage) (quote aggregate_probe_bindings) '()) '()))
-			(define grouptbl (group_cache_relation cache))
-			(define initializer_owner (qassoc_get (gs_facts stage) (quote keytable_initializer_owner) true))
-			(define scalar_single_stage (scalar_value_stage? stage))
-			(define scalar_query_stage (and (query_block? src)
-				(and scalar_single_stage
-					(and (equal? (qassoc_get (gs_facts stage) (quote partition_limit) nil) 2)
-						(and (equal? (qassoc_get (gs_facts stage) (quote on_overflow) nil) (quote error))
-							(and (equal? (count ags) 2)
-								(equal? (cadr ags) aggregate_count_descriptor)))))))
-			(define scalar_order_base_stage (and (not query_input)
-				(compatible_scalar_order_aggregates? ags)))
-			/* Aggregate column names belong to the immutable logical stage. Prepared
-			input and RecMap rewrites below affect execution only: removing a scalar
-			alias must not rename aggregate columns read by the stage output. Base aggregate
-			columns use their direct physical builder and need no canonical list here. */
-			(define aggregate_cols (if (or query_input scalar_order_base_stage)
-					(map ags (lambda (ag) (group_stage_aggregate_column stage ag)))
-				'()))
-			(define scalar_aggregate_stage (scalar_aggregate_probe_supported? stage))
-			(define prepared_src (if (query_block? optimized_src)
-				(if (equal? result_sink (quote boolean-recset))
-					optimized_src
-					(if scalar_aggregate_stage
-						(begin
-							(define constant_reorder_stages (if (lowering_catalog? stage_lookup)
-								stage_lookup
-								(unique_stages_by_id (merge (list stage_lookup (qb_stages rewritten_src))))))
-							(if (not (empty_list? (filter (qb_sources optimized_src) (lambda (src)
-								(constant_scalar_or_presence_stage_output_source? constant_reorder_stages src)))))
-								(query_block_without_stages_after_eager_prepare_with_constant_scalars_first constant_reorder_stages optimized_src)
-								(query_block_without_stages_after_eager_prepare_using stage_lookup optimized_src)))
-						(query_block_without_stages_after_eager_prepare_using stage_lookup optimized_src)))
-				optimized_src))
-			(define direct_nested_stages (if (query_block? optimized_src)
-				(merge_unique (list
-					(query_block_stages_to_prepare_using stage_lookup optimized_src)
-					(available_stage_outputs_from_sources_using stage_lookup (qb_sources optimized_src))
-					(available_stage_outputs_from_sources_using stage_lookup (group_stage_final_extra_source_refs stage))
-					(group_cache_stages_from_sources stage_lookup (qb_sources optimized_src))
-					(group_cache_stages_from_sources stage_lookup (group_stage_final_extra_source_refs stage))
-					(query_block_probe_expr_stages optimized_src)))
-				'()))
-			(define owner_handle (qassoc_get (gs_facts stage) (quote btw2025_handle) nil))
-			(define owner_ancestors (qassoc_get (gs_facts stage) (quote btw2025_ancestors) '()))
-			(define nested_stages (if (nil? owner_handle)
-				direct_nested_stages
-				(filter direct_nested_stages (lambda (candidate)
-					(begin
-						(define candidate_handle (qassoc_get (gs_facts candidate) (quote btw2025_handle) nil))
-						(define candidate_parent (qassoc_get (gs_facts candidate) (quote btw2025_parent) nil))
-						(or
-							(nil? candidate_handle)
-							(equal? candidate_parent owner_handle)
-							(and
-								(nil? candidate_parent)
-								(and
-									(not (equal? candidate_handle owner_handle))
-									(not (contains? owner_ancestors candidate_handle))))))))))
-			(define nested_prepare (if (and include_nested_prepares (query_block? optimized_src))
-				(if relational_presence_chain
-					(lower_presence_stage_prepares_with_graph
-						prepare_dependency_graph stage_lookup nested_stages)
-					(lower_unique_stage_prepares_using prepare_catalog stage_lookup nested_stages))
-				'()))
-			(define nested_materialize (if (and include_nested_prepares (query_block? optimized_src))
-				(lower_stage_materialize_all nested_stages) '()))
-			(define nested_prepare_expr (if (empty_list? nested_prepare)
-				nil
-				(cons (quote !begin) (merge (list nested_prepare nested_materialize)))))
-			(define key_columns (map (zip key_names keys) (lambda (binding)
-				(list (quote list) "column" (car binding) "any" (quoted_runtime_list '())
-					(list (quote list) "collate" (physical_column_collation_expr src (cadr binding)))))))
-			(define create_cols (cons (quote list)
-				(cons (cons (quote list) (cons "unique" (cons "group" (list (cons (quote list) key_names)))))
-					key_columns)))
-			/* Ordered bulk fills and pointwise probes share the canonical cache.
-			Keep the same computed-column definition for both physical carriers;
-			bulk preparation seeds values through its computed setters. */
-			(define ensure_agg_columns (if scalar_order_base_stage
-				(map ags (lambda (ag)
-					(build_group_aggregate_column stage schema tbl alias grouptbl
-						keys key_names aggregate_condition ag)))
-				(if query_input
-					(map (produceN (count ags)) (lambda (i)
-						(list (quote createcolumn)
-							(list (quote table) schema false grouptbl false (quote tx))
-							(nth aggregate_cols i)
-							"any"
-							(quoted_runtime_list '())
-							(list (quote list) "collate" (physical_column_collation_expr src (car (nth ags i)))))))
-					'())))
-			(define collect_plan (if (not query_input)
-				nil
-				(if (union_block? src)
-						(build_union_group_aggregates_insert_plan prepared_src stage grouptbl keys key_names (list aggregate_count_descriptor))
-					(build_query_group_collect_plan prepared_src grouptbl keys key_names))))
-			/* A base-table bulk fill cannot evaluate a dependent stage value by
-			itself. Those conditions are realized by the per-aggregate physical
-			operator below (including projected RecSets), after nested stages have
-			been prepared. */
-			(define base_group_into_plan (if (or query_input
-				(or scalar_order_base_stage (expr_refs_stage_output_alias? condition)))
-				nil
-					(build_base_group_into_plan stage grouptbl keys key_names condition
-					/* Probe-bound partitions discover their complete key domain once, but
-					leave aggregate values to the filtered lazy computed columns. */
-					(if (empty_list? aggregate_probe_bindings)
-						(non_scalar_order_aggregates ags)
-							'()))))
-			(define cleanup_plan (if (query_block? src)
-				nil
-					(build_group_keytable_cleanup src schema alias grouptbl keys key_names)))
-			(define agg_plans (if query_input
-				(if (empty_list? ags)
-					'()
-					(list (if (union_block? src)
-							(build_union_group_aggregates_insert_plan prepared_src stage grouptbl keys key_names ags)
-						(build_query_group_aggregates_insert_plan prepared_src grouptbl keys key_names lowering_ags aggregate_cols
-							(lowering_catalog_planning_session raw_stage_lookup)))))
-				(if scalar_order_base_stage
-						(list (build_group_ordered_scalar_columns_insert_plan stage grouptbl keys key_names condition ags))
-					(map ags (lambda (ag)
-						(build_group_aggregate_column
-							stage schema tbl alias grouptbl keys key_names aggregate_condition ag))))))
-			(define empty_aggregate_seed_plans (if (and query_input
-				(and initializer_owner
-					/* A fused scalar carrier can have several value slots plus
-					COUNT, so it uses the ordinary aggregate fill instead of the
-					two-slot scalar fill. Retain its declared empty scalar row too. */
-					(and (or (not scalar_single_stage)
-						(and (not scalar_query_stage)
-							(qassoc_get (gs_facts stage) 'preserve_empty_domain false)))
-						(not (empty_list? ags)))))
-				(if (equal? keys '(1))
-					(list (build_group_constant_key_insert_plan schema grouptbl))
-					(if (reduce keys (lambda (session_only key)
-						(and session_only (query_session_read? key))) true)
-						(list (build_group_session_key_insert_plan schema grouptbl key_names keys))
+	(begin
+		/* Raw stage lists are a discovery directory; the selected stage already
+		carries its immutable physical owner. Retain that same owner at this
+		common materializer boundary, including direct single-stage callers. */
+		(define lookup_stages (if (lowering_catalog? lookup_stages) lookup_stages
+			(lowering_catalog_rebind (group_stage_lowering_catalog stage) lookup_stages)))
+		(if (and (or (scalar_cardinality_probe_contract? stage) (scalar_first_probe_contract? stage))
+			(not (scalar_probe_input_closed? stage)))
+			(neumann_fail "build_queryplan" "residual bounded scalar input requires caller-bound probing")
+			(scoped_relational_program_stage? stage)
+			true
+			(and (invocation_group_stage? lookup_stages stage) (not (equal? result_sink (quote boolean-recset))))
+			(list 'define (invocation_group_packet_symbol (gs_id stage)) (lower_runtime_group_carrier lookup_stages stage))
+			(if (not (nil? (qassoc_get (gs_facts stage) (quote keytable_prepare_variants) nil)))
+				(cons (quote !begin) (map (group_prepare_variants stage) (lambda (variant)
+					(lower_group_stage_prepare_using all_stages lookup_stages variant include_nested_prepares result_sink))))
+				(begin
+					(define observed_key (qassoc_get (gs_facts stage) (quote group_join_observation) nil))
+					(define logical_src (gs_input stage))
+					(define prepare_catalog (unique_stages_by_id (merge (list (list stage) (lowering_catalog_stages all_stages)))))
+					(define range_recmap_candidates (if (query_block? logical_src)
+						(select_group_range_recmap_candidate prepare_catalog stage logical_src
+							(lowering_catalog_planning_session lookup_stages)) '()))
+					(define src (reduce range_recmap_candidates
+						(lambda (block candidate) (query_block_with_group_range_recmap block candidate))
+						logical_src))
+					(define prepare_dependency_graph (stage_dependency_graph prepare_catalog))
+					(define prepare_dependencies
+						(stage_dependency_closure_using_graph prepare_dependency_graph stage))
+					(define relational_presence_chain (and (> (count prepare_dependencies) 2)
+						(reduce prepare_dependencies (lambda (eligible dependency)
+							(and eligible (and (group_stage? dependency)
+								(presence_probe_stage? dependency)))) true)))
+					(define fact_lookup (group_stage_lowering_catalog stage))
+					(define raw_stage_lookup (if (lowering_catalog? lookup_stages)
+						lookup_stages
+						(if (lowering_catalog? fact_lookup)
+							fact_lookup
+							(unique_stages_by_id
+								(merge (list
+									prepare_catalog
+									lookup_stages
+									(qassoc_get (gs_facts stage) (quote stage_catalog) '())))))))
+					/* A presence/scalar-first-probe source whose lookup domain is invariant
+					for the whole query (only literals, parameters, or session values -- no
+					outer-row column) is evaluated exactly once regardless of how many rows
+					this stage's own input scan accepts. Bind it before rewriting so
+					rewrite_scalar_first_probe_expr_using_index (via query_invariant_probe_
+					binding_for_col) replaces every reference with that one bound value
+					instead of a fresh per-row probe. Mirrors
+					prepare_simple_query_block_physical_core_chosen. */
+					(define invariant_probe_entries (query_invariant_probe_entries_for_stages raw_stage_lookup))
+					/* A boolean RecSet producer is also executed by cardinality observations,
+					before the main query's lexical bindings exist. Keep invariant probes as
+					query-scoped markers inside that closed producer; its own lowering memoizes
+					them once. Other result sinks retain the established outer binding. */
+					(define closed_boolean_sink (equal? result_sink (quote boolean-recset)))
+					(define stage_lookup (if closed_boolean_sink
+						(stage_lookup_with_inline_query_invariant_probes raw_stage_lookup)
+						(stage_lookup_with_query_invariant_probe_bindings
+							raw_stage_lookup invariant_probe_entries)))
+					(define invariant_probe_bindings (if closed_boolean_sink '()
+						(query_invariant_probe_bindings invariant_probe_entries)))
+					(define recmap_candidate (if (empty_list? range_recmap_candidates)
+						(select_nested_scalar_recmap_candidate
+							(group_stage_nested_scalar_recmap_candidate stage_lookup stage)
+							(lowering_catalog_planning_session lookup_stages)) nil))
+					(if (and (not (union_block? src)) (and (not (query_block? src)) (not (source_is_base_table? src))))
+						(neumann_fail "build_queryplan" "group-stage lowering expects a base table, query-block, or union-block input")
+						true)
+					(define cache (group_stage_cache stage))
+					(define schema (group_cache_schema cache))
+					(define tbl (group_stage_input_name stage))
+					(define alias (group_stage_input_alias stage))
+					(define query_input (or (query_block? src) (union_block? src)))
+					/* Aggregate stages own their input query block. Apply the physical
+					membership choice here too; otherwise the top-level preparation pass never
+					reaches this nested block and eagerly materializes the candidate cache. */
+					(define membership_src (if (query_block? src)
+						(query_block_with_physical_membership_using stage_lookup src)
+						src))
+					/* A nested presence chain represented as correlated scalar probes copies
+					the complete remaining probe suffix into every parent prepare. Its stage
+					caches are already dependency-ordered here, so consume those relational
+					outputs directly once the chain contains more than one dependency. */
+					(define rewritten_src (if (query_block? membership_src)
+						(if (equal? result_sink (quote boolean-recset))
+							(query_block_with_probe_markers_using_graph
+								stage_lookup prepare_dependency_graph membership_src true)
+							(if relational_presence_chain
+								membership_src
+								(query_block_with_presence_probes_using stage_lookup membership_src false)))
+						membership_src))
+					(define scalar_order_cache (if (query_block? rewritten_src)
+						(scalar_order_lookup_cache_candidate stage_lookup rewritten_src) nil))
+					(define carrier_src (if (query_block? rewritten_src)
+						(query_block_with_scalar_order_lookup_cache
+							(query_block_with_scalar_order_lookup_cache_input
+								stage_lookup rewritten_src scalar_order_cache)
+							scalar_order_cache)
+						rewritten_src))
+					/* Bounded inputs and scoped producers need the same physical probe
+					selection as a root block. A scoped output has no enumerable shared
+					carrier; select its existing bound probe before preparing dependencies.
+					Keep the dependency-ordered presence-chain preparation unchanged. */
+					(define optimized_src (if (and (query_block? carrier_src)
+						(or (not (nil? scalar_order_cache))
+							(and (not relational_presence_chain)
+								(or (query_limit_active? (qb_offset carrier_src) (qb_limit carrier_src))
+									(not (nil? (find (qb_sources carrier_src) (lambda (candidate)
+										(scoped_program_probe_stage? stage_lookup
+											(source_stage_output_stage stage_lookup candidate))) nil)))))))
+						(query_block_with_scalar_first_probes_using stage_lookup carrier_src)
+						carrier_src))
+					(define rewrite_catalog_src (if (nil? scalar_order_cache) membership_src optimized_src))
+					(define rewrite_sources (if (query_block? rewrite_catalog_src) (qb_sources rewrite_catalog_src) '()))
+					(define rewrite_default_alias (if (query_block? src)
+						(qassoc_get (qb_facts rewrite_catalog_src) (quote default_alias) (if (empty_list? rewrite_sources) nil (source_alias (car rewrite_sources))))
+						nil))
+					/* Keys and aggregate values are consumers outside the input query block.
+					Rewrite them through every probe selected above, not only presence probes;
+					otherwise removing a scalar source leaves its projected value unbound. */
+					(define retained_input_aliases (if (query_block? optimized_src)
+						(source_aliases (qb_sources optimized_src)) '()))
+					(define input_probe_sources (if (and (query_block? carrier_src) (query_block? optimized_src))
+						(filter (qb_sources carrier_src) (lambda (candidate)
+							(not (contains? retained_input_aliases (source_alias candidate)))))
 						'()))
-				'()))
-			(define computed_order_exprs (merge_unique (map (produceN (count prepare_order_items)) (lambda (i)
-				(match (nth prepare_order_items i) '(expr _dir) (begin
-					(define replaced_order_expr (replace_group_order_expr_indexed
-							src alias grouptbl keys key_names stage key_index expr
-						(nth prepare_resolved_order_exprs i)))
-					(if (direct_group_order_expr? replaced_order_expr) '() (list replaced_order_expr))))))))
-			(define computed_order_plans (map computed_order_exprs (lambda (expr)
-				(build_group_computed_order_column schema grouptbl expr))))
-			(define ensure_agg_expr (if (empty_list? ensure_agg_columns)
-				nil
-				(cons (quote !begin) ensure_agg_columns)))
-			(define aggregate_prepare_expr (cons
-				(quote !begin)
-				(merge (list ensure_agg_columns agg_plans computed_order_plans))))
-			(define base_group_fill (symbol "__group_base_fill"))
-			(define base_group_fill_call (list base_group_fill (physical_query_tx_symbol)))
-			(define finalize_group_fill (list (quote rebuild) (list (quote table) schema false grouptbl false (quote tx)) true false))
-			(define partition_plan (group_cache_partition_plan schema tbl alias src grouptbl keys key_names))
-			(define initial_fill_expr (if (nil? base_group_into_plan)
-				nil
-				(list (quote initialize_cache_table)
-					(physical_query_tx_symbol)
-					(list (quote table) schema false grouptbl false (quote tx))
-					(list (quote list) (source_table_expr src))
-					(list (quote lambda) (list (physical_query_tx_symbol))
-						(cons (quote !begin) (filter (list partition_plan aggregate_prepare_expr cleanup_plan) (lambda (expr) (not (nil? expr))))))
-					base_group_fill
-					(list (quote lambda) (list (symbol "__group_finalize_tx")) finalize_group_fill))))
-			(define create_options (if (nil? initial_fill_expr)
-				(quoted_runtime_list '("engine" "cache"))
-				(list (quote list)
-					"engine" "cache"
-					"oninit" (list (quote lambda) (list (quote tx)) initial_fill_expr))))
-			/* Every use must seed its own session-domain keys, even when another
-			stage owns creation of the shared physical carrier. */
-			(define prepare_bound_group (list (quote if)
-				(group_stage_session_binding_missing_expr stage schema grouptbl keys key_names)
-				(list (quote !begin) aggregate_prepare_expr base_group_fill_call)
-				aggregate_prepare_expr))
-			(define group_cache_created (symbol "__group_cache_created"))
-			(define keytable_init
-				(list (quote group_cache_create) schema grouptbl create_cols create_options true (quote tx)))
-			(define boolean_row_keys (if (equal? result_sink (quote boolean-recset))
-				(scalar_first_probe_recset_row_keys stage
-					(scalar_first_probe_carrier_source prepared_src)) '()))
-			(define boolean_domain_src (if (equal? result_sink (quote boolean-recset))
-				(boolean_recset_domain_source prepared_src boolean_row_keys) nil))
-			(define boolean_input (if (nil? boolean_domain_src) prepared_src
-				(query_block_with_inner_domain_source prepared_src boolean_domain_src)))
-			(if (and (equal? result_sink (quote boolean-recset)) (nil? boolean_domain_src))
-				(neumann_fail "build_queryplan" "boolean RecSet sink requires a unique base-table domain")
-				true)
-			(define lowered_plan_core (if (equal? result_sink (quote boolean-recset))
-				(build_query_boolean_recset_plan
-					stage_lookup boolean_input boolean_domain_src boolean_row_keys result_sink_ags)
-				(if scalar_query_stage
-					(list (quote !begin)
-						nested_prepare_expr
-						(if initializer_owner keytable_init nil)
-						ensure_agg_expr
-						(build_scalar_single_query_stage_fill_plan
-							prepared_src stage grouptbl keys key_names
-							(car lowering_ags) (cadr lowering_ags)
-							(car aggregate_cols) (cadr aggregate_cols)))
-					(if query_input
-						(cons (quote !begin)
-							(merge (list
-								nested_prepare
-								nested_materialize
-								(if initializer_owner (list keytable_init) '())
-								ensure_agg_columns
-								computed_order_plans
-								(if (and initializer_owner (empty_list? ags)) (list collect_plan) '())
-								agg_plans
-								empty_aggregate_seed_plans)))
+					(define input_probe_column_map (if (empty_list? input_probe_sources) '()
+						(stage_output_single_aggregate_columns
+							(stage_output_stage_index (lowering_catalog_stages stage_lookup)) input_probe_sources)))
+					(define stage_probe_sources_for_rewrite (if (query_block? src)
+						(merge_unique (list input_probe_sources
+							(presence_probe_output_sources stage_lookup rewrite_sources rewrite_default_alias
+								(equal? result_sink (quote boolean-recset)))))
+						'()))
+					(define keys (if (empty_list? (gs_keys stage))
+						'(1)
+						(if (query_block? src)
+							(map (gs_keys stage) (lambda (key)
+								(rewrite_scalar_first_probe_expr stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
+									(rewrite_stage_graph_expr input_probe_column_map '()
+										(rewrite_group_range_recmaps_expr range_recmap_candidates key)))))
+							(gs_keys stage))))
+					(define prepare_order_items (coalesceNil (gs_order stage) '()))
+					(define prepare_resolved_order_exprs (map prepare_order_items (lambda (item)
+						(match item '(expr _dir) (canonical_column_expr_for_alias alias expr)))))
+					(define key_index (make_group_key_index keys prepare_resolved_order_exprs))
+					(define condition (if (query_block? src)
+						(rewrite_scalar_first_probe_expr stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
+							(rewrite_group_range_recmaps_expr range_recmap_candidates
+								(rewrite_stage_graph_expr input_probe_column_map '()
+									(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))))
+						(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
+					(define needs_count_filter (and
+						(not (qassoc_get (gs_facts stage) (quote preserve_empty_domain) false))
+						(not (scalar_value_stage? stage))
+						(and (not (equal? keys '(1))) (not (equal? condition true)))))
+					(define ags (if needs_count_filter
+						(dedupe_aggregates_by_col (merge (list (gs_aggregates stage) (list aggregate_count_descriptor))))
+						(gs_aggregates stage)))
+					(define recmap_ags
+						(rewrite_group_range_recmaps_expr range_recmap_candidates
+							(rewrite_nested_scalar_recmap_expr recmap_candidate ags)))
+					(define lowering_ags (if (query_block? src)
+						(rewrite_scalar_first_probe_aggregates stage_lookup stage_probe_sources_for_rewrite rewrite_default_alias
+							(rewrite_stage_graph_expr input_probe_column_map '() recmap_ags))
+						recmap_ags))
+					(define result_sink_ags (if (and (equal? result_sink (quote boolean-recset))
+						(query_block? src))
+						(rewrite_scalar_first_probe_aggregates stage_lookup
+							(filter rewrite_sources (lambda (candidate)
+								(stage_output_relation? (source_relation candidate))))
+							rewrite_default_alias ags)
+						lowering_ags))
+					(define key_names (group_key_cols keys))
+					(define aggregate_condition (replace_group_session_expr stage keys key_names condition))
+					(define aggregate_probe_bindings
+						(coalesceNil (qassoc_get (gs_facts stage) (quote aggregate_probe_bindings) '()) '()))
+					(define grouptbl (group_cache_relation cache))
+					(define initializer_owner (qassoc_get (gs_facts stage) (quote keytable_initializer_owner) true))
+					(define scalar_single_stage (scalar_value_stage? stage))
+					(define scalar_query_stage (and (query_block? src)
+						(and scalar_single_stage
+							(and (equal? (qassoc_get (gs_facts stage) (quote partition_limit) nil) 2)
+								(and (equal? (qassoc_get (gs_facts stage) (quote on_overflow) nil) (quote error))
+									(and (equal? (count ags) 2)
+										(equal? (cadr ags) aggregate_count_descriptor)))))))
+					(define scalar_order_base_stage (and (not query_input)
+						(compatible_scalar_order_aggregates? ags)))
+					/* Aggregate column names belong to the immutable logical stage. Prepared
+					input and RecMap rewrites below affect execution only: removing a scalar
+					alias must not rename aggregate columns read by the stage output. Base aggregate
+					columns use their direct physical builder and need no canonical list here. */
+					(define aggregate_cols (if (or query_input scalar_order_base_stage)
+						(map ags (lambda (ag) (group_stage_aggregate_column stage ag)))
+						'()))
+					(define scalar_aggregate_stage (scalar_aggregate_probe_supported? stage))
+					(define prepared_src (if (query_block? optimized_src)
+						(if (equal? result_sink (quote boolean-recset))
+							optimized_src
+							(if scalar_aggregate_stage
+								(begin
+									(define constant_reorder_stages (if (lowering_catalog? stage_lookup)
+										stage_lookup
+										(unique_stages_by_id (merge (list stage_lookup (qb_stages rewritten_src))))))
+									(if (not (empty_list? (filter (qb_sources optimized_src) (lambda (src)
+										(constant_scalar_or_presence_stage_output_source? constant_reorder_stages src)))))
+										(query_block_without_stages_after_eager_prepare_with_constant_scalars_first constant_reorder_stages optimized_src)
+										(query_block_without_stages_after_eager_prepare_using stage_lookup optimized_src)))
+								(query_block_without_stages_after_eager_prepare_using stage_lookup optimized_src)))
+						optimized_src))
+					(define direct_nested_stages (if (query_block? optimized_src)
+						(merge_unique (list
+							(query_block_stages_to_prepare_using stage_lookup optimized_src)
+							(available_stage_outputs_from_sources_using stage_lookup (qb_sources optimized_src))
+							(available_stage_outputs_from_sources_using stage_lookup (group_stage_final_extra_source_refs stage))
+							(group_cache_stages_from_sources stage_lookup (qb_sources optimized_src))
+							(group_cache_stages_from_sources stage_lookup (group_stage_final_extra_source_refs stage))
+							(query_block_probe_expr_stages optimized_src)))
+						'()))
+					(define owner_handle (qassoc_get (gs_facts stage) (quote btw2025_handle) nil))
+					(define owner_ancestors (qassoc_get (gs_facts stage) (quote btw2025_ancestors) '()))
+					(define nested_stages (if (nil? owner_handle)
+						direct_nested_stages
+						(filter direct_nested_stages (lambda (candidate)
+							(begin
+								(define candidate_handle (qassoc_get (gs_facts candidate) (quote btw2025_handle) nil))
+								(define candidate_parent (qassoc_get (gs_facts candidate) (quote btw2025_parent) nil))
+								(or
+									(nil? candidate_handle)
+									(equal? candidate_parent owner_handle)
+									(and
+										(nil? candidate_parent)
+										(and
+											(not (equal? candidate_handle owner_handle))
+											(not (contains? owner_ancestors candidate_handle))))))))))
+					(define nested_prepare (if (and include_nested_prepares (query_block? optimized_src))
+						(if relational_presence_chain
+							(lower_presence_stage_prepares_with_graph
+								prepare_dependency_graph stage_lookup nested_stages)
+							(lower_unique_stage_prepares_using prepare_catalog stage_lookup nested_stages))
+						'()))
+					(define nested_materialize (if (and include_nested_prepares (query_block? optimized_src))
+						(lower_stage_materialize_all nested_stages) '()))
+					(define nested_prepare_expr (if (empty_list? nested_prepare)
+						nil
+						(cons (quote !begin) (merge (list nested_prepare nested_materialize)))))
+					(define key_columns (map (zip key_names keys) (lambda (binding)
+						(list (quote list) "column" (car binding) "any" (quoted_runtime_list '())
+							(list (quote list) "collate" (physical_column_collation_expr src (cadr binding)))))))
+					(define create_cols (cons (quote list)
+						(cons (cons (quote list) (cons "unique" (cons "group" (list (cons (quote list) key_names)))))
+							key_columns)))
+					/* Ordered bulk fills and pointwise probes share the canonical cache.
+					Keep the same computed-column definition for both physical carriers;
+					bulk preparation seeds values through its computed setters. */
+					(define ensure_agg_columns (if scalar_order_base_stage
+						(map ags (lambda (ag)
+							(build_group_aggregate_column stage schema tbl alias grouptbl
+								keys key_names aggregate_condition ag)))
+						(if query_input
+							(map (produceN (count ags)) (lambda (i)
+								(list (quote createcolumn)
+									(list (quote table) schema false grouptbl false (quote tx))
+									(nth aggregate_cols i)
+									"any"
+									(quoted_runtime_list '())
+									(list (quote list) "collate" (physical_column_collation_expr src (car (nth ags i)))))))
+							'())))
+					(define collect_plan (if (not query_input)
+						nil
+						(if (union_block? src)
+							(build_union_group_aggregates_insert_plan prepared_src stage grouptbl keys key_names (list aggregate_count_descriptor))
+							(build_query_group_collect_plan prepared_src grouptbl keys key_names))))
+					/* A base-table bulk fill cannot evaluate a dependent stage value by
+					itself. Those conditions are realized by the per-aggregate physical
+					operator below (including projected RecSets), after nested stages have
+					been prepared. */
+					(define base_group_into_plan (if (or query_input
+						(or scalar_order_base_stage (expr_refs_stage_output_alias? condition)))
+						nil
+						(build_base_group_into_plan stage grouptbl keys key_names condition
+							/* Probe-bound partitions discover their complete key domain once, but
+							leave aggregate values to the filtered lazy computed columns. */
+							(if (empty_list? aggregate_probe_bindings)
+								(non_scalar_order_aggregates ags)
+								'()))))
+					(define cleanup_plan (if (query_block? src)
+						nil
+						(build_group_keytable_cleanup src schema alias grouptbl keys key_names)))
+					(define agg_plans (if query_input
+						(if (empty_list? ags)
+							'()
+							(list (if (union_block? src)
+								(build_union_group_aggregates_insert_plan prepared_src stage grouptbl keys key_names ags)
+								(build_query_group_aggregates_insert_plan prepared_src grouptbl keys key_names lowering_ags aggregate_cols
+									(lowering_catalog_planning_session raw_stage_lookup)))))
 						(if scalar_order_base_stage
+							(list (build_group_ordered_scalar_columns_insert_plan stage grouptbl keys key_names condition ags))
+							(map ags (lambda (ag)
+								(build_group_aggregate_column
+									stage schema tbl alias grouptbl keys key_names aggregate_condition ag))))))
+					(define empty_aggregate_seed_plans (if (and query_input
+						(and initializer_owner
+							/* A fused scalar carrier can have several value slots plus
+							COUNT, so it uses the ordinary aggregate fill instead of the
+							two-slot scalar fill. Retain its declared empty scalar row too. */
+							(and (or (not scalar_single_stage)
+								(and (not scalar_query_stage)
+									(qassoc_get (gs_facts stage) 'preserve_empty_domain false)))
+								(not (empty_list? ags)))))
+						(if (equal? keys '(1))
+							(list (build_group_constant_key_insert_plan schema grouptbl))
+							(if (reduce keys (lambda (session_only key)
+								(and session_only (query_session_read? key))) true)
+								(list (build_group_session_key_insert_plan schema grouptbl key_names keys))
+								'()))
+						'()))
+					(define computed_order_exprs (merge_unique (map (produceN (count prepare_order_items)) (lambda (i)
+						(match (nth prepare_order_items i) '(expr _dir) (begin
+							(define replaced_order_expr (replace_group_order_expr_indexed
+								src alias grouptbl keys key_names stage key_index expr
+								(nth prepare_resolved_order_exprs i)))
+							(if (direct_group_order_expr? replaced_order_expr) '() (list replaced_order_expr))))))))
+					(define computed_order_plans (map computed_order_exprs (lambda (expr)
+						(build_group_computed_order_column schema grouptbl expr))))
+					(define ensure_agg_expr (if (empty_list? ensure_agg_columns)
+						nil
+						(cons (quote !begin) ensure_agg_columns)))
+					(define aggregate_prepare_expr (cons
+						(quote !begin)
+						(merge (list ensure_agg_columns agg_plans computed_order_plans))))
+					(define base_group_fill (symbol "__group_base_fill"))
+					(define base_group_fill_call (list base_group_fill (physical_query_tx_symbol)))
+					(define finalize_group_fill (list (quote rebuild) (list (quote table) schema false grouptbl false (quote tx)) true false))
+					(define partition_plan (group_cache_partition_plan schema tbl alias src grouptbl keys key_names))
+					(define initial_fill_expr (if (nil? base_group_into_plan)
+						nil
+						(list (quote initialize_cache_table)
+							(physical_query_tx_symbol)
+							(list (quote table) schema false grouptbl false (quote tx))
+							(list (quote list) (source_table_expr src))
+							(list (quote lambda) (list (physical_query_tx_symbol))
+								(cons (quote !begin) (filter (list partition_plan aggregate_prepare_expr cleanup_plan) (lambda (expr) (not (nil? expr))))))
+							base_group_fill
+							(list (quote lambda) (list (symbol "__group_finalize_tx")) finalize_group_fill))))
+					(define create_options (if (nil? initial_fill_expr)
+						(quoted_runtime_list '("engine" "cache"))
+						(list (quote list)
+							"engine" "cache"
+							"oninit" (list (quote lambda) (list (quote tx)) initial_fill_expr))))
+					/* Every use must seed its own session-domain keys, even when another
+					stage owns creation of the shared physical carrier. */
+					(define prepare_bound_group (list (quote if)
+						(group_stage_session_binding_missing_expr stage schema grouptbl keys key_names)
+						(list (quote !begin) aggregate_prepare_expr base_group_fill_call)
+						aggregate_prepare_expr))
+					(define group_cache_created (symbol "__group_cache_created"))
+					(define keytable_init
+						(list (quote group_cache_create) schema grouptbl create_cols create_options true (quote tx)))
+					(define boolean_row_keys (if (equal? result_sink (quote boolean-recset))
+						(scalar_first_probe_recset_row_keys stage
+							(scalar_first_probe_carrier_source prepared_src)) '()))
+					(define boolean_domain_src (if (equal? result_sink (quote boolean-recset))
+						(boolean_recset_domain_source prepared_src boolean_row_keys) nil))
+					(define boolean_input (if (nil? boolean_domain_src) prepared_src
+						(query_block_with_inner_domain_source prepared_src boolean_domain_src)))
+					(if (and (equal? result_sink (quote boolean-recset)) (nil? boolean_domain_src))
+						(neumann_fail "build_queryplan" "boolean RecSet sink requires a unique base-table domain")
+						true)
+					(define lowered_plan_core (if (equal? result_sink (quote boolean-recset))
+						(build_query_boolean_recset_plan
+							stage_lookup boolean_input boolean_domain_src boolean_row_keys result_sink_ags)
+						(if scalar_query_stage
 							(list (quote !begin)
 								nested_prepare_expr
 								(if initializer_owner keytable_init nil)
-								aggregate_prepare_expr)
-							(list (quote !begin)
-								nested_prepare_expr
-								(if initializer_owner
-									(list
-										(list (quote lambda) (list group_cache_created)
-											(list (quote if) group_cache_created
-												nil
-												prepare_bound_group))
-										keytable_init)
-									prepare_bound_group)))))))
-			/* A query-invariant presence/scalar-first probe (see the comment at
-			raw_stage_lookup above) is bound exactly once here, ahead of whatever
-			this stage's own prepare plan does, so every rewritten reference below
-			reads that one binding instead of re-probing per row. */
-			(define recmap_plan (if (and (empty_list? range_recmap_candidates)
-				(nil? recmap_candidate)) lowered_plan_core
-				(cons (quote !begin)
-					(merge (list
-						(map range_recmap_candidates group_range_recmap_binding)
-						(if (nil? recmap_candidate) '()
-							(list (nested_scalar_recmap_binding recmap_candidate)))
-						(list lowered_plan_core))))))
-			(define lookup_cached_plan (if (nil? scalar_order_cache)
-				recmap_plan
-				(list (quote !begin) (nth scalar_order_cache 4) recmap_plan)))
-			(define lowered_plan (if (empty_list? invariant_probe_bindings)
-				lookup_cached_plan
-				(cons (quote !begin) (merge (list invariant_probe_bindings (list lookup_cached_plan))))))
-			(if (not (nil? observed_key)) (planner_queryplan_observation_read_expr observed_key)
-				(if (nil? base_group_into_plan)
-					lowered_plan
-					(list
-						(list (quote lambda) (list base_group_fill) lowered_plan)
-						(list (quote lambda) (list (physical_query_tx_symbol)) base_group_into_plan)))))))))
+								ensure_agg_expr
+								(build_scalar_single_query_stage_fill_plan
+									prepared_src stage grouptbl keys key_names
+									(car lowering_ags) (cadr lowering_ags)
+									(car aggregate_cols) (cadr aggregate_cols)))
+							(if query_input
+								(cons (quote !begin)
+									(merge (list
+										nested_prepare
+										nested_materialize
+										(if initializer_owner (list keytable_init) '())
+										ensure_agg_columns
+										computed_order_plans
+										(if (and initializer_owner (empty_list? ags)) (list collect_plan) '())
+										agg_plans
+										empty_aggregate_seed_plans)))
+								(if scalar_order_base_stage
+									(list (quote !begin)
+										nested_prepare_expr
+										(if initializer_owner keytable_init nil)
+										aggregate_prepare_expr)
+									(list (quote !begin)
+										nested_prepare_expr
+										(if initializer_owner
+											(list
+												(list (quote lambda) (list group_cache_created)
+													(list (quote if) group_cache_created
+														nil
+														prepare_bound_group))
+												keytable_init)
+											prepare_bound_group)))))))
+					/* A query-invariant presence/scalar-first probe (see the comment at
+					raw_stage_lookup above) is bound exactly once here, ahead of whatever
+					this stage's own prepare plan does, so every rewritten reference below
+					reads that one binding instead of re-probing per row. */
+					(define recmap_plan (if (and (empty_list? range_recmap_candidates)
+						(nil? recmap_candidate)) lowered_plan_core
+						(cons (quote !begin)
+							(merge (list
+								(map range_recmap_candidates group_range_recmap_binding)
+								(if (nil? recmap_candidate) '()
+									(list (nested_scalar_recmap_binding recmap_candidate)))
+								(list lowered_plan_core))))))
+					(define lookup_cached_plan (if (nil? scalar_order_cache)
+						recmap_plan
+						(list (quote !begin) (nth scalar_order_cache 4) recmap_plan)))
+					(define lowered_plan (if (empty_list? invariant_probe_bindings)
+						lookup_cached_plan
+						(cons (quote !begin) (merge (list invariant_probe_bindings (list lookup_cached_plan))))))
+					(if (not (nil? observed_key)) (planner_queryplan_observation_read_expr observed_key)
+						(if (nil? base_group_into_plan)
+							lowered_plan
+							(list
+								(list (quote lambda) (list base_group_fill) lowered_plan)
+								(list (quote lambda) (list (physical_query_tx_symbol)) base_group_into_plan))))))))))
 
 (define lower_orc_stage_prepare (lambda (stage)
 	(begin
@@ -2487,14 +2528,15 @@ prewarm a subset; the generated reducer itself must skip nonmembers. */
 		(define ags (gs_aggregates stage))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define key_names (group_key_cols keys))
-		(define stage_catalog (stage_catalog_with_nested
-			(merge (list
-				(nested_stage_catalog stage)
-				(if (query_block? src) (query_block_stage_catalog src) '())))))
+		(define stage_catalog (lowering_catalog_rebind (group_stage_lowering_catalog stage)
+			(stage_catalog_with_nested
+				(merge (list
+					(nested_stage_catalog stage)
+					(if (query_block? src) (query_block_stage_catalog src) '()))))))
 		(list (quote begin)
 			(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
 			(lower_query_block_core
-				(group_stage_final_block stage (group_stage_final_extra_sources_using stage_catalog stage)) result_consumer)))))
+				(group_stage_final_block stage_catalog stage (group_stage_final_extra_sources_using stage_catalog stage)) result_consumer)))))
 
 (define row_number_get_column? (lambda (col expr)
 	(match expr
@@ -3081,7 +3123,7 @@ kinds inherit the global aggregate consumer without expression-specific code. */
 								(begin
 									(define invocation_group (make_group_stage_for_query_block
 										(expand_grouped_query_block probe_rewritten) '()))
-									(lower_runtime_rows_group_stage (qb_schema probe_rewritten) invocation_group
+									(lower_runtime_rows_group_stage stage_lookup (qb_schema probe_rewritten) invocation_group
 										(gs_output invocation_group) (qb_order probe_rewritten)
 										(qb_offset probe_rewritten) (qb_limit probe_rewritten) result_consumer))
 								(neumann_fail "build_queryplan" "group-stage source did not lower to a physical driver"))
@@ -3139,7 +3181,7 @@ kinds inherit the global aggregate consumer without expression-specific code. */
 											(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup outer_prepare_stages)
 											(lower_stage_materialize_all outer_prepare_stages)
 											(list (lower_group_stage_prepare_using (cons main_stage stage_catalog) main_stage_lookup main_stage true nil))
-											(list (lower_query_block_core (group_stage_final_block main_stage final_stage_sources) result_consumer)))))))))))))))))
+											(list (lower_query_block_core (group_stage_final_block main_stage_lookup main_stage final_stage_sources) result_consumer)))))))))))))))))
 
 (define query_block_without_stages (lambda (block)
 	(make_query_block
@@ -3602,7 +3644,8 @@ cached plan is recompiled when data growth crosses the carrier boundary. */
 (define scalar_order_lookup_cache_candidate (lambda (stages block)
 	(begin
 		(define planning_session (planner_context_session (qb_facts block)))
-		(if (not (query_limit_active? (qb_offset block) (qb_limit block)))
+		(if (or (lowering_catalog_caller_input? stages)
+			(not (query_limit_active? (qb_offset block) (qb_limit block))))
 			nil
 			(begin
 				(define sources (qb_sources block))
@@ -3814,9 +3857,10 @@ mapper handles source-generation translation without changing logical stages. */
 					(nth (scalar_first_probe_parts outer_ag) 0)))
 				(define scalar_inner_marker (if (nil? outer_value) nil
 					(scalar_order_lookup_cache_marker outer_value nil)))
-				(define inner_stage_lookup (make_lowering_catalog (merge_unique (list
-					(lowering_catalog_stages stages)
-					(qassoc_get (gs_facts outer_stage) (quote probe_catalog) '())))))
+				(define inner_stage_lookup (lowering_catalog_rebind stages
+					(make_lowering_catalog (merge_unique (list
+						(lowering_catalog_stages stages)
+						(qassoc_get (gs_facts outer_stage) (quote probe_catalog) '()))))))
 				(define relational_inner_marker (if (or (not (nil? scalar_inner_marker))
 					(not (query_block? middle_input))) nil
 					(scalar_order_relational_cache_marker inner_stage_lookup
@@ -5789,25 +5833,27 @@ stage requested-column. The recursive result is ordered driver -> final. */
 				/* The selected direct stages carry compile-local physical context.
 				Publish those exact stage values into the lowering catalog so the
 				leaf emitter sees the same selection made above. */
-				(define physical_stage_catalog (if (empty_list? direct_group_join_stages)
-					stage_catalog
-					(make_lowering_catalog
-						(map (lowering_catalog_stages stage_catalog) (lambda (stage)
-							(begin
-								(define selected (if (group_stage? stage)
-									(stage_by_id direct_group_join_stages (gs_id stage)) nil))
-								(if (nil? selected) stage selected)))))))
+				(define physical_stage_catalog (lowering_catalog_rebind stage_lookup
+					(if (empty_list? direct_group_join_stages)
+						stage_catalog
+						(make_lowering_catalog
+							(map (lowering_catalog_stages stage_catalog) (lambda (stage)
+								(begin
+									(define selected (if (group_stage? stage)
+										(stage_by_id direct_group_join_stages (gs_id stage)) nil))
+									(if (nil? selected) stage selected))))))))
 				(define invocation_memberships (query_block_invocation_membership_stages raw_prepared_block false))
 				(define eager_stages (filter (unique_stages_by_id (merge (list candidate_eager_stages invocation_memberships
 					(filter (group_cache_stages_from_sources stage_lookup (qb_sources raw_prepared_block))
 						(lambda (stage) (invocation_group_stage? stage_lookup stage)))))) (lambda (stage)
-					(and (not (has_assoc? probe_marker_stage_ids (gs_id stage)))
-						(not (contains? direct_group_join_stage_ids (gs_id stage)))))))
-				(define eager_stage_lookup (stages_without_ids
-					(lowering_catalog_stages stage_lookup)
-					(merge_unique (list
-						(extract_assoc probe_marker_stage_ids (lambda (id _owned) id))
-						direct_group_join_stage_ids))))
+						(and (not (has_assoc? probe_marker_stage_ids (gs_id stage)))
+							(not (contains? direct_group_join_stage_ids (gs_id stage)))))))
+				(define eager_stage_lookup (lowering_catalog_rebind stage_lookup
+					(stages_without_ids
+						(lowering_catalog_stages stage_lookup)
+						(merge_unique (list
+							(extract_assoc probe_marker_stage_ids (lambda (id _owned) id))
+							direct_group_join_stage_ids)))))
 				(define eager_dependency_graph (stage_dependency_graph eager_stage_lookup))
 				(define bounded_probe_recipe_keys
 					(query_block_bounded_scalar_probe_recipe_keys carrier_block probe_recipe_entries))
@@ -5823,9 +5869,10 @@ stage requested-column. The recursive result is ordered driver -> final. */
 				/* Different logical stage IDs may resolve to one physical carrier.
 				Once that carrier is eager, no alias-equivalent stage may emit a
 				second lazy initializer for the same session key. */
-				(define lazy_catalog (stages_without_ids
-					(stages_without_prepare_backbones stage_catalog eager_stages)
-					direct_group_join_stage_ids))
+				(define lazy_catalog (lowering_catalog_rebind stage_lookup
+					(stages_without_ids
+						(stages_without_prepare_backbones stage_lookup stage_catalog eager_stages)
+						direct_group_join_stage_ids)))
 				(define core_block (query_block_without_stages
 					(query_block_with_stage_catalog
 						(if (nil? recmap_window) prepared_block
@@ -5944,12 +5991,12 @@ chooses the producer/driver implementation from canonical stage facts. */
 	(define runtime_stage (if retained_set_group nil (runtime_union_group_stage_for_block block)))
 	(if retained_set_group
 		(if (not (nil? (stage_by_id (qb_stages block) (gs_id retained_set_group))))
-			(lower_runtime_rows_group_stage (qb_schema block) retained_set_group (gs_output retained_set_group)
+			(lower_runtime_rows_group_stage (query_block_stage_lookup block) (qb_schema block) retained_set_group (gs_output retained_set_group)
 				(runtime_union_group_order retained_set_group) (gs_offset retained_set_group) (gs_limit retained_set_group) result_consumer)
-			(lower_runtime_rows_group_stage (qb_schema block) retained_set_group (qb_fields block)
+			(lower_runtime_rows_group_stage (query_block_stage_lookup block) (qb_schema block) retained_set_group (qb_fields block)
 				(qb_order block) (qb_offset block) (qb_limit block) result_consumer))
 		runtime_stage
-		(lower_runtime_rows_group_stage (qb_schema block) runtime_stage (gs_output runtime_stage)
+		(lower_runtime_rows_group_stage (query_block_stage_lookup block) (qb_schema block) runtime_stage (gs_output runtime_stage)
 			(runtime_union_group_order runtime_stage) (gs_offset runtime_stage) (gs_limit runtime_stage) result_consumer)
 		(empty_list? (qb_stages block))
 		(lower_simple_query_block_with_cataloged_stages block result_consumer)
@@ -6362,9 +6409,15 @@ invocation arguments and never replace the residual filter or join keys. */
 	(begin
 		(define dependency_graph (stage_dependency_graph stages))
 		(define lazy_stages (stage_dependency_closure_many_using_graph
-			dependency_graph (collect_stage_prepares selected)))
-		(map lazy_stages (lambda (stage)
-			(lazy_stage_prepare_binding dependency_graph stage stages))))))
+			dependency_graph (collect_stage_prepares stages selected)))
+		(define invocation (filter lazy_stages (lambda (stage)
+			(invocation_group_stage? stages stage))))
+		(merge (list
+			(lower_unique_stage_prepares_with_graph dependency_graph stages invocation)
+			(map invocation prepared_stage_binding)
+			(map (filter lazy_stages (lambda (stage)
+				(not (invocation_group_stage? stages stage)))) (lambda (stage)
+					(lazy_stage_prepare_binding dependency_graph stage stages))))))))
 
 (define prepared_stage_binding (lambda (stage)
 	(list
@@ -6373,7 +6426,7 @@ invocation arguments and never replace the residual filter or join keys. */
 		(list (quote once) (list (quote lambda) '() true)))))
 
 (define prepared_stage_bindings (lambda (stages)
-	(map (collect_stage_prepares stages) prepared_stage_binding)))
+	(map (collect_stage_prepares (group_stages_lowering_catalog stages) stages) prepared_stage_binding)))
 
 (define query_block_has_aggregates? (lambda (block)
 	(not (empty_list? (stage_aggregates_for_fields (qb_fields block))))))
@@ -6811,7 +6864,7 @@ lookup for each ordered driver candidate. */
 			(list (quote lambda) (list probe_var)
 				(compile_scan_plan (quote scan_exists)
 					(physical_query_tx_symbol)
-					(group_stage_table_expr stage)
+					(group_stage_table_expr (group_stage_lowering_catalog stage) stage)
 					(cons (quote list) filtercols)
 					(list (quote lambda) (map filtercols symbol)
 						(list (quote and)
@@ -6831,7 +6884,7 @@ lookup for each ordered driver candidate. */
 						(equal? (count (gs_keys stage)) 1))
 						(begin
 							(list
-								(group_stage_table_expr stage)
+								(group_stage_table_expr (group_stage_lowering_catalog stage) stage)
 								"k0"
 								(membership_cache_key_probe_expr stage)
 								(quote group_cache_probe)))
@@ -7532,13 +7585,15 @@ scalar comparison work rather than an uncalibrated multiplier. */
 						(reduce (gs_aggregates group_stage) (lambda (bounded ag)
 							(and bounded (bounded_scalar_aggregate? ag))) true))
 						(lower_query_local_base_scalar_stage group_stage fields (qb_offset block) (qb_limit block) result_consumer)
-						(lower_runtime_rows_group_stage (qb_schema block) group_stage fields
+						(lower_runtime_rows_group_stage (query_block_stage_lookup block) (qb_schema block) group_stage fields
 							(qb_order block) (qb_offset block) (qb_limit block) result_consumer))
 					(direct_base_group_plan_preferred? group_stage)
 					(lower_direct_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block) result_consumer)
 					/* Cache visibility is required independently of ORDER eligibility.
 					The existing native owner selects a query-local group when this
 					transaction cannot consume the maintained source cache. */
+					(lowering_catalog_caller_input? (query_block_lowering_catalog block))
+					(lower_query_local_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block) result_consumer)
 					(list (quote with_cache_sources) (physical_query_tx_symbol)
 						(list (quote list) (source_table_expr src))
 						(list (quote lambda) '() (lower_group_stage group_stage result_consumer))
@@ -13749,7 +13804,7 @@ stars through the same catalog-aware path used by physical lowering. */
 			nil
 			(begin
 				(define stage (make_group_stage_for_block branch src))
-				(define final_block (group_stage_final_block stage (group_stage_final_extra_sources stage)))
+				(define final_block (group_stage_final_block (group_stage_lowering_catalog stage) stage (group_stage_final_extra_sources stage)))
 				(if (union_ordered_branch_supported? final_block)
 					(list (list (lower_group_stage_prepare_using (list stage) (list stage) stage true nil)) final_block nil)
 					nil))))))
@@ -14194,7 +14249,7 @@ only its finished unique relation receives the set node's final window. */
 					(if (number? expression) (nth (projection_exprs fields) (- expression 1))
 						(union_group_output_expr fields expression)) direction)
 				_ (neumann_fail "build_queryplan" "malformed UNION ORDER BY item")))))
-		(lower_runtime_group_relation (logical_relation_schema block) stage
+		(lower_runtime_group_relation nil (logical_relation_schema block) stage
 			(lambda (table _scope)
 				(lower_runtime_group_output stage table fields ordering (union_offset block) (union_limit block) result_consumer)) false))))
 (define lower_union_block (lambda (block result_consumer)
@@ -14205,6 +14260,20 @@ only its finished unique relation receives the set node's final window. */
 /* UNION roots retain the catalogs of their query-block branches. Physical
 prepare ownership and missing-handle completion must see those stages too. */
 
+/* Physical root metadata uses the existing lowering-catalog transport. A
+UNION's branches inherit the same cohort profile; no logical fact is added. */
+(define physical_node_planning_facts (lambda (node)
+	(if (query_block? node) (qb_facts node)
+		(if (union_block? node)
+			(physical_node_planning_facts (car (union_branches node))) '()))))
+
+(define physical_node_lowering_catalog (lambda (node)
+	(if (query_block? node) (query_block_lowering_catalog node)
+		(if (union_block? node)
+			(reduce (union_branches node) (lambda (catalog branch)
+				(if (nil? catalog) (physical_node_lowering_catalog branch) catalog)) nil)
+			nil))))
+
 (define physical_node_stage_catalog (lambda (node)
 	(if (query_block? node)
 		(stage_catalog_with_nested (query_block_stage_catalog node))
@@ -14213,16 +14282,45 @@ prepare ownership and missing-handle completion must see those stages too. */
 				(merge (map (union_branches node) physical_node_stage_catalog)))
 			'()))))
 
-(define physical_node_with_stage_catalog (lambda (node)
+(define physical_node_with_stage_catalog (lambda (node context)
 	(if (query_block? node)
-		(query_block_with_full_stage_catalog node)
+		(begin
+			(define public_input (expression_equal? (lowering_catalog_input_profile context) 'public))
+			(define contextual (if (or (nil? context) public_input) node
+				(query_block_with_reorder_facts node (list
+					(list 'physical_planning_session (lowering_catalog_planning_session context))
+					(list 'lowering_catalog
+						(lowering_catalog_rebind context (physical_node_stage_catalog node)))))))
+			(define nested (stage_catalog_with_nested (query_block_stage_catalog contextual)))
+			(if (and (nil? context) (not (nil? (find nested
+				(lambda (stage) (and (group_stage? stage)
+					(not (invocation_group_stage? nil stage)))) nil))))
+				/* Attach only the original pure discovery catalog to each direct stage.
+				No group choice, canonical carrier or cardinality observation runs
+				until the public/caller collector and input owner are selected. */
+				(begin
+					(define catalog (make_lowering_catalog nested))
+					(make_query_block
+						(qb_schema contextual)
+						(qb_sources contextual)
+						(qb_fields contextual)
+						(qb_where contextual)
+						(qb_group contextual)
+						(qb_having contextual)
+						(qb_order contextual)
+						(qb_limit contextual)
+						(qb_offset contextual)
+						(qb_hidden contextual)
+						(map (qb_stages contextual) (lambda (stage)
+							(group_stage_with_lowering_catalog stage catalog)))
+						(query_block_facts_with_lowering_catalog contextual nested catalog)))
+				(query_block_with_full_stage_catalog contextual)))
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)
-				(map (union_branches node) physical_node_with_stage_catalog)
-				(union_order node)
-				(union_limit node)
-				(union_offset node)
+				(map (union_branches node) (lambda (branch)
+					(physical_node_with_stage_catalog branch context)))
+				(union_order node) (union_limit node) (union_offset node)
 				(union_facts node))
 			node))))
 
@@ -14246,8 +14344,25 @@ build_queryplan contract. */
 					(physical_union_identity node)))
 			node))))
 
-(define prepare_physical_queryplan (lambda (ir planning_session tx)
+(define planner_select_input_observations (lambda (planning tx ir context)
+	(if (or (nil? planning) (not (nil? tx))) true
+		(begin
+			(define public (expression_equal? (lowering_catalog_input_profile context) 'public))
+			(define caller (or (lowering_catalog_caller_input? context)
+				(physical_program_caller_lifetime? (ir_root ir))
+				(reduce (physical_node_stage_catalog (ir_root ir)) (lambda (needed stage)
+					(or needed (physical_program_caller_lifetime? stage))) false)))
+			(if public (planning "__memcp_queryplan_observation_scope"
+				(planning "__memcp_queryplan_public_observation_scope"))
+				(if caller
+					(begin
+						(define lifetime (planning "__memcp_queryplan_input_lifetime"))
+						(planning "__memcp_queryplan_observation_scope"
+							(if (nil? lifetime) (newsession) ((nth lifetime 2))))) true))))))
+
+(define prepare_physical_queryplan (lambda (ir planning_session tx context)
 	(begin
+		(planner_select_input_observations planning_session tx ir context)
 		(require_unnested_node "build_queryplan input" (ir_root ir))
 		/* This native handle exists only between physical preparation and emission.
 		It never enters the logical IR or the emitted/cached runtime plan. */
@@ -14256,7 +14371,7 @@ build_queryplan contract. */
 		(define contextual_root (apply_join_optimizer_plan_node contextual_input))
 		(make_ir
 			(ir_kind ir)
-			(physical_node_with_stage_catalog contextual_root)
+			(physical_node_with_stage_catalog contextual_root context)
 			(map (ir_stages ir) apply_join_optimizer_plan_stage)
 			(ir_context_of ir)
 			(ir_return ir)))))
@@ -14532,7 +14647,7 @@ not at every nested scope, so deeply nested programs retain linear admission. */
 		false)))
 
 (define closed_group_prepare_stage? (lambda (stages dependency_graph stage)
-	(and (group_stage? stage)
+	(and (group_stage? stage) (not (invocation_group_stage? stages stage))
 		(query_result_reusable_using_stages? stages stage)
 		(and (source_is_base_table? (gs_input stage))
 			(and (not (stage_has_residual_outer_refs? stage))
@@ -14544,7 +14659,7 @@ not at every nested scope, so deeply nested programs retain linear admission. */
 					true))))))
 
 (define shared_prepare_owner_key (lambda (stage)
-	(concat "__prepare_carrier_" (fnv_hash (stage_prepare_backbone_signature stage)))))
+	(concat "__prepare_carrier_" (fnv_hash (stage_prepare_backbone_signature (group_stage_lowering_catalog stage) stage)))))
 
 (define shared_prepare_owner_binding (lambda (dependency_graph catalog stage)
 	(list
@@ -14579,7 +14694,8 @@ lazy stage keys are actually reachable, then this collector emits one closed
 initializer owner per canonical carrier and replaces local copies with aliases.
 Both AST walks are linear; no pairwise recipe comparison is performed. */
 (define consolidate_closed_group_prepares (lambda (ir plan)
-	(if (not (closed_group_prepare_consolidation_required? ir))
+	(if (or (lowering_catalog_caller_input? (physical_node_lowering_catalog (ir_root ir)))
+		(not (closed_group_prepare_consolidation_required? ir)))
 		plan
 		(begin
 			(define catalog (physical_node_stage_catalog (ir_root ir)))
@@ -14595,20 +14711,20 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 				(define consumers (filter catalog (lambda (stage)
 					(and (closed_group_prepare_stage? catalog dependency_graph stage)
 						(has_assoc? emitted_keys (stage_prepare_key stage))))))
-				(define selected_backbones (stage_prepare_backbone_set consumers))
+				(define selected_backbones (stage_prepare_backbone_set catalog consumers))
 				/* A consumer can read an aggregate column without owning a prepare
 				binding. Once a carrier is reachable, collect every compatible column
 				requirement for it from the canonical catalog. */
 				(define selected (filter catalog (lambda (stage)
 					(and (closed_group_prepare_stage? catalog dependency_graph stage)
-						(and (has_assoc? selected_backbones (stage_prepare_backbone_signature stage))
+						(and (has_assoc? selected_backbones (stage_prepare_backbone_signature (group_stage_lowering_catalog stage) stage))
 							(or (has_assoc? emitted_keys (stage_prepare_key stage))
 								(or (has_assoc? emitted_call_keys (stage_prepare_key stage))
 									(stage_aggregate_referenced? emitted_strings stage))))))))
 				(if (empty_list? selected)
 					plan
 					(begin
-						(define carriers (collect_stage_prepares selected))
+						(define carriers (collect_stage_prepares catalog selected))
 						(define selected_keys (reduce selected (lambda (keys stage)
 							(set_assoc keys (stage_prepare_key stage) true)) '()))
 						(cons (quote !begin)
@@ -14854,79 +14970,267 @@ prepare bindings; no key enumeration or storage artifact enters logical IR. */
 							(if (equal? index 1) source (nth children index))))))))
 		_ expr)))
 
-(define emit_physical_queryplan (lambda (ir result_consumer finalizer)
+/* Frontends own descriptors and output adapters. This neutral continuation
+contains emitted code only; it is invoked after successful cohort admission
+and guards, inside the same invocation lifetime as the producer. A nested
+producer can explicitly inherit that already selected physical context. */
+(define physical_result_consumer (lambda (context finalize)
+	(list 'physical-result-consumer context finalize)))
+(define physical_result_context (lambda (consumer)
+	(match consumer ((symbol physical-result-consumer) context _finalize) context _ nil)))
+(define physical_result_finalize (lambda (consumer context plan)
+	(if (nil? consumer) plan
+		(match consumer
+			((symbol physical-result-consumer) _inherited finalize)
+			(if (nil? finalize) plan (finalize plan context))
+			_ (consumer plan)))))
+
+/* Select one whole retained-stage physical program before stage-output
+identities become physical names. The public arm retains its old nil-context
+kernel; the caller arm uses the executing native view for every stage. */
+(define physical_region_stages (lambda (ir)
+	(filter (physical_node_stage_catalog (ir_root ir)) (lambda (stage)
+		(and (group_stage? stage) (not (invocation_group_stage? nil stage)))))))
+
+/* Existing semantic invocation lifetimes select the caller program. This
+metadata walk never classifies literal/parameter domains as caller inputs or
+resolves a native handle; all native read authority stays with its operator. */
+(define physical_program_caller_lifetime? (lambda (node)
+	(if (or (query_block_invocation_scope? node) (scoped_relational_program_stage? node)) true
+		(query_block? node)
+		(reduce (qb_sources node) (lambda (caller source)
+			(or caller (physical_program_caller_lifetime? source))) false)
+		(union_block? node)
+		(reduce (union_branches node) (lambda (caller branch)
+			(or caller (physical_program_caller_lifetime? branch))) false)
+		(group_stage? node) (physical_program_caller_lifetime? (gs_input node))
+		(or (source_invocation_lifetime? node)
+			(local_relation_reference? (source_relation node))) true
+		(or (query_block? (source_relation node)) (union_block? (source_relation node)))
+		(physical_program_caller_lifetime? (source_relation node))
+		false)))
+
+/* EXPLAIN returns code/metadata, never a future row producer. Keep its existing
+statistics-only collector and select the inspected invocation's physical view;
+no runtime source preparation or SQL cache ownership is changed. */
+(define emit_physical_input_diagnostic (lambda (ir result_consumer finalizer stages planning)
 	(begin
-		(if (and (not (nil? result_consumer)) (not (equal? (ir_return ir) 'rows)))
-			(neumann_fail "build_queryplan" "a final result reduction requires a row-producing query") true)
-		(define candidate (if (equal? (ir_return ir) (quote rows)) (semijoin_carrier_spec (ir_root ir)) nil))
-		(define carrier (if (nil? candidate) nil
+		(define facts (physical_node_planning_facts (ir_root ir)))
+		(define tx (planner_context_tx facts))
+		(define caller (or (tx_requires_query_local_cache tx)
+			(physical_program_caller_lifetime? (ir_root ir))
+			(reduce stages (lambda (needed stage)
+				(or needed (physical_program_caller_lifetime? stage))) false)))
+		(define catalog (lowering_catalog_with_input_profile
+			(lowering_catalog_with_planning_session
+				(make_lowering_catalog (physical_node_stage_catalog (ir_root ir))) planning)
+			(if caller 'caller 'public)))
+		(emit_physical_queryplan
+			(prepare_physical_queryplan ir planning tx catalog)
+			result_consumer finalizer catalog))))
+
+/* Mutation and scoped-program producers may bind a checked native invocation
+inside their body. An outer cache dispatcher cannot certify that later input;
+retain the complete runtime alternatives across that semantic boundary. */
+/* This is phase ownership, not permission or a SQL-spelling heuristic.
+Opaque producers and scoped initializers keep the pre-existing dual program. */
+(define physical_dispatch_read_input? (lambda (node)
+	(if (query_block? node)
+		(and (not (query_block_invocation_scope? node))
+			(reduce (qb_sources node) (lambda (read_only source)
+				(and read_only (physical_dispatch_read_input? source))) true))
+		(union_block? node)
+		(reduce (union_branches node) (lambda (read_only branch)
+			(and read_only (physical_dispatch_read_input? branch))) true)
+		(group_stage? node)
+		(and (not (scoped_relational_program_stage? node))
+			(physical_dispatch_read_input? (gs_input node)))
+		(or (orc_stage? node) (window_stage? node)) true
+		(or (and (source_is_base_table? node)
+			(not (table_function_relation? (source_relation node)))
+			(not (scoped_stage_table_relation? (source_relation node))))
+			(row_domain_relation? (source_relation node))
+			(local_relation_reference? (source_relation node))
+			(stage_output_relation? (source_relation node))) true
+		(or (query_block? (source_relation node)) (union_block? (source_relation node)))
+		(physical_dispatch_read_input? (source_relation node))
+		false)))
+
+(define physical_region_dispatch_admitted? (lambda (ir)
+	(and (equal? (ir_return ir) 'rows)
+		(physical_dispatch_read_input? (ir_root ir))
+		(reduce (physical_node_stage_catalog (ir_root ir)) (lambda (read_only stage)
+			(and read_only (physical_dispatch_read_input? stage))) true))))
+
+(define emit_dispatched_physical_region (lambda (ir result_consumer finalizer stages planning common)
+	(begin
+		(define facts (physical_node_planning_facts (ir_root ir)))
+		(define compile_tx (planner_context_tx facts))
+		(define caller_lifetime (if (or (physical_program_caller_lifetime? (ir_root ir))
+			(reduce stages (lambda (needed stage)
+				(or needed (physical_program_caller_lifetime? stage))) false)) true false))
+		(define selected_caller (if (or (tx_requires_query_local_cache compile_tx) caller_lifetime) true false))
+		(define selected_session (sql_queryplan_fork_collector planning))
+		(define contracts selected_session)
+		(define catalog (lowering_catalog_with_planning_session
+			(make_lowering_catalog (physical_node_stage_catalog (ir_root ir))) selected_session))
+		(define selected_context (lowering_catalog_with_input_profile catalog (if selected_caller 'caller 'public)))
+		(define selected_context (if selected_caller
+			(lowering_catalog_with_input_contracts selected_context contracts) selected_context))
+		(define selected_input (prepare_physical_queryplan ir selected_session compile_tx selected_context))
+		(define selected_plan (emit_physical_queryplan selected_input result_consumer finalizer selected_context))
+		(define refusal (if selected_caller (contracts "__memcp_queryplan_input_refusal") nil))
+		/* There is no unused public arm to preserve in this selected compile.
+		A genuinely unsupported caller fails like the ordinary compiler, before
+		publishing a variant or executing its preparers/metadata. */
+		(if (nil? refusal) true (neumann_fail "build_queryplan" refusal))
+		(define selected (sql_queryplan_input_collector selected_session))
+		(sql_queryplan_register_input_alternatives planning caller_lifetime common
+			(if selected_caller (list true '() true) selected)
+			(if selected_caller selected (list true '() true)) (list selected_caller))
+		(planning "__memcp_queryplan_selected_access_work"
+			(selected_session "__memcp_queryplan_selected_access_work"))
+		selected_plan)))
+
+(define emit_physical_region (lambda (ir result_consumer finalizer stages)
+	(begin
+		(define facts (physical_node_planning_facts (ir_root ir)))
+		(define planning (planner_context_session facts))
+		(if (if (nil? planning) false (planning "__memcp_queryplan_diagnostic_statistics"))
+			(emit_physical_input_diagnostic ir result_consumer finalizer stages planning)
 			(begin
-				(define cache_name (if (and (nth candidate 5)
-					(not (equal? (prejoin_source_table_key (car candidate)) (prejoin_source_table_key (cadr candidate)))))
-					(car (semijoin_cached_predicate candidate)) nil))
-				(define selected (semijoin_root_preferred? candidate cache_name))
-				(planner_record_guard_condition
-					(list (quote equal?) (list (quote semijoin_root_preferred?) (quoted_runtime_list candidate) cache_name) selected)
-					(planner_context_session (qb_facts (ir_root ir))))
-				(if selected candidate nil))))
-		(define plan (if (not (nil? carrier))
-			(lower_semijoin_carrier (ir_root ir) carrier result_consumer)
-			(match (ir_return ir)
-				(symbol rows) (match (logical_op (ir_root ir))
-					(symbol query-block) (lower_query_block_with_cataloged_stages (ir_root ir) result_consumer)
-					(symbol union-block) (lower_union_block (ir_root ir) result_consumer)
-					_ (neumann_fail "build_queryplan" "unknown logical root"))
-				((symbol dml) target_schema target_tbl) (physical_mutation_producer
-					/* The logical local-relation descriptor names an already bound
-					native handle. It is not executable SQL-name syntax for TABLE;
-					the outer producer must borrow the same handle as its scan. */
-					(list (source_table_expr
-						(physical_dml_target_source (ir_root ir) target_schema target_tbl)))
-					(physical_dml_descriptor (ir_root ir) target_schema target_tbl)
-					(match (logical_op (ir_root ir))
-						(symbol query-block) (lower_dml_query_block_with_stages (ir_root ir) target_schema target_tbl)
-						(symbol union-block) (lower_dml_union_block_with_stages (ir_root ir) target_schema target_tbl)
-						_ (neumann_fail "build_queryplan" "DML lowering expects a query-block root")))
-				((symbol dml-many) target_specs) (match (logical_op (ir_root ir))
-					(symbol query-block) (physical_mutation_producer
-						(map target_specs (lambda (spec) (begin
-							(define source (dml_target_source_for_spec (qb_sources (ir_root ir)) spec))
-							(if source (source_table_expr source)
-								(neumann_fail "build_queryplan" "DELETE target relation mismatch")))))
-						(list "delete" '())
-						(lower_multi_target_delete_with_stages (ir_root ir) target_specs))
-					_ (neumann_fail "build_queryplan" "multi-target DELETE lowering expects a query-block root"))
-				_ (neumann_fail "build_queryplan" "DML lowering is intentionally not scaffolded yet"))))
-		(define consolidated_plan (consolidate_closed_group_prepares ir plan))
-		(define complete_plan (complete_emitted_prepare_bindings ir consolidated_plan))
-		(define deduplicated_plan (deduplicate_projected_truth_recipes
-			(deduplicate_lazy_prepare_recipes complete_plan)))
-		(define memoized_plan (if (empty_list? (ir_stages ir))
-			deduplicated_plan
-			(consolidate_query_invariant_presence_memos deduplicated_plan)))
-		(define planning_session (if (query_block? (ir_root ir))
-			(planner_context_session (qb_facts (ir_root ir))) nil))
-		/* Forced costgen alternatives must keep their requested physical path. */
-		/* Single-source blocks without stages have no projected join keys. */
-		(define fused_plan (if (or
-			(and (not (nil? planning_session))
-				(not (nil? (planning_session "__memcp_physical_overrides"))))
-			(and (query_block? (ir_root ir))
-				(empty_list? (ir_stages ir))
-				(<= (count (qb_sources (ir_root ir))) 1)))
-			memoized_plan (lower_ordered_keyset_scans memoized_plan)))
-		(define checked (bind_invocation_group_lifetimes
-			(bind_invocation_scan_sources (require_physical_scan_relations fused_plan))))
-		(define complete (if (and (not (nil? carrier)) (and (not (nth carrier 5))
+				(define managed (sql_queryplan_input_collector_active? planning))
+				(define common (sql_queryplan_take_input_collector planning))
+				(if (and (not (nil? (sql_queryplan_input_dispatch_owner planning)))
+					(physical_region_dispatch_admitted? ir))
+					(emit_dispatched_physical_region ir result_consumer finalizer stages planning common)
+					(begin
+						(define public_session (sql_queryplan_fork_collector planning))
+						(define caller_session (sql_queryplan_fork_collector planning))
+						(define catalog (make_lowering_catalog (physical_node_stage_catalog (ir_root ir))))
+						(define public_context (lowering_catalog_with_input_profile
+							(lowering_catalog_with_planning_session catalog public_session) 'public))
+						(define contracts (if (nil? caller_session) (newsession) caller_session))
+						(define caller_context (lowering_catalog_with_input_contracts
+							(lowering_catalog_with_input_profile
+								(lowering_catalog_with_planning_session catalog caller_session) 'caller) contracts))
+						(define compile_tx (planner_context_tx facts))
+						/* The public kernel receives its original nil-context catalog. Public
+						context only prevents recursively building another program choice. */
+						(define public_input (prepare_physical_queryplan ir public_session compile_tx public_context))
+						(define public (emit_physical_queryplan public_input result_consumer finalizer public_context))
+						(define caller_input (prepare_physical_queryplan ir caller_session compile_tx caller_context))
+						(define caller_plan (emit_physical_queryplan caller_input result_consumer finalizer caller_context))
+						(define public_work (if (nil? public_session) nil
+							(public_session "__memcp_queryplan_selected_access_work")))
+						(define caller_work (if (nil? caller_session) nil
+							(caller_session "__memcp_queryplan_selected_access_work")))
+						/* The existing parameter-cost metadata has one owner, not a runtime
+						branch slot. Preserve its original public record exactly. A different
+						caller work contract is unsupported until that owner can represent it;
+						it cannot silently change shared specialization/eligibility policy. */
+						(define refusal (if (expression_equal? public_work caller_work)
+							(contracts "__memcp_queryplan_input_refusal")
+							"build_queryplan: caller input requires a distinct parameter work contract"))
+						(define caller (if (nil? refusal) caller_plan (list 'error refusal)))
+						(define caller_lifetime (or (physical_program_caller_lifetime? (ir_root ir))
+							(reduce stages (lambda (caller stage)
+								(or caller (physical_program_caller_lifetime? stage))) false)))
+						(if (not managed)
+							(list 'if (if caller_lifetime true (list 'tx_requires_query_local_cache (physical_query_tx_symbol)))
+								(bind_invocation_group_lifetimes caller) public)
+							(begin
+								(sql_queryplan_register_input_alternatives planning caller_lifetime common
+									(sql_queryplan_input_collector public_session)
+									(if (nil? refusal) (sql_queryplan_input_collector caller_session) (list true '() true)) nil)
+								(planning "__memcp_queryplan_selected_access_work" public_work)
+								(list 'if (list 'car '__physical_input_context) caller public))))))))))
+
+(define emit_physical_queryplan (lambda (ir result_consumer finalizer context)
+	(if (and (nil? context) (not (empty_list? (physical_region_stages ir))))
+		(emit_physical_region ir result_consumer finalizer (physical_region_stages ir))
+		(begin
+			(if (and (not (nil? result_consumer)) (not (equal? (ir_return ir) 'rows)))
+				(neumann_fail "build_queryplan" "a final result reduction requires a row-producing query") true)
+			(define candidate (if (equal? (ir_return ir) (quote rows)) (semijoin_carrier_spec (ir_root ir)) nil))
+			(define carrier (if (nil? candidate) nil
+				(begin
+					(define cache_name (if (and (nth candidate 5)
+						(not (equal? (prejoin_source_table_key (car candidate)) (prejoin_source_table_key (cadr candidate)))))
+						(car (semijoin_cached_predicate candidate)) nil))
+					(define selected (semijoin_root_preferred? candidate cache_name))
+					(planner_record_guard_condition
+						(list (quote equal?) (list (quote semijoin_root_preferred?) (quoted_runtime_list candidate) cache_name) selected)
+						(planner_context_session (qb_facts (ir_root ir))))
+					(if selected candidate nil))))
+			(define plan (if (not (nil? carrier))
+				(lower_semijoin_carrier (ir_root ir) carrier result_consumer)
+				(match (ir_return ir)
+					(symbol rows) (match (logical_op (ir_root ir))
+						(symbol query-block) (lower_query_block_with_cataloged_stages (ir_root ir) result_consumer)
+						(symbol union-block) (lower_union_block (ir_root ir) result_consumer)
+						_ (neumann_fail "build_queryplan" "unknown logical root"))
+					((symbol dml) target_schema target_tbl) (physical_mutation_producer
+						/* The logical local-relation descriptor names an already bound
+						native handle. It is not executable SQL-name syntax for TABLE;
+						the outer producer must borrow the same handle as its scan. */
+						(list (source_table_expr
+							(physical_dml_target_source (ir_root ir) target_schema target_tbl)))
+						(physical_dml_descriptor (ir_root ir) target_schema target_tbl)
+						(match (logical_op (ir_root ir))
+							(symbol query-block) (lower_dml_query_block_with_stages (ir_root ir) target_schema target_tbl)
+							(symbol union-block) (lower_dml_union_block_with_stages (ir_root ir) target_schema target_tbl)
+							_ (neumann_fail "build_queryplan" "DML lowering expects a query-block root")))
+					((symbol dml-many) target_specs) (match (logical_op (ir_root ir))
+						(symbol query-block) (physical_mutation_producer
+							(map target_specs (lambda (spec) (begin
+								(define source (dml_target_source_for_spec (qb_sources (ir_root ir)) spec))
+								(if source (source_table_expr source)
+									(neumann_fail "build_queryplan" "DELETE target relation mismatch")))))
+							(list "delete" '())
+							(lower_multi_target_delete_with_stages (ir_root ir) target_specs))
+						_ (neumann_fail "build_queryplan" "multi-target DELETE lowering expects a query-block root"))
+					_ (neumann_fail "build_queryplan" "DML lowering is intentionally not scaffolded yet"))))
+			(define consolidated_plan (consolidate_closed_group_prepares ir plan))
+			(define complete_plan (complete_emitted_prepare_bindings ir consolidated_plan))
+			(define deduplicated_plan (deduplicate_projected_truth_recipes
+				(deduplicate_lazy_prepare_recipes complete_plan)))
+			(define memoized_plan (if (empty_list? (ir_stages ir))
+				deduplicated_plan
+				(consolidate_query_invariant_presence_memos deduplicated_plan)))
+			(define planning_session (if (query_block? (ir_root ir))
+				(planner_context_session (qb_facts (ir_root ir))) nil))
+			/* Forced costgen alternatives must keep their requested physical path. */
+			/* Single-source blocks without stages have no projected join keys. */
+			(define fused_plan (if (or
+				(and (not (nil? planning_session))
+					(not (nil? (planning_session "__memcp_physical_overrides"))))
+				(and (query_block? (ir_root ir))
+					(empty_list? (ir_stages ir))
+					(<= (count (qb_sources (ir_root ir))) 1)))
+				memoized_plan (lower_ordered_keyset_scans memoized_plan)))
+			(define input_bound (bind_invocation_scan_sources (require_physical_scan_relations fused_plan)))
+			(define checked (if (lowering_catalog_caller_input? context) input_bound
+				(bind_invocation_group_lifetimes input_bound)))
+			(define complete (if (and (not (nil? carrier)) (and (not (nth carrier 5))
 				(qassoc_get (qb_facts (ir_root ir)) (quote sql_calc_found_rows) false)))
-			(list (quote found_rows_result) checked) checked))
-		/* Finalizers transform code only. Bind declared invocation inputs before
-		publication closes callbacks; nested program owners retain their scopes. */
-		(define finalized (if (nil? finalizer) complete (finalizer complete)))
-		(publish_queryplan_callables finalized (logical_invocation_input_symbols ir)))))
+				(list (quote found_rows_result) checked) checked))
+			(define deferred (match finalizer
+				((symbol physical-result-consumer) _context _finalize) true _ false))
+			(define finalized (if deferred complete (if (nil? finalizer) complete (finalizer complete))))
+			(define published (publish_queryplan_callables
+				(if (and (lowering_catalog_caller_input? context)
+					(sql_queryplan_input_collector_active? (lowering_catalog_planning_session context)))
+					(sql_queryplan_bind_input_observations finalized) finalized)
+				(if (lowering_catalog_caller_input? context)
+					(merge_unique (list (logical_invocation_input_symbols ir)
+						(list '__invocation_group_scopes '__invocation_relation_initializers)
+						(if (sql_queryplan_input_collector_active? (lowering_catalog_planning_session context)) (list '__physical_input_context) '())))
+					(logical_invocation_input_symbols ir))))
+			(if deferred (physical_result_finalize finalizer context published) published)))))
 
 (define build_queryplan (lambda (ir)
-	(emit_physical_queryplan (prepare_physical_queryplan ir nil nil) nil nil)))
+	(emit_physical_queryplan (prepare_physical_queryplan ir nil nil nil) nil nil nil)))
 
 /* Keep phase ownership explicit. normalize_query_ast inside untangle_query
 removes parser-specific spelling before dependent joins are identified; this
@@ -15393,11 +15697,12 @@ current scalar once. No input expression or caller procedure is evaluated. */
 									(define candidate (decorrelate_logical_query candidate_ast))
 									(if (parameter_domain_ir_eligible? candidate) candidate nil)))))) nil))
 				(if (nil? partial) (decorrelate_logical_query ast) partial))))
+		(planner_select_input_observations planning_session tx selected_ir (physical_result_context finalizer))
 		(define reordered (optimize_logical_query selected_ir planning_session tx))
 		(tx_check tx)
-		(define prepared (prepare_physical_queryplan reordered planning_session tx))
+		(define prepared (prepare_physical_queryplan reordered planning_session tx (physical_result_context finalizer)))
 		(tx_check tx)
-		(define plan (emit_physical_queryplan prepared result_consumer finalizer))
+		(define plan (emit_physical_queryplan prepared result_consumer finalizer (physical_result_context finalizer)))
 		(record_parameter_plan_execution_cost reordered planning_session)
 		(tx_check tx)
 		plan)))
@@ -15410,11 +15715,12 @@ current scalar once. No input expression or caller procedure is evaluated. */
 			(ir_stages ir) (ir_context_of ir) (ir_return ir)))
 		(define normalized (require_flat_stage_dependencies "compile_ir" (normalize_stage_dependencies ir)))
 		(tx_check tx)
+		(planner_select_input_observations planning_session tx normalized (physical_result_context finalizer))
 		(define reordered (optimize_logical_query normalized planning_session tx))
 		(tx_check tx)
-		(define prepared (prepare_physical_queryplan reordered planning_session tx))
+		(define prepared (prepare_physical_queryplan reordered planning_session tx (physical_result_context finalizer)))
 		(tx_check tx)
-		(define plan (emit_physical_queryplan prepared result_consumer finalizer))
+		(define plan (emit_physical_queryplan prepared result_consumer finalizer (physical_result_context finalizer)))
 		(record_parameter_plan_execution_cost reordered planning_session)
 		(tx_check tx)
 		plan)))
@@ -15423,6 +15729,9 @@ current scalar once. No input expression or caller procedure is evaluated. */
 /* Parser-facing adapters                                                     */
 (define build_queryplan_term_using_result (lambda (query planning_session tx result_consumer finalizer)
 	(begin
+		(define context (physical_result_context finalizer))
+		(define planning_session (if (nil? context) planning_session
+			(lowering_catalog_planning_session context)))
 		(define query (sql_bind_catalog_declarations (normalize_query_ast query) tx planning_session))
 		(planner_guard_star_columns query planning_session)
 		(neumann_compile_pipeline query planning_session tx result_consumer finalizer))))
@@ -15446,7 +15755,7 @@ current scalar once. No input expression or caller procedure is evaluated. */
 		(define collected (if (nil? planning_session) nil
 			(planning_session "__memcp_queryplan_guard_conditions")))
 		(define compile_session (if collected planning_session
-			(sql_queryplan_compile_session (coalesceNil planning_session (newsession)) tx)))
+			(sql_queryplan_compile_session (coalesceNil planning_session (newsession)) tx nil nil)))
 		/* Nested assignment and predicate queries own their source declarations.
 		Retain the complete bound query; keeping only its outer source catalog
 		would discard the metadata needed to compile those lexical scopes. */
@@ -15461,10 +15770,10 @@ current scalar once. No input expression or caller procedure is evaluated. */
 		its existing lexical scopes, dependency stages and hidden expressions. */
 		(define facts (reduce (list
 			(list (quote dml) true) (list (quote dml_target_alias) tblalias)
-				(list (quote comparison-declarations) comparison_declarations)
-				(list (quote mutation_planning_session) compile_session)
-				(list (quote comparison-contracts) (merge (map
-					(cons (coalesceNil condition true) (source_join_exprs all_defs))
+			(list (quote comparison-declarations) comparison_declarations)
+			(list (quote mutation_planning_session) compile_session)
+			(list (quote comparison-contracts) (merge (map
+				(cons (coalesceNil condition true) (source_join_exprs all_defs))
 				(lambda (expr) (sql_mutation_comparison_contracts all_defs expr))))))
 			(lambda (facts entry) (qassoc_set facts (car entry) (cadr entry))) (qb_facts resolved)))
 		(define query (make_query_block schema all_defs cols condition
@@ -15791,8 +16100,8 @@ only: the returned executable plan still consumes the prepared value once. */
 		(accumulator "count" 0)
 		(planning_session "__memcp_explain_physical" accumulator)
 		(planning_session "__memcp_physical_overrides" overrides)
-		(define prepared (prepare_physical_queryplan reordered planning_session nil))
-		(define plan (emit_physical_queryplan prepared nil nil))
+		(define prepared (prepare_physical_queryplan reordered planning_session nil nil))
+		(define plan (emit_physical_queryplan prepared nil nil nil))
 		(define preparations (planning_session "__memcp_queryplan_preparations"))
 		(define observation_view (if (or (nil? preparations)
 			(equal? (coalesceNil (preparations "count") 0) 0)) (list plan '())
@@ -16149,9 +16458,9 @@ protocol callback receives only the calibration row. */
 		(define untangled_ns (nanotime))
 		(define reordered (optimize_logical_query ir planning_session nil))
 		(define reordered_ns (nanotime))
-		(define prepared (prepare_physical_queryplan reordered planning_session nil))
+		(define prepared (prepare_physical_queryplan reordered planning_session nil nil))
 		(define prepared_ns (nanotime))
-		(define plan (emit_physical_queryplan prepared nil nil))
+		(define plan (emit_physical_queryplan prepared nil nil nil))
 		(define emitted_ns (nanotime))
 		/* Read every raw-plan metric before transferring plan ownership to optimize. */
 		(define plan_text (pretty_print plan (settings "ExplainWidth")))

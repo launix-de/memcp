@@ -843,22 +843,7 @@ test_cases:
 - name: Source contract cleanup removes the alias
   sql: DROP TYPE dbo.ddl_source_float
 - name: Alias lookup caches one compiler session and reloads in the next
-  scm: |
-    (begin
-      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" true nil (newsession))
-      (create_sql_type_alias "memcp-tests" "ddl_session_alias" "INT" '() true nil (newsession))
-      (define first (newsession))
-      (define initial (tsql_find_type_alias "memcp-tests" "ddl_session_alias" first))
-      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" false nil (newsession))
-      (create_sql_type_alias "memcp-tests" "ddl_session_alias" "FLOAT" '() true nil (newsession))
-      (define retained (tsql_find_type_alias "memcp-tests" "ddl_session_alias" first))
-      (define second (sql_queryplan_compile_session first nil))
-      (define refreshed (tsql_find_type_alias "memcp-tests" "ddl_session_alias" second))
-      (drop_sql_type_alias "memcp-tests" "ddl_session_alias" false nil (newsession))
-      (and (equal? (initial "id") (retained "id"))
-        (equal? (retained "base_type") "INT")
-        (not (equal? (initial "id") (refreshed "id")))
-        (equal? (refreshed "base_type") "FLOAT")))
+  scm: "(begin\n  (drop_sql_type_alias \"memcp-tests\" \"ddl_session_alias\" true nil (newsession))\n  (create_sql_type_alias \"memcp-tests\" \"ddl_session_alias\" \"INT\" '() true nil (newsession))\n  (define first (newsession))\n  (define initial (tsql_find_type_alias \"memcp-tests\" \"ddl_session_alias\" first))\n  (drop_sql_type_alias \"memcp-tests\" \"ddl_session_alias\" false nil (newsession))\n  (create_sql_type_alias \"memcp-tests\" \"ddl_session_alias\" \"FLOAT\" '() true nil (newsession))\n  (define retained (tsql_find_type_alias \"memcp-tests\" \"ddl_session_alias\" first))\n  (define second (sql_queryplan_compile_session first nil nil nil))\n  (define refreshed (tsql_find_type_alias \"memcp-tests\" \"ddl_session_alias\" second))\n  (drop_sql_type_alias \"memcp-tests\" \"ddl_session_alias\" false nil (newsession))\n  (and (equal? (initial \"id\") (retained \"id\"))\n    (equal? (retained \"base_type\") \"INT\")\n    (not (equal? (initial \"id\") (refreshed \"id\")))\n    (equal? (refreshed \"base_type\") \"FLOAT\")))\n"
   expect: {result: true}
 - name: Absent alias is cached locally and discovered by a new compiler session
   scm: |

@@ -1153,8 +1153,10 @@ test_cases:
               (cached_parse cache "sql" (list parse_sql) "memcp-tests" query
                 (sql_policy "root") "root" session true tx)) sess nil))
             (define matches_variant (lambda (variant guard_session guard_tx)
-              (not (nil? (sql_queryplan_matching_variant (list variant)
-                guard_session guard_tx (lambda (_row) nil) (lambda (_fields) nil))))))
+              (not (nil? (call_with_invocation_group_lifetime (lambda (scopes initializers observations) (begin
+                      (define matched (sql_queryplan_matching_variant (list variant)
+                guard_session guard_tx (lambda (_row) nil) (lambda (_fields) nil) (list scopes initializers observations)))
+                      (if (nil? matched) nil (car matched)))))))))
             (define entry (car (cache (car (cache)))))
             (define variant (car (entry "variants")))
             (define cold_guard (matches_variant variant sess nil))

@@ -995,7 +995,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(list (list "o" "memcp-tests" "outer_source" false nil nil))
 		'() true '() nil '() nil nil '() (list outer_catalog_stage) '()))
 	(define prepared_catalog_root (ir_root (prepare_physical_queryplan
-		(make_ir (quote select) catalog_root '() nil (quote rows)))))
+		(make_ir (quote select) catalog_root '() nil (quote rows)) nil nil nil)))
 	(assert (count (qb_stages prepared_catalog_root)) 1
 		"physical preparation keeps only direct stages on the query block")
 	(assert (count (query_block_stage_catalog prepared_catalog_root)) 2

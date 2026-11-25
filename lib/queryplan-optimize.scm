@@ -484,8 +484,10 @@ observed output cardinality. The physical producer stays outside logical IR. */
 							(not (stage_has_residual_outer_refs? stage))))))
 				(if singleton 1
 					(if (group_stage? stage)
-						(list (quote planner_stage_input_rows)
-							(planner_quoted_value (gs_input stage))) nil)))
+						(if (lowering_catalog_caller_input? stages)
+							(planner_stage_input_rows_expr (gs_input stage))
+							(list (quote planner_stage_input_rows)
+								(planner_quoted_value (gs_input stage)))) nil)))
 			(list (quote planner_source_row_count) (planner_quoted_value src))))
 		(define decision (join_group_observation_id stages src local_predicates))
 		(define fallback_rows
@@ -3237,6 +3239,16 @@ floor avoids pretending that an unseen word is impossible. */
 						enriched)))
 			(lambda (_e) nil)))))
 
+/* Emit the same O(1) scalar cardinality kernel without quoting logical input
+which may carry physical compile directories. No data rows or profile travel
+into a shared compiled guard. */
+(define planner_source_row_count_expr (lambda (source)
+	(if (source_is_native_table? source)
+		(list 'planner_table_row_count (source_schema source)
+			(list 'quote (source_storage_relation source)))
+		(if (row_domain_relation? (source_relation source))
+			(count (row_domain_data (source_relation source))) nil))))
+
 (define planner_source_row_count (lambda (src)
 	(if (source_is_native_table? src)
 		(planner_table_row_count (source_schema src) (source_storage_relation src))
@@ -3662,6 +3674,16 @@ logical IR: it samples once per request and is shared by every guard binding. */
 
 (define planner_query_block_input_rows (lambda (block)
 	(planner_add_estimates (map (qb_sources block) planner_source_row_count))))
+
+(define planner_stage_input_rows_expr (lambda (input)
+	(if (union_block? input)
+		(list 'planner_add_estimates
+			(cons 'list (map (union_branches input) planner_stage_input_rows_expr)))
+		(query_block? input)
+		(list 'planner_add_estimates
+			(cons 'list (map (qb_sources input) planner_source_row_count_expr)))
+		(source_is_base_table? input) (planner_source_row_count_expr input)
+		nil)))
 
 (define planner_stage_input_rows (lambda (input)
 	(if (union_block? input)

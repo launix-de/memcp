@@ -29,48 +29,12 @@ setup:
         (rebuild (table "memcp-tests" false "qfi_frequency" false nil) true false))
 test_cases:
   - name: "Rejected parameter-domain specialization leaves the ordinary plan reusable"
-    scm: |
-      (begin
-        (define sess (newsession))
-        (sess "v1" 10)
-        (define planning (sql_queryplan_compile_session sess nil))
-        (define plan (parse_sql "memcp-tests" "SELECT d.x FROM (SELECT ? AS x) d"
-          (lambda (schema read write) true) planning nil))
-        (define guard (sql_queryplan_compile_formula nil
-          (sql_queryplan_guard_from_session planning)))
-        (define formula (sql_queryplan_compile_formula nil
-          (sql_queryplan_bind_execution_session plan)))
-        (define result (newsession))
-        (define run (lambda () (begin
-          (formula sess nil (lambda (row) (result "x" (cadr row))) (lambda (_fields) nil))
-          (result "x"))))
-        (define original (guard sess nil nil nil))
-        (define first (run))
-        (sess "v1" 20)
-        (if (and original (guard sess nil nil nil)
-          (equal? first 10) (equal? (run) 20)) true
-          (error "discarded parameter specialization changed the guard or runtime binding")))
+    scm: "(begin\n  (define sess (newsession))\n  (sess \"v1\" 10)\n  (define planning (sql_queryplan_compile_session sess nil nil nil))\n  (define plan (parse_sql \"memcp-tests\" \"SELECT d.x FROM (SELECT ? AS x) d\"\n    (lambda (schema read write) true) planning nil))\n  (define guard (sql_queryplan_compile_formula nil\n    (sql_queryplan_guard_from_session planning)))\n  (define formula (sql_queryplan_compile_formula nil\n    (sql_queryplan_bind_execution_session plan)))\n  (define result (newsession))\n  (define run (lambda () (begin\n    (formula sess nil (lambda (row) (result \"x\" (cadr row))) (lambda (_fields) nil))\n    (result \"x\"))))\n  (define original (guard sess nil nil nil))\n  (define first (run))\n  (sess \"v1\" 20)\n  (if (and original (guard sess nil nil nil)\n    (equal? first 10) (equal? (run) 20)) true\n    (error \"discarded parameter specialization changed the guard or runtime binding\")))\n"
     expect:
       rows: 1
       result_contains: ["true"]
   - name: "A shared cost guard covers its runtime binding without an identity guard"
-    scm: |
-      (begin
-        (define sess (newsession))
-        (sess "viewer" 10)
-        (define planning (sql_queryplan_compile_session sess nil))
-        (define input (planner_literal_value (quote (session "viewer")) planning))
-        (define value (planner_guard_runtime_binding (quote (session "viewer")) planning nil))
-        (define cost (planner_guard_runtime_binding (list (quote *) value 2) planning nil))
-        (planner_guarded_choice (< (* input 2) 100) (list (quote <) cost 100) planning)
-        (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))
-        (define original (guard sess nil nil nil))
-        (sess "viewer" 20)
-        (define same_region (guard sess nil nil nil))
-        (sess "viewer" 60)
-        (define crossed (guard sess nil nil nil))
-        (if (and original same_region (not crossed)) true
-          (error "shared cost guard did not preserve the decision region")))
+    scm: "(begin\n  (define sess (newsession))\n  (sess \"viewer\" 10)\n  (define planning (sql_queryplan_compile_session sess nil nil nil))\n  (define input (planner_literal_value (quote (session \"viewer\")) planning))\n  (define value (planner_guard_runtime_binding (quote (session \"viewer\")) planning nil))\n  (define cost (planner_guard_runtime_binding (list (quote *) value 2) planning nil))\n  (planner_guarded_choice (< (* input 2) 100) (list (quote <) cost 100) planning)\n  (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))\n  (define original (guard sess nil nil nil))\n  (sess \"viewer\" 20)\n  (define same_region (guard sess nil nil nil))\n  (sess \"viewer\" 60)\n  (define crossed (guard sess nil nil nil))\n  (if (and original same_region (not crossed)) true\n    (error \"shared cost guard did not preserve the decision region\")))\n"
     expect:
       rows: 1
       result_contains: ["true"]
@@ -111,67 +75,17 @@ test_cases:
       rows: 1
       result_contains: ["true"]
   - name: "Quoted session-shaped data is not a covered runtime dependency"
-    scm: |
-      (begin
-        (define sess (newsession))
-        (sess "viewer" 10)
-        (define planning (sql_queryplan_compile_session sess nil))
-        (define input (planner_literal_value (quote (session "viewer")) planning))
-        (planner_record_guard_condition
-          (quote (equal? (quote (session "viewer")) (quote (session "viewer")))) planning)
-        (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))
-        (define original (guard sess nil nil nil))
-        (sess "viewer" (+ input 1))
-        (if (and original (not (guard sess nil nil nil))
-          (empty_list? (planner_guard_runtime_session_reads
-            (quote (quote (session "viewer")))))) true
-          (error "quoted data was mistaken for a runtime session dependency")))
+    scm: "(begin\n  (define sess (newsession))\n  (sess \"viewer\" 10)\n  (define planning (sql_queryplan_compile_session sess nil nil nil))\n  (define input (planner_literal_value (quote (session \"viewer\")) planning))\n  (planner_record_guard_condition\n    (quote (equal? (quote (session \"viewer\")) (quote (session \"viewer\")))) planning)\n  (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))\n  (define original (guard sess nil nil nil))\n  (sess \"viewer\" (+ input 1))\n  (if (and original (not (guard sess nil nil nil))\n    (empty_list? (planner_guard_runtime_session_reads\n      (quote (quote (session \"viewer\")))))) true\n    (error \"quoted data was mistaken for a runtime session dependency\")))\n"
     expect:
       rows: 1
       result_contains: ["true"]
   - name: "Discarded cost bindings cannot suppress an uncovered specialization guard"
-    scm: |
-      (begin
-        (define sess (newsession))
-        (sess "viewer" 10)
-        (define planning (sql_queryplan_compile_session sess nil))
-        (define input (planner_literal_value (quote (session "viewer")) planning))
-        (define unused (planner_guard_runtime_binding (quote (session "viewer")) planning nil))
-        (define raw (sql_queryplan_guard_from_session planning))
-        (define guard (sql_queryplan_compile_formula nil raw))
-        (define original (guard sess nil nil nil))
-        (sess "viewer" (+ input 1))
-        (if (and original (not (guard sess nil nil nil))
-          (not (sql_queryplan_guard_references_symbol? raw unused))) true
-          (error "discarded cost binding incorrectly covered an input")))
+    scm: "(begin\n  (define sess (newsession))\n  (sess \"viewer\" 10)\n  (define planning (sql_queryplan_compile_session sess nil nil nil))\n  (define input (planner_literal_value (quote (session \"viewer\")) planning))\n  (define unused (planner_guard_runtime_binding (quote (session \"viewer\")) planning nil))\n  (define raw (sql_queryplan_guard_from_session planning))\n  (define guard (sql_queryplan_compile_formula nil raw))\n  (define original (guard sess nil nil nil))\n  (sess \"viewer\" (+ input 1))\n  (if (and original (not (guard sess nil nil nil))\n    (not (sql_queryplan_guard_references_symbol? raw unused))) true\n    (error \"discarded cost binding incorrectly covered an input\")))\n"
     expect:
       rows: 1
       result_contains: ["true"]
   - name: "Observed named bindings guard their compile-time value, including false and NULL"
-    scm: |
-      (begin
-        (define sess (newsession))
-        (sess "viewer" 999)
-        (sess "enabled" false)
-        (define planning (sql_queryplan_compile_session sess nil))
-        (define values (list
-          (planner_literal_value (quote (session "viewer")) planning)
-          (planner_literal_value (quote (session "enabled")) planning)
-          (planner_literal_value (quote (session "missing")) planning)))
-        (if (not (equal? values (list 999 false nil))) (error "planner read incorrect bindings") nil)
-        (define guard (sql_queryplan_compile_formula nil
-          (sql_queryplan_conjoin_guards (sql_queryplan_uncovered_binding_conditions planning))))
-        (define original (guard sess nil nil nil))
-        (sess "viewer" 998)
-        (define changed (guard sess nil nil nil))
-        (sess "viewer" 999)
-        (sess "missing" 1)
-        (define formerly_null (guard sess nil nil nil))
-        (sess "missing" nil)
-        (sess "enabled" true)
-        (define formerly_false (guard sess nil nil nil))
-        (if (and original (not changed) (not formerly_null) (not formerly_false)) true
-          (error "named binding guard lost the observed value or accepted a changed binding")))
+    scm: "(begin\n  (define sess (newsession))\n  (sess \"viewer\" 999)\n  (sess \"enabled\" false)\n  (define planning (sql_queryplan_compile_session sess nil nil nil))\n  (define values (list\n    (planner_literal_value (quote (session \"viewer\")) planning)\n    (planner_literal_value (quote (session \"enabled\")) planning)\n    (planner_literal_value (quote (session \"missing\")) planning)))\n  (if (not (equal? values (list 999 false nil))) (error \"planner read incorrect bindings\") nil)\n  (define guard (sql_queryplan_compile_formula nil\n    (sql_queryplan_conjoin_guards (sql_queryplan_uncovered_binding_conditions planning))))\n  (define original (guard sess nil nil nil))\n  (sess \"viewer\" 998)\n  (define changed (guard sess nil nil nil))\n  (sess \"viewer\" 999)\n  (sess \"missing\" 1)\n  (define formerly_null (guard sess nil nil nil))\n  (sess \"missing\" nil)\n  (sess \"enabled\" true)\n  (define formerly_false (guard sess nil nil nil))\n  (if (and original (not changed) (not formerly_null) (not formerly_false)) true\n    (error \"named binding guard lost the observed value or accepted a changed binding\")))\n"
     expect:
       rows: 1
       result_contains: ["true"]
@@ -433,27 +347,7 @@ test_cases:
     expect:
       data: [true]
   - name: "Numeric frequency guard reads the executing binding and rebuilt snapshot"
-    scm: |
-      (begin
-        (define sess (newsession))
-        (sess "owner" 1)
-        (define planning (sql_queryplan_compile_session sess nil))
-        (define src (list "f" "memcp-tests" "qfi_frequency" false nil (sql_relation_declarations "memcp-tests" "qfi_frequency" nil)))
-        (define pred (list 'lambda (list 'x) (list 'equal?? 'x (list 'session "owner"))))
-        (planner_record_filter_feedback_guard src '("owner_id") pred planning)
-        (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))
-        (define original (guard sess nil nil nil))
-        (sess "owner" 2)
-        (define other (guard sess nil nil nil))
-        (sess "owner" 1)
-        (define restored (guard sess nil nil nil))
-        (insert (table "memcp-tests" false "qfi_frequency" false nil) '("owner_id")
-          (map (produceN 6000) (lambda (i) (list 3))))
-        (rebuild (table "memcp-tests" false "qfi_frequency" false nil) true false)
-        (define changed (guard sess nil nil nil))
-        (if (and original (not other) restored (not changed)) true
-          (error (concat "frequency guard ignored binding or rebuild: "
-            (serialize (list original other restored changed))))))
+    scm: "(begin\n  (define sess (newsession))\n  (sess \"owner\" 1)\n  (define planning (sql_queryplan_compile_session sess nil nil nil))\n  (define src (list \"f\" \"memcp-tests\" \"qfi_frequency\" false nil (sql_relation_declarations \"memcp-tests\" \"qfi_frequency\" nil)))\n  (define pred (list 'lambda (list 'x) (list 'equal?? 'x (list 'session \"owner\"))))\n  (planner_record_filter_feedback_guard src '(\"owner_id\") pred planning)\n  (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))\n  (define original (guard sess nil nil nil))\n  (sess \"owner\" 2)\n  (define other (guard sess nil nil nil))\n  (sess \"owner\" 1)\n  (define restored (guard sess nil nil nil))\n  (insert (table \"memcp-tests\" false \"qfi_frequency\" false nil) '(\"owner_id\")\n    (map (produceN 6000) (lambda (i) (list 3))))\n  (rebuild (table \"memcp-tests\" false \"qfi_frequency\" false nil) true false)\n  (define changed (guard sess nil nil nil))\n  (if (and original (not other) restored (not changed)) true\n    (error (concat \"frequency guard ignored binding or rebuild: \"\n      (serialize (list original other restored changed))))))\n"
     expect:
       data: [true]
   - name: "A cardinality-only guard ignores aggregate publication but rejects row changes"
@@ -461,23 +355,7 @@ test_cases:
       - sql: "DROP TABLE IF EXISTS qfi_cardinality"
       - sql: "CREATE TABLE qfi_cardinality (id INT PRIMARY KEY) ENGINE=memory"
       - sql: "INSERT INTO qfi_cardinality VALUES (1),(2),(3)"
-    scm: |
-      (begin
-        (define sess (newsession))
-        (define planning (sql_queryplan_compile_session sess nil))
-        (define src '("cache" "memcp-tests" "qfi_cardinality" false true (sql_relation_declarations "memcp-tests" "qfi_cardinality" nil)))
-        (planner_record_source_row_count_guard src (planner_source_row_count src) planning)
-        (define guard (sql_queryplan_compile_formula nil
-          (sql_queryplan_guard_from_session planning)))
-        (define original (guard sess nil nil nil))
-        (createcolumn (table "memcp-tests" false "qfi_cardinality" false nil)
-          "extra_aggregate" "INT" '() '("temp" true) '("id") (lambda (id) (+ id 1)))
-        (define published (guard sess nil nil nil))
-        (insert (table "memcp-tests" false "qfi_cardinality" false nil) '("id") (list (list 4)))
-        (define changed (guard sess nil nil nil))
-        (if (and original published (not changed)) true
-          (error (concat "cardinality guard followed unrelated schema or missed rows: "
-            (serialize (list original published changed))))))
+    scm: "(begin\n  (define sess (newsession))\n  (define planning (sql_queryplan_compile_session sess nil nil nil))\n  (define src '(\"cache\" \"memcp-tests\" \"qfi_cardinality\" false true (sql_relation_declarations \"memcp-tests\" \"qfi_cardinality\" nil)))\n  (planner_record_source_row_count_guard src (planner_source_row_count src) planning)\n  (define guard (sql_queryplan_compile_formula nil\n    (sql_queryplan_guard_from_session planning)))\n  (define original (guard sess nil nil nil))\n  (createcolumn (table \"memcp-tests\" false \"qfi_cardinality\" false nil)\n    \"extra_aggregate\" \"INT\" '() '(\"temp\" true) '(\"id\") (lambda (id) (+ id 1)))\n  (define published (guard sess nil nil nil))\n  (insert (table \"memcp-tests\" false \"qfi_cardinality\" false nil) '(\"id\") (list (list 4)))\n  (define changed (guard sess nil nil nil))\n  (if (and original published (not changed)) true\n    (error (concat \"cardinality guard followed unrelated schema or missed rows: \"\n      (serialize (list original published changed))))))\n"
     expect:
       data: [true]
     cleanup:

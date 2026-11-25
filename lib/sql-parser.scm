@@ -1332,26 +1332,30 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 				(list (list "__found_rows_source" schema2 (sql_select_clear_stage query) false nil nil))
 				(list "found_rows" (list (quote aggregate) 1 (quote +) 0))
 				true nil nil nil nil nil '() '() '())))))
-	(define sql_build_select_plan (lambda (query) (begin
+	(define sql_build_select_plan (lambda (query planning_session) (begin
 		(define expanded_query (sql_expand_views query policy planning_session tx))
-		(define actual_plan (build_queryplan_term expanded_query planning_session tx))
-		(define execution_plan (if (and (sql_select_calc_found_rows? query)
-			(not (equal? (car actual_plan) (quote found_rows_result))))
-			(begin
-				(define count_plan (build_queryplan_term (sql_select_found_rows_count_query expanded_query) planning_session tx))
-				(list (quote !begin)
-					(list (quote session) "found_rows" 0)
-					(list
-						(list (quote lambda) (list (quote resultrow)) count_plan)
-						(list (quote lambda) (list (quote item))
-							(list (quote session) "found_rows"
-								(list (quote get_assoc) (quote item) "found_rows"))))
+		(build_queryplan_term_using_result expanded_query planning_session tx nil
+			(physical_result_consumer nil (lambda (actual_plan context) (begin
+				(define execution_plan (if (and (sql_select_calc_found_rows? query)
+					(not (equal? (car actual_plan) (quote found_rows_result))))
+					(begin
+						/* The count is part of this consumer, not a separately admitted
+						query. Its ordinary builder inherits the same cohort context. */
+						(define count_plan (build_queryplan_term_using_result
+							(sql_select_found_rows_count_query expanded_query) planning_session tx nil
+							(physical_result_consumer context nil)))
+						(list (quote !begin)
+							(list (quote session) "found_rows" 0)
+							(list
+								(list (quote lambda) (list (quote resultrow)) count_plan)
+								(list (quote lambda) (list (quote item))
+									(list (quote session) "found_rows"
+										(list (quote get_assoc) (quote item) "found_rows"))))
+							actual_plan))
 					actual_plan))
-			actual_plan))
-		(list (quote !begin)
-			(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded_query)))
-			execution_plan)
-	)))
+				(list (quote !begin)
+					(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded_query)))
+					execution_plan))))))))
 	(define sql_union_all_parts (lambda (query)
 		(match query
 			((symbol union-block) (symbol all) branches order limit offset facts) (list branches order limit offset)
@@ -2092,7 +2096,7 @@ https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html */
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
-		(parser (define query sql_select) (sql_build_select_plan query))
+		(parser (define query sql_select) (sql_build_select_plan query (sql_queryplan_read_dispatch_session planning_session parse_sql)))
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir (sql_expand_views query policy planning_session tx)))
 		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder (sql_expand_views query policy planning_session tx) planning_session))
 		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query sql_select)) (explain_queryplan_compile (sql_expand_views query policy planning_session tx) parse_started_ns (strlen s) planning_session))

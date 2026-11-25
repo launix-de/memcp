@@ -114,154 +114,169 @@ session forwarding closure. Other calls remain at their original row boundary. *
 	(reduce aggregates (lambda (valid ag)
 		(and valid (or (count_distinct_descriptor? ag) (native_distinct_aggregate? ag) (bounded_scalar_aggregate? ag)
 			(equal? (cadr ag) (scalar_once_reduce_first))))) true)))
-(define lower_runtime_group_relation (lambda (database stage consume retain) (begin
-	(define src (gs_input stage))
-	(define union_input (union_block? src))
-	(define query_input (query_block? src))
-	(define relation_input (or union_input query_input))
-	(define alias (group_stage_input_alias stage))
-	(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
-	(define key_names (group_key_cols keys))
-	(define ags (gs_aggregates stage))
-	(define collations (qassoc_get (gs_facts stage) 'group-value-collations '()))
-	(if (runtime_group_reducers_supported? ags)
-		true (neumann_fail "build_queryplan" "native grouping requires bounded scalar or distinct value reducers"))
-	(define value_names (map ags (lambda (ag) (group_stage_aggregate_column stage ag))))
-	(define group_names (merge (list key_names value_names)))
-	(define distinct_indices (filter (produceN (count ags)) (lambda (i) (runtime_distinct_aggregate? (nth ags i)))))
-	(define group_table '__runtime_group_table)
-	(define scope '__runtime_group_scope)
-	(define name '__runtime_group_name)
-	(define distinct_vars (map distinct_indices (lambda (i) (symbol (concat "__runtime_distinct_" i)))))
-	(define key_params (map key_names (lambda (column) (symbol (concat "__runtime_key_" column)))))
-	(define value_params (mapIndex ags (lambda (i _ag) (symbol (concat "__runtime_value_" i)))))
-	(define key_values (if relation_input key_params (map keys (lambda (expr) (lower_column_expr_for_alias src expr)))))
-	(define condition (coalesceNil (qassoc_get (gs_facts stage) 'condition true) true))
-	(if (and union_input (not (expression_equal? condition true)))
-		(neumann_fail "build_queryplan" "volatile UNION grouping requires its input condition in the UNION branches") true)
-	(define input_columns (if relation_input '() (merge_unique (list (extract_columns_for_alias src condition)
-		(merge (map keys (lambda (expr) (extract_columns_for_alias src expr))))
-		(merge (map ags (lambda (ag) (extract_columns_for_alias src (car ag)))))))))
-	(define input_params (map input_columns (lambda (col) (scan_callback_symbol_for_alias alias col))))
-	(define row_values (mapIndex ags (lambda (i ag)
-		(if (runtime_distinct_aggregate? ag) (runtime_distinct_neutral ag)
-			(and union_input (equal? ag aggregate_count_descriptor)) 1
-			(if relation_input (nth value_params i) (lower_column_expr_for_alias src (car ag)))))))
-	(define old_params (mapIndex ags (lambda (i _ag) (symbol (concat "__old_" i)))))
-	(define new_params (mapIndex ags (lambda (i _ag) (symbol (concat "__new_" i)))))
-	(define collision (list 'lambda (cons '$update (merge (list old_params new_params)))
-		(list '$update (runtime_cons_list_expr (merge (mapIndex ags (lambda (i ag)
-			(list (nth value_names i) (if (runtime_distinct_aggregate? ag) (nth old_params i)
-				(list (cadr ag) (nth old_params i) (nth new_params i)))))))))))
-	(define insert_group (runtime_group_insert_expr group_table group_names
-		(merge (list key_values row_values))
-		(merge (list '("$update") value_names (map value_names (lambda (col) (concat "NEW." col))))) collision key_names))
-	(define fill_distinct (mapIndex distinct_indices (lambda (j i) (begin
-		(define value (if relation_input (nth value_params i) (lower_column_expr_for_alias src (car (nth ags i)))))
-		(list 'if (list 'nil? value) nil
-			(runtime_group_insert_expr (nth distinct_vars j) (merge (list key_names '("value")))
-				(merge (list key_values (list value))) '() (list 'lambda '() nil)
-				(merge (list key_names '("value")))))))))
-	(define fill_row (cons 'begin (merge (list (list insert_group) fill_distinct (list nil)))))
-	/* Each branch emits a bounded key/operand tuple straight into the native
-	scope-owned relations. Scalar nil reduction carries no accumulated row bag. */
-	(define fill (if union_input
-		(lower_union_block_as_dataset_reduce src keys key_names ags
-			(mapIndex ags (lambda (i _ag) (concat "__runtime_operand_" i)))
-			(list 'lambda (merge (list key_params value_params)) fill_row)
-			(list 'lambda (list 'acc 'row) nil) nil (list 'lambda (list 'left 'right) nil))
-		query_input (begin
-			(define input_fields (merge (list
-				(merge (mapIndex keys (lambda (i expression) (list (nth key_names i) expression))))
-				(merge (mapIndex ags (lambda (i ag) (list (concat "__runtime_operand_" i) (car ag))))))))
-			(define catalog (invocation_group_catalog '() stage))
-			/* A source may already name its invocation carrier rather than its
-			logical stage-output. Recover its producer from the same catalog before
-			consumption, unless the enclosing preparation already owns that packet. */
-			(define input_stages (unique_stages_by_id (merge (list (qb_stages src)
-				(stage_outputs_from_sources_using catalog (qb_sources src))
-				(filter (group_cache_stages_from_sources catalog (qb_sources src))
-					(lambda (dependency) (and (invocation_group_stage? catalog dependency)
-						(not (qassoc_get (gs_facts dependency) 'eager_prepared false)))))))))
-			(define input (make_query_block (qb_schema src) (qb_sources src) input_fields
-				(combine_where (qb_where src) condition) (qb_group src) (qb_having src)
-				(qb_order src) (qb_limit src) (qb_offset src) (qb_hidden src) input_stages
-				(query_block_facts_with_lowering_catalog src catalog
-					(lowering_catalog_with_planning_session (make_indexed_lowering_catalog catalog nil)
-						(planner_context_session (qb_facts src))))))
-			(define prepared (prepare_simple_query_block_physical_core input))
-			(cons '!begin (merge (list (nth prepared 0)
-				(list (if (query_group_cardinality_domain? keys ags)
-					/* One invocation has one constant key tuple. Keep the complete
-					chosen input, reduce its cardinality as a scalar, then insert the
-					completed state once instead of updating a native row per input. */
-					(list 'reduce_assoc
-						(build_query_grouped_assoc_plan (nth prepared 1) keys key_names ags false)
-						(list 'lambda (list '__count_acc '__count_keys '__count_values)
-							(list 'apply (list 'lambda (merge (list key_params value_params)) fill_row)
-								(list 'merge (list 'list '__count_keys '__count_values)))) nil)
-					(lower_query_block_as_dataset_reduce (nth prepared 1) (qb_fields (nth prepared 1))
-						(list 'lambda (merge (list key_params value_params)) fill_row)
-						(list 'lambda (list 'acc 'row) nil) nil (list 'lambda (list 'left 'right) nil))))
-				(nth prepared 2)))))
-		(compile_scan_plan 'scan (physical_query_tx_symbol) '__runtime_group_input
-			(quoted_runtime_list input_columns) (list 'lambda input_params (lower_column_expr_for_alias src condition))
-			(quoted_runtime_list input_columns) (list 'lambda (cons '__acc input_params)
-				fill_row) nil nil false)))
-	/* Native keys deduplicate complete (group,value) tuples. Fold each surviving
-	value once through the original bounded reducer; ordinary bag aggregates
-	have already consumed their full input and are not touched by this pass. */
-	(define fold_distinct (mapIndex distinct_indices (lambda (j i) (begin
-		(define ag (nth ags i))
-		(define cardinality (count_distinct_descriptor? ag))
-		(define reducer (if cardinality '+ (cadr (distinct_aggregate_underlying ag))))
-		(define contribution (if cardinality 1 '__distinct_value))
-		(define initial (list reducer (runtime_distinct_neutral ag) contribution))
-		(define params (map key_names (lambda (col) (symbol (concat "__distinct_" col)))))
-		(define payload (mapIndex ags (lambda (k other)
-			(if (equal? i k) initial (runtime_distinct_neutral other)))))
-		(define update (list 'lambda (list '$update 'old)
-			(list '$update (list 'list (nth value_names i) (list reducer 'old contribution)))))
-		(compile_scan_plan 'scan (physical_query_tx_symbol) (nth distinct_vars j)
-			(quoted_runtime_list '()) (list 'lambda '() true)
-			(quoted_runtime_list (if cardinality key_names (append key_names "value")))
-			(list 'lambda (cons '__acc (if cardinality params (append params '__distinct_value)))
-				(list 'begin (runtime_group_insert_expr group_table group_names (merge (list params payload))
-					(list "$update" (nth value_names i)) update key_names) nil)) nil nil false)))))
-	(define emit (consume group_table scope))
-	(define initialize (if (and (qassoc_get (gs_facts stage) 'preserve_empty_domain false)
-		(not (reduce keys (lambda (columns key) (or columns (expr_contains_column_ref? key))) false)))
-		(list (runtime_group_insert_expr group_table group_names
-			(merge (list (if relation_input keys key_values) (map ags runtime_distinct_neutral)))
-			'() (list 'lambda '() nil) key_names)) '()))
-	(define execution (cons 'begin (merge (list
-		(list (list 'define group_table (runtime_group_create_expr database name group_names
-			(merge (list keys (map ags car))) key_names src collations scope)))
-		(mapIndex distinct_indices (lambda (j i)
-			(list 'define (nth distinct_vars j)
-				(runtime_group_create_expr database (list 'concat name ":distinct:" i)
-					(merge (list key_names '("value"))) (merge (list keys (list (car (nth ags i)))))
-					(merge (list key_names '("value"))) src collations scope))))
-		initialize (list fill) fold_distinct (list emit)))))
-	(runtime_group_bind_domain stage
-		(list 'begin (if relation_input nil (list 'define '__runtime_group_input (source_scan_table_expr src condition)))
-			(list 'define name (list 'concat "." (list 'uuid) "#query-group"))
-			/* Scratch rows have their own ordinary nil-writer visibility. The
-			original query still retains this exact scope through its decision, so
-			readers and any prepared carrier keep their existing native lifetime. */
-			(list 'define scope (list 'if (list 'nil? (physical_query_tx_symbol))
-				(list 'new_relation_scope (physical_query_session_symbol))
-				(list 'tx_get_or_compute_resource (physical_query_tx_symbol)
-					(list 'concat "query-group/" name)
-					(list 'lambda '() (list 'new_relation_scope (physical_query_session_symbol))))))
-			(list 'try (list 'lambda '()
-				(list (list 'lambda (list 'result)
-					(list 'begin (if retain true
-						(list 'if (list 'nil? (physical_query_tx_symbol)) (list 'close_relation_scope scope) true))
-						'result)) execution))
-				(list 'lambda (list 'failure) (list 'begin
-					(list 'if (list 'nil? (physical_query_tx_symbol)) (list 'close_relation_scope scope) true)
-					(list 'error 'failure)))))))))
+/* Ordered FIRST operands are compiler markers with a separate ordered-probe
+owner. They are not executable row values for the ordinary native carrier.
+Only the actual chosen materializer asks for this bounded reducer contract. */
+(define runtime_group_materializer_supported? (lambda (stage)
+	(and (runtime_group_reducers_supported? (gs_aggregates stage))
+		(reduce (gs_aggregates stage) (lambda (valid aggregate)
+			(and valid (nil? (scalar_order_aggregate_parts aggregate)))) true))))
+
+(define lower_runtime_group_relation (lambda (catalog database stage consume retain)
+	(if (and (lowering_catalog_caller_input? catalog) (not (runtime_group_materializer_supported? stage)))
+		(begin
+			(define reason "native grouping requires executable bounded scalar or distinct value reducers")
+			(define contracts (lowering_catalog_input_contracts catalog))
+			(if (nil? contracts) (neumann_fail "build_queryplan" reason)
+				(begin (contracts "__memcp_queryplan_input_refusal" reason) (list 'error reason))))
+		(begin
+			(define src (gs_input stage))
+			(define union_input (union_block? src))
+			(define query_input (query_block? src))
+			(define relation_input (or union_input query_input))
+			(define alias (group_stage_input_alias stage))
+			(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
+			(define key_names (group_key_cols keys))
+			(define ags (gs_aggregates stage))
+			(define collations (qassoc_get (gs_facts stage) 'group-value-collations '()))
+			(if (runtime_group_reducers_supported? ags)
+				true (neumann_fail "build_queryplan" "native grouping requires bounded scalar or distinct value reducers"))
+			(define value_names (map ags (lambda (ag) (group_stage_aggregate_column stage ag))))
+			(define group_names (merge (list key_names value_names)))
+			(define distinct_indices (filter (produceN (count ags)) (lambda (i) (runtime_distinct_aggregate? (nth ags i)))))
+			(define group_table '__runtime_group_table)
+			(define scope '__runtime_group_scope)
+			(define name '__runtime_group_name)
+			(define distinct_vars (map distinct_indices (lambda (i) (symbol (concat "__runtime_distinct_" i)))))
+			(define key_params (map key_names (lambda (column) (symbol (concat "__runtime_key_" column)))))
+			(define value_params (mapIndex ags (lambda (i _ag) (symbol (concat "__runtime_value_" i)))))
+			(define key_values (if relation_input key_params (map keys (lambda (expr) (lower_column_expr_for_alias src expr)))))
+			(define condition (coalesceNil (qassoc_get (gs_facts stage) 'condition true) true))
+			(if (and union_input (not (expression_equal? condition true)))
+				(neumann_fail "build_queryplan" "volatile UNION grouping requires its input condition in the UNION branches") true)
+			(define input_columns (if relation_input '() (merge_unique (list (extract_columns_for_alias src condition)
+				(merge (map keys (lambda (expr) (extract_columns_for_alias src expr))))
+				(merge (map ags (lambda (ag) (extract_columns_for_alias src (car ag)))))))))
+			(define input_params (map input_columns (lambda (col) (scan_callback_symbol_for_alias alias col))))
+			(define row_values (mapIndex ags (lambda (i ag)
+				(if (runtime_distinct_aggregate? ag) (runtime_distinct_neutral ag)
+					(and union_input (equal? ag aggregate_count_descriptor)) 1
+					(if relation_input (nth value_params i) (lower_column_expr_for_alias src (car ag)))))))
+			(define old_params (mapIndex ags (lambda (i _ag) (symbol (concat "__old_" i)))))
+			(define new_params (mapIndex ags (lambda (i _ag) (symbol (concat "__new_" i)))))
+			(define collision (list 'lambda (cons '$update (merge (list old_params new_params)))
+				(list '$update (runtime_cons_list_expr (merge (mapIndex ags (lambda (i ag)
+					(list (nth value_names i) (if (runtime_distinct_aggregate? ag) (nth old_params i)
+						(list (cadr ag) (nth old_params i) (nth new_params i)))))))))))
+			(define insert_group (runtime_group_insert_expr group_table group_names
+				(merge (list key_values row_values))
+				(merge (list '("$update") value_names (map value_names (lambda (col) (concat "NEW." col))))) collision key_names))
+			(define fill_distinct (mapIndex distinct_indices (lambda (j i) (begin
+				(define value (if relation_input (nth value_params i) (lower_column_expr_for_alias src (car (nth ags i)))))
+				(list 'if (list 'nil? value) nil
+					(runtime_group_insert_expr (nth distinct_vars j) (merge (list key_names '("value")))
+						(merge (list key_values (list value))) '() (list 'lambda '() nil)
+						(merge (list key_names '("value")))))))))
+			(define fill_row (cons 'begin (merge (list (list insert_group) fill_distinct (list nil)))))
+			/* Each branch emits a bounded key/operand tuple straight into the native
+			scope-owned relations. Scalar nil reduction carries no accumulated row bag. */
+			(define fill (if union_input
+				(lower_union_block_as_dataset_reduce src keys key_names ags
+					(mapIndex ags (lambda (i _ag) (concat "__runtime_operand_" i)))
+					(list 'lambda (merge (list key_params value_params)) fill_row)
+					(list 'lambda (list 'acc 'row) nil) nil (list 'lambda (list 'left 'right) nil))
+				query_input (begin
+					(define input_fields (merge (list
+						(merge (mapIndex keys (lambda (i expression) (list (nth key_names i) expression))))
+						(merge (mapIndex ags (lambda (i ag) (list (concat "__runtime_operand_" i) (car ag))))))))
+					(define catalog (invocation_group_catalog catalog stage))
+					/* A source may already name its invocation carrier rather than its
+					logical stage-output. Recover its producer from the same catalog before
+					consumption, unless the enclosing preparation already owns that packet. */
+					(define input_stages (unique_stages_by_id (merge (list (qb_stages src)
+						(stage_outputs_from_sources_using catalog (qb_sources src))
+						(filter (group_cache_stages_from_sources catalog (qb_sources src))
+							(lambda (dependency) (and (invocation_group_stage? catalog dependency)
+								(not (qassoc_get (gs_facts dependency) 'eager_prepared false)))))))))
+					(define input (make_query_block (qb_schema src) (qb_sources src) input_fields
+						(combine_where (qb_where src) condition) (qb_group src) (qb_having src)
+						(qb_order src) (qb_limit src) (qb_offset src) (qb_hidden src) input_stages
+						(query_block_facts_with_lowering_catalog src catalog
+							(lowering_catalog_with_planning_session catalog
+								(planner_context_session (qb_facts src))))))
+					(define prepared (prepare_simple_query_block_physical_core input))
+					(cons '!begin (merge (list (nth prepared 0)
+						(list (if (query_group_cardinality_domain? keys ags)
+							/* One invocation has one constant key tuple. Keep the complete
+							chosen input, reduce its cardinality as a scalar, then insert the
+							completed state once instead of updating a native row per input. */
+							(list 'reduce_assoc
+								(build_query_grouped_assoc_plan (nth prepared 1) keys key_names ags false)
+								(list 'lambda (list '__count_acc '__count_keys '__count_values)
+									(list 'apply (list 'lambda (merge (list key_params value_params)) fill_row)
+										(list 'merge (list 'list '__count_keys '__count_values)))) nil)
+							(lower_query_block_as_dataset_reduce (nth prepared 1) (qb_fields (nth prepared 1))
+								(list 'lambda (merge (list key_params value_params)) fill_row)
+								(list 'lambda (list 'acc 'row) nil) nil (list 'lambda (list 'left 'right) nil))))
+						(nth prepared 2)))))
+				(compile_scan_plan 'scan (physical_query_tx_symbol) '__runtime_group_input
+					(quoted_runtime_list input_columns) (list 'lambda input_params (lower_column_expr_for_alias src condition))
+					(quoted_runtime_list input_columns) (list 'lambda (cons '__acc input_params)
+						fill_row) nil nil false)))
+			/* Native keys deduplicate complete (group,value) tuples. Fold each surviving
+			value once through the original bounded reducer; ordinary bag aggregates
+			have already consumed their full input and are not touched by this pass. */
+			(define fold_distinct (mapIndex distinct_indices (lambda (j i) (begin
+				(define ag (nth ags i))
+				(define cardinality (count_distinct_descriptor? ag))
+				(define reducer (if cardinality '+ (cadr (distinct_aggregate_underlying ag))))
+				(define contribution (if cardinality 1 '__distinct_value))
+				(define initial (list reducer (runtime_distinct_neutral ag) contribution))
+				(define params (map key_names (lambda (col) (symbol (concat "__distinct_" col)))))
+				(define payload (mapIndex ags (lambda (k other)
+					(if (equal? i k) initial (runtime_distinct_neutral other)))))
+				(define update (list 'lambda (list '$update 'old)
+					(list '$update (list 'list (nth value_names i) (list reducer 'old contribution)))))
+				(compile_scan_plan 'scan (physical_query_tx_symbol) (nth distinct_vars j)
+					(quoted_runtime_list '()) (list 'lambda '() true)
+					(quoted_runtime_list (if cardinality key_names (append key_names "value")))
+					(list 'lambda (cons '__acc (if cardinality params (append params '__distinct_value)))
+						(list 'begin (runtime_group_insert_expr group_table group_names (merge (list params payload))
+							(list "$update" (nth value_names i)) update key_names) nil)) nil nil false)))))
+			(define emit (consume group_table scope))
+			(define initialize (if (and (qassoc_get (gs_facts stage) 'preserve_empty_domain false)
+				(not (reduce keys (lambda (columns key) (or columns (expr_contains_column_ref? key))) false)))
+				(list (runtime_group_insert_expr group_table group_names
+					(merge (list (if relation_input keys key_values) (map ags runtime_distinct_neutral)))
+					'() (list 'lambda '() nil) key_names)) '()))
+			(define execution (cons 'begin (merge (list
+				(list (list 'define group_table (runtime_group_create_expr database name group_names
+					(merge (list keys (map ags car))) key_names src collations scope)))
+				(mapIndex distinct_indices (lambda (j i)
+					(list 'define (nth distinct_vars j)
+						(runtime_group_create_expr database (list 'concat name ":distinct:" i)
+							(merge (list key_names '("value"))) (merge (list keys (list (car (nth ags i)))))
+							(merge (list key_names '("value"))) src collations scope))))
+				initialize (list fill) fold_distinct (list emit)))))
+			(runtime_group_bind_domain stage
+				(list 'begin (if relation_input nil (list 'define '__runtime_group_input (source_scan_table_expr src condition)))
+					(list 'define name (list 'concat "." (list 'uuid) "#query-group"))
+					/* Scratch rows have their own ordinary nil-writer visibility. The
+					original query still retains this exact scope through its decision, so
+					readers and any prepared carrier keep their existing native lifetime. */
+					(list 'define scope (list 'if (list 'nil? (physical_query_tx_symbol))
+						(list 'new_relation_scope (physical_query_session_symbol))
+						(list 'tx_get_or_compute_resource (physical_query_tx_symbol)
+							(list 'concat "query-group/" name)
+							(list 'lambda '() (list 'new_relation_scope (physical_query_session_symbol))))))
+					(list 'try (list 'lambda '()
+						(list (list 'lambda (list 'result)
+							(list 'begin (if retain true
+								(list 'if (list 'nil? (physical_query_tx_symbol)) (list 'close_relation_scope scope) true))
+								'result)) execution))
+						(list 'lambda (list 'failure) (list 'begin
+							(list 'if (list 'nil? (physical_query_tx_symbol)) (list 'close_relation_scope scope) true)
+							(list 'error 'failure))))))))))
 
 /* The native relation owner is shared by terminal GROUP/DISTINCT emission and
 prepared stage-output consumers. Only the latter transfer their scope/table
@@ -311,8 +326,8 @@ packet to the enclosing query's explicit lifetime owner. */
 			(list 'resultrow (cons 'list (map_assoc replaced_fields (lambda (_title expr) (lower_column_expr_for_alias helper_src expr))))))
 		nil false)))
 	emit)))
-(define lower_runtime_rows_group_stage (lambda (database stage fields order_items offset_value limit_value result_consumer)
-	(lower_runtime_group_relation database stage
+(define lower_runtime_rows_group_stage (lambda (catalog database stage fields order_items offset_value limit_value result_consumer)
+	(lower_runtime_group_relation catalog database stage
 		(lambda (table _scope) (lower_runtime_group_output stage table fields order_items offset_value limit_value result_consumer)) false)))
 /* Physical carriers are lexical native handles. Their names and mutable
 lifetime resources never enter a logical source declaration or cache key. */
@@ -320,16 +335,19 @@ lifetime resources never enter a logical source declaration or cache key. */
 those real scopes before classifying an external reference as unresolved;
 missing references still remain conservatively invocation-owned. */
 (define invocation_group_catalog (lambda (stages stage)
-	(unique_stages_by_id (merge (list (nested_stage_catalog stage)
-		(lowering_catalog_stages (qassoc_get (gs_facts stage) 'stage_catalog nil))
-		(lowering_catalog_stages (qassoc_get (gs_facts stage) 'lowering_catalog nil))
-		(lowering_catalog_stages (qassoc_get (gs_facts stage) 'probe_catalog nil))
-		(lowering_catalog_stages stages))))))
+	(lowering_catalog_rebind stages
+		(unique_stages_by_id (merge (list (nested_stage_catalog stage)
+			(lowering_catalog_stages (qassoc_get (gs_facts stage) 'stage_catalog nil))
+			(lowering_catalog_stages (qassoc_get (gs_facts stage) 'lowering_catalog nil))
+			(lowering_catalog_stages (qassoc_get (gs_facts stage) 'probe_catalog nil))
+			(lowering_catalog_stages stages)))))))
 (define native_distinct_group_stage? (lambda (stage)
 	(not (nil? (find (gs_aggregates stage) distinct_aggregate_descriptor? nil)))))
 (define invocation_group_stage? (lambda (stages stage)
 	(and (group_stage? stage) (not (scoped_relational_program_stage? stage))
 		(or
+			(expression_equal? (coalesceNil (lowering_catalog_input_profile stages)
+				(lowering_catalog_input_profile (group_stage_lowering_catalog stage))) 'caller)
 			/* DISTINCT bounded reductions need native value sets. The invocation
 			group profile supplies those independently of source reusability; no
 			SQL spelling or freshness flag chooses a physical LIST accumulator. */
@@ -346,8 +364,8 @@ missing references still remain conservatively invocation-owned. */
 (define scoped_stage_table_id cadr)
 (define invocation_group_table_expr (lambda (stage)
 	(list 'cadr (invocation_group_packet_symbol (gs_id stage)))))
-(define group_stage_table_expr (lambda (stage)
-	(if (invocation_group_stage? (nested_stage_catalog stage) stage)
+(define group_stage_table_expr (lambda (catalog stage)
+	(if (invocation_group_stage? catalog stage)
 		(invocation_group_table_expr stage)
 		(list 'table (group_stage_cache_schema stage) false (group_stage_cache_relation stage) false (physical_query_tx_symbol)))))
 (define group_carrier_source_declarations (lambda (stage collations) (begin
@@ -369,8 +387,8 @@ missing references still remain conservatively invocation-owned. */
 		(group_carrier_source_declarations stage
 			(qassoc_get (gs_facts stage) 'group-value-collations '()))
 		(list "lifetime" "invocation")))))
-(define lower_runtime_group_carrier (lambda (stage) (begin
-	(define value (lower_runtime_group_relation (group_stage_schema stage) stage
+(define lower_runtime_group_carrier (lambda (catalog stage) (begin
+	(define value (lower_runtime_group_relation catalog (group_stage_schema stage) stage
 		(lambda (table scope) (list 'list scope table)) true))
 	(define packet '__created_invocation_group)
 	(list (list 'lambda (list packet)
@@ -409,6 +427,22 @@ stage's declaration/provenance payload. */
 	(cons head tail) (not (nil? (find node physical_plan_uses_invocation_groups? nil)))
 	_ (or (expression_equal? node '__invocation_group_scopes)
 		(expression_equal? node '__invocation_relation_initializers)))))
+/* Regional alternatives share the existing nil-Tx observation registries for
+exactly one actual query dispatch, including its bounded guard/miss chain.
+Three empty maps are lexical to the profiled dispatch; native group scopes
+are allocated only by its selected producers. Nothing here
+is retained in a compiled variant, and this supplies no native read authority. */
+(define call_with_invocation_group_lifetime (lambda (consume)
+	(begin
+		(define scopes (newsession)) (define initializers (newsession))
+		(define observations (newsession))
+		(define cleanup (lambda ()
+			(map (scopes) (lambda (key) (close_relation_scope (scopes key))))))
+		(try (lambda () (begin
+			(define result (consume (lambda () scopes) (lambda () initializers) (lambda () observations)))
+			(cleanup) result))
+			(lambda (failure) (begin (cleanup) (error failure)))))))
+
 (define bind_invocation_group_lifetimes (lambda (plan)
 	(if (not (physical_plan_uses_invocation_groups? plan)) plan (begin
 		/* A zero-argument session call returns its keys, never assoc pairs. */

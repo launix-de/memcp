@@ -118,13 +118,14 @@ string form preserves colons and encodes its reserved lower-case _x marker. */
 				(tsql_for_xml_value_formula info (list 'nth row (+ (* index 2) 1)))))))
 		(list "/>"))))))
 	(define consumer (make_result_reduction tsql_for_xml_reduce '(0 "") tsql_for_xml_combine))
-	(define input (list (list 'lambda (list 'resultrow)
-		(build_reducing_queryplan_term query consumer planning tx nil)) formatter))
 	(define descriptors (tsql_for_xml_descriptors (qb_schema query) parameters))
 	(define state '__xml_auto_result)
-	(list '!begin
-		(list 'resultfields (list 'quote (list tsql_for_xml_column)) (list 'quote descriptors))
-		(list (list 'lambda (list state) (list '!begin
-			(list 'if (list '> (list 'car state) 0)
-				(list 'resultrow (list 'list tsql_for_xml_column (list 'cadr state))) true)
-			(list 'car state))) input)))))
+	(build_reducing_queryplan_term query consumer planning tx
+		(physical_result_consumer nil (lambda (plan _context) (begin
+			(define input (list (list 'lambda (list 'resultrow) plan) formatter))
+			(list '!begin
+				(list 'resultfields (list 'quote (list tsql_for_xml_column)) (list 'quote descriptors))
+				(list (list 'lambda (list state) (list '!begin
+					(list 'if (list '> (list 'car state) 0)
+						(list 'resultrow (list 'list tsql_for_xml_column (list 'cadr state))) true)
+					(list 'car state))) input)))))))))

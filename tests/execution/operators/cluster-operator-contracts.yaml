@@ -1821,6 +1821,74 @@ test_cases:
 # Oracle and cluster start with independent copies of the committed fixture.
 # These require native remote mutations; an unsupported-operation error must
 # fail, never satisfy the test.
+# Whole retained-stage private visibility uses the same delegated native transaction.
+- name: group-private-begin
+  session_id: cluster-group-private
+  sql: START ACID TRANSACTION
+- name: group-private-write-two-shards
+  session_id: cluster-group-private
+  sql: UPDATE big_items SET v7=-id-1 WHERE id IN(245000,250000)
+  expect:
+    affected_rows: 2
+    cluster:
+      min_remote_shards: 1
+- name: group-private-owned-scalar-groups
+  session_id: cluster-group-private
+  sql: "SELECT\n  (SELECT SUM(total) FROM\n    (SELECT id%2 AS bucket,SUM(CASE WHEN v7<0 THEN v7 ELSE 0 END) AS\
+    \ total\n      FROM big_items WHERE id IN(245000,250000) GROUP BY id%2) grouped_values) AS total,\n  (SELECT\
+    \ COUNT(*) FROM\n    (SELECT id%2 AS bucket,SUM(CASE WHEN v7<0 THEN v7 ELSE 0 END) AS total\n      FROM big_items\
+    \ WHERE id IN(245000,250000) GROUP BY id%2) grouped_counts) AS groups,\n  (SELECT COUNT(*) FROM big_items WHERE\
+    \ id IN(245000,250000) AND v7<0) AS changed_rows"
+  expect:
+    rows: 1
+    data:
+    - total: -495002
+      groups: 1
+      changed_rows: 2
+    cluster:
+      min_remote_shards: 1
+- name: group-private-observer-scalar-groups
+  sql: "SELECT\n  (SELECT SUM(total) FROM\n    (SELECT id%2 AS bucket,SUM(CASE WHEN v7<0 THEN v7 ELSE 0 END) AS\
+    \ total\n      FROM big_items WHERE id IN(245000,250000) GROUP BY id%2) grouped_values) AS total,\n  (SELECT\
+    \ COUNT(*) FROM\n    (SELECT id%2 AS bucket,SUM(CASE WHEN v7<0 THEN v7 ELSE 0 END) AS total\n      FROM big_items\
+    \ WHERE id IN(245000,250000) GROUP BY id%2) grouped_counts) AS groups,\n  (SELECT COUNT(*) FROM big_items WHERE\
+    \ id IN(245000,250000) AND v7<0) AS changed_rows"
+  expect:
+    rows: 1
+    data:
+    - total: 0
+      groups: 1
+      changed_rows: 0
+    cluster:
+      min_remote_shards: 1
+- name: group-private-rollback
+  session_id: cluster-group-private
+  sql: ROLLBACK
+- name: group-private-restored-scalar-groups
+  sql: "SELECT\n  (SELECT SUM(total) FROM\n    (SELECT id%2 AS bucket,SUM(CASE WHEN v7<0 THEN v7 ELSE 0 END) AS\
+    \ total\n      FROM big_items WHERE id IN(245000,250000) GROUP BY id%2) grouped_values) AS total,\n  (SELECT\
+    \ COUNT(*) FROM\n    (SELECT id%2 AS bucket,SUM(CASE WHEN v7<0 THEN v7 ELSE 0 END) AS total\n      FROM big_items\
+    \ WHERE id IN(245000,250000) GROUP BY id%2) grouped_counts) AS groups,\n  (SELECT COUNT(*) FROM big_items WHERE\
+    \ id IN(245000,250000) AND v7<0) AS changed_rows"
+  expect:
+    rows: 1
+    data:
+    - total: 0
+      groups: 1
+      changed_rows: 0
+    cluster:
+      min_remote_shards: 1
+- name: group-private-restored-complete-signature
+  sql: SELECT COUNT(*) AS n,SUM(id) AS ids,SUM(v7) AS vals FROM big_items
+  expect:
+    rows: 1
+    data:
+    - n: 320000
+      ids: 51199840000
+      vals: 687845503431224
+    cluster:
+      min_remote_shards: 1
+
 - name: bulk-update-begin
   session_id: cluster-bulk-update
   sql: START ACID TRANSACTION

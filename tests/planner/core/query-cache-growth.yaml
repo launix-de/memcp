@@ -332,8 +332,10 @@ test_cases:
           (map (produceN 4096) (lambda (i) (list (+ i 10) (concat "other-" i)))))
         (rebuild (table "memcp-tests" false "cg_rows" false nil) true false)
         (define guard_after_growth
-          (not (nil? (sql_queryplan_matching_variant (list first_variant)
-            sess nil (lambda (_row) nil) (lambda (_fields) nil)))))
+          (not (nil? (call_with_invocation_group_lifetime (lambda (scopes initializers observations) (begin
+                  (define matched (sql_queryplan_matching_variant (list first_variant)
+            sess nil (lambda (_row) nil) (lambda (_fields) nil) (list scopes initializers observations)))
+                  (if (nil? matched) nil (car matched))))))))
         (define second_formula (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true nil))
         (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
         (if (and (equal? first_variants 1) (not guard_after_growth)
@@ -368,8 +370,10 @@ test_cases:
           (map (produceN 4096) (lambda (i) (list (+ i 10000) (concat "other-" i)))))
         (rebuild (table "memcp-tests" false "cg_rows" false nil) true false)
         (define guard_after_growth
-          (not (nil? (sql_queryplan_matching_variant (list first_variant)
-            sess nil (lambda (_row) nil) (lambda (_fields) nil)))))
+          (not (nil? (call_with_invocation_group_lifetime (lambda (scopes initializers observations) (begin
+                  (define matched (sql_queryplan_matching_variant (list first_variant)
+            sess nil (lambda (_row) nil) (lambda (_fields) nil) (list scopes initializers observations)))
+                  (if (nil? matched) nil (car matched))))))))
         (define second_formula (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" sess true nil))
         (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
         (if (and (>= first_variants 1) (not guard_after_growth)

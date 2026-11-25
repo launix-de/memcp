@@ -135,27 +135,7 @@ test_cases:
     expect:
       data: [{e: 0, id: 1}, {e: 0, id: 2}, {e: 1, id: 5}]
   - name: "Unique partition dominance needs no per-request selectivity scan"
-    scm: |
-      (begin
-        (define planning (sql_queryplan_compile_session (newsession) nil))
-        (with_session planning (lambda ()
-          (parse_sql "memcp-tests"
-            "SELECT SQL_CALC_FOUND_ROWS d.id FROM imc_domain d WHERE d.direct_flag = 0 AND NOT EXISTS (SELECT 1 FROM imc_assignment a WHERE a.actor_id = 99 AND a.domain_id = d.id) ORDER BY d.id DESC LIMIT 10"
-            (lambda args true) planning nil)))
-        /* Zero-budget calls only read published feedback. Reject actual
-        sampling budgets, not the metadata operator's name. Positive-budget
-        sentinels ensure the assertion cannot silently become permissive. */
-        (define metadata_only (lambda (expr)
-          (match expr
-            ((symbol quote) value) true
-            ((symbol scan_selectivity_estimate) tx tbl access values columns filter budget)
-              (equal? budget 0)
-            (cons head tail) (reduce expr (lambda (ok part) (and ok (metadata_only part))) true)
-            _ true)))
-        (and (metadata_only (sql_queryplan_guard_from_session planning))
-          (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil 0))
-          (not (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil 1)))
-          (not (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil -1))))))
+    scm: "(begin\n  (define planning (sql_queryplan_compile_session (newsession) nil nil nil))\n  (with_session planning (lambda ()\n    (parse_sql \"memcp-tests\"\n      \"SELECT SQL_CALC_FOUND_ROWS d.id FROM imc_domain d WHERE d.direct_flag = 0 AND NOT EXISTS (SELECT 1 FROM imc_assignment a WHERE a.actor_id = 99 AND a.domain_id = d.id) ORDER BY d.id DESC LIMIT 10\"\n      (lambda args true) planning nil)))\n  /* Zero-budget calls only read published feedback. Reject actual\n  sampling budgets, not the metadata operator's name. Positive-budget\n  sentinels ensure the assertion cannot silently become permissive. */\n  (define metadata_only (lambda (expr)\n    (match expr\n      ((symbol quote) value) true\n      ((symbol scan_selectivity_estimate) tx tbl access values columns filter budget)\n        (equal? budget 0)\n      (cons head tail) (reduce expr (lambda (ok part) (and ok (metadata_only part))) true)\n      _ true)))\n  (and (metadata_only (sql_queryplan_guard_from_session planning))\n    (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil 0))\n    (not (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil 1)))\n    (not (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil -1))))))\n"
     expect:
       data: [true]
 

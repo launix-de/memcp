@@ -237,19 +237,7 @@ test_cases:
       amount: 40
       all_amount: 70
 - name: Parameterized range chain remains available to physical costing
-  scm: |
-    (begin
-      (define request (newsession))
-      (define shape (sql_parameterize_select_literals "SELECT periods.period_id,\n  (SELECT SUM((SELECT h.quantity FROM ds_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time\n    ORDER BY h.coordinate DESC LIMIT 1))\n   FROM ds_entity e\n   WHERE (SELECT h.coordinate FROM ds_history h\n     WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time\n     ORDER BY h.coordinate DESC LIMIT 1) BETWEEN 0 AND periods.end_time\n     AND (SELECT k.active FROM ds_kind k\n       WHERE k.name=(SELECT h.kind FROM ds_history h\n         WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time\n         ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=true) AS total\nFROM (SELECT 1 AS period_id,10 AS end_time\n  UNION SELECT 2 AS period_id,25 AS end_time) periods\nORDER BY periods.period_id" true))
-      (mapIndex (cadr shape) (lambda (i value) (request (concat "v" (+ i 1)) value)))
-      (define resultrow (lambda (row) row))
-      (define explained (with_session request (lambda ()
-        (eval (parse_sql "memcp-tests" (concat "EXPLAIN PHYSICAL " (car shape))
-          nil (sql_queryplan_compile_session request nil) nil)))))
-      (define code (get_assoc explained "code"))
-      (if (and (strlike code "%__group_range_dimension_%")
-               (not (strlike code "%group_cache_create%"))) true
-        (error "range-to-dimension chain lost to eager group materialization")))
+  scm: "(begin\n  (define request (newsession))\n  (define shape (sql_parameterize_select_literals \"SELECT periods.period_id,\\n  (SELECT SUM((SELECT h.quantity FROM ds_history h\\n    WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time\\n    ORDER BY h.coordinate DESC LIMIT 1))\\n   FROM ds_entity e\\n   WHERE (SELECT h.coordinate FROM ds_history h\\n     WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time\\n     ORDER BY h.coordinate DESC LIMIT 1) BETWEEN 0 AND periods.end_time\\n     AND (SELECT k.active FROM ds_kind k\\n       WHERE k.name=(SELECT h.kind FROM ds_history h\\n         WHERE h.entity_id=e.id AND h.coordinate<=periods.end_time\\n         ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=true) AS total\\nFROM (SELECT 1 AS period_id,10 AS end_time\\n  UNION SELECT 2 AS period_id,25 AS end_time) periods\\nORDER BY periods.period_id\" true))\n  (mapIndex (cadr shape) (lambda (i value) (request (concat \"v\" (+ i 1)) value)))\n  (define resultrow (lambda (row) row))\n  (define explained (with_session request (lambda ()\n    (eval (parse_sql \"memcp-tests\" (concat \"EXPLAIN PHYSICAL \" (car shape))\n      nil (sql_queryplan_compile_session request nil nil nil) nil)))))\n  (define code (get_assoc explained \"code\"))\n  (if (and (strlike code \"%__group_range_dimension_%\")\n           (not (strlike code \"%group_cache_create%\"))) true\n    (error \"range-to-dimension chain lost to eager group materialization\")))\n"
   expect:
     data: [true]
 - name: Parameterized latest-row dimension chain

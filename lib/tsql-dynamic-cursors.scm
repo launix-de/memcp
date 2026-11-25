@@ -143,7 +143,7 @@ is never retained by the cursor, its plan or a storage computed column. */
 	(define input (tsql_cursor_dynamic_input session false (map keys (lambda (_key) nil))))
 	(define cache (newcachemap))
 	(define entry (sql_queryplan_new_entry cache "cursor" (list factory) (cursor "schema")
-		(cursor "text") policy input tx nil))
+		(cursor "text") policy input tx nil nil nil))
 	/* Publication follows successful binding/compilation. A failed OPEN does
 	not replace the prior last-opened cursor status or install partial state. */
 	(cursor "fields" fields) (cursor "source_contracts" source_contracts)
@@ -170,7 +170,7 @@ is never retained by the cursor, its plan or a storage computed column. */
 		retains only the closed logical factory and ordinary policy metadata. */
 		(define entry (cache "cursor" tx (lambda ()
 			(sql_queryplan_new_entry cache "cursor" (list factory) schema text
-				(tsql_temporary_policy (input "username") (tsql_temporary_bindings input)) input tx nil))))
+				(tsql_temporary_policy (input "username") (tsql_temporary_bindings input)) input tx nil nil nil))))
 		(define row (sql_execute_formula input tx (cadr entry)
 			(lambda (row) row) (lambda args true)))
 		(if (nil? row) (begin (cursor "eof" true) nil) (begin

@@ -1,0 +1,550 @@
+metadata:
+  syntax: sql
+  isolated: true
+  requires_tds: true
+  requires_mysql: true
+  description: Whole retained-stage producers and consumers preserve original private
+    views
+setup:
+- sql: DROP TABLE IF EXISTS grouped_private_rebind
+- sql: DROP TABLE IF EXISTS grouped_private_marker
+- sql: CREATE TABLE grouped_private_marker(id INT PRIMARY KEY,value INT NULL)
+- sql: INSERT INTO grouped_private_marker VALUES(1,0),(2,NULL)
+cleanup:
+- sql: DROP TABLE IF EXISTS grouped_private_rebind
+- sql: DROP TABLE IF EXISTS grouped_private_marker
+test_cases:
+- name: Doomed CATCH reads the original grouped private value before same-batch rollback
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT ON
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE grouped_private_marker SET value=9 WHERE id=1
+    - connection: owner
+      sql: "BEGIN TRY\n  THROW 51009,N'grouped-private-control',1;\nEND TRY\nBEGIN\
+        \ CATCH\n  SELECT ERROR_NUMBER() AS number,@@TRANCOUNT AS depth,XACT_STATE()\
+        \ AS state,\n    (SELECT value FROM grouped_private_marker WHERE id=1) AS\
+        \ value,\n    (SELECT COUNT(*) FROM grouped_private_marker) AS n;\n  ROLLBACK\
+        \ TRANSACTION;\nEND CATCH"
+      expect:
+        rows: 1
+        data:
+        - number: 51009
+          depth: 1
+          state: -1
+          value: 9
+          n: 2
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: SELECT id,value FROM grouped_private_marker ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 0
+        - id: 2
+          value: null
+- name: Cold warm and savepoint scalar cells follow original writes while the observer
+    stays committed
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE grouped_private_marker SET value=9 WHERE id=1
+    - connection: owner
+      sql: SELECT (SELECT value FROM grouped_private_marker WHERE id=1) AS value,(SELECT
+        COUNT(*) FROM grouped_private_marker) AS n
+      expect:
+        rows: 1
+        data:
+        - value: 9
+          n: 2
+    - connection: owner
+      sql: SELECT (SELECT value FROM grouped_private_marker WHERE id=1) AS value,(SELECT
+        COUNT(*) FROM grouped_private_marker) AS n
+      expect:
+        rows: 1
+        data:
+        - value: 9
+          n: 2
+    - connection: observer
+      sql: SELECT (SELECT value FROM grouped_private_marker WHERE id=1) AS value,(SELECT
+        COUNT(*) FROM grouped_private_marker) AS n
+      expect:
+        rows: 1
+        data:
+        - value: 0
+          n: 2
+    - connection: owner
+      sql: SAVE TRANSACTION grouped_private_saved
+    - connection: owner
+      sql: UPDATE grouped_private_marker SET value=12 WHERE id=1
+    - connection: owner
+      sql: SELECT (SELECT value FROM grouped_private_marker WHERE id=1) AS value,(SELECT
+        COUNT(*) FROM grouped_private_marker) AS n
+      expect:
+        rows: 1
+        data:
+        - value: 12
+          n: 2
+    - connection: owner
+      sql: ROLLBACK TRANSACTION grouped_private_saved
+    - connection: owner
+      sql: SELECT (SELECT value FROM grouped_private_marker WHERE id=1) AS value,(SELECT
+        COUNT(*) FROM grouped_private_marker) AS n
+      expect:
+        rows: 1
+        data:
+        - value: 9
+          n: 2
+    - connection: owner
+      sql: UPDATE grouped_private_marker SET value=11 WHERE id=1
+    - connection: owner
+      sql: SELECT (SELECT value FROM grouped_private_marker WHERE id=1) AS value,(SELECT
+        COUNT(*) FROM grouped_private_marker) AS n
+      expect:
+        rows: 1
+        data:
+        - value: 11
+          n: 2
+    - connection: observer
+      sql: SELECT (SELECT value FROM grouped_private_marker WHERE id=1) AS value,(SELECT
+        COUNT(*) FROM grouped_private_marker) AS n
+      expect:
+        rows: 1
+        data:
+        - value: 0
+          n: 2
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT (SELECT value FROM grouped_private_marker WHERE id=1) AS value,(SELECT
+        COUNT(*) FROM grouped_private_marker) AS n
+      expect:
+        rows: 1
+        data:
+        - value: 0
+          n: 2
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS depth,XACT_STATE() AS state
+      expect:
+        rows: 1
+        data:
+        - depth: 0
+          state: 0
+- name: Independent and dependent retained groups share a coherent private view
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE grouped_private_marker SET value=9 WHERE id=1
+    - connection: owner
+      sql: SELECT (SELECT value FROM grouped_private_marker WHERE id=1) AS first_value,(SELECT
+        COUNT(*) FROM grouped_private_marker WHERE value IS NOT NULL) AS nonnull_rows,(SELECT
+        SUM(value) FROM grouped_private_marker WHERE id <= (SELECT MAX(id) FROM grouped_private_marker
+        WHERE value IS NOT NULL)) AS nested_total
+      expect:
+        rows: 1
+        data:
+        - first_value: 9
+          nonnull_rows: 1
+          nested_total: 9
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT (SELECT value FROM grouped_private_marker WHERE id=1) AS value,(SELECT
+        COUNT(*) FROM grouped_private_marker) AS n
+      expect:
+        rows: 1
+        data:
+        - value: 0
+          n: 2
+- name: Private grouped cells distinguish empty NULL zero and duplicate operands
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: INSERT INTO grouped_private_marker VALUES(3,0),(4,0)
+    - connection: owner
+      sql: SELECT (SELECT value FROM grouped_private_marker WHERE id=2) AS null_value,(SELECT
+        value FROM grouped_private_marker WHERE id=99) AS absent_value,(SELECT value
+        FROM grouped_private_marker WHERE id=3) AS zero_value,(SELECT COUNT(*) FROM
+        grouped_private_marker) AS bag_rows,(SELECT COUNT(value) FROM grouped_private_marker)
+        AS value_rows,(SELECT SUM(value) FROM grouped_private_marker) AS total,(SELECT
+        COUNT(DISTINCT value) FROM grouped_private_marker) AS distinct_values
+      expect:
+        rows: 1
+        data:
+        - null_value: null
+          absent_value: null
+          zero_value: 0
+          bag_rows: 4
+          value_rows: 3
+          total: 0
+          distinct_values: 1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT (SELECT value FROM grouped_private_marker WHERE id=1) AS value,(SELECT
+        COUNT(*) FROM grouped_private_marker) AS n
+      expect:
+        rows: 1
+        data:
+        - value: 0
+          n: 2
+- name: An ordinary committed scalar keeps complete shared-view results
+  sql: SELECT (SELECT value FROM grouped_private_marker WHERE id=1) AS value,(SELECT
+    COUNT(*) FROM grouped_private_marker) AS n
+  expect:
+    rows: 1
+    data:
+    - value: 0
+      n: 2
+- name: Regional guard misses preserve complete private results and emit one header
+    after admission
+  scm: "(begin\n  (define cache (newcachemap)) (define state (newsession))\n  (define\
+    \ session (newsession)) (session \"username\" \"root\")\n  (state \"contract\"\
+    \ 1) (state \"compiled\" (list))\n  (tx_begin_acid session) (define tx (session\
+    \ \"__memcp_tx\"))\n  (try (lambda () (begin\n    (eval (parse_sql \"memcp-tests\"\
+    \ \"UPDATE grouped_private_marker SET value=9 WHERE id=1\" nil session tx))\n\
+    \    (define parser (lambda (schema query policy planning actual_tx) (begin\n\
+    \      (define contract (state \"contract\"))\n      (state \"compiled\" (append\
+    \ (state \"compiled\") contract))\n      (planner_record_guard_condition\n   \
+    \     (list 'equal? (list state \"contract\") contract) planning)\n      (parse_sql\
+    \ schema query policy planning actual_tx))))\n    (define query \"SELECT (SELECT\
+    \ SUM(value) FROM grouped_private_marker) AS total,(SELECT COUNT(*) FROM grouped_private_marker)\
+    \ AS n\")\n    (define formula (cached_parse cache \"sql\" (list parser (list\
+    \ \"exact_guards\" true))\n      \"memcp-tests\" query nil \"root\" session false\
+    \ tx))\n    (define observed (map (list 1 2 3 2 1) (lambda (contract) (begin\n\
+    \      (state \"contract\" contract)\n      (define result (newsession)) (result\
+    \ \"rows\" 0) (result \"headers\" 0)\n      /* Retain the first dispatcher. Its\
+    \ miss must recheck newer variants;\n      failed regions must never publish partial\
+    \ or duplicate metadata. */\n      (sql_execute_formula session tx formula\n \
+    \       (lambda (row) (begin\n          (result \"rows\" (+ (result \"rows\")\
+    \ 1))\n          (result \"total\" (row \"total\")) (result \"n\" (row \"n\"))))\n\
+    \        (lambda args (result \"headers\" (+ (result \"headers\") 1))))\n    \
+    \  (list (result \"rows\") (result \"headers\") (result \"total\") (result \"\
+    n\"))))))\n    (define contracts (map (list 1 2 3) (lambda (contract) (contains?\
+    \ (state \"compiled\") contract))))\n    (tx_rollback session)\n    (list observed\
+    \ contracts)))\n    (lambda (failure) (begin (tx_rollback session) (error failure)))))"
+  expect:
+    result:
+    - - &id001
+        - 1
+        - 1
+        - 9
+        - 2
+      - *id001
+      - *id001
+      - *id001
+      - *id001
+    - - true
+      - true
+      - true
+- name: Direct SQL and PostgreSQL parsers retain complete rows and their declared
+    callback contracts
+  scm: "(begin\n  (define query \"SELECT (SELECT SUM(value) FROM grouped_private_marker)\
+    \ AS total,(SELECT COUNT(*) FROM grouped_private_marker) AS n\")\n  (map (list\
+    \ parse_sql parse_psql) (lambda (parser) (begin\n    (define cache (newcachemap))\
+    \ (define session (newsession))\n    (map (list 1 2) (lambda (_iteration) (begin\n\
+    \      (define result (newsession)) (result \"rows\" 0) (result \"headers\" 0)\n\
+    \      (sql_execute_formula session nil\n        (cached_parse cache \"sql\" (list\
+    \ parser) \"memcp-tests\" query nil \"root\" session false nil)\n        (lambda\
+    \ (row) (begin (result \"rows\" (+ (result \"rows\") 1))\n          (result \"\
+    total\" (row \"total\")) (result \"n\" (row \"n\"))))\n        (lambda args (result\
+    \ \"headers\" (+ (result \"headers\") 1))))\n      (list (result \"rows\") (result\
+    \ \"headers\") (result \"total\") (result \"n\")))))))))"
+  expect:
+    result:
+    - - - 1
+        - 1
+        - 0
+        - 2
+      - - 1
+        - 1
+        - 0
+        - 2
+    - - - 1
+        - 0
+        - 0
+        - 2
+      - - 1
+        - 0
+        - 0
+        - 2
+- name: PostgreSQL syntax over its actual MySQL transport emits complete columns and
+    rows cold and warm
+  mysql:
+    statements:
+    - sql: SET syntax='postgresql'
+    - sql: SELECT (SELECT SUM(value) FROM grouped_private_marker) AS total,(SELECT
+        COUNT(*) FROM grouped_private_marker) AS n
+      expect:
+        columns:
+        - total
+        - n
+        rows: 1
+        data:
+        - total: 0
+          n: 2
+    - sql: SELECT (SELECT SUM(value) FROM grouped_private_marker) AS total,(SELECT
+        COUNT(*) FROM grouped_private_marker) AS n
+      expect:
+        columns:
+        - total
+        - n
+        rows: 1
+        data:
+        - total: 0
+          n: 2
+- name: Nil transaction group observations survive one bounded attempt chain and retire
+    after the whole dispatch
+  scm: "(begin\n  (define packet (call_with_invocation_group_lifetime (lambda (scope_input\
+    \ initializer_input observation_input) (begin\n    (define registry (scope_input))\
+    \ (define initializers (initializer_input))\n    (define session (newsession))\
+    \ (define scope (new_relation_scope session))\n    (define name (concat \".\"\
+    \ (uuid) \"#group-owner-control\"))\n    (createtable \"memcp-tests\" name (list\
+    \ (list \"column\" \"value\" \"INT\" (list) (list)))\n      (list \"engine\" \"\
+    memory\" \"ephemeral\" true \"scope\" scope) false nil)\n    (define source (table\
+    \ \"memcp-tests\" false name false nil))\n    (insert source (list \"value\")\
+    \ (list (list 7)))\n    (registry \"observation\" scope) (initializers \"source\"\
+    \ true)\n    (define read (lambda () (scan nil source (list) (list) (list) (lambda\
+    \ () true)\n      (list \"value\") (lambda (acc value) (+ acc value)) 0 +)))\n\
+    \    /* Each admission has returned before the next attempt. Only the existing\n\
+    \    query-owned native observation lifetime crosses that boundary. */\n    (define\
+    \ first (with_cache_sources nil (list source) read read))\n    (define second\
+    \ (with_cache_sources nil (list source) read read))\n    (list source name first\
+    \ second (expression_equal? registry (scope_input))\n      ((initializer_input)\
+    \ \"source\"))))))\n  (define retired (try (lambda () (begin\n    (scan nil (car\
+    \ packet) (list) (list) (list) (lambda () true)\n      (list \"value\") (lambda\
+    \ (acc value) (+ acc value)) 0 +) false))\n    (lambda (_failure) true)))\n  (list\
+    \ (nth packet 2) (nth packet 3) (nth packet 4) (nth packet 5)\n    (nil? (table\
+    \ \"memcp-tests\" false (cadr packet) false nil)) retired))"
+  expect:
+    result:
+    - 7
+    - 7
+    - true
+    - true
+    - true
+    - true
+- name: Nil transaction group scopes retire on error without masking the original
+    failure
+  scm: "(begin\n  (define retained (newsession))\n  (define message (try (lambda ()\
+    \ (call_with_invocation_group_lifetime\n    (lambda (scope_input _initializer_input\
+    \ _observation_input) (begin\n      (define owner (newsession)) (define scope\
+    \ (new_relation_scope owner))\n      (define name (concat \".\" (uuid) \"#group-error-control\"\
+    ))\n      (createtable \"memcp-tests\" name (list (list \"column\" \"value\" \"\
+    INT\" (list) (list)))\n        (list \"engine\" \"memory\" \"ephemeral\" true\
+    \ \"scope\" scope) false nil)\n      (retained \"source\" (table \"memcp-tests\"\
+    \ false name false nil))\n      (retained \"name\" name) ((scope_input) \"observation\"\
+    \ scope)\n      (error \"group-owner-original-failure\"))))) (lambda (failure)\
+    \ failure)))\n  (define retired (try (lambda () (begin\n    (scan nil (retained\
+    \ \"source\") (list) (list) (list) (lambda () true)\n      (list \"value\") (lambda\
+    \ (acc value) (+ acc value)) 0 +) false))\n    (lambda (_failure) true)))\n  (list\
+    \ message (nil? (table \"memcp-tests\" false (retained \"name\") false nil)) retired))"
+  expect:
+    result:
+    - group-owner-original-failure
+    - true
+    - true
+- name: The existing generic timer consumes a bound physical input program with exact
+    private rows
+  scm: "(begin\n  (define session (newsession)) (session \"username\" \"root\")\n\
+    \  (define observation (newsession)) (observation \"execution_ns\" -1)\n  (define\
+    \ state (newsession)) (state \"rows\" 0) (state \"headers\" 0)\n  (tx_begin_acid\
+    \ session) (define tx (session \"__memcp_tx\"))\n  (try (lambda () (begin\n  \
+    \  (eval (parse_sql \"memcp-tests\" \"UPDATE grouped_private_marker SET value=9\
+    \ WHERE id=1\" nil session tx))\n    (define answer (call_with_invocation_group_lifetime\
+    \ (lambda (scopes initializers observations) (begin\n      (define info (list\
+    \ (list 'physical_input_profile true) (list 'caller_lifetime false) (list 'observation\
+    \ observation)))\n      (define context (sql_queryplan_input_context (list true\
+    \ nil (list) info) tx (list scopes initializers observations)))\n      (define\
+    \ program (lambda (actual_session actual_tx resultrow resultfields actual_context)\
+    \ (begin\n        (if (equal? (car actual_context) (tx_requires_query_local_cache\
+    \ actual_tx)) true\n          (error \"input profile differs from its native owner\"\
+    ))\n        (sql_execute_formula actual_session actual_tx\n          (cached_parse\
+    \ (newcachemap) \"sql\" (list parse_sql) \"memcp-tests\"\n            \"SELECT\
+    \ (SELECT SUM(value) FROM grouped_private_marker) AS total,(SELECT COUNT(*) FROM\
+    \ grouped_private_marker) AS n\"\n            nil \"root\" actual_session false\
+    \ actual_tx) resultrow resultfields)\n        37)))\n      (sql_parameter_execute\
+    \ info\n        (lambda (actual_session actual_tx row fields) (program actual_session\
+    \ actual_tx row fields context))\n        session tx\n        (lambda (row) (begin\
+    \ (state \"rows\" (+ (state \"rows\") 1))\n          (state \"total\" (get_assoc\
+    \ row \"total\")) (state \"n\" (get_assoc row \"n\"))))\n        (lambda args\
+    \ (state \"headers\" (+ (state \"headers\") 1))))))))\n    (define source (table\
+    \ \"memcp-tests\" false \"grouped_private_marker\" false tx))\n    (define access\
+    \ (list 372734710317056 (scan_boundary \"equal\" \"id\" 0 0 true true \"\" false)\
+    \ \"value\"))\n    (define public (scan_lookup nil source access (list 1)))\n\
+    \    (tx_rollback session)\n    (list answer (>= (observation \"execution_ns\"\
+    ) 0) (state \"rows\") (state \"headers\")\n      (state \"total\") (state \"n\"\
+    ) public\n      (scan_lookup nil (table \"memcp-tests\" false \"grouped_private_marker\"\
+    \ false nil) access (list 1)))))\n    (lambda (failure) (begin (tx_rollback session)\
+    \ (error failure)))))"
+  expect:
+    result:
+    - 37
+    - true
+    - 1
+    - 1
+    - 9
+    - 2
+    - 0
+    - 0
+- name: Physical catalog rebinding preserves one compile contract owner without changing
+    semantic group identity
+  scm: "(begin\n  (define source (list \"m\" \"memcp-tests\" \"grouped_private_marker\"\
+    \ false nil nil))\n  (define value (list 'get_column \"m\" false \"value\" false))\n\
+    \  (define aggregate (list value 'sql_sum_reduce nil))\n  (define stage (make_group_stage\
+    \ \"group-contract-control\" source (list) (list)\n    (list aggregate) nil (list\
+    \ \"total\" (list 'sum value)) (list) nil nil (list)))\n  (define ordered (make_group_stage\
+    \ \"ordered-contract-control\" source (list) (list)\n    (list (list (list 'scalar_order_value\
+    \ value (list value) (list \"ASC\") 0)\n      (scalar_once_reduce_first) nil))\
+    \ nil (list) (list) nil nil (list)))\n  (define contracts (newsession)) (define\
+    \ planning (newsession))\n  (define catalog (lowering_catalog_with_input_contracts\n\
+    \    (lowering_catalog_with_input_profile (make_lowering_catalog (list stage ordered))\
+    \ 'caller) contracts))\n  (define rebound (lowering_catalog_with_planning_session\n\
+    \    (lowering_catalog_rebind catalog (make_indexed_lowering_catalog (list stage\
+    \ ordered) nil)) planning))\n  (define attached (group_stage_with_lowering_catalog\
+    \ stage rebound))\n  (define no_catalog (lowering_catalog_with_input_contracts\n\
+    \    (lowering_catalog_with_input_profile (make_lowering_catalog (list ordered))\
+    \ 'caller) contracts))\n  (define refusal (lower_runtime_group_relation no_catalog\
+    \ \"memcp-tests\" ordered\n    (lambda (_source _scope) (error \"an unsupported\
+    \ materializer reached its consumer\")) true))\n  (list (expression_equal? (lowering_catalog_input_contracts\
+    \ rebound) contracts)\n    (expression_equal? (lowering_catalog_input_profile\
+    \ rebound) 'caller)\n    (expression_equal? (logical_stage_key stage) (logical_stage_key\
+    \ attached))\n    (runtime_group_materializer_supported? stage) (runtime_group_materializer_supported?\
+    \ ordered)\n    (contracts \"__memcp_queryplan_input_refusal\")\n    (expression_equal?\
+    \ refusal (list 'error \"native grouping requires executable bounded scalar or\
+    \ distinct value reducers\"))))"
+  expect:
+    result:
+    - true
+    - true
+    - true
+    - true
+    - false
+    - native grouping requires executable bounded scalar or distinct value reducers
+    - true
+- name: Supported GROUP_CONCAT reads the original private value and preserves observer
+    isolation through rollback
+  scm: "(begin\n  (define session (newsession)) (session \"username\" \"root\")\n\
+    \  (define emitted (newsession)) (emitted \"headers\" 0) (emitted \"rows\" 0)\n\
+    \  (tx_begin_acid session) (define tx (session \"__memcp_tx\"))\n  (try (lambda\
+    \ () (begin\n    (eval (parse_sql \"memcp-tests\" \"UPDATE grouped_private_marker\
+    \ SET value=9 WHERE id=1\" nil session tx))\n    (sql_execute_formula session\
+    \ tx\n      (cached_parse (newcachemap) \"sql\" (list parse_sql) \"memcp-tests\"\
+    \n        \"SELECT (SELECT GROUP_CONCAT(value) FROM grouped_private_marker) AS\
+    \ combined\"\n        nil \"root\" session false tx)\n      (lambda (row) (begin\n\
+    \        (emitted \"rows\" (+ (emitted \"rows\") 1))\n        /* Compare the complete\
+    \ scalar spelling; this is a visibility contract,\n        not a new declaration\
+    \ of the raw parser's runtime numeric/string type. */\n        (emitted \"combined\"\
+    \ (concat (get_assoc row \"combined\")))))\n      (lambda args (emitted \"headers\"\
+    \ (+ (emitted \"headers\") 1))))\n    (define source (table \"memcp-tests\" false\
+    \ \"grouped_private_marker\" false tx))\n    (define access (list 372734710317056\
+    \ (scan_boundary \"equal\" \"id\" 0 0 true true \"\" false) \"value\"))\n    (define\
+    \ own (scan_lookup tx source access (list 1)))\n    (define public (scan_lookup\
+    \ nil source access (list 1)))\n    (tx_rollback session)\n    (list (emitted\
+    \ \"combined\") (emitted \"rows\") (emitted \"headers\") own public\n      (scan_lookup\
+    \ nil (table \"memcp-tests\" false \"grouped_private_marker\" false nil) access\
+    \ (list 1)))))\n    (lambda (failure) (begin (tx_rollback session) (error failure)))))"
+  expect:
+    result:
+    - '9'
+    - 1
+    - 1
+    - 9
+    - 0
+    - 0
+- name: An ordered compiler operand refuses at its actual native materializer before
+    any metadata or row callback
+  scm: "(begin\n  (define session (newsession)) (session \"username\" \"root\")\n\
+    \  (define emitted (newsession)) (emitted \"rows\" 0) (emitted \"headers\" 0)\n\
+    \  (define compiler (newsession)) (compiler \"consumer_called\" false)\n  (tx_begin_acid\
+    \ session) (define tx (session \"__memcp_tx\"))\n  (try (lambda () (begin\n  \
+    \  (eval (parse_sql \"memcp-tests\" \"UPDATE grouped_private_marker SET value=9\
+    \ WHERE id=1\" nil session tx))\n    (define input (list \"m\" \"memcp-tests\"\
+    \ \"grouped_private_marker\" false nil nil))\n    (define value (list 'get_column\
+    \ \"m\" false \"value\" false))\n    /* This is the existing ordered-FIRST logical\
+    \ operand contract. Its own\n    ordered probe can consume it; the ordinary native\
+    \ grouping carrier cannot. */\n    (define ordered (make_group_stage \"ordered-boundary-control\"\
+    \ input (list) (list)\n      (list (list (list 'scalar_order_value value (list\
+    \ value) (list \"ASC\") 0)\n        (scalar_once_reduce_first) nil)) nil (list)\
+    \ (list) nil nil (list)))\n    (define contracts (newsession))\n    (define catalog\
+    \ (lowering_catalog_with_input_contracts\n      (lowering_catalog_with_input_profile\
+    \ (make_lowering_catalog (list ordered)) 'caller) contracts))\n    (define program\
+    \ (lower_runtime_group_relation catalog \"memcp-tests\" ordered\n      (lambda\
+    \ (_source _scope) (begin\n        (compiler \"consumer_called\" true)\n     \
+    \   (list 'begin (list 'resultfields (list 'quote (list \"combined\")))\n    \
+    \      (list 'resultrow (list 'list \"combined\" 99))))) true))\n    /* Execute\
+    \ the ACTUAL emitted materializer program through the common\n    compiler/callback\
+    \ boundary, not a test-authored throw or a shape assertion. */\n    (define message\
+    \ (try (lambda () (begin\n      (sql_execute_formula session tx (sql_queryplan_compile_formula\
+    \ tx program)\n        (lambda (_row) (emitted \"rows\" (+ (emitted \"rows\")\
+    \ 1)))\n        (lambda args (emitted \"headers\" (+ (emitted \"headers\") 1))))\n\
+    \      \"ordered materializer was admitted\")) (lambda (failure) failure)))\n\
+    \    (define source (table \"memcp-tests\" false \"grouped_private_marker\" false\
+    \ tx))\n    (define access (list 372734710317056 (scan_boundary \"equal\" \"id\"\
+    \ 0 0 true true \"\" false) \"value\"))\n    (define own (scan_lookup tx source\
+    \ access (list 1)))\n    (define public (scan_lookup nil source access (list 1)))\n\
+    \    (tx_rollback session)\n    (list message (emitted \"rows\") (emitted \"headers\"\
+    ) (compiler \"consumer_called\") own public\n      (scan_lookup nil (table \"\
+    memcp-tests\" false \"grouped_private_marker\" false nil) access (list 1)))))\n\
+    \    (lambda (failure) (begin (tx_rollback session) (error failure)))))"
+  expect:
+    result:
+    - native grouping requires executable bounded scalar or distinct value reducers
+    - 0
+    - 0
+    - false
+    - 9
+    - 0
+    - 0
+- name: A retained grouped dispatcher rebinds a replaced physical source before any
+    header or preparation
+  scm: "(begin\n  (define schema \"memcp-tests\") (define session (newsession)) (define\
+    \ cache (newcachemap))\n  (eval (parse_sql schema \"DROP TABLE IF EXISTS grouped_private_rebind\"\
+    \ nil nil nil))\n  (eval (parse_sql schema \"CREATE TABLE grouped_private_rebind(id\
+    \ INT PRIMARY KEY,value INT NULL)\" nil nil nil))\n  (eval (parse_sql schema \"\
+    INSERT INTO grouped_private_rebind VALUES(1,7),(2,NULL)\" nil nil nil))\n  (define\
+    \ query \"SELECT (SELECT SUM(value) FROM grouped_private_rebind) AS total,(SELECT\
+    \ COUNT(*) FROM grouped_private_rebind) AS n\")\n  (define formula (cached_parse\
+    \ cache \"sql\" (list parse_sql) schema query nil \"root\" session false nil))\n\
+    \  (define execute (lambda () (begin\n    (define state (newsession)) (state \"\
+    rows\" 0) (state \"headers\" 0)\n    (sql_execute_formula session nil formula\n\
+    \      (lambda (row) (begin (state \"rows\" (+ (state \"rows\") 1))\n        (state\
+    \ \"total\" (get_assoc row \"total\")) (state \"n\" (get_assoc row \"n\"))))\n\
+    \      (lambda args (state \"headers\" (+ (state \"headers\") 1))))\n    (list\
+    \ (state \"rows\") (state \"headers\") (state \"total\") (state \"n\")))))\n \
+    \ (define cold (execute)) (define warm (execute))\n  (eval (parse_sql schema \"\
+    DROP TABLE grouped_private_rebind\" nil nil nil))\n  (eval (parse_sql schema \"\
+    CREATE TABLE grouped_private_rebind(id INT PRIMARY KEY,value INT NULL)\" nil nil\
+    \ nil))\n  (eval (parse_sql schema \"INSERT INTO grouped_private_rebind VALUES(1,11),(2,13)\"\
+    \ nil nil nil))\n  (define replaced (execute)) (define replaced_warm (execute))\n\
+    \  (eval (parse_sql schema \"DROP TABLE grouped_private_rebind\" nil nil nil))\n\
+    \  (list cold warm replaced replaced_warm))"
+  expect:
+    result:
+    - - 1
+      - 1
+      - 7
+      - 2
+    - - 1
+      - 1
+      - 7
+      - 2
+    - - 1
+      - 1
+      - 24
+      - 2
+    - - 1
+      - 1
+      - 24
+      - 2

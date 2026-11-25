@@ -299,22 +299,7 @@ test_cases:
       (list first (counter "compiled")))
   expect: {result: [1,2]}
 - name: One compile keeps its immutable facts while its live guard observes a new declaration
-  scm: |
-    (begin
-      (define s (newsession)) (s "username" "root")
-      (define planning (sql_queryplan_compile_session s nil))
-      (define query (make_query_block "memcp-tests"
-        (list (list "r" "memcp-tests" "catalog_binding_rows" false nil nil))
-        (list "label" (list 'get_column "r" false "label" false))
-        true nil nil nil nil nil nil nil nil))
-      (define first (sql_bind_catalog_declarations query nil planning))
-      (define original (source_declarations (car (qb_sources first))))
-      (altercolumn (table "memcp-tests" false "catalog_binding_rows" false nil)
-        "label" "dimensions" '(109))
-      (define second (sql_bind_catalog_declarations first nil planning))
-      (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))
-      (and (identical? original (source_declarations (car (qb_sources second))))
-        (not (guard s nil (lambda (_row) true) (lambda args true)))))
+  scm: "(begin\n  (define s (newsession)) (s \"username\" \"root\")\n  (define planning (sql_queryplan_compile_session s nil nil nil))\n  (define query (make_query_block \"memcp-tests\"\n    (list (list \"r\" \"memcp-tests\" \"catalog_binding_rows\" false nil nil))\n    (list \"label\" (list 'get_column \"r\" false \"label\" false))\n    true nil nil nil nil nil nil nil nil))\n  (define first (sql_bind_catalog_declarations query nil planning))\n  (define original (source_declarations (car (qb_sources first))))\n  (altercolumn (table \"memcp-tests\" false \"catalog_binding_rows\" false nil)\n    \"label\" \"dimensions\" '(109))\n  (define second (sql_bind_catalog_declarations first nil planning))\n  (define guard (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))\n  (and (identical? original (source_declarations (car (qb_sources second))))\n    (not (guard s nil (lambda (_row) true) (lambda args true)))))\n"
   expect: {result: true}
 - name: CTE star exports are bound before their outer consumer
   sql: WITH q AS (SELECT * FROM catalog_binding_rows) SELECT id,label FROM q ORDER BY id
@@ -577,27 +562,7 @@ test_cases:
     - [true,true,true,true,true,true,true,true,true]
 
 - name: EXPLAIN dependencies follow their planner owner rather than an ambient session
-  scm: |
-    (begin
-      (define source (newsession)) (source "username" "root")
-      (define diagnostic (sql_queryplan_compile_session source nil))
-      (diagnostic "__memcp_queryplan_diagnostic_statistics" true)
-      (define ordinary (sql_queryplan_compile_session source nil))
-      (ordinary "__memcp_queryplan_diagnostic_statistics" false)
-      (define relation (list "p" "memcp-tests" "catalog_point_stats" false nil
-        (sql_relation_declarations "memcp-tests" "catalog_point_stats" nil)))
-      (define block (make_query_block "memcp-tests" (list relation)
-        (list "payload" (list (quote get_column) "p" false "payload" false))
-        true nil nil nil nil nil nil nil nil))
-      (with_session ordinary (lambda ()
-        (hybrid_reorder_query_block_using '() block diagnostic nil)))
-      (with_session diagnostic (lambda ()
-        (hybrid_reorder_query_block_using '() block ordinary nil)))
-      (list
-        (sql_queryplan_guard_references_symbol?
-          (sql_queryplan_statistics_guard_from_session diagnostic) (quote table_planner_statistics))
-        (sql_queryplan_guard_references_symbol?
-          (sql_queryplan_statistics_guard_from_session ordinary) (quote table_planner_statistics))))
+  scm: "(begin\n  (define source (newsession)) (source \"username\" \"root\")\n  (define diagnostic (sql_queryplan_compile_session source nil nil nil))\n  (diagnostic \"__memcp_queryplan_diagnostic_statistics\" true)\n  (define ordinary (sql_queryplan_compile_session source nil nil nil))\n  (ordinary \"__memcp_queryplan_diagnostic_statistics\" false)\n  (define relation (list \"p\" \"memcp-tests\" \"catalog_point_stats\" false nil\n    (sql_relation_declarations \"memcp-tests\" \"catalog_point_stats\" nil)))\n  (define block (make_query_block \"memcp-tests\" (list relation)\n    (list \"payload\" (list (quote get_column) \"p\" false \"payload\" false))\n    true nil nil nil nil nil nil nil nil))\n  (with_session ordinary (lambda ()\n    (hybrid_reorder_query_block_using '() block diagnostic nil)))\n  (with_session diagnostic (lambda ()\n    (hybrid_reorder_query_block_using '() block ordinary nil)))\n  (list\n    (sql_queryplan_guard_references_symbol?\n      (sql_queryplan_statistics_guard_from_session diagnostic) (quote table_planner_statistics))\n    (sql_queryplan_guard_references_symbol?\n      (sql_queryplan_statistics_guard_from_session ordinary) (quote table_planner_statistics))))\n"
   expect: {result: [true,false]}
 
 - name: A real private ordered source reuses one native transaction-owned plan

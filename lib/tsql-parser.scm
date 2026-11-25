@@ -3870,8 +3870,8 @@ compiling; the emitted row callback contains no SQL type tags or dispatch. */
 /* The common final-consumer contract counts completed callback effects using
 the existing native accumulators. The adapter is created once per invocation;
 its argument closes over the caller's actual sink outside the new binding. */
-(define tsql_rowcount_query_plan (lambda (query planning tx)
-	(build_reducing_queryplan_term query (make_result_reduction + 0 +) planning tx nil)))
+(define tsql_rowcount_query_plan (lambda (query planning tx finalizer)
+	(build_reducing_queryplan_term query (make_result_reduction + 0 +) planning tx finalizer)))
 (define tsql_count_completed_output (lambda (plan)
 	(list (list 'lambda (list 'resultrow) plan)
 		(list 'lambda (list '__tsql_completed_row)
@@ -6707,7 +6707,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(tsql_bind_computed_profile
 			(tsql_prepare_query_relations bound_query policy planning_session tx)
 			planning_session tx (tsql_arithmetic_enabled frontend_options)))))
-	(define tsql_build_select_plan (lambda (query) (begin
+	(define tsql_build_select_plan (lambda (query planning_session) (begin
 		(define xml_mode (tsql_for_xml_mode query))
 		(define xml_alias (if xml_mode (tsql_for_xml_alias query) nil))
 		(define query (if xml_mode (tsql_for_xml_input query) query))
@@ -6739,11 +6739,12 @@ that context explicitly; stored views refuse this scalar before publication. */
 								(tsql_select_into_provenance bound_query expanded tx))) descriptors)))
 					targets (tsql_assignment_plan expanded targets)
 					xml_mode (tsql_for_xml_plan expanded xml_alias parameters planning_session tx)
-					(list (quote !begin)
-						(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded))
-							(list (quote quote) descriptors))
-						(tsql_count_completed_output
-							(tsql_result_output_plan (tsql_rowcount_query_plan expanded planning_session tx) descriptors)))))))))
+					(tsql_rowcount_query_plan expanded planning_session tx
+						(physical_result_consumer nil (lambda (plan _context)
+							(list (quote !begin)
+								(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded))
+									(list (quote quote) descriptors))
+								(tsql_count_completed_output (tsql_result_output_plan plan descriptors))))))))))))
 	/* INSERT SELECT consumes the existing planner's result stream and the native
 	insert operator. Identity allocation and constraints remain native. */
 	(define tsql_insert_select_plan (lambda (database tbl columns explicit_columns query) (begin
@@ -7627,8 +7628,8 @@ that context explicitly; stored views refuse this scalar before publication. */
 
 
 	(define command_parser (if analyze_parameters
-		(parser (define query tsql_root_select) (lambda () (tsql_build_select_plan query)))
-		describe (parser (or (parser (define query tsql_root_select) (lambda () (tsql_build_select_plan query)))
+		(parser (define query tsql_root_select) (lambda () (tsql_build_select_plan query planning_session)))
+		describe (parser (or (parser (define query tsql_root_select) (lambda () (tsql_build_select_plan query planning_session)))
 			tsql_cte_mutation tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete))
 		(parser (or p (parser empty (lambda () ""))))))
 	(if (frontend_options "__tsql_logical_insert")
@@ -8000,7 +8001,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(tsql_raise_error 137 (concat "Must declare the scalar variable @" spelling) 2))) true)
 			(if (and (list? command) (equal? (count command) 2)
 				(equal? (car command) "tsql-query-command"))
-				(tsql_build_select_plan (cadr command))
+				(tsql_build_select_plan (cadr command) (sql_queryplan_read_dispatch_session planning_session parse_tsql))
 				(begin
 					(tsql_record_full_temporary_guard planning_session)
 					(if (string? command) command (command))))))
