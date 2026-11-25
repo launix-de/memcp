@@ -43,11 +43,13 @@ func (entry catalogDeclarationAmendment) referencesTable(t *table) bool {
 
 // Caller owns schema publication and the existing drained savepoint/rollback
 // boundary. A same-name replacement, even with copied IDs, is never authority
-// to release a lease or remove storage. Validate the whole suffix before effects.
+// to release a lease or remove storage. A future prepared version is not a
+// published cut: failed preparation must still retire its original constructor.
+// Validate the whole suffix before effects.
 func validateCancelledCatalogIntents(tx *TxContext, db *database, cancelled []*table, history []catalogDeclarationAmendment) {
 	for _, t := range cancelled {
 		if t == nil || t.schema != db || db.tables.Get(t.Name) != t || t.RuntimeIdentity == "" ||
-			t.creator.Load() != tx.transactionState || t.CatalogVersion.Load() != 0 || !tx.ownsPendingTable(t) {
+			t.creator.Load() != tx.transactionState || t.committedAt(db.catalogView().version) || !tx.ownsPendingTable(t) {
 			panic("private catalog retirement lost its original native generation")
 		}
 		for _, entry := range history {

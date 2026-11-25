@@ -124,8 +124,15 @@ func TestCancelledCatalogConstructorRefusesWrongGenerationOrSurvivingReferences(
 	requirePanic(t, func() { validateCancelledCatalogIntents(tx, changes.db, []*table{cancelled}, nil) })
 	changes.db.tables.Set(cancelled.Name, cancelled)
 	assertUnchanged()
-	cancelled.CatalogVersion.Store(1)
+	// Actual preparation assigns the next version BEFORE validating/freezing
+	// the decision. Its failure still owns this unpublished original generation.
+	cancelled.CatalogVersion.Store(changes.db.catalogView().version + 1)
+	validateCancelledCatalogIntents(tx, changes.db, []*table{cancelled}, nil)
+	assertUnchanged()
+	// Only the accepted catalog cut makes that version a public predecessor.
+	changes.db.catalogVersion = cancelled.CatalogVersion.Load()
 	requirePanic(t, func() { validateCancelledCatalogIntents(tx, changes.db, []*table{cancelled}, nil) })
+	changes.db.catalogVersion = 0
 	cancelled.CatalogVersion.Store(0)
 	assertUnchanged()
 	for _, entry := range []catalogDeclarationAmendment{
