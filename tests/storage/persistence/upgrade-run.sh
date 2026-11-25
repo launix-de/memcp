@@ -266,6 +266,10 @@ bash "$VALIDATOR" "$MYSQL_PORT" mutate "$ORACLES/before.json" "$ORACLES/after-dm
 # New writer-only identity fixtures follow every mandatory legacy comparison.
 curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin \
   --data-binary @"$GITHUB_WORKSPACE/candidate/tests/storage/persistence/upgrade-identity-add-fill.scm"
+# Candidate-only logical index declarations use the identity hook's existing
+# neutral fixture after every old-writer comparison; OLD never sees this API.
+curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin \
+  --data-binary @"$GITHUB_WORKSPACE/candidate/tests/storage/persistence/upgrade-index-fill.scm"
 
 stop_server
 
@@ -278,5 +282,16 @@ bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/after-dml.json"
 # New writer-only identity fixtures follow every mandatory legacy comparison.
 curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin \
   --data-binary @"$GITHUB_WORKSPACE/candidate/tests/storage/persistence/upgrade-identity-add-verify.scm"
+curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin \
+  --data-binary @"$GITHUB_WORKSPACE/candidate/tests/storage/persistence/upgrade-index-verify.scm"
 
+stop_server
+
+# Reuse the same runner-owned normal lifecycle after the native index hook
+# checkpointed its required Name V2 header. All legacy oracles remain mandatory.
+start_server candidate candidate-index-reopen
+python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
+bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/after-dml.json"
+curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin \
+  --data-binary @"$GITHUB_WORKSPACE/candidate/tests/storage/persistence/upgrade-index-reopen.scm"
 stop_server
