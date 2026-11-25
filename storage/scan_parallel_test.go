@@ -1385,10 +1385,15 @@ func TestUniqueReservationLifecycle(t *testing.T) {
 			rows := [][]scm.Scmer{{scm.NewInt(7)}}
 			tbl.Insert(cols, rows, nil, scm.NewNil(), false, nil, tx)
 			shard := tbl.ActiveShards()[0]
-			access := exactScanAccess(newExactScanAccessSchema(cols), rows[0])
-			if _, present := shard.GetRecordidForUnique(access, nil, false, nil); present {
-				t.Fatal("ordinary key lookup exposed an uncommitted row")
-			}
+			func() {
+				access := exactScanAccess(newExactScanAccessSchema(cols), rows[0])
+				_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
+				defer finishInputUnique()
+				access.columnInput = columnInputUnique
+				if _, present := shard.GetRecordidForUnique(access, nil, false, nil); present {
+					t.Fatal("ordinary key lookup exposed an uncommitted row")
+				}
+			}()
 			var callbacks int
 			collision := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
 				callbacks++
@@ -1511,17 +1516,22 @@ func TestUniqueReservationOwnKeyReplacementCycle(t *testing.T) {
 	if !scm.ToBool(shard.UpdateFunction(0, false, false, tx, nil)(scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(8)}))) {
 		t.Fatal("first replacement was not staged")
 	}
-	access := exactScanAccess(newExactScanAccessSchema(cols), []scm.Scmer{scm.NewInt(8)})
-	recid, present := shard.GetRecordidForUnique(access, tx, false, nil)
-	if !present {
-		t.Fatal("own replacement is not visible")
-	}
-	if !scm.ToBool(shard.UpdateFunction(recid, false, false, tx, nil)(scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(7)}))) {
-		t.Fatal("replacement did not reuse its own hidden old key")
-	}
-	if _, present := shard.GetRecordidForUnique(access, tx, false, nil); present {
-		t.Fatal("superseded own replacement remained visible")
-	}
+	func() {
+		access := exactScanAccess(newExactScanAccessSchema(cols), []scm.Scmer{scm.NewInt(8)})
+		_, columnInputUnique, finishInputUnique := shard.t.readDataContext(tx)
+		defer finishInputUnique()
+		access.columnInput = columnInputUnique
+		recid, present := shard.GetRecordidForUnique(access, tx, false, nil)
+		if !present {
+			t.Fatal("own replacement is not visible")
+		}
+		if !scm.ToBool(shard.UpdateFunction(recid, false, false, tx, nil)(scm.NewSlice([]scm.Scmer{scm.NewString("id"), scm.NewInt(7)}))) {
+			t.Fatal("replacement did not reuse its own hidden old key")
+		}
+		if _, present := shard.GetRecordidForUnique(access, tx, false, nil); present {
+			t.Fatal("superseded own replacement remained visible")
+		}
+	}()
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}

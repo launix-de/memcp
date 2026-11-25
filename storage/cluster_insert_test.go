@@ -1175,7 +1175,13 @@ func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	lease := shard.GetRead(nil, false)
 	defer lease.Release()
-	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true, nil)
+	id, found := func() (uint32, bool) {
+		accessUnique := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)})
+		_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
+		defer finishInputUnique()
+		accessUnique.columnInput = columnInputUnique
+		return shard.GetRecordidForUnique(accessUnique, nil, true, nil)
+	}()
 	reader := shard.ColumnReaderTx(nil, "value", false, ReadAuto, shard.t.bindColumnInput(nil))
 	defer ReleaseColumnReader(reader)
 	if !found || reader.GetValue(id).Int() != workers*repetitions {
@@ -1187,7 +1193,13 @@ func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 		}), false, nil); n != 2 {
 		t.Fatalf("reserved column setter affected %d rows", n)
 	}
-	id, found = shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true, nil)
+	id, found = func() (uint32, bool) {
+		accessUnique := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)})
+		_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
+		defer finishInputUnique()
+		accessUnique.columnInput = columnInputUnique
+		return shard.GetRecordidForUnique(accessUnique, nil, true, nil)
+	}()
 	updated := shard.ColumnReaderTx(nil, "value", false, ReadAuto, shard.t.bindColumnInput(nil))
 	defer ReleaseColumnReader(updated)
 	if !found || updated.GetValue(id).Int() != workers*repetitions+1 {
@@ -1519,7 +1531,11 @@ func TestClusterLocalUniqueUpdaterCannotEscapeReservation(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	lease := shard.GetRead(nil, false)
 	defer lease.Release()
-	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true, nil)
+	accessUnique := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)})
+	_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
+	defer finishInputUnique()
+	accessUnique.columnInput = columnInputUnique
+	id, found := shard.GetRecordidForUnique(accessUnique, nil, true, nil)
 	reader := shard.ColumnReaderTx(nil, "value", false, ReadAuto, shard.t.bindColumnInput(nil))
 	defer ReleaseColumnReader(reader)
 	if !found || reader.GetValue(id).Int() != 0 {
@@ -1607,7 +1623,11 @@ func TestClusterUniqueKeyChangeChecksAppendedLane(t *testing.T) {
 			var actual int64 = -1
 			for _, shard := range tbl.ActiveShards() {
 				lease := shard.GetRead(nil, false)
-				id, found := lease.shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)}), nil, true, nil)
+				accessUnique := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(42)})
+				_, columnInputUnique, finishInputUnique := lease.shard.t.readDataContext(nil)
+				defer finishInputUnique()
+				accessUnique.columnInput = columnInputUnique
+				id, found := lease.shard.GetRecordidForUnique(accessUnique, nil, true, nil)
 				if found {
 					reader := lease.shard.ColumnReaderTx(nil, "value", false, ReadAuto, lease.shard.t.bindColumnInput(nil))
 					actual = reader.GetValue(id).Int()

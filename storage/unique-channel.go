@@ -17,9 +17,10 @@ import "github.com/launix-de/memcp/storage/mosi"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
 type uniqueNativeShard struct {
-	shard *storageShard
-	guard *uniqueWriteGuard
-	tx    *TxContext
+	columnInput *nativeTableInput
+	shard       *storageShard
+	guard       *uniqueWriteGuard
+	tx          *TxContext
 }
 
 type uniqueReservationBusy struct {
@@ -191,6 +192,7 @@ func uniqueKeyValues(columns []string, row []scm.Scmer, constraint uniqueKey, me
 // rechecked under reservations; already delivered collision callbacks are never
 // repeated. In particular an all-duplicate IGNORE needs no writer admission.
 func (t *table) uniqueReadOnlyPrefix(columns []string, rows [][]scm.Scmer, mergeNull bool, tx *TxContext, failure func(string, []scm.Scmer)) [][]scm.Scmer {
+	columnInput := t.bindColumnInput(tx)
 	for index, row := range rows {
 		topology := t.pinActiveTopology()
 		found := false
@@ -203,6 +205,7 @@ func (t *table) uniqueReadOnlyPrefix(columns []string, rows [][]scm.Scmer, merge
 					continue
 				}
 				access := exactScanAccess(newExactScanAccessSchema(constraint.Cols), key)
+				access.columnInput = columnInput
 				for _, shard := range t.uniqueProbeShards(topology, constraint.Cols, key) {
 					if shard != nil && shard.probeUnique(access, tx, nil) {
 						failure(constraint.Id, nil)
@@ -319,7 +322,9 @@ func (set *uniqueReservationSet) call(shard *storageShard, operation string, arg
 			}
 			key := arguments[1].Slice()
 			if anchor := set.uniqueProbeAnchor(columns, key); anchor != nil {
-				found := shard.probeUnique(exactScanAccess(newExactScanAccessSchema(columns), key), anchor.tx, nil)
+				access := exactScanAccess(newExactScanAccessSchema(columns), key)
+				access.columnInput = anchor.columnInput
+				found := shard.probeUnique(access, anchor.tx, nil)
 				return scm.NewSlice([]scm.Scmer{scm.NewBool(found), scm.NewInt(0), scm.NewSlice(nil)})
 			}
 		}
@@ -344,14 +349,16 @@ func (set *uniqueReservationSet) probe(shard *storageShard, columns []string, ke
 		if exclude != nil && part.shard.uuid == exclude.shard.uuid && part.shard != exclude.shard {
 			panic(uniqueReadRetry{})
 		}
-		id, found := part.shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema(columns), key), part.tx, true, exclude)
+		access := exactScanAccess(newExactScanAccessSchema(columns), key)
+		access.columnInput = part.columnInput
+		id, found := part.shard.GetRecordidForUnique(access, part.tx, true, exclude)
 		values := make([]scm.Scmer, len(projection))
 		if found {
 			for i, column := range projection {
 				if column == "$update" || strings.HasPrefix(column, "$set:") || strings.HasPrefix(column, "NEW.") {
 					continue
 				}
-				reader := part.shard.ColumnReaderTx(part.tx, column, false, ReadAuto, part.shard.t.bindColumnInput(part.tx))
+				reader := part.shard.ColumnReaderTx(part.tx, column, false, ReadAuto, part.columnInput)
 				values[i] = reader.GetValue(id)
 				ReleaseColumnReader(reader)
 			}
@@ -597,14 +604,14 @@ func (t *table) reserveUniqueDomain(columns []string, rows [][]scm.Scmer, mergeN
 		}
 		for _, shard := range domain {
 			if owned != nil && activeReplication(t.schema).shardCell(shard) == owned {
-				set.bindNativeShard(shard.uuid.String(), &uniqueNativeShard{shard: borrowed.ownedShard, guard: borrowed, tx: tx})
+				set.bindNativeShard(shard.uuid.String(), &uniqueNativeShard{shard: borrowed.ownedShard, guard: borrowed, tx: tx, columnInput: borrowed.ownedShard.t.bindColumnInput(tx)})
 			} else {
 				pending = append(pending, shard)
 			}
 		}
 		set.nativeWrites = getShardWrites(pending, tx)
 		for index, access := range set.nativeWrites {
-			set.bindNativeShard(pending[index].uuid.String(), &uniqueNativeShard{shard: access.shard, guard: borrowed, tx: tx})
+			set.bindNativeShard(pending[index].uuid.String(), &uniqueNativeShard{shard: access.shard, guard: borrowed, tx: tx, columnInput: access.shard.t.bindColumnInput(tx)})
 		}
 		borrowed.lock()
 		set.nativeGuardHeld = true
@@ -627,7 +634,7 @@ func (t *table) reserveUniqueDomain(columns []string, rows [][]scm.Scmer, mergeN
 				current = borrowed.ownedShard
 			}
 			if admitted {
-				set.singleSource, set.singleNative = shard, uniqueNativeShard{shard: current, guard: borrowed, tx: tx}
+				set.singleSource, set.singleNative = shard, uniqueNativeShard{shard: current, guard: borrowed, tx: tx, columnInput: current.t.bindColumnInput(tx)}
 				if !borrowed.held {
 					if !borrowed.tryLock() {
 						panic(uniqueReservationBusy{shard: remoteScanShard{Resource: cluster.manager.shardResource(shard)}, retry: true})
@@ -763,7 +770,7 @@ func (set *uniqueReservationSet) reserveLocalUniqueGroup(shards []*storageShard,
 			} else {
 				current = set.guard.ownedShard
 			}
-			native = &uniqueNativeShard{shard: current, guard: set.guard, tx: tx}
+			native = &uniqueNativeShard{shard: current, guard: set.guard, tx: tx, columnInput: current.t.bindColumnInput(tx)}
 		}
 		set.bindNativeShard(shard.uuid.String(), native)
 	}
@@ -961,7 +968,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 		s = firstWrite.shard
 	}
 	scope := &uniqueReservationSet{ctx: ctx, table: s.t, guard: guardPointer, topology: s.t.activeTopology(), local: make(map[string]*uniqueNativeShard), clients: make(map[string]*uniqueReservationClient)}
-	scope.bindNativeShard(ids[0], &uniqueNativeShard{shard: s, guard: guardPointer, tx: tx})
+	scope.bindNativeShard(ids[0], &uniqueNativeShard{shard: s, guard: guardPointer, tx: tx, columnInput: s.t.bindColumnInput(tx)})
 	guardPointer.reservations = scope
 	for _, id := range ids[1:] {
 		resource := mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: id}
@@ -993,7 +1000,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 			return false, uniqueReservationBusy{shard: remoteScanShard{Resource: resource}}
 		}
 		defer access.Release()
-		scope.bindNativeShard(id, &uniqueNativeShard{shard: access.shard, guard: guardPointer, tx: tx})
+		scope.bindNativeShard(id, &uniqueNativeShard{shard: access.shard, guard: guardPointer, tx: tx, columnInput: access.shard.t.bindColumnInput(tx)})
 	}
 	if !guardPointer.held {
 		if !guardPointer.tryLock() {
@@ -1060,14 +1067,16 @@ func (set *uniqueReservationSet) dispatchUniqueCommand(_ context.Context, comman
 				return scm.NewNil(), err
 			}
 		}
-		id, found := s.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema(keyColumns), command[2].Slice()), part.tx, true, exclude)
+		access := exactScanAccess(newExactScanAccessSchema(keyColumns), command[2].Slice())
+		access.columnInput = part.columnInput
+		id, found := s.GetRecordidForUnique(access, part.tx, true, exclude)
 		values := make([]scm.Scmer, len(projection))
 		if found {
 			for i, column := range projection {
 				if column == "$update" || strings.HasPrefix(column, "$set:") || strings.HasPrefix(column, "NEW.") {
 					continue // invocation-owned inputs/handles are bound by the caller
 				}
-				reader := s.ColumnReaderTx(part.tx, column, false, ReadAuto, s.t.bindColumnInput(part.tx))
+				reader := s.ColumnReaderTx(part.tx, column, false, ReadAuto, part.columnInput)
 				values[i] = reader.GetValue(id)
 				ReleaseColumnReader(reader)
 			}

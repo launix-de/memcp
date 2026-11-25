@@ -21,6 +21,9 @@ func TestUniqueProbeExclusionContinuesAfterItsExactPhysicalRecord(t *testing.T) 
 	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(7)}, {scm.NewInt(7)}}, nil, scm.NewNil(), false, nil)
 	shard := tbl.ActiveShards()[0]
 	access := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(7)})
+	_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
+	defer finishInputUnique()
+	access.columnInput = columnInputUnique
 	first, found := shard.GetRecordidForUnique(access, nil, true, nil)
 	if !found {
 		t.Fatal("unexcluded positive control has no equal row")
@@ -69,7 +72,11 @@ func TestRepeatedUniqueUpdatesPreserveOriginalRowsAndRealCollisions(t *testing.T
 				}
 				locate := func(id int64, reader *TxContext) uint32 {
 					t.Helper()
-					recid, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(id)}), reader, false, nil)
+					access := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(id)})
+					_, columnInputUnique, finishInputUnique := shard.t.readDataContext(reader)
+					defer finishInputUnique()
+					access.columnInput = columnInputUnique
+					recid, found := shard.GetRecordidForUnique(access, reader, false, nil)
 					if !found {
 						t.Fatalf("original row %d disappeared", id)
 					}

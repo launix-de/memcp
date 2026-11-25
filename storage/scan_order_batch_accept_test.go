@@ -269,7 +269,9 @@ func TestCollectOrderedCandidateBatchPrunesRangePartitions(t *testing.T) {
 	}
 	collect := func(operator string, offset int, limit int) ([]orderedBatchRecord, *recSet, bool) {
 		relation := serialTestCallable(scm.Eval(scm.NewSymbol(operator), &scm.Globalenv))
-		return collectPartitionOrderedCandidateBatch(nil, scanOrderTableSpec{table: table},
+		dataTx, columnInput, finishInput := table.readDataContext(nil)
+		defer finishInput()
+		return collectPartitionOrderedCandidateBatch(nil, scanOrderTableSpec{table: table, dataTx: dataTx, dataBound: true, columnInput: columnInput},
 			[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{relation}, offset, limit)
 	}
 

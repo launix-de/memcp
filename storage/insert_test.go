@@ -885,6 +885,9 @@ func TestUniqueCollatedIndexLookup(t *testing.T) {
 			tbl.Insert([]string{"label"}, [][]scm.Scmer{{scm.NewString(pair[0])}}, nil, scm.NewNil(), false, nil)
 			for _, shard := range tbl.ActiveShards() {
 				access := exactScanAccess(newExactScanAccessSchema([]string{"label"}), []scm.Scmer{scm.NewString(pair[1])})
+				_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
+				defer finishInputUnique()
+				access.columnInput = columnInputUnique
 				if _, found := shard.GetRecordidForUnique(access, nil, true, nil); !found {
 					t.Fatal("collated key absent from UNIQUE index")
 				}
@@ -900,6 +903,9 @@ func TestUniqueTextProbeDuringGlobalDefinitions(t *testing.T) {
 	tbl.Insert([]string{"label"}, [][]scm.Scmer{{scm.NewString("key")}}, nil, scm.NewNil(), false, nil)
 	shard := tbl.ActiveShards()[0]
 	access := exactScanAccess(newExactScanAccessSchema([]string{"label"}), []scm.Scmer{scm.NewString("key")})
+	_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
+	defer finishInputUnique()
+	access.columnInput = columnInputUnique
 	// Replication starts while lib/main.scm is still defining unrelated globals.
 	// Engine collation construction must not consult that mutable environment.
 	const iterations = 4096
@@ -982,7 +988,11 @@ func TestUniqueNullRowAcquiresFirstConcreteKey(t *testing.T) {
 				}), scm.NewInt(0), scm.Globalenv.Vars[scm.Symbol("+")], false)
 			found := false
 			for _, shard := range tbl.ActiveShards() {
-				_, present := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"value"}), []scm.Scmer{scm.NewInt(7)}), nil, true, nil)
+				accessUnique := exactScanAccess(newExactScanAccessSchema([]string{"value"}), []scm.Scmer{scm.NewInt(7)})
+				_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
+				defer finishInputUnique()
+				accessUnique.columnInput = columnInputUnique
+				_, present := shard.GetRecordidForUnique(accessUnique, nil, true, nil)
 				found = found || present
 			}
 			if !found || tbl.CountExact() != 1 {
@@ -1041,6 +1051,9 @@ func TestUniqueNativeAfterInsertCanUpdatePublishedKey(t *testing.T) {
 		}
 		shard := tbl.ActiveShards()[0]
 		access := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(1)})
+		_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
+		defer finishInputUnique()
+		access.columnInput = columnInputUnique
 		id, found := shard.GetRecordidForUnique(access, nil, true, nil)
 		if !found {
 			panic("AFTER trigger could not see the published row")
@@ -1061,7 +1074,11 @@ func TestUniqueNativeAfterInsertCanUpdatePublishedKey(t *testing.T) {
 		t.Fatal("AFTER INSERT waited for its own key guard")
 	}
 	shard := tbl.ActiveShards()[0]
-	id, found := shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(1)}), nil, true, nil)
+	accessUnique := exactScanAccess(newExactScanAccessSchema([]string{"id"}), []scm.Scmer{scm.NewInt(1)})
+	_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
+	defer finishInputUnique()
+	accessUnique.columnInput = columnInputUnique
+	id, found := shard.GetRecordidForUnique(accessUnique, nil, true, nil)
 	if !found || shard.rowValueByRecidLocked(id, "payload", nil, nil).String() != "after-insert" {
 		t.Fatal("native INSERT returned before its AFTER trigger's update")
 	}

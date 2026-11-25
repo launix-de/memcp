@@ -584,6 +584,7 @@ type foreignKey struct {
 // one atomic DDL observation. The key option determines whether NULL-containing
 // tuples participate, matching the insert-time uniqueness contract.
 func (t *table) hasDuplicateUniqueValues(cols []string, nullsNotDistinct bool, currentTx *TxContext) bool {
+	columnInput := t.bindColumnInput(currentTx)
 	shards := t.ActiveShards()
 	accessSchema := newExactScanAccessSchema(cols)
 	rows := make([]uniqueValidationRow, 0, t.CountEstimate())
@@ -607,7 +608,7 @@ func (t *table) hasDuplicateUniqueValues(cols []string, nullsNotDistinct bool, c
 		readAccesses[i] = shard.GetRead(currentTx, false)
 		shard = readAccesses[i].shard
 		shards[i] = shard
-		initializedColumns := shard.initializedColumnInput(shard.t.bindColumnInput(currentTx))
+		initializedColumns := shard.initializedColumnInput(columnInput)
 		func() {
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
@@ -640,7 +641,9 @@ func (t *table) hasDuplicateUniqueValues(cols []string, nullsNotDistinct bool, c
 			if shard == nil {
 				continue
 			}
-			recid, present := shard.GetRecordidForUnique(exactScanAccess(accessSchema, row.key), currentTx, false, nil)
+			access := exactScanAccess(accessSchema, row.key)
+			access.columnInput = columnInput
+			recid, present := shard.GetRecordidForUnique(access, currentTx, false, nil)
 			if present && (shard != row.shard || recid != row.recid) {
 				return true
 			}
@@ -5404,6 +5407,9 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 			}
 		}
 
+		probeAccess := exactScanAccess(accessSchema, key)
+		probeAccess.columnInput = columnInput
+
 		topology := t.pinActiveTopology()
 		defer topology.releaseOperation()
 		shardlist := topology.shards
@@ -5513,9 +5519,9 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 				if guard.reservations != nil {
 					uid, present, reservedValues = guard.reservations.probe(s, uniq.Cols, key, onCollisionCols, exclude)
 				} else if sharedClusterSource(t) {
-					present = s.probeUnique(exactScanAccess(accessSchema, key), currentTx, exclude)
+					present = s.probeUnique(probeAccess, currentTx, exclude)
 				} else {
-					uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true, exclude)
+					uid, present = s.GetRecordidForUnique(probeAccess, currentTx, true, exclude)
 				}
 				if present {
 					// found a unique collision
@@ -5572,7 +5578,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 							if access.shard != s {
 								panic(uniqueReadRetry{})
 							}
-							uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true, exclude)
+							uid, present = s.GetRecordidForUnique(probeAccess, currentTx, true, exclude)
 							if !present {
 								panic(uniqueReadRetry{})
 							}
@@ -5589,7 +5595,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 									guard.mask.include(batchMask)
 									guard.lock()
 								}()
-								uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true, exclude)
+								uid, present = s.GetRecordidForUnique(probeAccess, currentTx, true, exclude)
 								if !present {
 									guard.mask.include(batchMask)
 									guard.lock()
@@ -5614,7 +5620,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 							}
 							if callbackGuard == nil {
 								var present bool
-								uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true, exclude)
+								uid, present = s.GetRecordidForUnique(probeAccess, currentTx, true, exclude)
 								if !present {
 									panic(uniqueReadRetry{})
 								}
@@ -5648,7 +5654,7 @@ func (t *table) processUniqueCollision(columns []string, values [][]scm.Scmer, m
 									guard.mask.include(needed.mask)
 									guard.lock()
 									var present bool
-									uid, present = s.GetRecordidForUnique(exactScanAccess(accessSchema, key), currentTx, true, exclude)
+									uid, present = s.GetRecordidForUnique(probeAccess, currentTx, true, exclude)
 									if !present {
 										t.processUniqueCollision(columns, values[j:j+1], mergeNull, success, onCollisionCols, failure, 0, currentTx, guard, exclude)
 										return

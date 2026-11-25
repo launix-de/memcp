@@ -426,34 +426,36 @@ func TestOrderedComparisonReaderLifetime(t *testing.T) {
 	_, order := persistableTestOrder(false)
 	sortcols := []scm.Scmer{scm.NewString("label")}
 	sortdirs := []func(...scm.Scmer) scm.Scmer{order}
-	run := func() *shardqueue {
-		_, columnInput2, finishColumnInput2 := shard.t.readDataContext(nil)
-		defer finishColumnInput2()
-		columnAccess2 := scanAccess{}
-		columnAccess2.columnInput = columnInput2
-		return shard.scan_order(columnAccess2, nil, trueCondition(), nil, scm.NewNil(),
-			sortcols, sortdirs, 0, 0, 2, nil, nil, nil)
-	}
-	queue := run()
-	if queue.scols[0](queue.items[0]).String() != inputs[1] {
-		t.Fatal("shard return released the queue's comparison reader")
-	}
-	consumeDirectScanOrder(queue, &scanOrderTableSpec{callback: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-		return scm.NewInt(1)
-	})}, nil, 0, 0, 1, scm.NewInt(0), false, scm.NewInt(0))
-
-	queue = run()
 	func() {
-		defer func() {
-			if recover() == nil {
-				t.Fatal("consumer panic was lost")
-			}
-		}()
-		consumeDirectScanOrder(queue, &scanOrderTableSpec{callback: scm.NewFunc(func(...scm.Scmer) scm.Scmer {
-			panic("consumer failed")
+		_, columnInput, finishInput := shard.t.readDataContext(nil)
+		defer finishInput()
+		run := func() *shardqueue {
+			columnAccess2 := scanAccess{}
+			columnAccess2.columnInput = columnInput
+			return shard.scan_order(columnAccess2, nil, trueCondition(), nil, scm.NewNil(),
+				sortcols, sortdirs, 0, 0, 2, nil, nil, nil)
+		}
+		queue := run()
+		if queue.scols[0](queue.items[0]).String() != inputs[1] {
+			t.Fatal("shard return released the queue's comparison reader")
+		}
+		consumeDirectScanOrder(queue, &scanOrderTableSpec{columnInput: columnInput, callback: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+			return scm.NewInt(1)
 		})}, nil, 0, 0, 1, scm.NewInt(0), false, scm.NewInt(0))
-	}()
 
+		queue = run()
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("consumer panic was lost")
+				}
+			}()
+			consumeDirectScanOrder(queue, &scanOrderTableSpec{columnInput: columnInput, callback: scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+				panic("consumer failed")
+			})}, nil, 0, 0, 1, scm.NewInt(0), false, scm.NewInt(0))
+		}()
+
+	}()
 	func() {
 		defer func() {
 			if recover() == nil {

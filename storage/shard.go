@@ -4467,9 +4467,7 @@ func releaseUniqueLookupScratch(scratch *uniqueLookupScratch, columns int) {
 }
 
 func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxContext, checkReservations bool, exclude *recMapTarget) (result uint32, present bool) {
-	columnInput := t.t.bindColumnInput(currentTx)
-	access.columnInput = columnInput
-	initializedColumns := t.initializedColumnInput(columnInput)
+	initializedColumns := t.initializedColumnInput(access.columnInput)
 	access = t.t.uniqueAccess(access)
 	columns := access.len()
 	scratch := acquireUniqueLookupScratch()

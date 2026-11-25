@@ -322,11 +322,19 @@ func TestScanJoinOrderPrunesCompatibleJoinKeyShardPairs(t *testing.T) {
 		mapCols:     []scanJoinOrderColumn{{table: 0, column: "id"}},
 		mapReduceFn: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
 	}
-	prepareScanJoinOrderSpec(nil, &spec)
-	streams := make([][]*scanJoinOrderShardStream, 2)
-	streams[0] = collectScanJoinOrderShardStreams(nil, &spec.inputs[0], []scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{descending})
-	_, ascending := integerOrder(false)
-	streams[1] = collectScanJoinOrderShardStreams(nil, &spec.inputs[1], []scm.Scmer{scm.NewString("key_col")}, []func(...scm.Scmer) scm.Scmer{ascending})
+	streams := func() [][]*scanJoinOrderShardStream {
+		for i := range spec.inputs {
+			var finishInput func()
+			spec.inputs[i].dataTx, spec.inputs[i].columnInput, finishInput = spec.inputs[i].table.readDataContext(nil)
+			defer finishInput()
+		}
+		prepareScanJoinOrderSpec(nil, &spec)
+		streams := make([][]*scanJoinOrderShardStream, 2)
+		streams[0] = collectScanJoinOrderShardStreams(nil, &spec.inputs[0], []scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{descending})
+		_, ascending := integerOrder(false)
+		streams[1] = collectScanJoinOrderShardStreams(nil, &spec.inputs[1], []scm.Scmer{scm.NewString("key_col")}, []func(...scm.Scmer) scm.Scmer{ascending})
+		return streams
+	}()
 	allPairs := len(streams[0]) * len(streams[1])
 	combinations := scanJoinOrderShardCombinations(&spec, streams)
 	if len(combinations) >= allPairs {
@@ -462,15 +470,23 @@ func TestScanJoinOrderCandidateInputPrunesBeforeProjection(t *testing.T) {
 		{table: left, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1)},
 		{table: right, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1), sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "id"}}, targetKeyCols: []string{"id"}},
 	}, limit: -1, mapCols: []scanJoinOrderColumn{{table: 1, column: "amount"}}}
-	prepareScanJoinOrderSpec(nil, &spec)
-	streams := make([][]*scanJoinOrderShardStream, 2)
-	streams[0] = collectScanJoinOrderShardStreams(nil, &spec.inputs[0], nil, nil)
-	input := &spec.inputs[1]
-	input.candidateCols, input.candidate = scanJoinOrderCandidateInput(&spec, 1, streams)
-	if input.candidate.IsNil() {
-		t.Fatal("small outer key set did not become a projection filter")
-	}
-	streams[1] = collectScanJoinOrderShardStreams(nil, input, nil, nil)
+	streams := func() [][]*scanJoinOrderShardStream {
+		for i := range spec.inputs {
+			var finishInput func()
+			spec.inputs[i].dataTx, spec.inputs[i].columnInput, finishInput = spec.inputs[i].table.readDataContext(nil)
+			defer finishInput()
+		}
+		prepareScanJoinOrderSpec(nil, &spec)
+		streams := make([][]*scanJoinOrderShardStream, 2)
+		streams[0] = collectScanJoinOrderShardStreams(nil, &spec.inputs[0], nil, nil)
+		input := &spec.inputs[1]
+		input.candidateCols, input.candidate = scanJoinOrderCandidateInput(&spec, 1, streams)
+		if input.candidate.IsNil() {
+			t.Fatal("small outer key set did not become a projection filter")
+		}
+		streams[1] = collectScanJoinOrderShardStreams(nil, input, nil, nil)
+		return streams
+	}()
 	count := 0
 	for _, stream := range streams[1] {
 		count += len(stream.records)
