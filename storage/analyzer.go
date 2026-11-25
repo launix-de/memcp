@@ -182,7 +182,8 @@ type scanAccessSegment struct {
 }
 
 type scanAccessRuntime struct {
-	mutation bool // invocation-owned: acquire M before selecting cluster mutation rows
+	initializer *nativeColumnInitializer // invocation-only original-T construction; no serialized schema authority
+	mutation    bool                     // invocation-owned: acquire M before selecting cluster mutation rows
 	// prefixMerge is immutable invocation-owned state, borrowed under the scan
 	// shard rights and lock. It retains no index or mutable shard container.
 	prefixMerge *orderedPrefixAccess
@@ -207,13 +208,17 @@ type scanAccessRuntime struct {
 // introduced after local-filter compilation, such as a RecSet input or join
 // batch keys; it is never used to re-materialize the compiled schema.
 type scanAccess struct {
-	feedback      *filterObservation // invocation-local identity; immutable across shard workers
+	columnInput   nativeTableInput     // admitted immutable source; never serialized
+	producerInput *nativeMutationInput // actual local runtime producer; never part of compiled access/wire data
+	feedback      *filterObservation   // invocation-local identity; immutable across shard workers
 	schema        []scm.Scmer
 	values        []scm.Scmer
-	compiledCount int
 	firstBoundary *scanBoundaryBox
 	runtime       *scanAccessRuntime
 	batchValues   *scm.Scmer
+	// The existing schema header bounds this count to 12 bits. Keep it beside
+	// the scalar flags so the immutable access view remains a compact value.
+	compiledCount uint16
 	// plannerFilterCovered records the complete-subtree proof encoded in a
 	// static access schema. Mutating scans still retain their callback.
 	plannerFilterCovered bool
@@ -254,16 +259,16 @@ func (a scanAccess) useScratch(scratch *scanAnalyzeScratch) scanAccess {
 
 func (a scanAccess) len() int {
 	if a.runtime == nil {
-		return a.compiledCount
+		return int(a.compiledCount)
 	}
-	return a.compiledCount + len(a.runtime.inserted.items) + len(a.runtime.suffix.items) + len(a.runtime.extra.items)
+	return int(a.compiledCount) + len(a.runtime.inserted.items) + len(a.runtime.suffix.items) + len(a.runtime.extra.items)
 }
 
 // boundaryParts resolves one Scheme boundary item and the adjacent value
 // segment addressed by its slots. Runtime order/RecSet segments use exactly
 // the same representation as the planner-owned prefix.
 func (a scanAccess) boundaryParts(index int) (*scanBoundaryBox, []scm.Scmer) {
-	compiled := a.compiledCount
+	compiled := int(a.compiledCount)
 	insertAt := compiled
 	var inserted, suffix, extra scanAccessSegment
 	if a.runtime != nil {
@@ -433,16 +438,16 @@ func (a scanAccess) resolveBatchValue(value scm.Scmer, batched bool, subindex in
 	return *(*scm.Scmer)(unsafe.Add(unsafe.Pointer(a.batchValues), uintptr(subindex)*unsafe.Sizeof(value)))
 }
 
-// impossible reports SQL comparison probes whose runtime operand is NULL.
+// impossible reports non-null-safe SQL comparison probes whose runtime operand is NULL.
 // NULL is otherwise also the unbounded-range sentinel, so this check must use
 // the schema slot rather than the materialized boundary value.
 func (a scanAccess) impossible() bool {
 	for i := 0; i < a.len(); i++ {
 		boundary, values := a.boundaryParts(i)
-		if boundary.lowerSlot >= 0 && values[boundary.lowerSlot].IsNil() && (boundary.analyzer == RangeMatcher || (boundary.analyzer == EqualMatcher && !boundary.nullSafe)) {
+		if boundary.lowerSlot >= 0 && values[boundary.lowerSlot].IsNil() && ((boundary.analyzer == RangeMatcher || boundary.analyzer == EqualMatcher) && !boundary.nullSafe) {
 			return true
 		}
-		if boundary.upperSlot >= 0 && values[boundary.upperSlot].IsNil() && boundary.analyzer == RangeMatcher {
+		if boundary.upperSlot >= 0 && values[boundary.upperSlot].IsNil() && boundary.analyzer == RangeMatcher && !boundary.nullSafe {
 			return true
 		}
 	}
@@ -456,10 +461,10 @@ func (a scanAccess) impossibleBatch(stride int, batchdata []scm.Scmer, batchid i
 	for i := 0; i < a.len(); i++ {
 		boundary, _ := a.boundaryParts(i)
 		for _, slot := range [2]int{boundary.lowerSlot, boundary.upperSlot} {
-			if slot <= -2 && (boundary.analyzer == RangeMatcher || (boundary.analyzer == EqualMatcher && !boundary.nullSafe)) {
+			if slot <= -2 && (boundary.analyzer == RangeMatcher || boundary.analyzer == EqualMatcher) {
 				subindex := -slot - 2
 				position := batchid*stride + subindex
-				if position < 0 || position >= len(batchdata) || batchdata[position].IsNil() {
+				if position < 0 || position >= len(batchdata) || (!boundary.nullSafe && batchdata[position].IsNil()) {
 					return true
 				}
 			}
@@ -516,7 +521,7 @@ func scanAccessFromScheme(schemaValue scm.Scmer, values []scm.Scmer, suffix *sca
 			computedMapCols = boundary.MapColumns()
 		}
 	}
-	access := scanAccess{schema: schema, values: values, compiledCount: count,
+	access := scanAccess{schema: schema, values: values, compiledCount: uint16(count),
 		plannerFilterCovered: meta.consumer == scanAccessConsumerCoveredScan}
 	if count > 0 {
 		access.firstBoundary = (*scanBoundaryBox)(schema[scanAccessSchemaHeaderSize].Custom(TagScanBoundary))
@@ -1068,6 +1073,11 @@ func sortedBoundariesCoverCondition(conditionCols []string, condition scm.Scmer,
 		// A runtime NULL bound intentionally widens equal?? to an unbounded
 		// candidate scan so the residual can implement NULL-aware equality.
 		if want.nullSafe && want.lower.IsNil() {
+			return false
+		}
+		// NULL-first upper intervals include NULL row keys. They do not prove
+		// the scalar comparison's NULL rejection without a real lower bound.
+		if want.matcher == RangeMatcher && want.lower.IsNil() {
 			return false
 		}
 		covered := false
@@ -1796,11 +1806,18 @@ func newScanIndexBounds(access scanAccess) scanIndexBounds {
 		sortedEnd++
 	}
 	usableSorted := sortedEnd
-	for usableSorted >= 2 {
-		if !scanAccessBoundaryIsPoint(access, usableSorted-2) &&
-			!(scanAccessBoundaryIsUnboundedOrder(access, usableSorted-2) && scanAccessBoundaryIsUnboundedOrder(access, usableSorted-1)) {
-			usableSorted--
+	// An ordered index may keep its complete sort suffix after one range.
+	// Only unbounded ORDER coordinates may follow the first non-point axis;
+	// another restriction still belongs to the residual, as before.
+	for i := 0; i < sortedEnd; i++ {
+		if scanAccessBoundaryIsPoint(access, i) {
 			continue
+		}
+		for j := i + 1; j < sortedEnd; j++ {
+			if !scanAccessBoundaryIsUnboundedOrder(access, j) {
+				usableSorted = j
+				break
+			}
 		}
 		break
 	}
@@ -1812,9 +1829,7 @@ func newScanIndexBounds(access scanAccess) scanIndexBounds {
 	if effectiveLen > 0 {
 		result.firstLower = access.boundValue(0, false)
 	}
-	if usableSorted > 0 {
-		result.lastUpper = access.boundValue(usableSorted-1, true)
-	}
+	result.updateLastUpper(access)
 	return result
 }
 
@@ -1847,10 +1862,18 @@ func (b *scanIndexBounds) truncate(access scanAccess, length int) {
 	}
 	if b.usableSorted > length {
 		b.usableSorted = length
-		if length > 0 {
-			b.lastUpper = access.boundValue(length-1, true)
-		} else {
-			b.lastUpper = scm.NewNil()
+		b.updateLastUpper(access)
+	}
+}
+
+// The cached upper value belongs to the last restriction, not to trailing
+// unbounded ORDER coordinates retained only for physical index ordering.
+func (b *scanIndexBounds) updateLastUpper(access scanAccess) {
+	b.lastUpper = scm.NewNil()
+	for i := b.usableSorted - 1; i >= 0; i-- {
+		if !scanAccessBoundaryIsUnboundedOrder(access, i) {
+			b.lastUpper = access.boundValue(i, true)
+			return
 		}
 	}
 }

@@ -1,0 +1,364 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Lexical temporary column layouts share the original native transaction and row Undo
+setup:
+- sql: DROP PROCEDURE IF EXISTS layout_column_repeat
+- sql: DROP TABLE IF EXISTS layout_column_result
+- sql: DROP TABLE IF EXISTS layout_column_seed
+- sql: CREATE TABLE layout_column_result(id INT,a INT,b INT,c INT,d INT,e INT,f INT,g INT)
+- sql: CREATE TABLE layout_column_seed(id INT,a INT,b INT,c INT,d INT,e INT,f INT,g INT,discarded INT)
+- sql: INSERT INTO layout_column_seed VALUES(1,11,NULL,13,14,15,16,17,101),(2,21,22,23,24,NULL,26,27,NULL)
+- sql: 'CREATE PROCEDURE layout_column_repeat @n INT AS BEGIN SELECT @n AS id,@n+10 AS kept,@n+100 AS discarded INTO #module_layout;
+    ALTER TABLE #module_layout DROP COLUMN discarded; SELECT * FROM #module_layout; END'
+test_cases:
+- name: SELECT INTO DROP and INSERT SELECT star bind the same eight surviving columns
+  tds:
+    statements:
+    - sql: BEGIN TRANSACTION
+    - sql: 'SELECT * INTO #layout_copy FROM layout_column_seed'
+    - sql: 'ALTER TABLE #layout_copy DROP COLUMN discarded'
+    - sql: 'INSERT INTO layout_column_result SELECT * FROM #layout_copy'
+    - sql: SELECT * FROM layout_column_result ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          a: 11
+          b: null
+          c: 13
+          d: 14
+          e: 15
+          f: 16
+          g: 17
+        - id: 2
+          a: 21
+          b: 22
+          c: 23
+          d: 24
+          e: null
+          f: 26
+          g: 27
+    - sql: ROLLBACK TRANSACTION
+    - sql: SELECT * FROM layout_column_result
+      expect:
+        rows: 0
+        data: []
+- name: A later transaction in the same connection commits the temporary layout
+  tds:
+    statements:
+    - sql: 'SELECT id,a,discarded INTO #layout_later FROM layout_column_seed'
+    - sql: BEGIN TRANSACTION
+    - sql: 'ALTER TABLE #layout_later DROP COLUMN discarded'
+    - sql: 'SELECT * FROM #layout_later ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - &id001
+          id: 1
+          a: 11
+        - &id002
+          id: 2
+          a: 21
+    - sql: 'INSERT INTO #layout_later VALUES(3,31)'
+    - sql: COMMIT TRANSACTION
+    - sql: 'SELECT * FROM #layout_later ORDER BY id'
+      expect:
+        rows: 3
+        data:
+        - *id001
+        - *id002
+        - id: 3
+          a: 31
+    - sql: 'DROP TABLE #layout_later'
+- name: Full rollback restores the prior header and all original row cells
+  tds:
+    statements:
+    - sql: 'SELECT id,a,discarded INTO #layout_undo FROM layout_column_seed'
+    - sql: BEGIN TRANSACTION
+    - sql: 'ALTER TABLE #layout_undo DROP COLUMN discarded'
+    - sql: 'INSERT INTO #layout_undo VALUES(3,31)'
+    - sql: 'SELECT * FROM #layout_undo ORDER BY id'
+      expect:
+        rows: 3
+        data:
+        - *id001
+        - *id002
+        - id: 3
+          a: 31
+    - sql: ROLLBACK TRANSACTION
+    - sql: 'SELECT * FROM #layout_undo ORDER BY id'
+      expect:
+        rows: 2
+        data: &id003
+        - id: 1
+          a: 11
+          discarded: 101
+        - id: 2
+          a: 21
+          discarded: null
+    - sql: 'DROP TABLE #layout_undo'
+- name: Nested savepoints restore each immutable header and its prior rows
+  tds:
+    statements:
+    - sql: 'CREATE TABLE #layout_save(id INT,a INT,b INT,c INT)'
+    - sql: 'INSERT INTO #layout_save VALUES(1,11,12,13)'
+    - sql: BEGIN TRANSACTION
+    - sql: SAVE TRANSACTION first_drop
+    - sql: 'ALTER TABLE #layout_save DROP COLUMN b'
+    - sql: 'INSERT INTO #layout_save VALUES(2,21,23)'
+    - sql: SAVE TRANSACTION second_drop
+    - sql: 'ALTER TABLE #layout_save DROP COLUMN c'
+    - sql: 'INSERT INTO #layout_save VALUES(3,31)'
+    - sql: 'SELECT * FROM #layout_save ORDER BY id'
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          a: 11
+        - id: 2
+          a: 21
+        - id: 3
+          a: 31
+    - sql: ROLLBACK TRANSACTION second_drop
+    - sql: 'SELECT * FROM #layout_save ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          a: 11
+          c: 13
+        - id: 2
+          a: 21
+          c: 23
+    - sql: ROLLBACK TRANSACTION first_drop
+    - sql: 'SELECT * FROM #layout_save'
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          a: 11
+          b: 12
+          c: 13
+    - sql: COMMIT TRANSACTION
+    - sql: 'SELECT * FROM #layout_save'
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          a: 11
+          b: 12
+          c: 13
+    - sql: 'DROP TABLE #layout_save'
+- name: Layout rewind preserves earlier public work and full rollback removes it
+  tds:
+    statements:
+    - sql: 'SELECT id,a,discarded INTO #layout_public_undo FROM layout_column_seed'
+    - sql: BEGIN TRANSACTION
+    - sql: INSERT INTO layout_column_result VALUES(9,91,92,93,94,95,96,97)
+    - sql: SAVE TRANSACTION before_layout
+    - sql: 'ALTER TABLE #layout_public_undo DROP COLUMN discarded'
+    - sql: 'UPDATE #layout_public_undo SET a=a+100'
+    - sql: 'INSERT INTO layout_column_result SELECT id,a,0,0,0,0,0,0 FROM #layout_public_undo'
+    - sql: ROLLBACK TRANSACTION before_layout
+    - sql: 'SELECT * FROM #layout_public_undo ORDER BY id'
+      expect:
+        rows: 2
+        data: *id003
+    - sql: SELECT * FROM layout_column_result
+      expect:
+        rows: 1
+        data:
+        - id: 9
+          a: 91
+          b: 92
+          c: 93
+          d: 94
+          e: 95
+          f: 96
+          g: 97
+    - sql: ROLLBACK TRANSACTION
+    - sql: SELECT * FROM layout_column_result
+      expect:
+        rows: 0
+        data: []
+    - sql: 'DROP TABLE #layout_public_undo'
+- name: A reused column name after commit has fresh cells instead of old payload
+  tds:
+    statements:
+    - sql: 'CREATE TABLE #layout_reuse(id INT,discarded INT)'
+    - sql: 'INSERT INTO #layout_reuse VALUES(1,111),(2,222)'
+    - sql: BEGIN TRANSACTION
+    - sql: 'ALTER TABLE #layout_reuse DROP COLUMN discarded'
+    - sql: COMMIT TRANSACTION
+    - sql: 'ALTER TABLE #layout_reuse ADD discarded INT NULL'
+    - sql: 'SELECT * FROM #layout_reuse ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          discarded: null
+        - id: 2
+          discarded: null
+    - sql: 'INSERT INTO #layout_reuse VALUES(3,333)'
+    - sql: 'SELECT * FROM #layout_reuse ORDER BY id'
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          discarded: null
+        - id: 2
+          discarded: null
+        - id: 3
+          discarded: 333
+    - sql: 'DROP TABLE #layout_reuse'
+- name: Default-bearing retired cells do not enter later implicit insert columns
+  tds:
+    statements:
+    - sql: 'CREATE TABLE #layout_default(id INT,kept INT,discarded INT CONSTRAINT DF_layout_default_discarded DEFAULT(7))'
+    - sql: 'INSERT INTO #layout_default(id,kept) VALUES(1,11)'
+    - sql: BEGIN TRANSACTION
+    - sql: 'ALTER TABLE #layout_default DROP CONSTRAINT DF_layout_default_discarded'
+    - sql: 'SELECT * FROM #layout_default'
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          kept: 11
+          discarded: 7
+    - sql: SAVE TRANSACTION after_default_clear
+    - sql: 'INSERT INTO #layout_default(id,kept) VALUES(9,99)'
+    - sql: 'SELECT * FROM #layout_default ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          kept: 11
+          discarded: 7
+        - id: 9
+          kept: 99
+          discarded: null
+    - sql: ROLLBACK TRANSACTION after_default_clear
+    - sql: 'ALTER TABLE #layout_default DROP COLUMN discarded'
+    - sql: 'INSERT INTO #layout_default VALUES(2,22)'
+    - sql: 'SELECT * FROM #layout_default ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          kept: 11
+        - id: 2
+          kept: 22
+    - sql: ROLLBACK TRANSACTION
+    - sql: 'SELECT * FROM #layout_default'
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          kept: 11
+          discarded: 7
+    - sql: 'INSERT INTO #layout_default(id,kept) VALUES(3,33)'
+    - sql: 'SELECT * FROM #layout_default ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          kept: 11
+          discarded: 7
+        - id: 3
+          kept: 33
+          discarded: 7
+    - sql: 'DROP TABLE #layout_default'
+- name: A default-only scoped decision commits its header while retaining every stored cell
+  tds:
+    statements:
+    - sql: 'CREATE TABLE #layout_default_clear(id INT PRIMARY KEY,value INT CONSTRAINT DF_layout_default_clear DEFAULT(7))'
+    - sql: 'INSERT INTO #layout_default_clear(id) VALUES(1)'
+    - sql: BEGIN TRANSACTION
+    - sql: 'ALTER TABLE #layout_default_clear DROP CONSTRAINT DF_layout_default_clear'
+    - sql: 'INSERT INTO #layout_default_clear(id) VALUES(2)'
+    - sql: 'SELECT * FROM #layout_default_clear ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 7
+        - id: 2
+          value: null
+    - sql: COMMIT TRANSACTION
+    - sql: 'INSERT INTO #layout_default_clear(id) VALUES(3)'
+    - sql: 'SELECT * FROM #layout_default_clear ORDER BY id'
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 7
+        - id: 2
+          value: null
+        - id: 3
+          value: null
+    - sql: 'DROP TABLE #layout_default_clear'
+- name: A scoped default savepoint restores its recipe and rows before the original commit
+  tds:
+    statements:
+    - sql: 'CREATE TABLE #layout_default_save(id INT PRIMARY KEY,value INT CONSTRAINT DF_layout_default_save DEFAULT(7))'
+    - sql: 'INSERT INTO #layout_default_save(id) VALUES(1)'
+    - sql: BEGIN TRANSACTION
+    - sql: SAVE TRANSACTION keep_default
+    - sql: 'ALTER TABLE #layout_default_save DROP CONSTRAINT DF_layout_default_save'
+    - sql: 'INSERT INTO #layout_default_save(id) VALUES(2)'
+    - sql: 'SELECT * FROM #layout_default_save ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 7
+        - id: 2
+          value: null
+    - sql: ROLLBACK TRANSACTION keep_default
+    - sql: 'INSERT INTO #layout_default_save(id) VALUES(3)'
+    - sql: 'SELECT * FROM #layout_default_save ORDER BY id'
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 7
+        - id: 3
+          value: 7
+    - sql: COMMIT TRANSACTION
+    - sql: 'INSERT INTO #layout_default_save(id) VALUES(4)'
+    - sql: 'SELECT * FROM #layout_default_save ORDER BY id'
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 7
+        - id: 3
+          value: 7
+        - id: 4
+          value: 7
+    - sql: 'DROP TABLE #layout_default_save'
+- name: Two module invocations reuse one temporary name with independent native layouts
+  tds:
+    statements:
+    - sql: BEGIN TRANSACTION
+    - sql: EXEC layout_column_repeat 1
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          kept: 11
+    - sql: EXEC layout_column_repeat 2
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          kept: 12
+    - sql: COMMIT TRANSACTION
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS layout_column_repeat
+- sql: DROP TABLE IF EXISTS layout_column_result
+- sql: DROP TABLE IF EXISTS layout_column_seed

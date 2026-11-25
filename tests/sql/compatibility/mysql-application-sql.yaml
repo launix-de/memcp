@@ -112,9 +112,9 @@ test_cases:
         (sess "username" "root")
         (sess "schema" "memcp-tests")
         (define formula
-          (cached_parse cache (list parse_sql) "memcp-tests"
+          (cached_parse cache "sql" (list parse_sql) "memcp-tests"
             "SELECT SQL_CALC_FOUND_ROWS ID FROM wpcompat_posts WHERE post_type = 'post' ORDER BY ID LIMIT 2"
-            nil "root" sess true))
+            nil "root" sess true nil))
         (sql_execute_formula sess nil formula (lambda (_row) true) (lambda (_fields) nil))
         (if (equal? (sess "found_rows") 3)
           "ok"

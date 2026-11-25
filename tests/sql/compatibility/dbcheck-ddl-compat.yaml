@@ -224,8 +224,25 @@ test_cases:
       affected_rows: 1
   - name: "INSERT IGNORE ... VALUES SELECT legacy syntax"
     sql: "INSERT IGNORE INTO dbc_t (id, name, email, status, active) VALUES SELECT id+200, name, CONCAT(name, '@legacy.com'), status, active FROM dbc_t"
+    # Both source rows produce the same UNIQUE email; exactly one is inserted.
     expect:
-      affected_rows: 2
+      rows: 1
+      data: [{affected_rows: 1}]
+  - name: "Legacy INSERT SELECT preserves one actual unique email candidate"
+    sql: "SELECT COUNT(*) AS n,SUM(CASE WHEN id IN(201,301) THEN 1 ELSE 0 END) AS candidate_keys FROM dbc_t WHERE email='Alice@legacy.com'"
+    expect:
+      rows: 1
+      data: [{n: 1, candidate_keys: 1}]
+  - name: "The actual legacy candidate retains its complete projected data"
+    sql: "SELECT name,email,status,active FROM dbc_t WHERE email='Alice@legacy.com'"
+    expect:
+      rows: 1
+      data: [{name: Alice, email: 'Alice@legacy.com', status: active, active: true}]
+  - name: "Remove the unordered legacy winner before independent projection cases"
+    sql: "DELETE FROM dbc_t WHERE email='Alice@legacy.com'"
+    expect:
+      rows: 1
+      data: [{affected_rows: 1}]
 
   # --- Direct INSERT ... SELECT resultrow contract ---
   - name: "CREATE direct INSERT SELECT source table"

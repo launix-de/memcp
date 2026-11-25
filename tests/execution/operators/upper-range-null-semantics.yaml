@@ -1,0 +1,426 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  syntax: mysql
+  description: Upper index ranges preserve the original scalar NULL rejection across SQL frontends
+setup:
+- sql: DROP TABLE IF EXISTS nullable_upper_range_rows
+- sql: DROP TABLE IF EXISTS nullable_range_bounds
+- sql: CREATE TABLE nullable_upper_range_rows(id INT PRIMARY KEY,v INT,label VARCHAR(12),text_key VARCHAR(8),day_key
+    DATE,secondary_key INT)
+- sql: INSERT INTO nullable_upper_range_rows VALUES(1,NULL,'missing',NULL,NULL,0)
+- sql: INSERT INTO nullable_upper_range_rows SELECT 2,-2,'negative','a',DATE '2024-01-01',1
+- sql: INSERT INTO nullable_upper_range_rows SELECT 3,0,'zero','a',DATE '2024-01-02',NULL
+- sql: INSERT INTO nullable_upper_range_rows SELECT 4,2,'edge','b',DATE '2024-01-03',0
+- sql: INSERT INTO nullable_upper_range_rows SELECT 5,7,'above','c',DATE '2024-01-04',0
+- sql: INSERT INTO nullable_upper_range_rows SELECT 6,2,'duplicate','b',DATE '2024-01-03',2
+- scm: (rebuild (table "memcp-tests" false "nullable_upper_range_rows" false nil) true true nil true)
+- sql: INSERT INTO nullable_upper_range_rows VALUES(7,NULL,'delta-null',NULL,NULL,NULL)
+- sql: INSERT INTO nullable_upper_range_rows SELECT 8,-1,'delta-low','a',DATE '2024-01-01',1
+- sql: INSERT INTO nullable_upper_range_rows SELECT 9,4,'delta-high','c',DATE '2024-01-04',1
+- sql: CREATE TABLE nullable_range_bounds(bound_id INT PRIMARY KEY,ceiling INT)
+- sql: INSERT INTO nullable_range_bounds VALUES(1,NULL),(2,0),(3,2),(4,8)
+test_cases:
+- name: mysql Exclusive upper range rejects NULL
+  syntax: mysql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v<2 ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 8, v: -1, label: delta-low}
+- name: mysql Inclusive upper range rejects NULL
+  syntax: mysql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v<=2 ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 4, v: 2, label: edge}
+    - {id: 6, v: 2, label: duplicate}
+    - {id: 8, v: -1, label: delta-low}
+- name: mysql Reversed exclusive comparison rejects NULL
+  syntax: mysql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE 2>v ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 8, v: -1, label: delta-low}
+- name: mysql Reversed inclusive comparison rejects NULL
+  syntax: mysql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE 2>=v ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 4, v: 2, label: edge}
+    - {id: 6, v: 2, label: duplicate}
+    - {id: 8, v: -1, label: delta-low}
+- name: mysql Lower range keeps its non-NULL matches
+  syntax: mysql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v>=2 ORDER BY id
+  expect:
+    data:
+    - {id: 4, v: 2, label: edge}
+    - {id: 5, v: 7, label: above}
+    - {id: 6, v: 2, label: duplicate}
+    - {id: 9, v: 4, label: delta-high}
+- name: mysql Bounded interval retains complete duplicates
+  syntax: mysql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v>=0 AND v<=2 ORDER BY id
+  expect:
+    data:
+    - {id: 3, v: 0, label: zero}
+    - {id: 4, v: 2, label: edge}
+    - {id: 6, v: 2, label: duplicate}
+- name: mysql An explicit OR preserves the requested NULL rows
+  syntax: mysql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v<2 OR v IS NULL ORDER BY id
+  expect:
+    data:
+    - {id: 1, v: null, label: missing}
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 7, v: null, label: delta-null}
+    - {id: 8, v: -1, label: delta-low}
+- name: mysql A NULL bound matches no rows
+  syntax: mysql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v<NULL ORDER BY id
+  expect:
+    data: []
+- name: mysql Text upper range rejects NULL
+  syntax: mysql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE text_key<'b' ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 8, v: -1, label: delta-low}
+- name: mysql Date upper range rejects NULL
+  syntax: mysql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE day_key<DATE '2024-01-03' ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 8, v: -1, label: delta-low}
+- name: psql Exclusive upper range rejects NULL
+  syntax: psql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v<2 ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 8, v: -1, label: delta-low}
+- name: psql Inclusive upper range rejects NULL
+  syntax: psql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v<=2 ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 4, v: 2, label: edge}
+    - {id: 6, v: 2, label: duplicate}
+    - {id: 8, v: -1, label: delta-low}
+- name: psql Reversed exclusive comparison rejects NULL
+  syntax: psql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE 2>v ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 8, v: -1, label: delta-low}
+- name: psql Reversed inclusive comparison rejects NULL
+  syntax: psql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE 2>=v ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 4, v: 2, label: edge}
+    - {id: 6, v: 2, label: duplicate}
+    - {id: 8, v: -1, label: delta-low}
+- name: psql Lower range keeps its non-NULL matches
+  syntax: psql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v>=2 ORDER BY id
+  expect:
+    data:
+    - {id: 4, v: 2, label: edge}
+    - {id: 5, v: 7, label: above}
+    - {id: 6, v: 2, label: duplicate}
+    - {id: 9, v: 4, label: delta-high}
+- name: psql Bounded interval retains complete duplicates
+  syntax: psql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v>=0 AND v<=2 ORDER BY id
+  expect:
+    data:
+    - {id: 3, v: 0, label: zero}
+    - {id: 4, v: 2, label: edge}
+    - {id: 6, v: 2, label: duplicate}
+- name: psql An explicit OR preserves the requested NULL rows
+  syntax: psql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v<2 OR v IS NULL ORDER BY id
+  expect:
+    data:
+    - {id: 1, v: null, label: missing}
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 7, v: null, label: delta-null}
+    - {id: 8, v: -1, label: delta-low}
+- name: psql A NULL bound matches no rows
+  syntax: psql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v<NULL ORDER BY id
+  expect:
+    data: []
+- name: psql Text upper range rejects NULL
+  syntax: psql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE text_key<'b' ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 8, v: -1, label: delta-low}
+- name: psql Date upper range rejects NULL
+  syntax: psql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE day_key<DATE '2024-01-03' ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 8, v: -1, label: delta-low}
+- name: tsql Exclusive upper range rejects NULL
+  syntax: tsql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v<2 ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 8, v: -1, label: delta-low}
+- name: tsql Inclusive upper range rejects NULL
+  syntax: tsql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v<=2 ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 4, v: 2, label: edge}
+    - {id: 6, v: 2, label: duplicate}
+    - {id: 8, v: -1, label: delta-low}
+- name: tsql Reversed exclusive comparison rejects NULL
+  syntax: tsql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE 2>v ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 8, v: -1, label: delta-low}
+- name: tsql Reversed inclusive comparison rejects NULL
+  syntax: tsql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE 2>=v ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 4, v: 2, label: edge}
+    - {id: 6, v: 2, label: duplicate}
+    - {id: 8, v: -1, label: delta-low}
+- name: tsql Lower range keeps its non-NULL matches
+  syntax: tsql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v>=2 ORDER BY id
+  expect:
+    data:
+    - {id: 4, v: 2, label: edge}
+    - {id: 5, v: 7, label: above}
+    - {id: 6, v: 2, label: duplicate}
+    - {id: 9, v: 4, label: delta-high}
+- name: tsql Bounded interval retains complete duplicates
+  syntax: tsql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v>=0 AND v<=2 ORDER BY id
+  expect:
+    data:
+    - {id: 3, v: 0, label: zero}
+    - {id: 4, v: 2, label: edge}
+    - {id: 6, v: 2, label: duplicate}
+- name: tsql An explicit OR preserves the requested NULL rows
+  syntax: tsql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v<2 OR v IS NULL ORDER BY id
+  expect:
+    data:
+    - {id: 1, v: null, label: missing}
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 7, v: null, label: delta-null}
+    - {id: 8, v: -1, label: delta-low}
+- name: tsql A NULL bound matches no rows
+  syntax: tsql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE v<NULL ORDER BY id
+  expect:
+    data: []
+- name: tsql Text upper range rejects NULL
+  syntax: tsql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE text_key<'b' ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 8, v: -1, label: delta-low}
+- name: tsql Date upper range rejects NULL
+  syntax: tsql
+  sql: SELECT id,v,label FROM nullable_upper_range_rows WHERE day_key<CAST('2024-01-03' AS DATE) ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative}
+    - {id: 3, v: 0, label: zero}
+    - {id: 8, v: -1, label: delta-low}
+- name: mysql Runtime < upper bounds preserve NULL and outer matches
+  syntax: mysql
+  sql: SELECT b.bound_id,b.ceiling AS upper_value,r.id,r.v,r.label FROM nullable_range_bounds b LEFT JOIN nullable_upper_range_rows
+    r ON r.v<b.ceiling ORDER BY b.bound_id,r.id
+  expect:
+    data:
+    - {bound_id: 1, upper_value: null, id: null, v: null, label: null}
+    - {bound_id: 2, upper_value: 0, id: 2, v: -2, label: negative}
+    - {bound_id: 2, upper_value: 0, id: 8, v: -1, label: delta-low}
+    - {bound_id: 3, upper_value: 2, id: 2, v: -2, label: negative}
+    - {bound_id: 3, upper_value: 2, id: 3, v: 0, label: zero}
+    - {bound_id: 3, upper_value: 2, id: 8, v: -1, label: delta-low}
+    - {bound_id: 4, upper_value: 8, id: 2, v: -2, label: negative}
+    - {bound_id: 4, upper_value: 8, id: 3, v: 0, label: zero}
+    - {bound_id: 4, upper_value: 8, id: 4, v: 2, label: edge}
+    - {bound_id: 4, upper_value: 8, id: 5, v: 7, label: above}
+    - {bound_id: 4, upper_value: 8, id: 6, v: 2, label: duplicate}
+    - {bound_id: 4, upper_value: 8, id: 8, v: -1, label: delta-low}
+    - {bound_id: 4, upper_value: 8, id: 9, v: 4, label: delta-high}
+- name: mysql Runtime <= upper bounds preserve NULL and outer matches
+  syntax: mysql
+  sql: SELECT b.bound_id,b.ceiling AS upper_value,r.id,r.v,r.label FROM nullable_range_bounds b LEFT JOIN nullable_upper_range_rows
+    r ON r.v<=b.ceiling ORDER BY b.bound_id,r.id
+  expect:
+    data:
+    - {bound_id: 1, upper_value: null, id: null, v: null, label: null}
+    - {bound_id: 2, upper_value: 0, id: 2, v: -2, label: negative}
+    - {bound_id: 2, upper_value: 0, id: 3, v: 0, label: zero}
+    - {bound_id: 2, upper_value: 0, id: 8, v: -1, label: delta-low}
+    - {bound_id: 3, upper_value: 2, id: 2, v: -2, label: negative}
+    - {bound_id: 3, upper_value: 2, id: 3, v: 0, label: zero}
+    - {bound_id: 3, upper_value: 2, id: 4, v: 2, label: edge}
+    - {bound_id: 3, upper_value: 2, id: 6, v: 2, label: duplicate}
+    - {bound_id: 3, upper_value: 2, id: 8, v: -1, label: delta-low}
+    - {bound_id: 4, upper_value: 8, id: 2, v: -2, label: negative}
+    - {bound_id: 4, upper_value: 8, id: 3, v: 0, label: zero}
+    - {bound_id: 4, upper_value: 8, id: 4, v: 2, label: edge}
+    - {bound_id: 4, upper_value: 8, id: 5, v: 7, label: above}
+    - {bound_id: 4, upper_value: 8, id: 6, v: 2, label: duplicate}
+    - {bound_id: 4, upper_value: 8, id: 8, v: -1, label: delta-low}
+    - {bound_id: 4, upper_value: 8, id: 9, v: 4, label: delta-high}
+- name: psql Runtime < upper bounds preserve NULL and outer matches
+  syntax: psql
+  sql: SELECT b.bound_id,b.ceiling AS upper_value,r.id,r.v,r.label FROM nullable_range_bounds b LEFT JOIN nullable_upper_range_rows
+    r ON r.v<b.ceiling ORDER BY b.bound_id,r.id
+  expect:
+    data:
+    - {bound_id: 1, upper_value: null, id: null, v: null, label: null}
+    - {bound_id: 2, upper_value: 0, id: 2, v: -2, label: negative}
+    - {bound_id: 2, upper_value: 0, id: 8, v: -1, label: delta-low}
+    - {bound_id: 3, upper_value: 2, id: 2, v: -2, label: negative}
+    - {bound_id: 3, upper_value: 2, id: 3, v: 0, label: zero}
+    - {bound_id: 3, upper_value: 2, id: 8, v: -1, label: delta-low}
+    - {bound_id: 4, upper_value: 8, id: 2, v: -2, label: negative}
+    - {bound_id: 4, upper_value: 8, id: 3, v: 0, label: zero}
+    - {bound_id: 4, upper_value: 8, id: 4, v: 2, label: edge}
+    - {bound_id: 4, upper_value: 8, id: 5, v: 7, label: above}
+    - {bound_id: 4, upper_value: 8, id: 6, v: 2, label: duplicate}
+    - {bound_id: 4, upper_value: 8, id: 8, v: -1, label: delta-low}
+    - {bound_id: 4, upper_value: 8, id: 9, v: 4, label: delta-high}
+- name: psql Runtime <= upper bounds preserve NULL and outer matches
+  syntax: psql
+  sql: SELECT b.bound_id,b.ceiling AS upper_value,r.id,r.v,r.label FROM nullable_range_bounds b LEFT JOIN nullable_upper_range_rows
+    r ON r.v<=b.ceiling ORDER BY b.bound_id,r.id
+  expect:
+    data:
+    - {bound_id: 1, upper_value: null, id: null, v: null, label: null}
+    - {bound_id: 2, upper_value: 0, id: 2, v: -2, label: negative}
+    - {bound_id: 2, upper_value: 0, id: 3, v: 0, label: zero}
+    - {bound_id: 2, upper_value: 0, id: 8, v: -1, label: delta-low}
+    - {bound_id: 3, upper_value: 2, id: 2, v: -2, label: negative}
+    - {bound_id: 3, upper_value: 2, id: 3, v: 0, label: zero}
+    - {bound_id: 3, upper_value: 2, id: 4, v: 2, label: edge}
+    - {bound_id: 3, upper_value: 2, id: 6, v: 2, label: duplicate}
+    - {bound_id: 3, upper_value: 2, id: 8, v: -1, label: delta-low}
+    - {bound_id: 4, upper_value: 8, id: 2, v: -2, label: negative}
+    - {bound_id: 4, upper_value: 8, id: 3, v: 0, label: zero}
+    - {bound_id: 4, upper_value: 8, id: 4, v: 2, label: edge}
+    - {bound_id: 4, upper_value: 8, id: 5, v: 7, label: above}
+    - {bound_id: 4, upper_value: 8, id: 6, v: 2, label: duplicate}
+    - {bound_id: 4, upper_value: 8, id: 8, v: -1, label: delta-low}
+    - {bound_id: 4, upper_value: 8, id: 9, v: 4, label: delta-high}
+- name: tsql Runtime < upper bounds preserve NULL and outer matches
+  syntax: tsql
+  sql: SELECT b.bound_id,b.ceiling AS upper_value,r.id,r.v,r.label FROM nullable_range_bounds b LEFT JOIN nullable_upper_range_rows
+    r ON r.v<b.ceiling ORDER BY b.bound_id,r.id
+  expect:
+    data:
+    - {bound_id: 1, upper_value: null, id: null, v: null, label: null}
+    - {bound_id: 2, upper_value: 0, id: 2, v: -2, label: negative}
+    - {bound_id: 2, upper_value: 0, id: 8, v: -1, label: delta-low}
+    - {bound_id: 3, upper_value: 2, id: 2, v: -2, label: negative}
+    - {bound_id: 3, upper_value: 2, id: 3, v: 0, label: zero}
+    - {bound_id: 3, upper_value: 2, id: 8, v: -1, label: delta-low}
+    - {bound_id: 4, upper_value: 8, id: 2, v: -2, label: negative}
+    - {bound_id: 4, upper_value: 8, id: 3, v: 0, label: zero}
+    - {bound_id: 4, upper_value: 8, id: 4, v: 2, label: edge}
+    - {bound_id: 4, upper_value: 8, id: 5, v: 7, label: above}
+    - {bound_id: 4, upper_value: 8, id: 6, v: 2, label: duplicate}
+    - {bound_id: 4, upper_value: 8, id: 8, v: -1, label: delta-low}
+    - {bound_id: 4, upper_value: 8, id: 9, v: 4, label: delta-high}
+- name: tsql Runtime <= upper bounds preserve NULL and outer matches
+  syntax: tsql
+  sql: SELECT b.bound_id,b.ceiling AS upper_value,r.id,r.v,r.label FROM nullable_range_bounds b LEFT JOIN nullable_upper_range_rows
+    r ON r.v<=b.ceiling ORDER BY b.bound_id,r.id
+  expect:
+    data:
+    - {bound_id: 1, upper_value: null, id: null, v: null, label: null}
+    - {bound_id: 2, upper_value: 0, id: 2, v: -2, label: negative}
+    - {bound_id: 2, upper_value: 0, id: 3, v: 0, label: zero}
+    - {bound_id: 2, upper_value: 0, id: 8, v: -1, label: delta-low}
+    - {bound_id: 3, upper_value: 2, id: 2, v: -2, label: negative}
+    - {bound_id: 3, upper_value: 2, id: 3, v: 0, label: zero}
+    - {bound_id: 3, upper_value: 2, id: 4, v: 2, label: edge}
+    - {bound_id: 3, upper_value: 2, id: 6, v: 2, label: duplicate}
+    - {bound_id: 3, upper_value: 2, id: 8, v: -1, label: delta-low}
+    - {bound_id: 4, upper_value: 8, id: 2, v: -2, label: negative}
+    - {bound_id: 4, upper_value: 8, id: 3, v: 0, label: zero}
+    - {bound_id: 4, upper_value: 8, id: 4, v: 2, label: edge}
+    - {bound_id: 4, upper_value: 8, id: 5, v: 7, label: above}
+    - {bound_id: 4, upper_value: 8, id: 6, v: 2, label: duplicate}
+    - {bound_id: 4, upper_value: 8, id: 8, v: -1, label: delta-low}
+    - {bound_id: 4, upper_value: 8, id: 9, v: 4, label: delta-high}
+- name: mysql Two upper range predicates retain both NULL rejections
+  syntax: mysql
+  sql: SELECT id,v,label,secondary_key FROM nullable_upper_range_rows WHERE v<=2 AND secondary_key<=1 ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative, secondary_key: 1}
+    - {id: 4, v: 2, label: edge, secondary_key: 0}
+    - {id: 8, v: -1, label: delta-low, secondary_key: 1}
+- name: psql Two upper range predicates retain both NULL rejections
+  syntax: psql
+  sql: SELECT id,v,label,secondary_key FROM nullable_upper_range_rows WHERE v<=2 AND secondary_key<=1 ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative, secondary_key: 1}
+    - {id: 4, v: 2, label: edge, secondary_key: 0}
+    - {id: 8, v: -1, label: delta-low, secondary_key: 1}
+- name: tsql Two upper range predicates retain both NULL rejections
+  syntax: tsql
+  sql: SELECT id,v,label,secondary_key FROM nullable_upper_range_rows WHERE v<=2 AND secondary_key<=1 ORDER BY id
+  expect:
+    data:
+    - {id: 2, v: -2, label: negative, secondary_key: 1}
+    - {id: 4, v: 2, label: edge, secondary_key: 0}
+    - {id: 8, v: -1, label: delta-low, secondary_key: 1}
+cleanup:
+- sql: DROP TABLE IF EXISTS nullable_range_bounds
+- sql: DROP TABLE IF EXISTS nullable_upper_range_rows

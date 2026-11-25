@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Trailing semicolon acceptance
 
 metadata:
@@ -15,7 +17,13 @@ test_cases:
         v INT
       );
     expect:
-      affected_rows: 1
+      affected_rows: 0
+      result_contains: '"affected_rows"'
+
+  - name: "Completed MySQL declaration is present: CREATE TABLE with trailing semicolon"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE ts"
+    expect: {rows: 1,data: [{Table: "ts"}]}
 
   - name: "INSERT with trailing semicolon"
     sql: "INSERT INTO ts (id, v) VALUES (1, 10);"

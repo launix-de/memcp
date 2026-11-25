@@ -49,7 +49,7 @@ func TestJITScanOrderPreservesAdjacentMapColumnNames(t *testing.T) {
 	source := `(lambda (session tx resultrow resultfields)
 		(!begin
 			(resultfields (quote ("ID" "post_status" "post_type")))
-			(scan_order tx (table "tjit_scan_order_column_names" false "posts" false)
+			(scan_order tx (table "tjit_scan_order_column_names" false "posts" false nil)
 				(quote ()) (quote ()) (quote ()) (lambda () true) (quote ("post_title")) (list <) 0 0 (session "v1")
 				(list "ID" "post_status" "post_type")
 				(lambda (__scan_acc ID post_status post_type)
@@ -173,7 +173,7 @@ func TestScanOrderRecSetSelectsExactWindow(t *testing.T) {
 // must enter the merge heap in the same order as the serial scan.
 func TestScanOrderRecSetParallelRunsPreserveTiesAndWindow(t *testing.T) {
 	table := setupBatchAcceptTable(t, "torderrecsetparallel", 90)
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	if !table.beginManualRepartition() {
 		t.Fatal("manual repartition was not claimed")
 	}
@@ -194,7 +194,7 @@ func TestScanOrderRecSetParallelRunsPreserveTiesAndWindow(t *testing.T) {
 			scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 				ids = append(ids, values[1].Int())
 				return values[0]
-			}), scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+			}), scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), nil)
 		return ids
 	}
 	previous := runtime.GOMAXPROCS(1)
@@ -229,7 +229,7 @@ func TestScanOrderBatchAcceptGreedyWithoutOrder(t *testing.T) {
 
 func TestScanOrderBatchAcceptMixedOrderAcrossShards(t *testing.T) {
 	table := setupBatchAcceptTable(t, "tbatchacceptshards", 30)
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	if !table.beginManualRepartition() {
 		t.Fatal("manual repartition was not claimed")
 	}
@@ -252,7 +252,7 @@ func TestScanOrderBatchAcceptMixedOrderAcrossShards(t *testing.T) {
 
 func TestCollectOrderedCandidateBatchPrunesRangePartitions(t *testing.T) {
 	table := setupBatchAcceptTable(t, "tbatchacceptpartitionorder", 30)
-	RebuildTable(table, true, false)
+	RebuildTable(table, true, false, nil)
 	if !table.beginManualRepartition() {
 		t.Fatal("manual repartition was not claimed")
 	}
@@ -262,14 +262,16 @@ func TestCollectOrderedCandidateBatchPrunesRangePartitions(t *testing.T) {
 		ids := make([]int64, len(records))
 		for i, record := range records {
 			release := record.shard.GetRead(nil, false)
-			ids[i] = int64(scm.ToInt(record.shard.ColumnReaderTx(nil, "id", false, ReadAuto).GetValue(record.recid)))
+			ids[i] = int64(scm.ToInt(record.shard.ColumnReaderTx(nil, "id", false, ReadAuto, record.shard.t.bindColumnInput(nil)).GetValue(record.recid)))
 			release.Release()
 		}
 		return ids
 	}
 	collect := func(operator string, offset int, limit int) ([]orderedBatchRecord, *recSet, bool) {
 		relation := serialTestCallable(scm.Eval(scm.NewSymbol(operator), &scm.Globalenv))
-		return collectPartitionOrderedCandidateBatch(nil, scanOrderTableSpec{table: table},
+		dataTx, columnInput, finishInput := table.readDataContext(nil)
+		defer finishInput.release()
+		return collectPartitionOrderedCandidateBatch(nil, scanOrderTableSpec{table: table, dataTx: dataTx, dataBound: true, columnInput: columnInput},
 			[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{relation}, offset, limit)
 	}
 

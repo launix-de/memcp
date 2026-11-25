@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Sparse and prefix storage compression coverage
 # Targets storage-sparse.go (binary search GetValue, serialize/deserialize),
 # storage-prefix.go (prefix detection, compression), and storage-scmer.go
@@ -21,7 +23,10 @@ test_cases:
   - name: "Create sparse table"
     sql: "CREATE TABLE sp_sparse (id INT, rare_val VARCHAR(50))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert mostly NULL data (sparse pattern)"
     sql: |
@@ -82,7 +87,10 @@ test_cases:
   - name: "Create prefix table"
     sql: "CREATE TABLE sp_prefix (id INT, url VARCHAR(200))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert strings with common prefix"
     sql: |
@@ -124,7 +132,10 @@ test_cases:
   - name: "Create mixed null table"
     sql: "CREATE TABLE sp_mixed_null (id INT, a INT, b VARCHAR(20), c DOUBLE)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert with NULL pattern"
     sql: |
@@ -165,7 +176,10 @@ test_cases:
   - name: "Create boolean-skewed table"
     sql: "CREATE TABLE sp_bool_skewed (id INT, flag INT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert skewed booleans (99% zero)"
     sql: |

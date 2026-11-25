@@ -322,7 +322,7 @@ func TestCompleteRecSetFilterFeedback(t *testing.T) {
 
 func TestFilterFeedbackColdDatabaseRestart(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "feedback_restart", 1000)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	filter := scm.Read("feedback-restart", `(lambda (x) (< x 124))`, true)
 	schema, values, _ := compileScanAccess(scm.NewSlice([]scm.Scmer{scm.NewString("id")}), filter)
 	for i := range values {
@@ -333,7 +333,7 @@ func TestFilterFeedbackColdDatabaseRestart(t *testing.T) {
 	if value, _, known := tbl.filterSelectivity(key); !known || value != .123 {
 		t.Fatalf("training %v %v", value, known)
 	}
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	db := newDatabase()
 	db.Name = "feedback_restart"
 	db.persistence = persistence
@@ -578,7 +578,7 @@ func TestNumericKeyFrequencyMetadataAndFeedbackPriority(t *testing.T) {
 
 func TestNumericKeyFrequencyColdPersistence(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "key_frequency_restart", 10000)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	before, _ := tbl.keyFrequency("id")
 	if before == nil {
 		t.Fatal("rebuild did not publish frequency statistics")

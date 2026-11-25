@@ -13,10 +13,15 @@ import "github.com/launix-de/memcp/scm"
 
 func assertInitializedColumn(t *testing.T, tbl *table, column string, value scm.Scmer, rows int) {
 	t.Helper()
+	// Test cases name the visible declaration; native readers use storage keys.
+	storageColumn, exists := tbl.ResolveColumnName(column, false)
+	if !exists {
+		t.Fatalf("initialized column declaration does not exist: %s", column)
+	}
 	count := 0
 	for _, shard := range tbl.ActiveShards() {
 		release := shard.GetRead(nil, false)
-		read := shard.ColumnReaderTx(nil, column, false, ReadAuto).GetValue
+		read := shard.ColumnReaderTx(nil, storageColumn, false, ReadAuto, shard.t.bindColumnInput(nil)).GetValue
 		shard.mu.RLock()
 		for i := uint32(0); i < shard.main_count+uint32(len(shard.deltaRows())); i++ {
 			if !shard.deletions.Get(uint(i)) {
@@ -38,7 +43,7 @@ func assertInitializedColumn(t *testing.T, tbl *table, column string, value scm.
 
 func TestAddedDefaultOverlappingInsertAndRebuild(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "taddeddefaultconcurrent", 50)
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
 	started := make(chan struct{})
@@ -56,7 +61,7 @@ func TestAddedDefaultOverlappingInsertAndRebuild(t *testing.T) {
 		t.Fatalf("overlapping INSERT failed: %v", failure)
 	}
 	assertInitializedColumn(t, tbl, "flag", scm.NewInt(7), 100)
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
 	assertInitializedColumn(t, reloadTableFromPersistence(t, "taddeddefaultconcurrent", persistence), "flag", scm.NewInt(7), 100)
@@ -184,7 +189,7 @@ func TestAddedDefaultNullableAdapterPolicy(t *testing.T) {
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("new")}}, nil, scm.NewNil(), false, nil)
 	reloaded := reloadTableFromPersistence(t, "taddeddefaultpolicy", persistence)
 	shard := reloaded.ActiveShards()[0]
-	read := shard.ColumnReaderTx(nil, "optional", false, ReadAuto).GetValue
+	read := shard.ColumnReaderTx(nil, "optional", false, ReadAuto, shard.t.bindColumnInput(nil)).GetValue
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	if !read(0).IsNil() || read(1).Int() != 4 {
@@ -200,8 +205,8 @@ func TestAddedDefaultWaitsForExistingRebuildPublication(t *testing.T) {
 		release:           make(chan struct{}),
 	}
 	tbl.schema.persistence = blocking
-	rebuilt := make(chan string, 1)
-	go func() { rebuilt <- RebuildTable(tbl, true, false) }()
+	rebuilt := make(chan tableRebuildResult, 1)
+	go func() { rebuilt <- RebuildTable(tbl, true, false, nil) }()
 	<-blocking.entered
 	added := make(chan any, 1)
 	go func() {
@@ -216,7 +221,7 @@ func TestAddedDefaultWaitsForExistingRebuildPublication(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 	close(blocking.release)
-	if result := <-rebuilt; strings.Contains(result, "errors:") {
+	if result := <-rebuilt; result.err != nil {
 		t.Fatal(result)
 	}
 	select {
@@ -239,11 +244,6 @@ func TestSchemaQueueRetainsCaptureOwnershipAndPublishesNewerDDL(t *testing.T) {
 	}
 	db.persistence = blocking
 	db.schemalock.RLock()
-	older, err := json.Marshal(db)
-	if err != nil {
-		db.schemalock.RUnlock()
-		t.Fatal(err)
-	}
 	db.saveMu.Lock()
 	queueLocked, backendReleased := true, false
 	published := make(chan any, 1)
@@ -261,7 +261,7 @@ func TestSchemaQueueRetainsCaptureOwnershipAndPublishesNewerDDL(t *testing.T) {
 	go func() {
 		defer func() { published <- recover() }()
 		close(started)
-		db.commitSchemaSnapshot(older, true, func() {
+		db.commitSchemaSnapshot(true, func() {
 			db.schemalock.RUnlock()
 			close(released)
 		})
@@ -390,7 +390,7 @@ func TestAddedDefaultSchemaDropsRetiredRecoveryExtents(t *testing.T) {
 	if count := strings.Count(string(encoded), value); count != 2 {
 		t.Fatalf("serialized payload count = %d, want 2", count)
 	}
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
 	encoded, err = json.Marshal(tbl)
@@ -405,7 +405,7 @@ func TestAddedDefaultSchemaDropsRetiredRecoveryExtents(t *testing.T) {
 
 func TestAddedNullableFreshColumnKeepsSparseColdShard(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "taddednullablecold", 2)
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
 	db := newDatabase()
@@ -422,7 +422,7 @@ func TestAddedNullableFreshColumnKeepsSparseColdShard(t *testing.T) {
 	if shard.state() != COLD || shard.plannerMainRows.Load() != 0 || shard.plannerDeltaRows.Load() != 0 {
 		t.Fatal("fresh nullable ADD loaded old rows")
 	}
-	if _, sparse := shard.getColumnStorageOrPanic("fresh", false, nil).(*StorageSparse); !sparse {
+	if _, sparse := shard.getColumnStorageInput("fresh", false, shard.initializedColumnInput(shard.t.bindColumnInput(nil)), nil).(*StorageSparse); !sparse {
 		t.Fatal("fresh nullable ADD did not use existing sparse storage")
 	}
 	assertInitializedColumn(t, reloaded, "fresh", scm.NewNil(), 2)
@@ -458,10 +458,10 @@ func TestAddedNullableFreshColumnKeepsExistingDeltaRows(t *testing.T) {
 func TestAddedNullableRetiredNameDoesNotRestoreOldValues(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "taddednullablereused", 2)
 	tbl.CreateColumn("reused", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(8)})
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
-	tbl.DropColumn("reused")
+	tbl.DropColumn("reused", scm.NewNil())
 	reloaded := reloadTableFromPersistence(t, "taddednullablereused", persistence)
 	reloaded.CreateColumn("reused", "INT", nil, nil)
 	assertInitializedColumn(t, reloaded, "reused", scm.NewNil(), 2)
@@ -487,7 +487,7 @@ func TestAddedDefaultExpressionSurvivesNilConstantOption(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	release := shard.GetRead(nil, false)
 	defer release.Release()
-	read := shard.ColumnReaderTx(nil, "created", false, ReadAuto).GetValue
+	read := shard.ColumnReaderTx(nil, "created", false, ReadAuto, shard.t.bindColumnInput(nil)).GetValue
 	value := func() scm.Scmer {
 		shard.mu.RLock()
 		defer shard.mu.RUnlock()

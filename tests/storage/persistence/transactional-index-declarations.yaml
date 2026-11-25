@@ -1,0 +1,57 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Required V32 index decisions and typed Name V2 checkpoints retain exact standalone ownership
+setup:
+- sql: DROP TABLE IF EXISTS logical_index_recovery
+- sql: CREATE TABLE logical_index_recovery(id INT,payload INT)
+- sql: INSERT logical_index_recovery VALUES(1,10),(2,20)
+test_cases:
+- name: Accept named nonunique and enforcing declarations in the original row decision
+  steps:
+  - sql: BEGIN TRANSACTION
+    session_id: index_accept
+  - sql: CREATE INDEX IX_recovered ON logical_index_recovery(payload) INCLUDE(id)
+    session_id: index_accept
+  - sql: CREATE UNIQUE INDEX UX_recovered ON logical_index_recovery(id)
+    session_id: index_accept
+  - sql: UPDATE logical_index_recovery SET payload=11 WHERE id=1
+    session_id: index_accept
+  - sql: COMMIT TRANSACTION
+    session_id: index_accept
+- name: Crash before a standalone retirement is accepted
+  steps:
+  - sql: BEGIN TRANSACTION
+    session_id: index_unaccepted
+  - sql: DROP INDEX UX_recovered ON logical_index_recovery
+    session_id: index_unaccepted
+  - scm: (crash)
+    expect:
+      interrupted_ok: true
+- name: Replay required index decisions
+  action: restart
+- name: Original rows and both accepted declarations survive recovery
+  sql: SELECT r.id,r.payload,(SELECT COUNT(*) FROM sys.indexes WHERE object_id=OBJECT_ID(N'logical_index_recovery') AND name IN(N'IX_recovered',N'UX_recovered')) AS named FROM logical_index_recovery r ORDER BY r.id
+  expect:
+    rows: 2
+    data: [{id: 1,payload: 11,named: 2},{id: 2,payload: 20,named: 2}]
+- name: Unaccepted unique retirement did not remove recovered enforcement
+  sql: INSERT logical_index_recovery VALUES(1,99)
+  expect:
+    error: true
+- name: Recovered standalone ownership authorizes exact retirement
+  sql: DROP INDEX UX_recovered ON logical_index_recovery
+- name: Accepted standalone retirement removes only its key
+  sql: INSERT logical_index_recovery VALUES(1,99)
+- name: Checkpoint and reopen remaining typed name metadata
+  action: restart
+- name: Remaining logical metadata and retired enforcing key are exact after reopen
+  sql: SELECT id,payload,(SELECT COUNT(*) FROM sys.indexes WHERE object_id=OBJECT_ID(N'logical_index_recovery') AND name=N'IX_recovered') AS nonunique,(SELECT COUNT(*) FROM sys.indexes WHERE object_id=OBJECT_ID(N'logical_index_recovery') AND name=N'UX_recovered') AS retired FROM logical_index_recovery ORDER BY id,payload
+  expect:
+    rows: 3
+    data: [{id: 1,payload: 11,nonunique: 1,retired: 0},{id: 1,payload: 99,nonunique: 1,retired: 0},{id: 2,payload: 20,nonunique: 1,retired: 0}]
+cleanup:
+- sql: DROP TABLE IF EXISTS logical_index_recovery

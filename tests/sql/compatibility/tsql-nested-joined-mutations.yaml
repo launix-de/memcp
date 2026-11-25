@@ -1,0 +1,244 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/queries/from-transact-sql
+# https://learn.microsoft.com/sql/t-sql/queries/update-transact-sql
+metadata:
+  isolated: true
+  description: Right-associated DML join operands preserve logical nullable scopes
+  syntax: tsql
+setup:
+- sql: CREATE TABLE nested_write_targets(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE nested_write_sources(id INT PRIMARY KEY,lookup_id INT)
+- sql: CREATE TABLE nested_write_lookup(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO nested_write_targets VALUES(1,10),(2,20),(3,30),(4,40)
+- sql: INSERT INTO nested_write_sources VALUES(1,7),(2,8),(3,NULL)
+- sql: INSERT INTO nested_write_lookup VALUES(7,70)
+- sql: CREATE TABLE nested_write_audit(id INT,value INT)
+- syntax: tsql
+  sql: CREATE TRIGGER nested_write_audit_trigger ON nested_write_targets AFTER UPDATE AS INSERT INTO
+    nested_write_audit(id,value) SELECT id,value FROM inserted
+- sql: CREATE TABLE nested_write_optional(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO nested_write_optional VALUES(1,10),(2,20),(3,30),(4,40)
+- sql: CREATE TABLE nested_period_targets(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO nested_period_targets VALUES(1,10),(2,20),(3,30),(4,40)
+- sql: CREATE TABLE nested_period_sources(id INT,period INT,lookup_id INT,PRIMARY KEY(id,period))
+- sql: INSERT INTO nested_period_sources VALUES(1,20230101,7),(1,20250101,8),(2,20250101,8),(3,20230101,NULL)
+cleanup:
+- sql: DROP TABLE nested_period_sources
+- sql: DROP TABLE nested_period_targets
+- sql: DROP TABLE nested_write_optional
+- sql: DROP TRIGGER nested_write_audit_trigger
+- sql: DROP TABLE nested_write_audit
+- sql: DROP TABLE nested_write_lookup
+- sql: DROP TABLE nested_write_sources
+- sql: DROP TABLE nested_write_targets
+test_cases:
+- name: SELECT preserves nullable right-associated operand
+  syntax: tsql
+  sql: SELECT t.id,ISNULL(r.value,-1) AS value FROM nested_write_targets t INNER JOIN nested_write_sources
+    s INNER JOIN (SELECT id FROM nested_write_targets GROUP BY id) g ON s.id=g.id LEFT JOIN nested_write_lookup
+    r ON s.lookup_id=r.id ON t.id=s.id ORDER BY t.id
+  expect:
+    rows: 3
+    data:
+    - &id001
+      id: 1
+      value: 70
+    - &id002
+      id: 2
+      value: -1
+    - &id003
+      id: 3
+      value: -1
+- name: NOEXEC accepts the same right-associated UPDATE without mutation
+  syntax: tsql
+  sql: SET NOEXEC ON; UPDATE t SET value=ISNULL(r.value,-1) FROM nested_write_targets t INNER JOIN
+    nested_write_sources s INNER JOIN (SELECT id FROM nested_write_targets GROUP BY id) g ON s.id=g.id
+    LEFT JOIN nested_write_lookup r ON s.lookup_id=r.id ON t.id=s.id; SET NOEXEC OFF; SELECT id,value
+    FROM nested_write_targets ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      value: 10
+    - id: 2
+      value: 20
+    - id: 3
+      value: 30
+    - id: 4
+      value: 40
+- name: UPDATE preserves nullable source rows and excludes absent INNER matches
+  syntax: tsql
+  sql: UPDATE t SET value=ISNULL(r.value,-1) FROM nested_write_targets t INNER JOIN nested_write_sources
+    s INNER JOIN (SELECT id FROM nested_write_targets GROUP BY id) g ON s.id=g.id LEFT JOIN nested_write_lookup
+    r ON s.lookup_id=r.id ON t.id=s.id
+  expect:
+    affected_rows: 3
+- name: UPDATE publishes exact selected complete values
+  syntax: tsql
+  sql: SELECT id,value FROM nested_write_targets ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - *id001
+    - *id002
+    - *id003
+    - id: 4
+      value: 40
+- name: The native UPDATE sink fires one coherent trigger tuple per target
+  sql: SELECT id,value FROM nested_write_audit ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 70
+    - id: 2
+      value: -1
+    - id: 3
+      value: -1
+- name: The source query remains inside an explicit native transaction
+  session_id: nested_operand_rollback
+  sql: BEGIN TRANSACTION
+- name: The joined mutation uses its current transaction capability
+  session_id: nested_operand_rollback
+  sql: UPDATE t SET value=ISNULL(r.value,-1)+100 FROM nested_write_targets t INNER JOIN nested_write_sources
+    s INNER JOIN (SELECT id FROM nested_write_targets GROUP BY id) g ON s.id=g.id LEFT JOIN nested_write_lookup
+    r ON s.lookup_id=r.id ON t.id=s.id
+  expect:
+    affected_rows: 3
+- name: The transaction sees every complete selected assignment
+  sql: SELECT id,value FROM nested_write_targets ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      value: 170
+    - id: 2
+      value: 99
+    - id: 3
+      value: 99
+    - id: 4
+      value: 40
+  session_id: nested_operand_rollback
+- name: ROLLBACK is owned by the existing native lifecycle
+  session_id: nested_operand_rollback
+  sql: ROLLBACK TRANSACTION
+- name: Rollback restores target values after the joined mutation
+  sql: SELECT id,value FROM nested_write_targets ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      value: 70
+    - id: 2
+      value: -1
+    - id: 3
+      value: -1
+    - id: 4
+      value: 40
+- name: Rollback also restores trigger effects
+  sql: SELECT id,value FROM nested_write_audit ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 70
+    - id: 2
+      value: -1
+    - id: 3
+      value: -1
+- name: NOEXEC prepares nested DELETE without entering its native sink
+  sql: SET NOEXEC ON; DELETE t FROM nested_write_targets t LEFT JOIN nested_write_sources s INNER
+    JOIN nested_write_lookup r ON s.lookup_id=r.id ON t.id=s.id WHERE r.id IS NULL; SET NOEXEC OFF;
+    SELECT id,value FROM nested_write_targets ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      value: 70
+    - id: 2
+      value: -1
+    - id: 3
+      value: -1
+    - id: 4
+      value: 40
+- name: DELETE filters after nullable operand extension
+  sql: DELETE t FROM nested_write_targets t LEFT JOIN nested_write_sources s INNER JOIN nested_write_lookup
+    r ON s.lookup_id=r.id ON t.id=s.id WHERE r.id IS NULL
+  expect:
+    affected_rows: 3
+- name: DELETE preserves the exact matched lookup complement
+  sql: SELECT id,value FROM nested_write_targets ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 70
+- name: Native trigger effects remain complete and occur once per updated target
+  sql: SELECT id,value FROM nested_write_audit ORDER BY id,value
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 70
+    - id: 2
+      value: -1
+    - id: 3
+      value: -1
+- name: NOEXEC binds nested operands containing correlated aggregate assignments
+  sql: "SET NOEXEC ON; UPDATE t SET value=ISNULL(r.value,-1)\nFROM nested_period_targets t INNER\
+    \ JOIN nested_period_sources s\n INNER JOIN (SELECT id,ISNULL(\n   (SELECT MAX(p.period) FROM\
+    \ nested_period_sources p WHERE p.period<=20240101 AND p.id=nested_period_targets.id),\n   (SELECT\
+    \ MIN(p.period) FROM nested_period_sources p WHERE p.period>20240101 AND p.id=nested_period_targets.id))\
+    \ AS chosen_period\n FROM nested_period_targets GROUP BY id) g ON s.id=g.id AND s.period=g.chosen_period\n\
+    \ LEFT JOIN nested_write_lookup r ON s.lookup_id=r.id\nON t.id=s.id; SET NOEXEC OFF; SELECT id,value\
+    \ FROM nested_period_targets ORDER BY id"
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      value: 10
+    - id: 2
+      value: 20
+    - id: 3
+      value: 30
+    - id: 4
+      value: 40
+- name: Nested grouped operands choose the past or future source row coherently
+  sql: "UPDATE t SET value=ISNULL(r.value,-1)\nFROM nested_period_targets t INNER JOIN nested_period_sources\
+    \ s\n INNER JOIN (SELECT id,ISNULL(\n   (SELECT MAX(p.period) FROM nested_period_sources p WHERE\
+    \ p.period<=20240101 AND p.id=nested_period_targets.id),\n   (SELECT MIN(p.period) FROM nested_period_sources\
+    \ p WHERE p.period>20240101 AND p.id=nested_period_targets.id)) AS chosen_period\n FROM nested_period_targets\
+    \ GROUP BY id) g ON s.id=g.id AND s.period=g.chosen_period\n LEFT JOIN nested_write_lookup r\
+    \ ON s.lookup_id=r.id\nON t.id=s.id"
+  expect:
+    affected_rows: 3
+- name: Correlated aggregate source choices retain the exact nullable assignments
+  sql: SELECT id,value FROM nested_period_targets ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      value: 70
+    - id: 2
+      value: -1
+    - id: 3
+      value: -1
+    - id: 4
+      value: 40
+- name: An optional composite lookup can update unmatched target rows
+  noncritical: true
+  sql: UPDATE t SET value=ISNULL(r.value,-1)+10 FROM nested_write_optional t LEFT JOIN nested_write_sources
+    s INNER JOIN nested_write_lookup r ON s.lookup_id=r.id ON t.id=s.id; SELECT id,value FROM nested_write_optional
+    ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      value: 80
+    - id: 2
+      value: 9
+    - id: 3
+      value: 9
+    - id: 4
+      value: 9

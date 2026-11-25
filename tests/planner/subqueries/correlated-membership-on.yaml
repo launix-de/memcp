@@ -1,0 +1,450 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# NULL comparison semantics: https://learn.microsoft.com/sql/t-sql/language-elements/in-transact-sql
+metadata:
+  description: Correlated membership retains ON predicates, caller multiplicity and SQL three-valued logic
+  isolated: true
+setup:
+- sql: CREATE TABLE membership_scope_outer(id INT)
+- sql: CREATE TABLE membership_scope_inner(id INT,owner INT,amount INT)
+- sql: CREATE TABLE membership_scope_tags(id INT)
+- sql: INSERT INTO membership_scope_outer VALUES(NULL),(1),(1),(2),(3)
+- sql: INSERT INTO membership_scope_inner VALUES(10,1,5),(11,1,NULL),(20,2,NULL),(30,NULL,9)
+- sql: INSERT INTO membership_scope_tags VALUES(10),(11),(20),(30)
+test_cases:
+- name: mysql IN retains its INNER ON correlation
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 10 IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+- name: mysql WHERE and INNER ON correlations have the same membership result
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 10 IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id WHERE i.owner=o.id) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+- name: mysql NOT IN preserves duplicate callers and empty correlated sets
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 10 NOT IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: -1
+    - id: 2
+    - id: 3
+- name: mysql IN match takes precedence over a NULL RHS value
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 5 IN(SELECT i.amount FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+- name: mysql NOT IN distinguishes NULL poison from an empty RHS
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 5 NOT IN(SELECT i.amount FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: -1
+    - id: 3
+- name: mysql Nullable residual ON binds the complete caller domain
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 30 IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND (i.owner=o.id OR (i.owner IS NULL AND o.id IS NULL)))
+    ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: -1
+- name: mysql Nullable residual WHERE binds the complete caller domain
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 30 IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id WHERE i.owner=o.id OR (i.owner IS NULL AND o.id IS NULL))
+    ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: -1
+- name: mysql LEFT ON correlations do not filter their preserved input
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 99 IN(SELECT COALESCE(t.id,99) FROM membership_scope_inner
+    i LEFT JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: -1
+    - id: 1
+    - id: 1
+    - id: 2
+    - id: 3
+- name: mysql projected IN and NOT IN retain SQL UNKNOWN
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN o.id IN(SELECT i.amount FROM membership_scope_inner i INNER JOIN
+    membership_scope_tags t ON t.id=i.id AND i.owner=o.id) THEN 1 WHEN o.id NOT IN(SELECT i.amount FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) THEN 0 ELSE -1 END AS state FROM membership_scope_outer
+    o ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: -1
+      state: 0
+    - id: 1
+      state: -1
+    - id: 1
+      state: -1
+    - id: 2
+      state: -1
+    - id: 3
+      state: 0
+- name: tsql IN retains its INNER ON correlation
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 10 IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+- name: tsql WHERE and INNER ON correlations have the same membership result
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 10 IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id WHERE i.owner=o.id) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+- name: tsql NOT IN preserves duplicate callers and empty correlated sets
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 10 NOT IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: -1
+    - id: 2
+    - id: 3
+- name: tsql IN match takes precedence over a NULL RHS value
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 5 IN(SELECT i.amount FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+- name: tsql NOT IN distinguishes NULL poison from an empty RHS
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 5 NOT IN(SELECT i.amount FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: -1
+    - id: 3
+- name: tsql Nullable residual ON binds the complete caller domain
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 30 IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND (i.owner=o.id OR (i.owner IS NULL AND o.id IS NULL)))
+    ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: -1
+- name: tsql Nullable residual WHERE binds the complete caller domain
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 30 IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id WHERE i.owner=o.id OR (i.owner IS NULL AND o.id IS NULL))
+    ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: -1
+- name: tsql LEFT ON correlations do not filter their preserved input
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 99 IN(SELECT COALESCE(t.id,99) FROM membership_scope_inner
+    i LEFT JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: -1
+    - id: 1
+    - id: 1
+    - id: 2
+    - id: 3
+- name: tsql projected IN and NOT IN retain SQL UNKNOWN
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN o.id IN(SELECT i.amount FROM membership_scope_inner i INNER JOIN
+    membership_scope_tags t ON t.id=i.id AND i.owner=o.id) THEN 1 WHEN o.id NOT IN(SELECT i.amount FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) THEN 0 ELSE -1 END AS state FROM membership_scope_outer
+    o ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: -1
+      state: 0
+    - id: 1
+      state: -1
+    - id: 1
+      state: -1
+    - id: 2
+      state: -1
+    - id: 3
+      state: 0
+- name: psql IN retains its INNER ON correlation
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 10 IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+- name: psql WHERE and INNER ON correlations have the same membership result
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 10 IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id WHERE i.owner=o.id) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+- name: psql NOT IN preserves duplicate callers and empty correlated sets
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 10 NOT IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: -1
+    - id: 2
+    - id: 3
+- name: psql IN match takes precedence over a NULL RHS value
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 5 IN(SELECT i.amount FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+- name: psql NOT IN distinguishes NULL poison from an empty RHS
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 5 NOT IN(SELECT i.amount FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: -1
+    - id: 3
+- name: psql Nullable residual ON binds the complete caller domain
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 30 IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND (i.owner=o.id OR (i.owner IS NULL AND o.id IS NULL)))
+    ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: -1
+- name: psql Nullable residual WHERE binds the complete caller domain
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 30 IN(SELECT i.id FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id WHERE i.owner=o.id OR (i.owner IS NULL AND o.id IS NULL))
+    ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: -1
+- name: psql LEFT ON correlations do not filter their preserved input
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE 99 IN(SELECT COALESCE(t.id,99) FROM membership_scope_inner
+    i LEFT JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: -1
+    - id: 1
+    - id: 1
+    - id: 2
+    - id: 3
+- name: psql projected IN and NOT IN retain SQL UNKNOWN
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN o.id IN(SELECT i.amount FROM membership_scope_inner i INNER JOIN
+    membership_scope_tags t ON t.id=i.id AND i.owner=o.id) THEN 1 WHEN o.id NOT IN(SELECT i.amount FROM membership_scope_inner
+    i INNER JOIN membership_scope_tags t ON t.id=i.id AND i.owner=o.id) THEN 0 ELSE -1 END AS state FROM membership_scope_outer
+    o ORDER BY id
+  expect:
+    rows: 5
+    data:
+    - id: -1
+      state: 0
+    - id: 1
+      state: -1
+    - id: 1
+      state: -1
+    - id: 2
+      state: -1
+    - id: 3
+      state: 0
+- name: mysql NOT IN subquery and value list retain UNKNOWN
+  syntax: mysql
+  sql: SELECT CASE WHEN 5 NOT IN(SELECT amount FROM membership_scope_inner WHERE owner=2) THEN 1 WHEN 5 IN(SELECT
+    amount FROM membership_scope_inner WHERE owner=2) THEN 2 ELSE 0 END AS subquery_state,CASE WHEN 5 NOT IN(NULL)
+    THEN 1 WHEN 5 IN(NULL) THEN 2 ELSE 0 END AS list_state
+  expect:
+    rows: 1
+    data:
+    - subquery_state: 0
+      list_state: 0
+- name: mysql A NULL probe is not in an empty subquery
+  syntax: mysql
+  sql: SELECT CASE WHEN NULL NOT IN(SELECT amount FROM membership_scope_inner WHERE owner=999) THEN 1 ELSE 0 END
+    AS empty_state
+  expect:
+    rows: 1
+    data:
+    - empty_state: 1
+- name: tsql NOT IN subquery and value list retain UNKNOWN
+  syntax: tsql
+  sql: SELECT CASE WHEN 5 NOT IN(SELECT amount FROM membership_scope_inner WHERE owner=2) THEN 1 WHEN 5 IN(SELECT
+    amount FROM membership_scope_inner WHERE owner=2) THEN 2 ELSE 0 END AS subquery_state,CASE WHEN 5 NOT IN(NULL)
+    THEN 1 WHEN 5 IN(NULL) THEN 2 ELSE 0 END AS list_state
+  expect:
+    rows: 1
+    data:
+    - subquery_state: 0
+      list_state: 0
+- name: tsql A NULL probe is not in an empty subquery
+  syntax: tsql
+  sql: SELECT CASE WHEN NULL NOT IN(SELECT amount FROM membership_scope_inner WHERE owner=999) THEN 1 ELSE 0 END
+    AS empty_state
+  expect:
+    rows: 1
+    data:
+    - empty_state: 1
+- name: psql NOT IN subquery and value list retain UNKNOWN
+  syntax: psql
+  sql: SELECT CASE WHEN 5 NOT IN(SELECT amount FROM membership_scope_inner WHERE owner=2) THEN 1 WHEN 5 IN(SELECT
+    amount FROM membership_scope_inner WHERE owner=2) THEN 2 ELSE 0 END AS subquery_state,CASE WHEN 5 NOT IN(NULL)
+    THEN 1 WHEN 5 IN(NULL) THEN 2 ELSE 0 END AS list_state
+  expect:
+    rows: 1
+    data:
+    - subquery_state: 0
+      list_state: 0
+- name: psql A NULL probe is not in an empty subquery
+  syntax: psql
+  sql: SELECT CASE WHEN NULL NOT IN(SELECT amount FROM membership_scope_inner WHERE owner=999) THEN 1 ELSE 0 END
+    AS empty_state
+  expect:
+    rows: 1
+    data:
+    - empty_state: 1
+- name: mysql EXISTS retains an empty row window
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE EXISTS(SELECT 1 FROM membership_scope_inner
+    i WHERE i.owner=o.id LIMIT 0) ORDER BY id
+  expect:
+    rows: 0
+    data: []
+  noncritical: true
+- name: mysql EXISTS retains its per-caller row offset
+  syntax: mysql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE EXISTS(SELECT 1 FROM membership_scope_inner
+    i WHERE i.owner=o.id ORDER BY i.id LIMIT 1 OFFSET 1) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+  noncritical: true
+- name: mysql Scalar row selection retains its ordered bound
+  syntax: mysql
+  sql: SELECT (SELECT i.amount FROM membership_scope_inner i WHERE i.owner=1 ORDER BY i.id LIMIT 1) AS value_result
+  expect:
+    rows: 1
+    data:
+    - value_result: 5
+- name: mysql A scalar subquery still rejects multiple result rows
+  syntax: mysql
+  sql: SELECT (SELECT i.amount FROM membership_scope_inner i WHERE i.owner=1) AS value_result
+  expect:
+    error: true
+    contains: scalar subselect returned more than one row
+- name: tsql EXISTS retains an empty row window
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE EXISTS(SELECT TOP(0) 1 FROM membership_scope_inner
+    i WHERE i.owner=o.id) ORDER BY id
+  expect:
+    rows: 0
+    data: []
+  noncritical: true
+- name: tsql EXISTS retains its per-caller row offset
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE EXISTS(SELECT 1 FROM membership_scope_inner
+    i WHERE i.owner=o.id ORDER BY i.id OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+  noncritical: true
+- name: tsql Scalar row selection retains its ordered bound
+  syntax: tsql
+  sql: SELECT (SELECT TOP(1) i.amount FROM membership_scope_inner i WHERE i.owner=1 ORDER BY i.id) AS value_result
+  expect:
+    rows: 1
+    data:
+    - value_result: 5
+- name: tsql A scalar subquery still rejects multiple result rows
+  syntax: tsql
+  sql: SELECT (SELECT i.amount FROM membership_scope_inner i WHERE i.owner=1) AS value_result
+  expect:
+    error: true
+    contains: scalar subselect returned more than one row
+- name: psql EXISTS retains an empty row window
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE EXISTS(SELECT 1 FROM membership_scope_inner
+    i WHERE i.owner=o.id LIMIT 0) ORDER BY id
+  expect:
+    rows: 0
+    data: []
+  noncritical: true
+- name: psql EXISTS retains its per-caller row offset
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_scope_outer o WHERE EXISTS(SELECT 1 FROM membership_scope_inner
+    i WHERE i.owner=o.id ORDER BY i.id LIMIT 1 OFFSET 1) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 1
+  noncritical: true
+- name: psql Scalar row selection retains its ordered bound
+  syntax: psql
+  sql: SELECT (SELECT i.amount FROM membership_scope_inner i WHERE i.owner=1 ORDER BY i.id LIMIT 1) AS value_result
+  expect:
+    rows: 1
+    data:
+    - value_result: 5
+- name: psql A scalar subquery still rejects multiple result rows
+  syntax: psql
+  sql: SELECT (SELECT i.amount FROM membership_scope_inner i WHERE i.owner=1) AS value_result
+  expect:
+    error: true
+    contains: scalar subselect returned more than one row
+cleanup:
+- sql: DROP TABLE membership_scope_tags
+- sql: DROP TABLE membership_scope_inner
+- sql: DROP TABLE membership_scope_outer

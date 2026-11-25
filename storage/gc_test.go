@@ -588,7 +588,7 @@ func TestBlobManifestSurvivesUnchangedColdRebuild(t *testing.T) {
 	LoadDatabases()
 	db := GetDatabase("gcdb")
 	cold := db.GetTable("docs")
-	RebuildTable(cold, false, false)
+	RebuildTable(cold, false, false, nil)
 	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

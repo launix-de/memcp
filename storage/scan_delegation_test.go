@@ -39,7 +39,7 @@ func TestScanDelegationColdSingleAndMixedShards(t *testing.T) {
 	for _, multi := range []bool{false, true} {
 		t.Run(fmt.Sprint(multi), func(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "tscandelegation", 4)
-			RebuildTable(tbl, true, false)
+			RebuildTable(tbl, true, false, nil)
 			if multi {
 				if !tbl.beginManualRepartition() {
 					t.Fatal("manual repartition was not claimed")
@@ -56,7 +56,7 @@ func TestScanDelegationColdSingleAndMixedShards(t *testing.T) {
 			var sum int64
 			var count int64
 			lease := remote.GetRead(nil, false)
-			reader := remote.ColumnReaderTx(nil, "id", false, ReadAuto)
+			reader := remote.ColumnReaderTx(nil, "id", false, ReadAuto, remote.t.bindColumnInput(nil))
 			for id := uint32(0); id < remote.main_count; id++ {
 				sum += reader.GetValue(id).Int()
 				count++
@@ -194,7 +194,7 @@ func TestScanDelegationPreservesNativeExistsAndBatchInvocation(t *testing.T) {
 	for _, exists := range []bool{true, false} {
 		t.Run(fmt.Sprint("exists=", exists), func(t *testing.T) {
 			table, _ := createDurabilityTestTable(t, "t_scan_family_delegate", 4)
-			RebuildTable(table, true, false)
+			RebuildTable(table, true, false, nil)
 			shard := table.ActiveShards()[0]
 			var freed [numEvictableTypes]int64
 			if !shardCleanup(shard, &freed) {

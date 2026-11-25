@@ -1,0 +1,327 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Each UNIQUE UPDATE probe omits only its exact physical source while retaining original transaction visibility and real other-row violations
+setup:
+- sql: DROP TABLE IF EXISTS unique_self_rollback
+- sql: DROP TABLE IF EXISTS unique_self_commit
+- sql: DROP TABLE IF EXISTS unique_self_multi
+- sql: DROP TABLE IF EXISTS unique_self_main
+- sql: DROP TABLE IF EXISTS unique_self_replace
+- sql: CREATE TABLE unique_self_rollback(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+- sql: INSERT unique_self_rollback VALUES(1,10),(2,20)
+- sql: ALTER TABLE unique_self_rollback ADD CONSTRAINT UQ_unique_self_rollback UNIQUE(value)
+- sql: CREATE TABLE unique_self_commit(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+- sql: INSERT unique_self_commit VALUES(1,10),(2,20)
+- sql: ALTER TABLE unique_self_commit ADD CONSTRAINT UQ_unique_self_commit UNIQUE(value)
+- sql: CREATE TABLE unique_self_multi(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+- sql: INSERT unique_self_multi VALUES(1,10),(2,20)
+- sql: ALTER TABLE unique_self_multi ADD CONSTRAINT UQ_unique_self_multi UNIQUE(value)
+- sql: CREATE TABLE unique_self_main(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+- sql: INSERT unique_self_main VALUES(1,10),(2,20)
+- sql: ALTER TABLE unique_self_main ADD CONSTRAINT UQ_unique_self_main UNIQUE(value)
+- sql: CREATE TABLE unique_self_replace(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+- sql: INSERT unique_self_replace VALUES(1,10),(2,20)
+- sql: ALTER TABLE unique_self_replace ADD CONSTRAINT UQ_unique_self_replace UNIQUE(value)
+- scm: (rebuild (table "memcp-tests" false "unique_self_main" false nil) true false)
+test_cases:
+- name: Sequential staged replacements retain owner observer savepoint and full rollback values
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE unique_self_rollback SET value=11 WHERE id=1
+    - connection: owner
+      sql: SAVE TRAN after_first
+    - connection: owner
+      sql: UPDATE unique_self_rollback SET value=12 WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM unique_self_rollback ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 12
+        - id: 2
+          value: 20
+    - connection: observer
+      sql: SELECT id,value FROM unique_self_rollback ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: ROLLBACK TRAN after_first
+    - connection: owner
+      sql: SELECT id,value FROM unique_self_rollback ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 11
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: UPDATE unique_self_rollback SET value=13 WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM unique_self_rollback ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 13
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: owner
+      sql: SELECT id,value FROM unique_self_rollback ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: observer
+      sql: SELECT id,value FROM unique_self_rollback ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+- name: Two original staged updates commit one final row without exposing an intermediate version
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE unique_self_commit SET value=11 WHERE id=1
+    - connection: owner
+      sql: UPDATE unique_self_commit SET value=12 WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM unique_self_commit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 12
+        - id: 2
+          value: 20
+    - connection: observer
+      sql: SELECT id,value FROM unique_self_commit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,value FROM unique_self_commit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 12
+        - id: 2
+          value: 20
+- name: A genuinely different UNIQUE or PRIMARY row still rejects after a staged replacement
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE unique_self_commit SET value=13 WHERE id=1
+    - connection: owner
+      sql: UPDATE unique_self_commit SET value=20 WHERE id=1
+      expect:
+        error: true
+        contains:
+        - Duplicate entry
+    - connection: owner
+      sql: SELECT id,value FROM unique_self_commit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 13
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: UPDATE unique_self_commit SET id=2 WHERE id=1
+      expect:
+        error: true
+        contains:
+        - PRIMARY
+    - connection: owner
+      sql: SELECT id,value FROM unique_self_commit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 13
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - depth: 1
+    - connection: observer
+      sql: SELECT id,value FROM unique_self_commit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 12
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: UPDATE unique_self_commit SET value=14 WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM unique_self_commit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 14
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: owner
+      sql: SELECT id,value FROM unique_self_commit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 12
+        - id: 2
+          value: 20
+- name: A multirow mapper keeps each update exclusion private across repeated statements
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE unique_self_multi SET value=value+1
+    - connection: owner
+      sql: UPDATE unique_self_multi SET value=value+1
+    - connection: owner
+      sql: SELECT id,value FROM unique_self_multi ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 12
+        - id: 2
+          value: 22
+    - connection: observer
+      sql: SELECT id,value FROM unique_self_multi ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,value FROM unique_self_multi ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 12
+        - id: 2
+          value: 22
+- name: Main storage and later staged delta replacements retain the same unique contract
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE unique_self_main SET value=11 WHERE id=1
+    - connection: owner
+      sql: UPDATE unique_self_main SET value=12 WHERE id=1
+    - connection: owner
+      sql: SAVE TRAN main_delta
+    - connection: owner
+      sql: UPDATE unique_self_main SET value=13 WHERE id=1
+    - connection: owner
+      sql: ROLLBACK TRAN main_delta
+    - connection: owner
+      sql: SELECT id,value FROM unique_self_main ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 12
+        - id: 2
+          value: 20
+    - connection: observer
+      sql: SELECT id,value FROM unique_self_main ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: owner
+      sql: SELECT id,value FROM unique_self_main ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+- name: REPLACE keeps its original collision callback and first complete row
+  syntax: mysql
+  sql: REPLACE INTO unique_self_replace(id,value) VALUES(1,11)
+- name: A second REPLACE retains exact physical self exclusion
+  syntax: mysql
+  sql: REPLACE INTO unique_self_replace(id,value) VALUES(1,12)
+- name: Ordinary INSERT still sees a different existing unique value
+  syntax: mysql
+  sql: INSERT INTO unique_self_replace(id,value) VALUES(3,20)
+  expect:
+    error: true
+    contains: Duplicate entry
+- name: REPLACE and rejected INSERT preserve all complete final values
+  syntax: mysql
+  sql: SELECT id,value FROM unique_self_replace ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 12
+    - id: 2
+      value: 20
+cleanup:
+- sql: DROP TABLE IF EXISTS unique_self_rollback
+- sql: DROP TABLE IF EXISTS unique_self_commit
+- sql: DROP TABLE IF EXISTS unique_self_multi
+- sql: DROP TABLE IF EXISTS unique_self_main
+- sql: DROP TABLE IF EXISTS unique_self_replace

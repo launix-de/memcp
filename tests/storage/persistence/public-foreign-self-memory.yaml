@@ -1,0 +1,50 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: One self endpoint retains its native FK directory and program containers through savepoints and publication
+setup:
+- sql: CREATE TABLE self_memory_tree(id INT PRIMARY KEY,parent_id INT)
+- sql: INSERT INTO self_memory_tree VALUES(1,NULL),(2,1)
+cleanup:
+- sql: DROP TABLE IF EXISTS self_memory_tree
+test_cases:
+- name: Self declaration savepoint zero retires its private directory and restages one native endpoint
+  scm: |
+    (begin
+      (define t (table "memcp-tests" false "self_memory_tree" false nil))
+      (define bytes (lambda () ((show t "memory") "metadata_size_bytes")))
+      (define initial (bytes))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define zero (tx_savepoint tx))
+      (createforeignkey t "FK_self_memory" '("parent_id") t '("id") "restrict" "restrict" tx)
+      (define staged (bytes))
+      (define one (equal? (count ((show t "constraints" tx) "ForeignKeys")) 1))
+      (define stable (equal? staged (bytes)))
+      (tx_rollback_to_savepoint tx zero)
+      (define rewound (bytes))
+      (define empty (empty_list? ((show t "constraints" tx) "ForeignKeys")))
+      (createforeignkey t "FK_self_memory" '("parent_id") t '("id") "restrict" "restrict" tx)
+      (tx_commit owner)
+      (define committed (bytes))
+      (define inserted (insert t '("id" "parent_id") (list (list 3 3))))
+      (and one stable empty (> rewound initial) (> (- staged rewound) 1024)
+        (> committed initial) (equal? inserted 1)
+        (equal? (count ((show t "constraints") "ForeignKeys")) 1)))
+  expect: {result: true}
+
+- name: Actual self point validation rejects an orphan and removal releases generated payload
+  scm: |
+    (begin
+      (define t (table "memcp-tests" false "self_memory_tree" false nil))
+      (define rejected (try (lambda () (begin (insert t '("id" "parent_id") (list (list 4 999))) false))
+        (lambda (failure) (strlike (concat failure) "%foreign key constraint%"))))
+      (define before ((show t "memory") "metadata_size_bytes"))
+      (define dropped (dropforeignkey t "FK_self_memory"))
+      (define after ((show t "memory") "metadata_size_bytes"))
+      (define inserted (insert t '("id" "parent_id") (list (list 4 999))))
+      (and rejected dropped (> (- before after) 1024) (equal? inserted 1)
+        (empty_list? ((show t "constraints") "ForeignKeys"))
+        (equal? (scan nil t '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +) 10)))
+  expect: {result: true}

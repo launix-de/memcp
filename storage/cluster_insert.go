@@ -5,9 +5,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "fmt"
+import "math"
 import "time"
 import "bytes"
 import "context"
+import "strconv"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage/mosi"
@@ -16,29 +18,56 @@ import "github.com/launix-de/memcp/storage/mosi"
 // is no seed/master allocator, second counter, or durable permissions catalog.
 // Requests are once per INSERT batch/block, before any shard lock or ownership.
 type clusterIDRequest struct {
-	Database string `json:"database"`
-	Table    string `json:"table"`
-	Explicit uint64 `json:"explicit"`
-	Count    uint64 `json:"count"`
+	Database         string `json:"database"`
+	Table            string `json:"table"`
+	Identity         string `json:"identity"`
+	Read             bool   `json:"read"`
+	ObservedExplicit bool   `json:"observed_explicit"`
+	Explicit         uint64 `json:"explicit"`
+	Count            uint64 `json:"count"`
+	SignedExplicit   string `json:"signed_explicit,omitempty"`
+	Advance          bool   `json:"advance,omitempty"`
 }
 
 type clusterIDReply struct {
-	Base uint64 `json:"base"`
+	Base  uint64              `json:"base"`
+	Range *tableIDReservation `json:"range,omitempty"`
+	State tableAllocatorState `json:"state"`
 }
 
-func (cluster *nodeCluster) reserveInsertIDs(t *table, explicit, count uint64) uint64 {
+func (cluster *nodeCluster) reserveInsertIDs(t *table, input tableIDExplicit, count uint64) tableIDReservation {
 	if cluster == nil {
 		panic(mosi.NetworkError)
 	}
-	request := clusterIDRequest{t.schema.Name, t.Name, explicit, count}
+	request := clusterIDRequest{Database: t.schema.Name, Table: t.Name, Identity: t.RuntimeIdentity, Explicit: input.High, Count: count, ObservedExplicit: input.Observed, Advance: input.Advance}
+	if input.Observed {
+		request.SignedExplicit = strconv.FormatInt(input.Value, 10)
+	}
 	reply, err := cluster.reserveIDs(cluster.ctx, request)
 	if err != nil {
 		panic(err)
 	}
 	// This is only an advisory local high-water snapshot. Future reservations
 	// always consult the current schema owner, including after a handover.
-	t.reserveLocalAutoIncrement(reply.Base+count, 0)
-	return reply.Base
+	if request.Identity == "" {
+		if reply.State != (tableAllocatorState{}) {
+			panic("legacy table allocator reply cannot carry provenance")
+		}
+		t.mergeRecoveredAutoIncrement(reply.Base + count)
+	} else {
+		high := reply.State.High
+		if reply.State.Version == 1 {
+			high = max(high, reply.Base+count)
+		}
+		t.mergeImportedAllocator(reply.State, high)
+	}
+	if reply.State.Version == 2 {
+		if reply.Range == nil {
+			panic("allocator epoch reply is missing its signed range")
+		}
+		return *reply.Range
+	}
+	return legacyTableIDReservation(reply.Base, count)
 }
 
 func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDRequest) (reply clusterIDReply, err error) {
@@ -47,7 +76,10 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 			err = fmt.Errorf("%v", failure)
 		}
 	}()
-	if !cluster.databases[request.Database] || request.Table == "" {
+	if request.SignedExplicit != "" && !request.ObservedExplicit {
+		return reply, fmt.Errorf("signed allocator input requires explicit-ID provenance")
+	}
+	if !cluster.databases[request.Database] || request.Table == "" || (request.Read && (request.Identity == "" || request.Count != 0 || request.Explicit != 0 || request.ObservedExplicit || request.SignedExplicit != "" || request.Advance)) {
 		return reply, fmt.Errorf("invalid cluster ID reservation")
 	}
 	owner, err := cluster.locate(ctx, mosiResource{Database: request.Database})
@@ -59,12 +91,22 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 		if peer == nil {
 			return reply, fmt.Errorf(mosi.NetworkError)
 		}
-		err = cluster.service.control(ctx, peer, "cluster.reserve_ids", request, &reply, true)
+		err = cluster.service.control(ctx, peer, "cluster.table_ids", request, &reply, true)
 		return reply, err
 	}
 	db := GetDatabase(request.Database)
 	if db == nil {
 		return reply, fmt.Errorf("ID reservation database disappeared")
+	}
+	if !request.Read {
+		target := db.tables.Get(request.Table)
+		if target == nil || target.RuntimeIdentity != request.Identity {
+			return reply, fmt.Errorf("ID reservation table generation disappeared")
+		}
+		// Legacy row-WAL recovery owns ordinary native reads before entering
+		// schema coordination. A row callback needing another reservation must
+		// never wait for a coordinator which itself waits for that row's shard.
+		target.prepareAllocatorRecovery()
 	}
 	// Reservation changes the atomic runtime counter, not the logical schema.
 	// Reuse the owner's existing directory transition boundary so a handover
@@ -79,10 +121,30 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 	}
 	defer releaseCoordination()
 	t := db.tables.Get(request.Table)
-	if t == nil {
-		return reply, fmt.Errorf("ID reservation table disappeared")
+	if t == nil || t.RuntimeIdentity != request.Identity || (request.Identity == "" && t.allocatorSnapshot() != nil) {
+		return reply, fmt.Errorf("ID reservation table generation disappeared")
 	}
-	reply.Base = t.reserveLocalAutoIncrement(request.Explicit, request.Count)
+	if request.Read {
+		reply.State = t.localTableAllocator()
+		return reply, nil
+	}
+	input := tableIDExplicit{High: request.Explicit, Observed: request.ObservedExplicit, Advance: request.Advance}
+	if request.SignedExplicit != "" {
+		input.Value = allocatorSignedDecimal(request.SignedExplicit)
+	} else if request.Explicit <= math.MaxInt64 {
+		input.Value = int64(request.Explicit)
+	}
+	if state := t.localTableAllocator(); state.Version == 2 && input.Observed && request.SignedExplicit == "" {
+		return reply, fmt.Errorf("allocator epoch requires signed explicit-ID provenance")
+	}
+	reservation := t.reserveLocalAutoIncrement(input, request.Count)
+	reply.Base = reservation.LegacyBase
+	if t.localTableAllocator().Version == 2 {
+		reply.Range = &reservation
+	}
+	if request.Identity != "" {
+		reply.State = t.localTableAllocator()
+	}
 	// Persist reservations before acknowledging: other nodes can commit their
 	// allocated IDs without returning the allocator's shard WAL to this node.
 	// An interrupted request may leave a gap and must never be blindly replayed.
@@ -90,7 +152,10 @@ func (cluster *nodeCluster) reserveIDs(ctx context.Context, request clusterIDReq
 	return reply, nil
 }
 
-func (cluster *nodeCluster) handleIDReservation(ctx context.Context, data []byte) (any, error) {
+func (cluster *nodeCluster) handleIDReservation(ctx context.Context, source string, data []byte) (any, error) {
+	if err := cluster.requireMember(source); err != nil {
+		return nil, err
+	}
 	var request clusterIDRequest
 	if err := unmarshalNode(data, &request); err != nil {
 		return nil, err
@@ -105,6 +170,13 @@ func (r *replicationManager) mergeClusterInsertTopology(previous, incoming *tabl
 	if previous.ShardMode != ShardModeFree || incoming.ShardMode != ShardModeFree {
 		return false, nil
 	}
+	previousAllocator, incomingAllocator := previous.localTableAllocator(), incoming.localTableAllocator()
+	if previousAllocator.Version != incomingAllocator.Version || previousAllocator.Epoch != incomingAllocator.Epoch {
+		// Schema coherence owns epoch replacement. An append-only topology merge
+		// cannot reinterpret the old schema's selected allocator authority.
+		return false, nil
+	}
+
 	before, after := previous.activeTopology(), incoming.activeTopology()
 	if len(after.shards) <= len(before.shards) {
 		return false, nil
@@ -142,7 +214,7 @@ func (r *replicationManager) mergeClusterInsertTopology(previous, incoming *tabl
 		}
 		cell.current.Store(next)
 	}
-	previous.reserveLocalAutoIncrement(atomic.LoadUint64(&incoming.Auto_increment), 0)
+	previous.mergeImportedAllocator(incoming.localTableAllocator(), atomic.LoadUint64(&incoming.Auto_increment))
 	previous.mu.Lock()
 	defer previous.mu.Unlock()
 	for _, shard := range after.shards[len(before.shards):] {
@@ -357,7 +429,7 @@ func (database *database) executeInsertTask(ctx context.Context, session *scanRP
 	defer invocation.close()
 	lease := database.GetRead(invocation.tx)
 	defer lease.Release()
-	table := database.GetTable(request.Table)
+	table := database.GetTableForTx(request.Table, false, invocation.tx)
 	if table == nil || table.filterSchemaFingerprint() != request.Schema {
 		return nil, fmt.Errorf("remote INSERT schema changed")
 	}

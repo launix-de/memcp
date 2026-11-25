@@ -1,0 +1,126 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  description: Retained cost guards observe current source generations before dependent
+    estimates
+  isolated: true
+test_cases:
+- name: An empty search compiles against its original catalog generation
+  setup:
+  - sql: DROP TABLE IF EXISTS guard_assignment
+  - sql: DROP TABLE IF EXISTS guard_override
+  - sql: DROP TABLE IF EXISTS guard_document
+  - sql: DROP TABLE IF EXISTS guard_file
+  - sql: DROP TABLE IF EXISTS guard_site
+  - sql: CREATE TABLE guard_site (id INT PRIMARY KEY, direct_flag INT) ENGINE=sloppy
+  - sql: CREATE TABLE guard_assignment (site_id INT, actor_id INT, allowed INT) ENGINE=sloppy
+  - sql: CREATE TABLE guard_override (site_id INT, actor_id INT, allowed INT) ENGINE=sloppy
+  - sql: "CREATE TABLE guard_file (\n  id INT PRIMARY KEY,\n  filename VARCHAR(255),\n\
+      \  search_text VARCHAR(1024)\n) ENGINE=sloppy\n"
+  - sql: "CREATE TABLE guard_document (\n  id INT PRIMARY KEY,\n  site_id INT,\n \
+      \ tenant_id INT,\n  file_id INT,\n  inventory_no VARCHAR(64),\n  sort_key INT\n\
+      ) ENGINE=sloppy\n"
+  - scm: "(begin\n  (define file_count (max 100 (floor (/ 4 2))))\n  (insert (table\
+      \ \"memcp-tests\" false \"guard_site\" false nil) '(\"id\" \"direct_flag\")\n\
+      \    (map (produceN 64) (lambda (i)\n      (list i (if (equal? (mod i 16) 0)\
+      \ 1 0)))))\n  (insert (table \"memcp-tests\" false \"guard_assignment\" false\
+      \ nil) '(\"site_id\" \"actor_id\" \"allowed\")\n    (map (produceN 32) (lambda\
+      \ (i) (list (* i 2) 7 1))))\n  (insert (table \"memcp-tests\" false \"guard_override\"\
+      \ false nil) '(\"site_id\" \"actor_id\" \"allowed\")\n    (map (produceN 22)\
+      \ (lambda (i) (list (* i 3) 7 1))))\n  (insert (table \"memcp-tests\" false\
+      \ \"guard_file\" false nil) '(\"id\" \"filename\" \"search_text\")\n    (map\
+      \ (produceN file_count) (lambda (i)\n      (list i\n        (if (equal? (mod\
+      \ i 100) 0)\n          (concat \"rare-document-file-\" (string i))\n       \
+      \   (if (equal? (mod i 5) 0)\n            (concat \"common-document-file-\"\
+      \ (string i))\n            (concat \"ordinary-file-\" (string i))))\n      \
+      \  (concat\n          (string_repeat\n            (if (equal? (mod i 128) 0)\n\
+      \              \"rare-document-text-\"\n              (if (equal? (mod i 7)\
+      \ 0) \"common-document-text-\" \"ordinary-text-\"))\n            8)\n      \
+      \    (string i))))))\n  (insert (table \"memcp-tests\" false \"guard_document\"\
+      \ false nil)\n    '(\"id\" \"site_id\" \"tenant_id\" \"file_id\" \"inventory_no\"\
+      \ \"sort_key\")\n    (map (produceN 4) (lambda (i)\n      (list i (mod i 64)\
+      \ (mod i 32) (mod i file_count)\n        (if (equal? (mod i 100) 0)\n      \
+      \    (concat \"inv-special-\" (string i))\n          (if (equal? (mod i 4) 0)\n\
+      \            (concat \"inv-common-\" (string i))\n            (concat \"inventory-\"\
+      \ (string i))))\n        i))))\n  (rebuild))\n"
+  - sql: SELECT id FROM guard_file WHERE filename LIKE '%common-document%'
+  - sql: SELECT id FROM guard_file WHERE search_text LIKE '%common-document%'
+  sql: "SELECT d.*\nFROM guard_document d\nWHERE d.inventory_no LIKE '%definitely-absent-token%'\n\
+    \  AND COALESCE((\n    SELECT CASE WHEN site.direct_flag = 1 THEN TRUE ELSE (\n\
+    \      EXISTS (\n        SELECT TRUE\n        FROM guard_assignment assignment\n\
+    \        WHERE assignment.site_id = site.id\n          AND assignment.actor_id\
+    \ = 7\n          AND assignment.allowed = 1\n        LIMIT 1\n      ) OR COALESCE((\n\
+    \        SELECT override.allowed\n        FROM guard_override override\n     \
+    \   WHERE override.site_id = site.id\n          AND override.actor_id = 7\n  \
+    \      LIMIT 1\n      ), FALSE)\n    ) END\n    FROM guard_site site\n    WHERE\
+    \ site.id = d.site_id\n    LIMIT 1\n  ), FALSE)\nORDER BY d.sort_key DESC\nLIMIT\
+    \ 72\n"
+  expect:
+    rows: 0
+    data: []
+- name: A recreated search source rebinds before evaluating retained cost inputs
+  setup:
+  - sql: DROP TABLE IF EXISTS guard_assignment
+  - sql: DROP TABLE IF EXISTS guard_override
+  - sql: DROP TABLE IF EXISTS guard_document
+  - sql: DROP TABLE IF EXISTS guard_file
+  - sql: DROP TABLE IF EXISTS guard_site
+  - sql: CREATE TABLE guard_site (id INT PRIMARY KEY, direct_flag INT) ENGINE=sloppy
+  - sql: CREATE TABLE guard_assignment (site_id INT, actor_id INT, allowed INT) ENGINE=sloppy
+  - sql: CREATE TABLE guard_override (site_id INT, actor_id INT, allowed INT) ENGINE=sloppy
+  - sql: "CREATE TABLE guard_file (\n  id INT PRIMARY KEY,\n  filename VARCHAR(255),\n\
+      \  search_text VARCHAR(1024)\n) ENGINE=sloppy\n"
+  - sql: "CREATE TABLE guard_document (\n  id INT PRIMARY KEY,\n  site_id INT,\n \
+      \ tenant_id INT,\n  file_id INT,\n  inventory_no VARCHAR(64),\n  sort_key INT\n\
+      ) ENGINE=sloppy\n"
+  - scm: "(begin\n  (define file_count (max 100 (floor (/ 4 2))))\n  (insert (table\
+      \ \"memcp-tests\" false \"guard_site\" false nil) '(\"id\" \"direct_flag\")\n\
+      \    (map (produceN 64) (lambda (i)\n      (list i (if (equal? (mod i 16) 0)\
+      \ 1 0)))))\n  (insert (table \"memcp-tests\" false \"guard_assignment\" false\
+      \ nil) '(\"site_id\" \"actor_id\" \"allowed\")\n    (map (produceN 32) (lambda\
+      \ (i) (list (* i 2) 7 1))))\n  (insert (table \"memcp-tests\" false \"guard_override\"\
+      \ false nil) '(\"site_id\" \"actor_id\" \"allowed\")\n    (map (produceN 22)\
+      \ (lambda (i) (list (* i 3) 7 1))))\n  (insert (table \"memcp-tests\" false\
+      \ \"guard_file\" false nil) '(\"id\" \"filename\" \"search_text\")\n    (map\
+      \ (produceN file_count) (lambda (i)\n      (list i\n        (if (equal? (mod\
+      \ i 100) 0)\n          (concat \"rare-document-file-\" (string i))\n       \
+      \   (if (equal? (mod i 5) 0)\n            (concat \"common-document-file-\"\
+      \ (string i))\n            (concat \"ordinary-file-\" (string i))))\n      \
+      \  (concat\n          (string_repeat\n            (if (equal? (mod i 128) 0)\n\
+      \              \"rare-document-text-\"\n              (if (equal? (mod i 7)\
+      \ 0) \"common-document-text-\" \"ordinary-text-\"))\n            8)\n      \
+      \    (string i))))))\n  (insert (table \"memcp-tests\" false \"guard_document\"\
+      \ false nil)\n    '(\"id\" \"site_id\" \"tenant_id\" \"file_id\" \"inventory_no\"\
+      \ \"sort_key\")\n    (map (produceN 4) (lambda (i)\n      (list i (mod i 64)\
+      \ (mod i 32) (mod i file_count)\n        (if (equal? (mod i 100) 0)\n      \
+      \    (concat \"inv-special-new-\" (string i))\n          (if (equal? (mod i\
+      \ 4) 0)\n            (concat \"inv-common-\" (string i))\n            (concat\
+      \ \"inventory-\" (string i))))\n        i))))\n  (rebuild))\n"
+  - sql: SELECT id FROM guard_file WHERE filename LIKE '%common-document%'
+  - sql: SELECT id FROM guard_file WHERE search_text LIKE '%common-document%'
+  sql: "SELECT d.*\nFROM guard_document d\nWHERE d.inventory_no LIKE '%inv-special%'\n\
+    \  AND COALESCE((\n    SELECT CASE WHEN site.direct_flag = 1 THEN TRUE ELSE (\n\
+    \      EXISTS (\n        SELECT TRUE\n        FROM guard_assignment assignment\n\
+    \        WHERE assignment.site_id = site.id\n          AND assignment.actor_id\
+    \ = 7\n          AND assignment.allowed = 1\n        LIMIT 1\n      ) OR COALESCE((\n\
+    \        SELECT override.allowed\n        FROM guard_override override\n     \
+    \   WHERE override.site_id = site.id\n          AND override.actor_id = 7\n  \
+    \      LIMIT 1\n      ), FALSE)\n    ) END\n    FROM guard_site site\n    WHERE\
+    \ site.id = d.site_id\n    LIMIT 1\n  ), FALSE)\nORDER BY d.sort_key DESC\nLIMIT\
+    \ 72\n"
+  expect:
+    rows: 1
+    data:
+    - id: 0
+      site_id: 0
+      tenant_id: 0
+      file_id: 0
+      inventory_no: inv-special-new-0
+      sort_key: 0
+cleanup:
+- sql: DROP TABLE IF EXISTS guard_assignment
+- sql: DROP TABLE IF EXISTS guard_override
+- sql: DROP TABLE IF EXISTS guard_document
+- sql: DROP TABLE IF EXISTS guard_file
+- sql: DROP TABLE IF EXISTS guard_site

@@ -27,11 +27,17 @@ func (s *session) executeClusterRequest(ctx context.Context, request ClusterRequ
 	}
 	return NewNil(), fmt.Errorf("unsupported session request %q", request.Method)
 }
-func ProjectClusterAssoc(view Scmer, demands []Scmer) (Scmer, error) {
+func ProjectClusterAssoc(view Scmer, demands []ClusterCallDemand) (Scmer, error) {
 	values := view.Slice()
 	selected := make([]Scmer, 0, len(demands)*2)
-	for _, key := range demands {
-		if key.IsNil() {
+	for _, demand := range demands {
+		// Native associative writes and scoped factories always execute at the
+		// owner. They need its endpoint, never its unrelated public read values.
+		if demand.Arity >= 2 {
+			continue
+		}
+		key := demand.Key
+		if demand.Arity <= 0 || key.IsNil() {
 			return view, nil
 		}
 		value := NewNil()
@@ -46,7 +52,7 @@ func ProjectClusterAssoc(view Scmer, demands []Scmer) (Scmer, error) {
 	return NewSlice(selected), nil
 }
 
-func (*session) ProjectClusterView(view Scmer, demands []Scmer) (Scmer, error) {
+func (*session) ProjectClusterView(view Scmer, demands []ClusterCallDemand) (Scmer, error) {
 	return ProjectClusterAssoc(view, demands)
 }
 
@@ -133,8 +139,8 @@ func (s *clusterSession) executeClusterRequest(ctx context.Context, r ClusterReq
 	}
 	return s.handle.Call(ctx, r)
 }
-func (*clusterSession) ProjectClusterView(view Scmer, keys []Scmer) (Scmer, error) {
-	return ProjectClusterAssoc(view, keys)
+func (*clusterSession) ProjectClusterView(view Scmer, demands []ClusterCallDemand) (Scmer, error) {
+	return ProjectClusterAssoc(view, demands)
 }
 
 func (s *session) Serialize(ctx *SerializationContext) (Scmer, error) {

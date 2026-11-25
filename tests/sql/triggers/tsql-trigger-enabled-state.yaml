@@ -1,0 +1,256 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Durable statement trigger state preserves SQL effects and native constraints
+setup:
+- sql: DROP TABLE IF EXISTS trigger_footprint_abort
+- sql: DROP TABLE IF EXISTS trigger_footprint_grandchild
+- sql: DROP TABLE IF EXISTS trigger_footprint_child
+- sql: DROP TABLE IF EXISTS trigger_footprint_parent
+- sql: DROP TABLE IF EXISTS trigger_footprint_audit
+- sql: DROP TABLE IF EXISTS trigger_footprint_direct
+- sql: CREATE TABLE trigger_state_input(id INT PRIMARY KEY)
+- sql: CREATE TABLE trigger_state_log(id INT)
+- sql: CREATE TABLE trigger_state_other(id INT PRIMARY KEY)
+- sql: CREATE TABLE trigger_state_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE trigger_state_child(id INT PRIMARY KEY, parent_id INT, CONSTRAINT trigger_state_fk FOREIGN KEY(parent_id) REFERENCES trigger_state_parent(id))
+- sql: CREATE TRIGGER trigger_state_audit ON trigger_state_input AFTER INSERT,UPDATE AS INSERT INTO trigger_state_log SELECT id FROM inserted
+- sql: CREATE TRIGGER trigger_state_other_audit ON trigger_state_other AFTER INSERT AS PRINT N'other'
+- sql: CREATE TRIGGER trigger_state_child_audit ON trigger_state_child AFTER INSERT AS PRINT N'child'
+- sql: CREATE TABLE trigger_state_replace_input(id INT PRIMARY KEY)
+- sql: INSERT INTO trigger_state_replace_input VALUES(1),(2)
+- sql: CREATE TRIGGER trigger_state_replace_guard ON trigger_state_replace_input INSTEAD OF DELETE AS PRINT N'retained'
+- sql: CREATE TABLE trigger_footprint_parent(id INT PRIMARY KEY,marker INT NOT NULL UNIQUE,value INT NULL)
+- sql: CREATE TABLE trigger_footprint_child(id INT PRIMARY KEY,parent_id INT NOT NULL,value INT,CONSTRAINT trigger_footprint_parent_fk FOREIGN KEY(parent_id) REFERENCES trigger_footprint_parent(id) ON UPDATE CASCADE ON DELETE CASCADE)
+- sql: CREATE TABLE trigger_footprint_grandchild(id INT PRIMARY KEY,child_id INT NOT NULL,CONSTRAINT trigger_footprint_child_fk FOREIGN KEY(child_id) REFERENCES trigger_footprint_child(id) ON UPDATE CASCADE ON DELETE CASCADE)
+- sql: CREATE TABLE trigger_footprint_audit(kind INT,old_id INT,new_id INT,old_value INT,new_value INT)
+- sql: CREATE TABLE trigger_footprint_direct(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE trigger_footprint_abort(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO trigger_footprint_parent VALUES(1,7,NULL)
+- sql: INSERT INTO trigger_footprint_child VALUES(10,1,3)
+- sql: INSERT INTO trigger_footprint_grandchild VALUES(100,10)
+- sql: INSERT INTO trigger_footprint_direct VALUES(1,10)
+- sql: INSERT INTO trigger_footprint_abort VALUES(1,1)
+- sql: CREATE TRIGGER trigger_footprint_parent_audit ON trigger_footprint_parent AFTER UPDATE AS INSERT trigger_footprint_audit SELECT 1,d.id,i.id,d.value,i.value FROM deleted d INNER JOIN inserted i ON d.marker=i.marker
+- sql: CREATE TRIGGER trigger_footprint_child_audit ON trigger_footprint_child AFTER UPDATE AS INSERT trigger_footprint_audit SELECT 2,d.id,i.id,d.value,i.value FROM deleted d INNER JOIN inserted i ON d.id=i.id
+- sql: CREATE TRIGGER trigger_footprint_grandchild_audit ON trigger_footprint_grandchild AFTER UPDATE AS INSERT trigger_footprint_audit SELECT 3,0,id,0,0 FROM inserted
+- sql: CREATE TRIGGER trigger_footprint_abort_program ON trigger_footprint_abort AFTER UPDATE AS BEGIN ROLLBACK TRANSACTION; UPDATE trigger_footprint_parent SET id=21 WHERE id=11; END
+cleanup:
+- sql: DROP TABLE IF EXISTS trigger_footprint_abort
+- sql: DROP TABLE IF EXISTS trigger_footprint_grandchild
+- sql: DROP TABLE IF EXISTS trigger_footprint_child
+- sql: DROP TABLE IF EXISTS trigger_footprint_parent
+- sql: DROP TABLE IF EXISTS trigger_footprint_audit
+- sql: DROP TABLE IF EXISTS trigger_footprint_direct
+- sql: DROP TABLE IF EXISTS trigger_state_replace_input
+- sql: DROP TABLE IF EXISTS trigger_state_child
+- sql: DROP TABLE IF EXISTS trigger_state_parent
+- sql: DROP TABLE IF EXISTS trigger_state_other
+- sql: DROP TABLE IF EXISTS trigger_state_input
+- sql: DROP TABLE IF EXISTS trigger_state_log
+test_cases:
+- name: A named ALTER TABLE disables the existing declaration
+  sql: ALTER TABLE trigger_state_input DISABLE TRIGGER trigger_state_audit
+- name: Disabled trigger still exists with its exact source and event mask
+  scm: |
+    (begin
+      (define rows (show (table "memcp-tests" false "trigger_state_input" false nil) "statement_triggers"))
+      (define declaration (car rows))
+      (and (equal? (count rows) 1) (declaration "disabled")
+        (equal? (declaration "source") "INSERT INTO trigger_state_log SELECT id FROM inserted")
+        (expression_equal? (declaration "events") '("insert" "update"))))
+  expect: {result: true}
+- name: Base insertion continues while its audit trigger is disabled
+  sql: INSERT INTO trigger_state_input VALUES(1)
+- name: Disabled body publishes no audit row
+  sql: SELECT COUNT(*) AS total FROM trigger_state_log
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Standalone enable restores the existing body
+  sql: ENABLE TRIGGER dbo.trigger_state_audit ON dbo.trigger_state_input
+- name: Enabled insertion fires the retained body
+  sql: INSERT INTO trigger_state_input VALUES(2)
+- name: Only the enabled insertion is audited
+  sql: SELECT id FROM trigger_state_log ORDER BY id
+  expect: {rows: 1, data: [{id: 2}]}
+- name: Standalone disable has the same durable effect
+  sql: DISABLE TRIGGER trigger_state_audit ON trigger_state_input
+- name: Trigger source alteration enables a previously disabled trigger
+  sql: ALTER TRIGGER trigger_state_audit ON trigger_state_input AFTER INSERT,UPDATE AS INSERT INTO trigger_state_log SELECT id+10 FROM inserted
+- name: Altered enabled trigger executes its new source
+  sql: INSERT INTO trigger_state_input VALUES(3)
+- name: Source replacement and implicit enable are both visible
+  sql: SELECT id FROM trigger_state_log ORDER BY id
+  expect: {rows: 2, data: [{id: 2}, {id: 13}]}
+- name: A trigger on another table cannot be disabled by the wrong target
+  sql: ALTER TABLE trigger_state_input DISABLE TRIGGER trigger_state_other_audit
+  expect: {error: true, contains: does not belong to target table}
+- name: A mixed valid and missing list fails without disabling its valid prefix
+  sql: ALTER TABLE trigger_state_input DISABLE TRIGGER trigger_state_audit, trigger_state_missing
+  expect: {error: true, contains: does not belong to target table}
+- name: Invalid target list retains the active trigger state
+  scm: (not ((car (show (table "memcp-tests" false "trigger_state_input" false nil) "statement_triggers")) "disabled"))
+  expect: {result: true}
+- name: ALL selects user statement triggers on the named table
+  sql: ALTER TABLE trigger_state_child DISABLE TRIGGER ALL
+- name: ALL never disables native foreign key enforcement
+  sql: INSERT INTO trigger_state_child VALUES(1,999)
+  expect: {error: true, contains: foreign key}
+- name: Native constraint rejection still leaves the target empty
+  sql: SELECT COUNT(*) AS total FROM trigger_state_child
+  expect: {rows: 1, data: [{total: 0}]}
+- name: ALL can enable the same statement declarations again
+  sql: ALTER TABLE trigger_state_child ENABLE TRIGGER ALL
+- name: Native savepoint rollback restores enabled state and external visibility
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define input (table "memcp-tests" false "trigger_state_input" false tx))
+      (define saved (tx_savepoint tx))
+      (statement_trigger_state input '("trigger_state_audit") false tx)
+      (define own_disabled ((car (show input "statement_triggers" tx)) "disabled"))
+      (define outside_enabled (not ((car (show input "statement_triggers")) "disabled")))
+      (tx_rollback_to_savepoint tx saved)
+      (define restored (not ((car (show input "statement_triggers" tx)) "disabled")))
+      (tx_commit owner)
+      (and own_disabled outside_enabled restored
+        (not ((car (show input "statement_triggers")) "disabled")))))
+  expect: {result: true}
+- name: Whole transaction rollback removes a pending state change
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define input (table "memcp-tests" false "trigger_state_input" false tx))
+      (statement_trigger_state input nil false tx)
+      (tx_rollback owner)
+      (not ((car (show input "statement_triggers")) "disabled"))))
+  expect: {result: true}
+- name: A disabled replacement declaration permits the ordinary deletion
+  sql: DISABLE TRIGGER trigger_state_replace_guard ON trigger_state_replace_input
+- name: Ordinary deletion runs while its replacement is disabled
+  sql: DELETE FROM trigger_state_replace_input WHERE id=1
+  expect: {rows: 1, data: [{affected_rows: 1}]}
+- name: Disabling replacement preserves only the undeleted row
+  sql: SELECT id FROM trigger_state_replace_input
+  expect: {rows: 1, data: [{id: 2}]}
+- name: Reenable the existing replacement program
+  sql: ENABLE TRIGGER trigger_state_replace_guard ON trigger_state_replace_input
+- name: Enabled replacement prevents the base deletion again
+  sql: DELETE FROM trigger_state_replace_input WHERE id=2
+- name: Replacement body retains the actual original row
+  sql: SELECT id FROM trigger_state_replace_input
+  expect: {rows: 1, data: [{id: 2}]}
+- name: Disabled parent triggers permit an unrelated update with enabled cascading child declarations
+  sql: |-
+    BEGIN TRANSACTION;
+    ALTER TABLE trigger_footprint_parent DISABLE TRIGGER ALL;
+    UPDATE trigger_footprint_parent SET value=-1 WHERE value IS NULL;
+    ALTER TABLE trigger_footprint_parent ENABLE TRIGGER ALL;
+    COMMIT TRANSACTION;
+- name: The unrelated update changes only its actual parent value
+  sql: |-
+    SELECT 1 AS kind,id,marker AS related,value FROM trigger_footprint_parent
+    UNION ALL SELECT 2,id,parent_id,value FROM trigger_footprint_child
+    UNION ALL SELECT 3,id,child_id,0 FROM trigger_footprint_grandchild
+    ORDER BY kind,id
+  expect:
+    rows: 3
+    data:
+    - {kind: 1, id: 1, related: 7, value: -1}
+    - {kind: 2, id: 10, related: 1, value: 3}
+    - {kind: 3, id: 100, related: 10, value: 0}
+- name: Neither disabled parent nor unrelated child handlers publish an audit row
+  sql: SELECT kind,old_id,new_id,old_value,new_value FROM trigger_footprint_audit
+  expect: {rows: 0, data: []}
+- name: Reenabled parent updates retain their ordinary statement handler
+  sql: UPDATE trigger_footprint_parent SET value=-2 WHERE id=1
+- name: Only the actual reenabled parent update is audited
+  sql: SELECT kind,old_id,new_id,old_value,new_value FROM trigger_footprint_audit
+  expect:
+    rows: 1
+    data: [{kind: 1, old_id: 1, new_id: 1, old_value: -1, new_value: -2}]
+- name: A real cascade honors a transactionally disabled child handler and leaves the unrelated grandchild alone
+  sql: |-
+    BEGIN TRANSACTION;
+    ALTER TABLE trigger_footprint_child DISABLE TRIGGER ALL;
+    UPDATE trigger_footprint_parent SET id=11 WHERE id=1;
+    ALTER TABLE trigger_footprint_child ENABLE TRIGGER ALL;
+    COMMIT TRANSACTION;
+- name: Native cascade changes the child reference without changing its own referenced key
+  sql: |-
+    SELECT 1 AS kind,id,marker AS related,value FROM trigger_footprint_parent
+    UNION ALL SELECT 2,id,parent_id,value FROM trigger_footprint_child
+    UNION ALL SELECT 3,id,child_id,0 FROM trigger_footprint_grandchild
+    ORDER BY kind,id
+  expect:
+    rows: 3
+    data:
+    - {kind: 1, id: 11, related: 7, value: -2}
+    - {kind: 2, id: 10, related: 11, value: 3}
+    - {kind: 3, id: 100, related: 10, value: 0}
+- name: The key cascade invokes only the enabled parent handler
+  sql: SELECT kind,old_id,new_id,old_value,new_value FROM trigger_footprint_audit ORDER BY kind,old_id,new_id
+  expect:
+    rows: 2
+    data:
+    - {kind: 1, old_id: 1, new_id: 1, old_value: -1, new_value: -2}
+    - {kind: 1, old_id: 1, new_id: 11, old_value: -2, new_value: -2}
+- name: Reenabled child updates skip cascades for the unchanged child key
+  sql: UPDATE trigger_footprint_child SET value=4 WHERE id=10
+- name: Reenabled child handler observes its actual original and new values
+  sql: SELECT kind,old_id,new_id,old_value,new_value FROM trigger_footprint_audit ORDER BY kind,old_id,new_id
+  expect:
+    rows: 3
+    data:
+    - {kind: 1, old_id: 1, new_id: 1, old_value: -1, new_value: -2}
+    - {kind: 1, old_id: 1, new_id: 11, old_value: -2, new_value: -2}
+    - {kind: 2, old_id: 10, new_id: 10, old_value: 3, new_value: 4}
+- name: Post rollback continuation retains native cascades while suppressing installed user handlers
+  sql: UPDATE trigger_footprint_abort SET value=50 WHERE id=1
+  expect: {error: true}
+- name: Autonomous suffix commits the parent and native child cascade while the original update rolls back
+  sql: |-
+    SELECT 1 AS kind,id,marker AS related,value FROM trigger_footprint_parent
+    UNION ALL SELECT 2,id,parent_id,value FROM trigger_footprint_child
+    UNION ALL SELECT 3,id,child_id,0 FROM trigger_footprint_grandchild
+    UNION ALL SELECT 4,id,0,value FROM trigger_footprint_abort
+    ORDER BY kind,id
+  expect:
+    rows: 4
+    data:
+    - {kind: 1, id: 21, related: 7, value: -2}
+    - {kind: 2, id: 10, related: 21, value: 4}
+    - {kind: 3, id: 100, related: 10, value: 0}
+    - {kind: 4, id: 1, related: 0, value: 1}
+- name: Native post rollback cascade leaves all installed user handlers suppressed
+  sql: SELECT kind,old_id,new_id,old_value,new_value FROM trigger_footprint_audit ORDER BY kind,old_id,new_id
+  expect:
+    rows: 3
+    data:
+    - {kind: 1, old_id: 1, new_id: 1, old_value: -1, new_value: -2}
+    - {kind: 1, old_id: 1, new_id: 11, old_value: -2, new_value: -2}
+    - {kind: 2, old_id: 10, new_id: 10, old_value: 3, new_value: 4}
+- name: A malformed native explicit assignment is rejected before a BEFORE callback or any row effect
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "trigger_footprint_direct" false nil))
+      (createtrigger target "trigger_footprint_before" "before_update" "" ""
+        (lambda (OLD NEW session tx) (begin (session "before_called" true) NEW)) true)
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define rejected (try (lambda () (begin
+        (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+          (scan bound target '() '() '() (lambda () true) '("$update")
+            (lambda (count update) (begin (update '("id" 2)) (+ count 1))) 0 +)))
+        false)) (lambda (cause)
+          (strlike (string (failure_value cause)) "%native UPDATE assignment is outside its declared columns: id%"))))
+      (define values (scan tx target '() '() '() (lambda () true) '("id" "value")
+        (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define result (list rejected (nil? (owner "before_called")) values))
+      (tx_rollback owner)
+      result)
+  expect:
+    result: [true, true, [[1, 10]]]

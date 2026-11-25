@@ -1,0 +1,143 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Frozen before measurement: widths 1/12/48, twelve month arguments repeated
+# four times at width48, five samples, no warmup, total aggregation, 10s budget.
+# Feature initialization is measured separately so old baselines can report
+# missing relational functions through the existing measured-case contract.
+metadata:
+  syntax: tsql
+  isolated: true
+  perf_ci: true
+  performance_shard_weight: 8
+  max_regression_pct: 20
+  description: Aggregate operand contracts do not duplicate relational function expansion
+setup:
+- sql: CREATE TABLE aggregate_witness_values(id INT,month_id INT,amount INT,PRIMARY KEY(id,month_id))
+- sql: INSERT aggregate_witness_values VALUES(1,1,1),(1,2,2),(1,3,3),(1,4,4),(1,5,5),(1,6,6),(1,7,7),(1,8,8),(1,9,9),(1,10,10),(1,11,11),(1,12,12),(2,1,NULL),(2,2,NULL),(2,3,NULL),(2,4,NULL),(2,5,NULL),(2,6,NULL),(2,7,NULL),(2,8,NULL),(2,9,NULL),(2,10,NULL),(2,11,NULL),(2,12,NULL),(3,1,-3),(3,2,5)
+- sql: CREATE TABLE aggregate_witness_callers(row_id INT PRIMARY KEY,group_id INT,lookup_id INT,include_flag INT)
+- sql: INSERT aggregate_witness_callers VALUES(1,1,1,1),(2,1,1,1),(3,2,2,1),(4,3,9,1),(5,4,1,0),(6,5,3,1)
+- scm: |
+    (begin
+      (globalvars "__aggregate_witness_declarations" (map (list 1 12 48) (lambda (width)
+        (list width (concat "CREATE OR ALTER VIEW aggregate_witness_view_" width
+          " AS SELECT group_id,"
+          (reduce (produceN width) (lambda (text index)
+            (concat text (if (equal? index 0) "" ",")
+              "SUM(CASE WHEN include_flag=1 THEN dbo.aggregate_witness_wrapper(lookup_id,"
+              (+ 1 (mod index 12)) ") ELSE NULL END) AS c" index)) "")
+          " FROM aggregate_witness_callers GROUP BY group_id")))))
+      true)
+- scm: |
+    (begin
+      (globalvars "__aggregate_witness_execute" (lambda (text) (begin
+        (define session (newsession)) (session "schema" "memcp-tests") (session "username" "root")
+        (with_autocommit session nil nil text (lambda (tx)
+          (sql_execute_formula session tx
+            (sql_queryplan_compile_formula tx (parse_tsql "memcp-tests" text
+              (tsql_policy (tsql_session_actor session)) session tx))
+            (lambda (_row) (error "declaration emitted a result row")) (lambda (_fields) true))))
+        true)))
+      true)
+- scm: |
+    (begin
+      (globalvars "__aggregate_witness_declare" (lambda (width)
+        ((globalvars "__aggregate_witness_execute")
+          (cadr (find (globalvars "__aggregate_witness_declarations")
+            (lambda (recipe) (equal? (car recipe) width)) nil)))))
+      true)
+- scm: |
+    (begin
+      (globalvars "__aggregate_witness_initialize" (lambda () (begin
+        (define routine_session (newsession))
+        (routine_session "schema" "memcp-tests") (routine_session "username" "root")
+        /* Routine grammar belongs to the public batch frontend. View timing
+           below deliberately retains its existing direct compiler boundary. */
+        (define execute_function (lambda (text)
+          (tsql_execute_request "memcp-tests" text routine_session nil 0
+            (lambda (_row) (error "routine declaration emitted a result row")) (lambda args true))))
+        (define outcome (try (lambda () (begin
+          (execute_function "DROP FUNCTION IF EXISTS dbo.aggregate_witness_wrapper")
+          (execute_function "DROP FUNCTION IF EXISTS dbo.aggregate_witness_leaf")
+          (execute_function
+            "CREATE FUNCTION dbo.aggregate_witness_leaf(@id INT,@month INT) RETURNS INT AS BEGIN DECLARE @amount INT; SELECT @amount=SUM(amount) FROM aggregate_witness_values WHERE id=@id AND month_id<=@month; RETURN @amount; END")
+          (execute_function
+            "CREATE FUNCTION dbo.aggregate_witness_wrapper(@id INT,@month INT) RETURNS INT AS BEGIN RETURN dbo.aggregate_witness_leaf(@id,@month); END")
+          (list true true))) (lambda (failure) (list false failure))))
+        (tds_frontend "close" routine_session nil nil nil nil nil nil)
+        (if (car outcome) true (error (cadr outcome)))
+        (map (list 1 12 48) (lambda (width) ((globalvars "__aggregate_witness_declare") width)))
+        true)))
+      true)
+test_cases:
+- name: Initialize relational aggregate operand declarations through the public compiler
+  scm: ((globalvars "__aggregate_witness_initialize"))
+  expect: {data: [true]}
+  performance_rows: 1
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 1
+  timing_aggregation: total
+- name: Declare 1 aggregate projections with relational scalar operands
+  scm: ((globalvars "__aggregate_witness_declare") 1)
+  expect: {data: [true]}
+  performance_rows: 1
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: Declare 12 aggregate projections with relational scalar operands
+  scm: ((globalvars "__aggregate_witness_declare") 12)
+  expect: {data: [true]}
+  performance_rows: 1
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: Declare 48 aggregate projections with relational scalar operands
+  scm: ((globalvars "__aggregate_witness_declare") 48)
+  expect: {data: [true]}
+  performance_rows: 1
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 5
+  timing_aggregation: total
+- name: Initialize the same feature declarations when ordinary mode skips performance cases
+  scm: ((globalvars "__aggregate_witness_initialize"))
+  expect: {result: true}
+- name: Width 1 preserves duplicate groups null missing and excluded operands
+  sql: SELECT group_id,c0 FROM aggregate_witness_view_1 ORDER BY group_id
+  expect:
+    rows: 5
+    data: [{"group_id": 1, "c0": 2}, {"group_id": 2, "c0": null}, {"group_id": 3, "c0": null}, {"group_id": 4, "c0": null}, {"group_id": 5, "c0": -3}]
+- name: Width 12 preserves duplicate groups null missing and excluded operands
+  sql: SELECT group_id,c0,c11 FROM aggregate_witness_view_12 ORDER BY group_id
+  expect:
+    rows: 5
+    data: [{"group_id": 1, "c0": 2, "c11": 156}, {"group_id": 2, "c0": null, "c11": null}, {"group_id": 3, "c0": null, "c11": null}, {"group_id": 4, "c0": null, "c11": null}, {"group_id": 5, "c0": -3, "c11": 2}]
+- name: Width 48 preserves duplicate groups null missing and excluded operands
+  sql: SELECT group_id,c0,c11,c12,c47 FROM aggregate_witness_view_48 ORDER BY group_id
+  expect:
+    rows: 5
+    data: [{"group_id": 1, "c0": 2, "c11": 156, "c12": 2, "c47": 156}, {"group_id": 2, "c0": null, "c11": null, "c12": null, "c47": null}, {"group_id": 3, "c0": null, "c11": null, "c12": null, "c47": null}, {"group_id": 4, "c0": null, "c11": null, "c12": null, "c47": null}, {"group_id": 5, "c0": -3, "c11": 2, "c12": -3, "c47": 2}]
+cleanup:
+- sql: DROP VIEW IF EXISTS aggregate_witness_view_48
+- sql: DROP VIEW IF EXISTS aggregate_witness_view_12
+- sql: DROP VIEW IF EXISTS aggregate_witness_view_1
+- scm: |
+    (begin
+      (dropprocedure "memcp-tests" "aggregate_witness_wrapper" true)
+      (dropprocedure "memcp-tests" "aggregate_witness_leaf" true)
+      true)
+- sql: DROP TABLE IF EXISTS aggregate_witness_callers
+- sql: DROP TABLE IF EXISTS aggregate_witness_values
+- scm: |
+    (begin
+      (globalvars "__aggregate_witness_initialize" nil)
+      (globalvars "__aggregate_witness_declare" nil)
+      (globalvars "__aggregate_witness_execute" nil)
+      (globalvars "__aggregate_witness_declarations" nil)
+      true)

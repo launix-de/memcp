@@ -1,0 +1,259 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Local temporary schema generations participate in their actual transaction decision
+  requires_tds: true
+  isolated: true
+setup:
+  - sql: DROP TABLE IF EXISTS temporary_schema_public
+  - sql: CREATE TABLE temporary_schema_public(id INT PRIMARY KEY)
+  - sql: INSERT temporary_schema_public VALUES(1),(2)
+test_cases:
+  - name: Transactional CREATE follows public reads and survives COMMIT across requests
+    tds:
+      statements:
+        - sql: BEGIN TRANSACTION
+        - sql: SELECT COUNT(*) AS n FROM temporary_schema_public
+          expect: {rows: 1,data: [{n: 2}]}
+        - sql: "CREATE TABLE #created(id INT PRIMARY KEY,label NVARCHAR(20))"
+        - sql: "INSERT #created VALUES(1,N'kept'),(2,NULL)"
+        - sql: "SELECT id,label FROM #created ORDER BY id"
+          expect: {rows: 2,data: [{id: 1,label: kept},{id: 2,label: null}]}
+        - sql: COMMIT TRANSACTION
+        - sql: "SELECT id,label FROM #created ORDER BY id"
+          expect: {rows: 2,data: [{id: 1,label: kept},{id: 2,label: null}]}
+        - sql: "DROP TABLE #created"
+  - name: ROLLBACK removes newly created schema and permits the same lexical name again
+    tds:
+      statements:
+        - sql: BEGIN TRANSACTION
+        - sql: "CREATE TABLE #rolled_back(id INT)"
+        - sql: "INSERT #rolled_back VALUES(9)"
+        - sql: ROLLBACK TRANSACTION
+        - sql: "SELECT id FROM #rolled_back"
+          expect: {error: true,contains: ['local temporary table does not exist: #rolled_back']}
+        - sql: "CREATE TABLE #rolled_back(label NVARCHAR(20))"
+        - sql: "INSERT #rolled_back VALUES(N'new schema')"
+        - sql: "SELECT label FROM #rolled_back"
+          expect: {rows: 1,data: [{label: new schema}]}
+        - sql: "DROP TABLE #rolled_back"
+  - name: DROP and recreation restore the old schema and rows on ROLLBACK
+    tds:
+      statements:
+        - sql: "CREATE TABLE #generation(id INT PRIMARY KEY)"
+        - sql: "INSERT #generation VALUES(4),(7)"
+        - sql: BEGIN TRANSACTION
+        - sql: "DROP TABLE #generation"
+        - sql: "CREATE TABLE #generation(label NVARCHAR(20))"
+        - sql: "INSERT #generation VALUES(N'pending')"
+        - sql: "SELECT label FROM #generation"
+          expect: {rows: 1,data: [{label: pending}]}
+        - sql: ROLLBACK TRANSACTION
+        - sql: "SELECT id FROM #generation ORDER BY id"
+          expect: {rows: 2,data: [{id: 4},{id: 7}]}
+        - sql: BEGIN TRANSACTION
+        - sql: "DROP TABLE #generation"
+        - sql: COMMIT TRANSACTION
+        - sql: "SELECT id FROM #generation"
+          expect: {error: true,contains: ['local temporary table does not exist: #generation']}
+        - sql: "CREATE TABLE #generation(id INT PRIMARY KEY)"
+        - sql: "INSERT #generation VALUES(11)"
+        - sql: "SELECT id FROM #generation"
+          expect: {rows: 1,data: [{id: 11}]}
+        - sql: "DROP TABLE #generation"
+  - name: Transactional SELECT INTO copies public rows without publishing a persistent table
+    tds:
+      statements:
+        - sql: BEGIN TRANSACTION
+        - sql: "SELECT id INTO #snapshot FROM temporary_schema_public WHERE id>0 ORDER BY id DESC"
+        - sql: "SELECT id FROM #snapshot ORDER BY id"
+          expect: {rows: 2,data: [{id: 1},{id: 2}]}
+        - sql: SELECT @@TRANCOUNT AS depth
+          expect: {rows: 1,data: [{depth: 1}]}
+        - sql: ROLLBACK TRANSACTION
+        - sql: "SELECT id FROM #snapshot"
+          expect: {error: true,contains: ['local temporary table does not exist: #snapshot']}
+  - name: Two actual connections retain independent transactional namespaces
+    tds:
+      statements:
+        - {connection: first,sql: BEGIN TRANSACTION}
+        - {connection: first,sql: 'CREATE TABLE #same(id INT)'}
+        - {connection: first,sql: 'INSERT #same VALUES(1)'}
+        - {connection: second,sql: 'CREATE TABLE #same(id INT)'}
+        - {connection: second,sql: 'INSERT #same VALUES(2)'}
+        - {connection: first,sql: ROLLBACK TRANSACTION}
+        - connection: first
+          sql: "SELECT id FROM #same"
+          expect: {error: true}
+        - connection: second
+          sql: "SELECT id FROM #same"
+          expect: {rows: 1,data: [{id: 2}]}
+        - {connection: second,sql: 'DROP TABLE #same'}
+  - name: Closing a transaction with pending schema leaves no connection generation behind
+    tds:
+      statements:
+        - sql: BEGIN TRANSACTION
+        - sql: "CREATE TABLE #socket_lifetime(id INT)"
+        - sql: "INSERT #socket_lifetime VALUES(8)"
+        - {close: true}
+        - sql: "SELECT id FROM #socket_lifetime"
+          expect: {error: true}
+        - sql: "CREATE TABLE #socket_lifetime(id INT)"
+        - sql: "SELECT COUNT(*) AS n FROM #socket_lifetime"
+          expect: {rows: 1,data: [{n: 0}]}
+        - sql: "DROP TABLE #socket_lifetime"
+  - name: A module temporary generation retires after the caller transaction decision
+    setup:
+      - sql: DROP PROCEDURE IF EXISTS temporary_schema_module
+      - sql: |
+          CREATE PROCEDURE temporary_schema_module AS BEGIN
+            CREATE TABLE #inside(id INT);
+            INSERT #inside VALUES(5);
+            SELECT id FROM #inside;
+          END;
+    tds:
+      statements:
+        - sql: BEGIN TRANSACTION
+        - sql: EXEC temporary_schema_module
+          expect: {rows: 1,data: [{id: 5}]}
+        - sql: ROLLBACK TRANSACTION
+        - sql: "SELECT id FROM #inside"
+          expect: {error: true}
+        - sql: EXEC temporary_schema_module
+          expect: {rows: 1,data: [{id: 5}]}
+    cleanup:
+      - sql: DROP PROCEDURE IF EXISTS temporary_schema_module
+  - name: The native savepoint restores relation generations and preceding row work
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (s "schema" "memcp-tests")
+        (define run (lambda (text row)
+          (tsql_execute_request "memcp-tests" text s nil 0 row (lambda args true))))
+        (define ignore (lambda (_row) true))
+        (define outcome (try (lambda () (begin
+          (run "CREATE TABLE #saved(id INT); INSERT #saved VALUES(1)" ignore)
+          (run "BEGIN TRANSACTION; INSERT #saved VALUES(2)" ignore)
+          (define tx (s "__memcp_tx"))
+          (define point (tx_savepoint tx))
+          (run "DROP TABLE #saved; CREATE TABLE #saved(label NVARCHAR(20)); INSERT #saved VALUES(N'pending'); CREATE TABLE #after(id INT)" ignore)
+          (tx_rollback_to_savepoint tx point)
+          (define values (newsession))
+          (run "SELECT COUNT(*) AS n,SUM(id) AS total FROM #saved" (lambda (row)
+            (begin (values "n" (row "n")) (values "total" (row "total")))))
+          (define absent (nil? (tsql_temporary_binding "#after" s)))
+          (run "CREATE TABLE #after(id INT); INSERT #after VALUES(9); COMMIT TRANSACTION" ignore)
+          (run "SELECT id FROM #after" (lambda (row) (values "after" (row "id"))))
+          (list true (and absent (equal? (values "n") 2) (equal? (values "total") 3) (equal? (values "after") 9)))))
+          (lambda (failure) (list false failure))))
+        (tds_frontend "close" s nil nil nil nil nil nil)
+        (if (car outcome) (cadr outcome) (error (cadr outcome))))
+    expect: {result: true}
+  - name: Separate temporary primary key declaration enforces complete composite keys
+    tds:
+      statements:
+        - sql: BEGIN TRANSACTION
+        - sql: "CREATE TABLE #keyed(object_name VARCHAR(100) NOT NULL,permission_name VARCHAR(100) NOT NULL) ON [PRIMARY]"
+        - sql: "ALTER TABLE #keyed ADD CONSTRAINT PK_temporary_composite PRIMARY KEY CLUSTERED(object_name,permission_name) ON [PRIMARY]"
+        - sql: "INSERT #keyed VALUES('first','read'),('first','write')"
+        - sql: "INSERT #keyed VALUES('first','read')"
+          expect: {error: true}
+        - sql: "SELECT object_name,permission_name FROM #keyed ORDER BY object_name,permission_name"
+          expect: {rows: 2,data: [{object_name: first,permission_name: read},{object_name: first,permission_name: write}]}
+        - sql: SELECT @@TRANCOUNT AS depth
+          expect: {rows: 1,data: [{depth: 1}]}
+        - sql: COMMIT TRANSACTION
+        - sql: "SELECT COUNT(*) AS n FROM #keyed"
+          expect: {rows: 1,data: [{n: 2}]}
+        - sql: "DROP TABLE #keyed"
+  - name: Rolled back temporary primary key and schema leave no enforcement on a new generation
+    tds:
+      statements:
+        - sql: BEGIN TRANSACTION
+        - sql: "CREATE TABLE #key_rollback(id INT NOT NULL)"
+        - sql: "ALTER TABLE #key_rollback ADD CONSTRAINT PK_temporary_rollback PRIMARY KEY(id)"
+        - sql: "INSERT #key_rollback VALUES(1)"
+        - sql: ROLLBACK TRANSACTION
+        - sql: "SELECT id FROM #key_rollback"
+          expect: {error: true}
+        - sql: "CREATE TABLE #key_rollback(id INT NOT NULL)"
+        - sql: "INSERT #key_rollback VALUES(3),(3)"
+        - sql: "SELECT COUNT(*) AS n,SUM(id) AS total FROM #key_rollback"
+          expect: {rows: 1,data: [{n: 2,total: 6}]}
+        - sql: "DROP TABLE #key_rollback"
+  - name: A module creates and amends its private generation within the caller transaction
+    setup:
+      - sql: DROP PROCEDURE IF EXISTS temporary_key_module
+      - sql: |
+          CREATE PROCEDURE temporary_key_module AS BEGIN
+            CREATE TABLE #module_keys(id INT NOT NULL);
+            ALTER TABLE #module_keys ADD CONSTRAINT PK_temporary_module PRIMARY KEY(id);
+            INSERT #module_keys VALUES(5),(7);
+            SELECT COUNT(*) AS n,SUM(id) AS total FROM #module_keys;
+            DROP TABLE #module_keys;
+          END;
+    tds:
+      statements:
+        - sql: BEGIN TRANSACTION
+        - sql: EXEC temporary_key_module
+          expect: {rows: 1,data: [{n: 2,total: 12}]}
+        - sql: SELECT @@TRANCOUNT AS depth
+          expect: {rows: 1,data: [{depth: 1}]}
+        - sql: ROLLBACK TRANSACTION
+        - sql: "SELECT id FROM #module_keys"
+          expect: {error: true}
+    cleanup:
+      - sql: DROP PROCEDURE IF EXISTS temporary_key_module
+  - name: Native savepoint restores a scoped primary key declaration before the next insert
+    scm: |
+      (begin
+        (define s (newsession))
+        (s "username" "root")
+        (s "schema" "memcp-tests")
+        (define run (lambda (text row)
+          (tsql_execute_request "memcp-tests" text s nil 0 row (lambda args true))))
+        (define ignore (lambda (_row) true))
+        (define outcome (try (lambda () (begin
+          (run "BEGIN TRANSACTION; CREATE TABLE #key_saved(id INT NOT NULL)" ignore)
+          (define tx (s "__memcp_tx"))
+          (define point (tx_savepoint tx))
+          (run "ALTER TABLE #key_saved ADD CONSTRAINT PK_temporary_saved PRIMARY KEY(id); INSERT #key_saved VALUES(1)" ignore)
+          (tx_rollback_to_savepoint tx point)
+          (define values (newsession))
+          (run "SELECT COUNT(*) AS n FROM #key_saved" (lambda (row) (values "empty" (row "n"))))
+          (run "INSERT #key_saved VALUES(3),(3); COMMIT TRANSACTION" ignore)
+          (run "SELECT COUNT(*) AS n,SUM(id) AS total FROM #key_saved" (lambda (row)
+            (begin (values "n" (row "n")) (values "total" (row "total")))))
+          (list true (and (equal? (values "empty") 0) (equal? (values "n") 2) (equal? (values "total") 6)))))
+          (lambda (failure) (list false failure))))
+        (tds_frontend "close" s nil nil nil nil nil nil)
+        (if (car outcome) (cadr outcome) (error (cadr outcome))))
+    expect: {result: true}
+  - name: Keep one connection temporary declaration for restart cleanup
+    session_id: temporary_schema_restart
+    sql: "CREATE TABLE #restart_only(id INT)"
+    expect: {}
+  - name: Persisted checkpoints do not retain temporary schema generations
+    # The hosted supervisor owns the server. Explicit SHUTDOWN requests a new
+    # generation there as well as in the standalone runner's owned process.
+    # Server control uses the existing administrative MySQL endpoint.
+    syntax: mysql
+    sql: SHUTDOWN
+  - name: A restarted session has no old temporary binding
+    session_id: temporary_schema_restart
+    sql: "SELECT id FROM #restart_only"
+    expect: {error: true,contains: 'local temporary table does not exist: #restart_only'}
+  - name: The restarted session can reuse the same local name
+    session_id: temporary_schema_restart
+    sql: |
+      CREATE TABLE #restart_only(id INT);
+      INSERT #restart_only VALUES(17);
+      SELECT id FROM #restart_only;
+      DROP TABLE #restart_only;
+    expect: {rows: 1,data: [{id: 17}]}
+cleanup:
+  - sql: DROP TABLE IF EXISTS temporary_schema_public
+  - sql: DROP PROCEDURE IF EXISTS temporary_schema_module
+  - sql: DROP PROCEDURE IF EXISTS temporary_key_module

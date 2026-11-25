@@ -1,0 +1,314 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: SELECT INTO creates typed native local relations with ordinary lexical lifetime
+  requires_tds: true
+  isolated: true
+test_cases:
+  - name: CTE SELECT INTO retains duplicate rows and typed NULL values
+    sql: |
+      WITH seed AS (
+        SELECT 1 AS id,CAST(N'one' AS NVARCHAR(4)) AS label
+        UNION ALL SELECT 1,CAST(N'one' AS NVARCHAR(4))
+        UNION ALL SELECT 2,CAST(NULL AS NVARCHAR(4))
+      ), selected AS (SELECT id,label FROM seed)
+      SELECT * INTO #cte_selected FROM selected;
+      SELECT id,label FROM #cte_selected ORDER BY id;
+    expect: {rows: 3, data: [{id: 1, label: one}, {id: 1, label: one}, {id: 2, label: null}]}
+  - name: Stored CTE population binds a qualified temporary input after its creation
+    setup:
+      - sql: |
+          CREATE PROCEDURE cte_temporary_population AS
+            CREATE TABLE #cte_input (id INT);
+            INSERT #cte_input VALUES (7);
+            WITH chosen AS (SELECT id FROM dbo.#cte_input)
+            SELECT * INTO #cte_output FROM chosen;
+            SELECT id FROM #cte_output;
+    sql: EXEC cte_temporary_population
+    expect: {rows: 1, data: [{id: 7}]}
+    cleanup:
+      - sql: DROP PROCEDURE cte_temporary_population
+  - name: Empty CTE population retains a writable typed declaration
+    sql: |
+      WITH empty_seed AS (SELECT CAST(1 AS INT) AS id WHERE 1=0)
+      SELECT id INTO #cte_empty FROM empty_seed;
+      INSERT #cte_empty VALUES (9);
+      SELECT id FROM #cte_empty;
+    expect: {rows: 1, data: [{id: 9}]}
+  - name: CTE definitions remain local to their population statement
+    sql: SELECT id FROM empty_seed
+    expect: {error: true}
+  - name: CTE SELECT INTO retains native transaction rollback through TDS
+    tds:
+      statements:
+        - sql: BEGIN TRANSACTION
+        - sql: "WITH seed AS (SELECT 5 AS id) SELECT id INTO #cte_rollback FROM seed"
+        - sql: "SELECT id FROM dbo.#cte_rollback"
+          expect: {rows: 1, data: [{id: 5}]}
+        - sql: ROLLBACK TRANSACTION
+        - sql: "SELECT id FROM #cte_rollback"
+          expect: {error: true}
+  - name: Ordinary SELECT INTO copies complete rows and NULL payloads
+    session_id: select_into_session
+    sql: |
+      CREATE TABLE #source(id INT NOT NULL,label NVARCHAR(20));
+      INSERT #source VALUES(1,N'first'),(2,NULL),(3,N'last');
+      SELECT id,label INTO #copied FROM #source WHERE id<=2;
+      SELECT id,label FROM #copied ORDER BY id;
+    expect:
+      rows: 2
+      data: [{id: 1,label: first},{id: 2,label: null}]
+  - name: SELECT INTO result persists across connection requests
+    session_id: select_into_session
+    sql: |
+      SELECT COUNT(*) AS n FROM #copied
+    expect: {rows: 1,data: [{n: 2}]}
+  - name: Empty SELECT INTO preserves its declared columns
+    session_id: select_into_session
+    sql: |
+      SELECT id,label INTO #empty FROM #source WHERE id<0;
+      INSERT #empty VALUES(7,N'after');
+      SELECT id,label FROM #empty;
+    expect: {rows: 1,data: [{id: 7,label: after}]}
+  - name: SELECT INTO cannot expose its local name to another connection
+    session_id: select_into_other
+    sql: |
+      SELECT id FROM #copied
+    expect: {error: true,contains: 'local temporary table does not exist: #copied'}
+  - name: SELECT INTO uses normal TDS result and lifetime ownership
+    tds:
+      statements:
+        - sql: |
+            SELECT CAST(5 AS INT) AS id INTO #wire_result
+        - sql: |
+            SELECT id FROM #wire_result
+          expect: {rows: 1,data: [{id: 5}]}
+        - sql: |
+            DROP TABLE #wire_result
+        - sql: |
+            SELECT id FROM #wire_result
+          expect: {error: true}
+  - name: Failed autocommit population leaves the newly created empty table
+    session_id: select_into_session
+    sql: "SELECT id,10/(id-1) AS quotient INTO #failed FROM #source WHERE id=1"
+    expect: {error: true}
+  - name: Empty declaration after population failure remains usable
+    session_id: select_into_session
+    sql: |
+      INSERT #failed VALUES(8,9);
+      SELECT id,quotient FROM #failed;
+      DROP TABLE #failed;
+    expect: {rows: 1,data: [{id: 8,quotient: 9}]}
+  - name: Direct catalog SELECT INTO copies ordinary declaration columns
+    setup:
+      - sql: CREATE TABLE catalog_into_source(id INT NOT NULL)
+    tds:
+      statements:
+        - sql: |
+            SELECT object_id,name INTO #catalog_direct
+            FROM sys.objects WHERE name=N'catalog_into_source' AND type=N'U'
+        - sql: "SELECT TOP 0 object_id,name FROM #catalog_direct"
+          expect:
+            rows: 0
+            column_types:
+              - {name: object_id, type: INT, nullable: false}
+              - {name: name, type: NVARCHAR, nullable: false}
+        - sql: "INSERT #catalog_direct(object_id,name) VALUES(-7,N'manual')"
+        - sql: |
+            SELECT name,CASE WHEN object_id=OBJECT_ID(N'dbo.catalog_into_source') THEN 1 ELSE 0 END AS source_match
+            FROM #catalog_direct ORDER BY object_id
+          expect:
+            rows: 2
+            data: [{name: manual, source_match: 0}, {name: catalog_into_source, source_match: 1}]
+    cleanup:
+      - sql: DROP TABLE catalog_into_source
+  - name: Derived empty catalog SELECT INTO retains writable ordinary types
+    tds:
+      statements:
+        - sql: |
+            SELECT object_id,name INTO #catalog_derived_empty
+            FROM (SELECT object_id,name FROM sys.objects WHERE type=N'U') AS objects
+            WHERE 1=0
+        - sql: "SELECT TOP 0 object_id,name FROM #catalog_derived_empty"
+          expect:
+            rows: 0
+            column_types:
+              - {name: object_id, type: INT, nullable: false}
+              - {name: name, type: NVARCHAR, nullable: false}
+        - sql: "INSERT #catalog_derived_empty(object_id,name) VALUES(-9,N'after')"
+        - sql: "SELECT object_id,name FROM #catalog_derived_empty"
+          expect: {rows: 1, data: [{object_id: -9, name: after}]}
+  - name: Joined catalog SELECT INTO supports an empty final validation cursor
+    tds:
+      statements:
+      - connection: owner
+        sql: 'SELECT a.name AS constraint_name,b.name AS table_name INTO #catalog_validation_names
+
+          FROM sys.objects AS a INNER JOIN
+
+          (SELECT name,object_id FROM sys.objects WHERE type=''U'') AS b ON a.parent_object_id=b.object_id
+
+          WHERE b.name=''catalog_validation_child'' AND schema_name(a.schema_id)=''dbo'' AND (a.type=''C'' OR a.type=''F'')
+
+          ORDER BY a.type DESC,a.modify_date DESC
+
+          DECLARE @constraint_name NVARCHAR(256)
+
+          DECLARE @table_name NVARCHAR(256)
+
+          DECLARE catalog_validation_cursor CURSOR FAST_FORWARD FOR SELECT constraint_name,table_name FROM #catalog_validation_names
+
+          OPEN catalog_validation_cursor
+
+          FETCH NEXT FROM catalog_validation_cursor INTO @constraint_name,@table_name
+
+          WHILE @@FETCH_STATUS=0
+
+          BEGIN
+
+          PRINT ''ALTER TABLE [dbo].[''+@table_name+''] WITH CHECK CHECK CONSTRAINT [''+@constraint_name+'']''
+
+          EXEC (''ALTER TABLE [dbo].[''+@table_name+''] WITH CHECK CHECK CONSTRAINT [''+@constraint_name+'']'')
+
+          FETCH NEXT FROM catalog_validation_cursor INTO @constraint_name,@table_name
+
+          END
+
+          CLOSE catalog_validation_cursor
+
+          DEALLOCATE catalog_validation_cursor'
+      - connection: owner
+        sql: 'SELECT COUNT(*) AS total FROM #catalog_validation_names'
+        expect:
+          rows: 1
+          data:
+          - total: 0
+      - connection: owner
+        sql: SELECT id,parent_id,amount FROM catalog_validation_child
+        expect:
+          rows: 1
+          data:
+          - id: 10
+            parent_id: 1
+            amount: 7
+      - connection: owner
+        sql: 'DROP TABLE #catalog_validation_names'
+      - connection: owner
+        sql: 'SELECT constraint_name FROM #catalog_validation_names'
+        expect:
+          error: true
+    setup:
+    - sql: DROP TABLE IF EXISTS catalog_validation_child
+    - sql: DROP TABLE IF EXISTS catalog_validation_parent
+    - sql: CREATE TABLE catalog_validation_parent(id INT PRIMARY KEY)
+    - sql: INSERT catalog_validation_parent VALUES(1)
+    - sql: CREATE TABLE catalog_validation_child(id INT PRIMARY KEY,parent_id INT,amount INT)
+    - sql: INSERT catalog_validation_child VALUES(10,1,7)
+    cleanup:
+    - sql: DROP TABLE IF EXISTS catalog_validation_child
+    - sql: DROP TABLE IF EXISTS catalog_validation_parent
+
+  - name: Joined catalog validation retains pending CHECK and foreign declarations in the original transaction
+    tds:
+      statements:
+      - connection: owner
+        sql: BEGIN TRANSACTION
+      - connection: owner
+        sql: ALTER TABLE catalog_validation_child WITH NOCHECK ADD CONSTRAINT FK_catalog_validation FOREIGN KEY(parent_id)
+          REFERENCES catalog_validation_parent(id)
+      - connection: owner
+        sql: ALTER TABLE catalog_validation_child ADD CONSTRAINT CK_catalog_validation CHECK(amount>=0)
+      - connection: owner
+        sql: ALTER TABLE catalog_validation_child NOCHECK CONSTRAINT CK_catalog_validation
+      - connection: owner
+        sql: 'SELECT a.name AS constraint_name,b.name AS table_name INTO #catalog_validation_names
+
+          FROM sys.objects AS a INNER JOIN
+
+          (SELECT name,object_id FROM sys.objects WHERE type=''U'') AS b ON a.parent_object_id=b.object_id
+
+          WHERE b.name=''catalog_validation_child'' AND schema_name(a.schema_id)=''dbo'' AND (a.type=''C'' OR a.type=''F'')
+
+          ORDER BY a.type DESC,a.modify_date DESC
+
+          DECLARE @constraint_name NVARCHAR(256)
+
+          DECLARE @table_name NVARCHAR(256)
+
+          DECLARE catalog_validation_cursor CURSOR FAST_FORWARD FOR SELECT constraint_name,table_name FROM #catalog_validation_names
+
+          OPEN catalog_validation_cursor
+
+          FETCH NEXT FROM catalog_validation_cursor INTO @constraint_name,@table_name
+
+          WHILE @@FETCH_STATUS=0
+
+          BEGIN
+
+          PRINT ''ALTER TABLE [dbo].[''+@table_name+''] WITH CHECK CHECK CONSTRAINT [''+@constraint_name+'']''
+
+          EXEC (''ALTER TABLE [dbo].[''+@table_name+''] WITH CHECK CHECK CONSTRAINT [''+@constraint_name+'']'')
+
+          FETCH NEXT FROM catalog_validation_cursor INTO @constraint_name,@table_name
+
+          END
+
+          CLOSE catalog_validation_cursor
+
+          DEALLOCATE catalog_validation_cursor'
+      - connection: owner
+        sql: COMMIT TRANSACTION
+      - connection: owner
+        sql: INSERT catalog_validation_child VALUES(11,1,-1)
+        expect:
+          error: true
+      - connection: owner
+        sql: SELECT id,parent_id,amount FROM catalog_validation_child
+        expect:
+          rows: 1
+          data:
+          - id: 10
+            parent_id: 1
+            amount: 7
+      - connection: owner
+        sql: SELECT name,is_disabled,is_not_trusted FROM sys.foreign_keys WHERE name='FK_catalog_validation'
+        expect:
+          rows: 1
+          data:
+          - name: FK_catalog_validation
+            is_disabled: false
+            is_not_trusted: false
+      - connection: owner
+        sql: SELECT name,type FROM sys.check_constraints WHERE name='CK_catalog_validation'
+        expect:
+          rows: 1
+          data:
+          - name: CK_catalog_validation
+            type: C
+      - connection: owner
+        sql: 'DROP TABLE #catalog_validation_names'
+      - connection: owner
+        sql: 'SELECT constraint_name FROM #catalog_validation_names'
+        expect:
+          error: true
+    setup:
+    - sql: DROP TABLE IF EXISTS catalog_validation_child
+    - sql: DROP TABLE IF EXISTS catalog_validation_parent
+    - sql: CREATE TABLE catalog_validation_parent(id INT PRIMARY KEY)
+    - sql: INSERT catalog_validation_parent VALUES(1)
+    - sql: CREATE TABLE catalog_validation_child(id INT PRIMARY KEY,parent_id INT,amount INT)
+    - sql: INSERT catalog_validation_child VALUES(10,1,7)
+    cleanup:
+    - sql: DROP TABLE IF EXISTS catalog_validation_child
+    - sql: DROP TABLE IF EXISTS catalog_validation_parent
+cleanup:
+  - session_id: select_into_session
+    sql: |
+      DROP TABLE IF EXISTS #empty
+  - session_id: select_into_session
+    sql: |
+      DROP TABLE IF EXISTS #copied
+  - session_id: select_into_session
+    sql: |
+      DROP TABLE IF EXISTS #source

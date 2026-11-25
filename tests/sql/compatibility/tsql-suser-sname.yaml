@@ -1,0 +1,103 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/functions/suser-sname-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: SID login names use the existing current-context and fresh native-visible account owners
+setup:
+- scm: |
+    (begin
+      (globalvars "__sname_account_sql" (close_procedure (lambda (text) (begin
+        (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql")
+        (sql_with_statement s nil 0 text (lambda (tx)
+          (mysql_run_sql_statement tx "system" text s (lambda (_row) true) (lambda args true))))
+        true))))
+      true)
+- scm: ((globalvars "__sname_account_sql") "CREATE USER sname_member IDENTIFIED BY 'pw'")
+- scm: ((globalvars "__sname_account_sql") "GRANT ALL ON `memcp-tests`.* TO sname_member")
+- scm: ((globalvars "__sname_account_sql") "CREATE USER sname_cycle IDENTIFIED BY 'pw'")
+- sql: CREATE TABLE sname_defaults(id INT PRIMARY KEY,login_name NVARCHAR(128) DEFAULT SUSER_SNAME())
+- sql: CREATE TABLE sname_saved(id INT PRIMARY KEY,login_sid VARBINARY(85))
+- sql: INSERT INTO sname_saved SELECT 1,SUSER_SID(N'sname_cycle') UNION ALL SELECT 2,SUSER_SID()
+test_cases:
+- name: Omitted SID retains the current security context
+  sql: SELECT SUSER_SNAME() AS login_name
+  expect: {rows: 1, data: [{login_name: root}]}
+- name: The current native SID roundtrips to its actual login name
+  sql: SELECT SUSER_SNAME(SUSER_SID()) AS login_name
+  expect: {rows: 1, data: [{login_name: root}]}
+- name: Explicit NULL and an absent SID return SQL NULL
+  sql: SELECT SUSER_SNAME(NULL) AS null_name,SUSER_SNAME(0x00) AS missing_name
+  expect: {rows: 1, data: [{null_name: null, missing_name: null}]}
+- name: SID arguments bind in the caller before metadata aliases
+  sql: SELECT p.name,SUSER_SNAME(p.sid) AS resolved FROM sys.server_principals p WHERE p.name=SUSER_SNAME()
+  expect: {rows: 1, data: [{name: root, resolved: root}]}
+- name: Duplicate callers and NULL SID operands retain complete rows
+  sql: SELECT v.id,SUSER_SNAME(CASE WHEN v.id=3 THEN NULL ELSE SUSER_SID() END) AS login_name FROM (VALUES(1),(2),(3)) v(id) ORDER BY v.id
+  expect: {rows: 3, data: [{id: 1, login_name: root}, {id: 2, login_name: root}, {id: 3, login_name: null}]}
+- name: Ordinary members resolve their own native SID
+  username: sname_member
+  password: pw
+  sql: SELECT SUSER_SNAME() AS current_name,SUSER_SNAME(SUSER_SID()) AS resolved
+  expect: {rows: 1, data: [{current_name: sname_member, resolved: sname_member}]}
+- name: The login-name fallback consumes a scalar SID lookup in a catalog query
+  sql: SELECT ISNULL(SUSER_SNAME(SUSER_SID()),N'~~UNKNOWN~~') AS dbowner FROM sysdatabases WHERE name=DB_NAME()
+  expect: {rows: 1, data: [{dbowner: root}]}
+- name: Root DEFAULT execution retains its existing security-context owner
+  sql: INSERT INTO sname_defaults(id) VALUES(1)
+  expect: {affected_rows: 1}
+- name: Member DEFAULT execution uses the current writer
+  username: sname_member
+  password: pw
+  sql: INSERT INTO sname_defaults(id) VALUES(2)
+  expect: {affected_rows: 1}
+- name: Contextual defaults preserve both complete login names
+  sql: SELECT id,login_name FROM sname_defaults ORDER BY id
+  expect: {rows: 2, data: [{id: 1, login_name: root}, {id: 2, login_name: sname_member}]}
+- name: A repeated SID query observes the existing native account
+  session_id: sname_reader
+  sql: SELECT SUSER_SNAME(login_sid) AS login_name FROM sname_saved WHERE id=1
+  expect: {rows: 1, data: [{login_name: sname_cycle}]}
+- name: Remove the native account through its existing account owner
+  scm: ((globalvars "__sname_account_sql") "DROP USER sname_cycle")
+  expect: {result: true}
+- name: The same SID query observes account removal without retaining a name
+  session_id: sname_reader
+  sql: SELECT SUSER_SNAME(login_sid) AS login_name FROM sname_saved WHERE id=1
+  expect: {rows: 1, data: [{login_name: null}]}
+- name: Recreate the native name with a new account incarnation
+  scm: ((globalvars "__sname_account_sql") "CREATE USER sname_cycle IDENTIFIED BY 'pw'")
+  expect: {result: true}
+- name: The same old SID does not authorize a reused account name
+  session_id: sname_reader
+  sql: SELECT SUSER_SNAME(login_sid) AS login_name FROM sname_saved WHERE id=1
+  expect: {rows: 1, data: [{login_name: null}]}
+- name: The replacement account resolves through its actual new SID
+  sql: SELECT SUSER_SNAME(SUSER_SID(N'sname_cycle')) AS login_name
+  expect: {rows: 1, data: [{login_name: sname_cycle}]}
+- name: Empty results retain the declared NVARCHAR128 wire type
+  tds:
+    statements:
+    - sql: SELECT SUSER_SNAME() AS current_name,SUSER_SNAME(NULL) AS nullable_name WHERE 1=0
+      expect:
+        rows: 0
+        column_types:
+        - {name: current_name, type: NVARCHAR, length: 128}
+        - {name: nullable_name, type: NVARCHAR, length: 128}
+- name: SUSER_SNAME rejects a genuinely invalid argument count
+  sql: SELECT SUSER_SNAME(0x00,0x01) AS invalid
+  expect: {error: true}
+- name: Other-login SID discovery remains an explicit positive authority target
+  username: sname_member
+  password: pw
+  sql: SELECT SUSER_SNAME(login_sid) AS login_name FROM sname_saved WHERE id=2
+  expect: {rows: 1, data: [{login_name: root}]}
+  noncritical: true
+cleanup:
+- sql: DROP TABLE IF EXISTS sname_saved
+- sql: DROP TABLE IF EXISTS sname_defaults
+- scm: ((globalvars "__sname_account_sql") "DROP USER IF EXISTS sname_cycle")
+- scm: ((globalvars "__sname_account_sql") "DROP USER IF EXISTS sname_member")
+- scm: (begin (globalvars "__sname_account_sql" nil) true)

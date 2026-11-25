@@ -12,13 +12,13 @@ setup:
 - sql: CREATE TABLE collated_scan_rows(id INT PRIMARY KEY,label VARCHAR(100))
 - sql: INSERT INTO collated_scan_rows VALUES(1,'ALPHA  '),(2,'alpha'),(3,'Σ'),(4,'ς'),(5,'σ'),(6,'K'),(7,'K'),(8,'k'),(9,'İ'),(10,'i'),(11,'I'),(12,NULL)
 - sql: CREATE TABLE collated_scan_work(object_name VARCHAR(100),permission_name VARCHAR(100))
-- scm: (insert (table "memcp-tests" false "collated_scan_work" false) '("object_name" "permission_name") (map (produceN
+- scm: (insert (table "memcp-tests" false "collated_scan_work" false nil) '("object_name" "permission_name") (map (produceN
     1000) (lambda (i) (list (concat "object_" i) "SELECT"))))
 test_cases:
 - name: Padded composite text input preserves spaces and case
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
-      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false nil)
       (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "alpha " " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
@@ -30,7 +30,7 @@ test_cases:
 - name: Unicode sigma variants retain native case folding
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
-      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false nil)
       (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "σ" " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
@@ -43,7 +43,7 @@ test_cases:
 - name: Kelvin sign and ASCII keys share their true equality class
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
-      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false nil)
       (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "k" " +$" "") "LATIN1_GENERAL_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
@@ -56,7 +56,7 @@ test_cases:
 - name: Dotted I remains distinct from the ASCII fold class
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
-      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false nil)
       (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "i" " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
@@ -68,7 +68,7 @@ test_cases:
 - name: Explicit case sensitive equality keeps separate keys
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
-      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false nil)
       (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "alpha" " +$" "") "utf8mb4_bin"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
@@ -79,7 +79,7 @@ test_cases:
 - name: NULL probe remains an empty SQL match
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
-      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false nil)
       (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace nil " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
@@ -89,7 +89,7 @@ test_cases:
 - name: Reversed normalized comparison retains every matching row
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
-      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false nil)
       (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace "alpha" " +$" "") (list regexp_replace (quote label) " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
@@ -101,7 +101,7 @@ test_cases:
 - name: Opaque scalar producer keeps its original comparison semantics
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
-      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false nil)
       (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list (list (quote lambda) (list (quote value)) (quote value)) (quote label)) (list regexp_replace "alpha" " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
@@ -113,7 +113,7 @@ test_cases:
   scm: |-
     (begin
      (define run (eval (list (quote lambda) (list (quote session)) (compile_scan_plan (quote scan) nil
-      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false nil)
       (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace (list (quote session) "needle") " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
@@ -138,19 +138,19 @@ test_cases:
   scm: |-
     (list
     (sort (eval (compile_scan_plan (quote scan) nil
-      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false nil)
       (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) "^." "") (list regexp_replace "lpha" " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
     (sort (eval (compile_scan_plan (quote scan) nil
-      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false nil)
       (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "alpha " " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
       (list (quote lambda) (list (quote a) (quote b)) (list (quote merge) (list (quote list) (quote a) (quote b)))) false)) <)
     (sort (eval (compile_scan_plan (quote scan) nil
-      (list (quote table) "memcp-tests" false "collated_scan_rows" false)
+      (list (quote table) "memcp-tests" false "collated_scan_rows" false nil)
       (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) "^." "") (list regexp_replace "lpha" " +$" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
@@ -164,7 +164,7 @@ test_cases:
 - name: Invalid bound regex remains unevaluated over an empty row domain
   scm: |-
     (sort (eval (compile_scan_plan (quote scan) nil
-      (list (quote table) "memcp-tests" false "collated_scan_empty" false)
+      (list (quote table) "memcp-tests" false "collated_scan_empty" false nil)
       (list (quote quote) '("label")) (list (quote lambda) (list (quote label))
         (list equal_collate (list regexp_replace (quote label) " +$" "") (list regexp_replace "alpha " "[" "") "Latin1_General_CI_AS"))
       (list (quote quote) '("id")) (list (quote lambda) (list (quote acc) (quote id)) (list (quote cons) (quote id) (quote acc))) '()
@@ -175,7 +175,7 @@ test_cases:
   scm: |-
     (begin
      (define lookup (eval (list (quote lambda) (list (quote needle)) (compile_scan_plan (quote scan_exists) nil
-     (list (quote table) "memcp-tests" false "collated_scan_work" false)
+     (list (quote table) "memcp-tests" false "collated_scan_work" false nil)
      (list (quote quote) '("object_name" "permission_name"))
      (list (quote lambda) (list (quote object_name) (quote permission_name))
       (list (quote and)

@@ -1,0 +1,488 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Batch table variables retain lexical scope and independent transactional data
+
+setup:
+- sql: CREATE TABLE variable_inputs(id INT PRIMARY KEY, label VARCHAR(8))
+- sql: INSERT variable_inputs VALUES(3,'third')
+- sql: CREATE TABLE variable_calls(kind VARCHAR(8), total INT)
+- sql: CREATE PROCEDURE variable_capture AS BEGIN SELECT 2 AS original_id,N'two' AS original_label; SELECT 3 AS other_id,CAST(NULL AS NVARCHAR(8)) AS other_label END
+- sql: CREATE PROCEDURE variable_capture_scope AS BEGIN DECLARE @rows TABLE(id INT); INSERT @rows VALUES(17); SELECT id FROM @rows END
+
+- sql: CREATE TABLE variable_outcome_inputs(id INT PRIMARY KEY)
+- sql: INSERT variable_outcome_inputs VALUES(1),(2)
+- sql: |
+    CREATE PROCEDURE variable_capture_recovery AS BEGIN
+      DECLARE @inside TABLE(id INT PRIMARY KEY);
+      INSERT @inside VALUES(1);
+      BEGIN TRY INSERT @inside VALUES(1); END TRY
+      BEGIN CATCH INSERT variable_calls VALUES('srccatch',31); END CATCH;
+      SELECT 17 AS id;
+    END
+
+test_cases:
+- name: VALUES and SELECT populate one typed batch-local table
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows TABLE(id INT NOT NULL,label VARCHAR(8) NULL);
+        INSERT INTO @rows(id,label) VALUES(1,'first'),(2,NULL);
+        INSERT INTO @rows(id,label) SELECT id,label FROM variable_inputs;
+        SELECT id,label FROM @rows ORDER BY id;
+      expect: {rows: 3, data: [{id: 1, label: first}, {id: 2, label: null}, {id: 3, label: third}]}
+- name: COMMIT leaves the lexical variable available to subsequent statements
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows TABLE(id INT);
+        BEGIN TRANSACTION;
+        INSERT INTO @rows VALUES(1);
+        COMMIT TRANSACTION;
+        INSERT INTO @rows VALUES(2);
+        SELECT id FROM @rows ORDER BY id;
+      expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+- name: A streaming private INSERT retains all rows across the caller rollback
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows TABLE(id INT NOT NULL PRIMARY KEY);
+        BEGIN TRANSACTION;
+        INSERT INTO @rows(id)
+          SELECT 100*a.n+10*b.n+c.n
+          FROM (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) AS a(n)
+          CROSS JOIN (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) AS b(n)
+          CROSS JOIN (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) AS c(n);
+        ROLLBACK TRANSACTION;
+        SELECT COUNT(*) AS total,SUM(id) AS checksum,MIN(id) AS first_id,MAX(id) AS last_id FROM @rows;
+      expect: {rows: 1, data: [{total: 1000, checksum: 499500, first_id: 0, last_id: 999}]}
+- name: Private inserts read the caller transaction and survive its rollback
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows TABLE(id INT);
+        BEGIN TRANSACTION;
+        INSERT variable_inputs VALUES(99,'pending');
+        INSERT INTO @rows SELECT id FROM variable_inputs WHERE id=99;
+        ROLLBACK TRANSACTION;
+        SELECT id,(SELECT COUNT(*) FROM variable_inputs WHERE id=99) AS public_count FROM @rows;
+      expect: {rows: 1, data: [{id: 99, public_count: 0}]}
+- name: Rollback preserves a variable declared inside the transaction
+  tds:
+    statements:
+    - sql: |
+        BEGIN TRANSACTION;
+        DECLARE @rows TABLE(id INT);
+        INSERT INTO @rows VALUES(7);
+        ROLLBACK TRANSACTION;
+        SELECT id FROM @rows;
+      expect: {rows: 1, data: [{id: 7}]}
+- name: Nested procedure declarations are independent from their caller and earlier invocations
+  tds:
+    statements:
+    - sql: |
+        CREATE PROCEDURE dbo.variable_inner AS BEGIN
+          DECLARE @rows TABLE(id INT);
+          INSERT INTO @rows VALUES(2);
+          INSERT variable_calls(kind,total) SELECT 'inner',SUM(id) FROM @rows;
+        END
+    - sql: |
+        DECLARE @rows TABLE(id INT);
+        INSERT INTO @rows VALUES(1);
+        EXEC dbo.variable_inner;
+        EXEC dbo.variable_inner;
+        SELECT (SELECT SUM(id) FROM @rows) AS outer_total,
+               (SELECT COUNT(*) FROM variable_calls WHERE kind='inner') AS calls,
+               (SELECT SUM(total) FROM variable_calls WHERE kind='inner') AS inner_total;
+      expect: {rows: 1, data: [{outer_total: 1, calls: 2, inner_total: 4}]}
+- name: Dynamic execution owns its declaration without replacing the caller variable
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows TABLE(id INT);
+        INSERT INTO @rows VALUES(1);
+        EXEC(N'DECLARE @rows TABLE(id INT); INSERT INTO @rows VALUES(5); INSERT variable_calls(kind,total) SELECT ''dynamic'',SUM(id) FROM @rows;');
+        SELECT (SELECT SUM(id) FROM @rows) AS outer_total,
+               (SELECT SUM(total) FROM variable_calls WHERE kind='dynamic') AS dynamic_total;
+      expect: {rows: 1, data: [{outer_total: 1, dynamic_total: 5}]}
+- name: Error cleanup leaves later procedure invocations usable with fresh local rows
+  tds:
+    statements:
+    - sql: |
+        CREATE PROCEDURE dbo.variable_retry @fail BIT AS BEGIN
+          DECLARE @rows TABLE(id INT);
+          INSERT INTO @rows VALUES(7);
+          IF @fail=1 RAISERROR(N'rejected invocation',16,1);
+          INSERT variable_calls(kind,total) SELECT 'retry',COUNT(*) FROM @rows;
+        END
+    - sql: EXEC dbo.variable_retry 1
+      expect: {error: true, contains: [rejected invocation]}
+    - sql: EXEC dbo.variable_retry 0
+    - sql: EXEC dbo.variable_retry 0
+    - sql: SELECT total FROM variable_calls WHERE kind='retry' ORDER BY total
+      expect: {rows: 2, data: [{total: 1}, {total: 1}]}
+- name: A later batch can declare the same name with a different SQL schema
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows TABLE(text_value NVARCHAR(12));
+        INSERT INTO @rows VALUES(N'rebound');
+        SELECT text_value FROM @rows;
+      expect: {rows: 1, data: [{text_value: rebound}]}
+
+- name: Native keys defaults and declared string widths use the ordinary INSERT sink
+  tds:
+    statements:
+    - sql: |
+        SET ANSI_WARNINGS OFF;
+        DECLARE @rows TABLE(id INT NOT NULL PRIMARY KEY,label VARCHAR(3) DEFAULT('abcde'));
+        INSERT INTO @rows(id) VALUES(1);
+        INSERT INTO @rows VALUES(2,'longer');
+        BEGIN TRY
+          INSERT INTO @rows VALUES(2,'bad');
+        END TRY BEGIN CATCH
+          PRINT N'duplicate rejected';
+        END CATCH;
+        SET ANSI_WARNINGS ON;
+        SELECT id,label FROM @rows ORDER BY id;
+      expect: {rows: 2, data: [{id: 1, label: abc}, {id: 2, label: lon}]}
+- name: ANSI ON rejects oversized private default and explicit assignments without publishing rows
+  tds:
+    statements:
+    - sql: |
+        SET ANSI_WARNINGS ON;
+        DECLARE @rows TABLE(id INT NOT NULL PRIMARY KEY,label VARCHAR(3) DEFAULT('abcde'));
+        DECLARE @default_rejected INT=0,@value_rejected INT=0;
+        BEGIN TRY
+          INSERT INTO @rows(id) VALUES(1);
+        END TRY BEGIN CATCH
+          IF ERROR_NUMBER()=8152 OR ERROR_NUMBER()=2628 SET @default_rejected=1;
+          ELSE THROW;
+        END CATCH;
+        BEGIN TRY
+          INSERT INTO @rows VALUES(2,'longer');
+        END TRY BEGIN CATCH
+          IF ERROR_NUMBER()=8152 OR ERROR_NUMBER()=2628 SET @value_rejected=1;
+          ELSE THROW;
+        END CATCH;
+        SELECT @default_rejected AS default_rejected,@value_rejected AS value_rejected,COUNT(*) AS remaining FROM @rows;
+      expect: {rows: 1, data: [{default_rejected: 1, value_rejected: 1, remaining: 0}]}
+
+- name: Local sources bind through control predicates scalar assignment and declaration names
+  tds:
+    statements:
+    - sql: |
+        DECLARE @scope TABLE(id INT);
+        DECLARE @total INT=0;
+        INSERT @scope VALUES(2),(3);
+        IF EXISTS(SELECT id FROM @scope WHERE id=3)
+          SELECT @total=SUM(id) FROM @scope;
+        SELECT @total AS total;
+      expect: {rows: 1, data: [{total: 5}]}
+- name: Scalar and table declarations share one lexical variable namespace
+  tds:
+    statements:
+    - sql: |
+        DECLARE @rows INT;
+        DECLARE @rows TABLE(id INT);
+      expect: {error: true, contains: [duplicate variable declaration]}
+
+- name: A returned private frame releases independently of an active caller transaction
+  tds:
+    statements:
+    - sql: |
+        CREATE PROCEDURE dbo.variable_pending AS BEGIN
+          DECLARE @rows TABLE(id INT);
+          INSERT @rows SELECT id FROM variable_inputs WHERE id=88;
+          INSERT variable_calls(kind,total) SELECT 'pending',SUM(id) FROM @rows;
+        END
+    - sql: |
+        BEGIN TRANSACTION;
+        INSERT variable_inputs VALUES(88,'pending');
+        EXEC dbo.variable_pending;
+    - sql: |
+        SELECT @@TRANCOUNT AS depth,(SELECT SUM(total) FROM variable_calls WHERE kind='pending') AS total;
+        ROLLBACK TRANSACTION;
+      expect: {rows: 1, data: [{depth: 1, total: 88}]}
+    - sql: |
+        SELECT (SELECT COUNT(*) FROM variable_inputs WHERE id=88) AS public_count,
+               (SELECT COUNT(*) FROM variable_calls WHERE kind='pending') AS call_count;
+      expect: {rows: 1, data: [{public_count: 0, call_count: 0}]}
+
+# https://learn.microsoft.com/sql/t-sql/statements/insert-transact-sql/
+# A table variable is an INSERT EXEC destination, not a dynamic SQL identifier.
+- name: Named procedure streams bind table variable destinations by ordinal
+  sql: |
+    DECLARE @rows TABLE(id INT PRIMARY KEY,label NVARCHAR(8),marker INT DEFAULT 9);
+    INSERT INTO @rows(other.id,other.label) EXEC variable_capture;
+    SELECT id,label,marker FROM @rows ORDER BY id;
+  expect: {rows: 2,data: [{id: 2,label: two,marker: 9},{id: 3,label: null,marker: 9}]}
+- name: Dynamic result streams enter the same typed local destination
+  sql: |
+    DECLARE @rows TABLE(id INT,label VARCHAR(3));
+    SET ANSI_WARNINGS OFF;
+    INSERT @rows EXEC(N'SELECT 5 AS source_id,N''longer'' AS source_label');
+    SET ANSI_WARNINGS ON;
+    SELECT id,label FROM @rows;
+  expect: {rows: 1,data: [{id: 5,label: lon}]}
+- name: A source module with the same local name cannot replace its destination
+  sql: |
+    DECLARE @rows TABLE(id INT);
+    INSERT @rows VALUES(1);
+    INSERT @rows EXEC variable_capture_scope;
+    SELECT id FROM @rows ORDER BY id;
+  expect: {rows: 2,data: [{id: 1},{id: 17}]}
+- name: Captured private writes survive caller rollback while public source writes roll back
+  sql: |
+    DECLARE @rows TABLE(id INT);
+    BEGIN TRANSACTION;
+    INSERT @rows EXEC(N'INSERT variable_inputs VALUES(77,''pending''); SELECT id FROM variable_inputs WHERE id=77');
+    ROLLBACK TRANSACTION;
+    SELECT id,(SELECT COUNT(*) FROM variable_inputs WHERE id=77) AS public_count FROM @rows;
+  expect: {rows: 1,data: [{id: 77,public_count: 0}]}
+- name: A failed dynamic producer leaves no captured prefix and preserves earlier private rows
+  sql: |
+    DECLARE @rows TABLE(id INT PRIMARY KEY);
+    DECLARE @source_rejected INT=0;
+    INSERT @rows VALUES(1);
+    BEGIN TRY
+      INSERT @rows EXEC(N'SELECT 2 AS id; THROW 50001,N''source rejected'',1');
+    END TRY BEGIN CATCH
+      IF ERROR_NUMBER()=50001 SET @source_rejected=1;
+      ELSE THROW;
+    END CATCH;
+    SELECT id,@source_rejected AS source_rejected FROM @rows;
+  expect: {rows: 1,data: [{id: 1,source_rejected: 1}]}
+- name: Destination uniqueness failure rolls back every row of that capture
+  sql: |
+    DECLARE @rows TABLE(id INT PRIMARY KEY);
+    DECLARE @duplicate_rejected INT=0;
+    INSERT @rows VALUES(1);
+    BEGIN TRY
+      INSERT @rows EXEC(N'INSERT variable_calls VALUES(''dupauto'',19); SELECT 2 AS id; SELECT 1 AS id');
+    END TRY BEGIN CATCH
+      IF ERROR_MESSAGE() LIKE N'%duplicate%' SET @duplicate_rejected=1;
+      ELSE THROW;
+    END CATCH;
+    SELECT id,@duplicate_rejected AS duplicate_rejected,
+      (SELECT COUNT(*) FROM variable_calls WHERE kind='dupauto') AS public_count FROM @rows;
+  expect: {rows: 1,data: [{id: 1,duplicate_rejected: 1,public_count: 0}]}
+# SQL Server 2022 autocommit reference: https://dbfiddle.uk/IQdtWM38
+- name: An autocommit source failure rolls back public source effects and its private capture
+  sql: |
+    DECLARE @rows TABLE(id INT PRIMARY KEY);
+    DECLARE @rejected INT=0;
+    INSERT @rows VALUES(1);
+    BEGIN TRY
+      INSERT @rows EXEC(N'INSERT variable_calls VALUES(''failed'',19); SELECT 2 AS id; THROW 50001,N''source rejected'',1');
+    END TRY BEGIN CATCH
+      IF ERROR_NUMBER()=50001 SET @rejected=1;
+      ELSE THROW;
+    END CATCH;
+    SELECT id,@rejected AS rejected,(SELECT COUNT(*) FROM @rows) AS private_count,
+      (SELECT COUNT(*) FROM variable_calls WHERE kind='failed') AS public_count FROM @rows;
+  expect: {rows: 1,data: [{id: 1,rejected: 1,private_count: 1,public_count: 0}]}
+# An explicit transaction retains completed source effects after capture failure.
+# SQL Server 2022 reference: https://dbfiddle.uk/fp3CEJMQ
+- name: An explicit transaction retains source effects after a destination duplicate
+  sql: |
+    DECLARE @rows TABLE(id INT PRIMARY KEY);
+    DECLARE @rejected INT=0,@source_before INT=-1,@private_before INT=-1,@depth INT=-1,@witness INT=-1;
+    INSERT @rows VALUES(1);
+    BEGIN TRANSACTION;
+    BEGIN TRY
+      INSERT @rows EXEC(N'INSERT variable_calls VALUES(''txdup'',19); SELECT 2 AS id; SELECT 1 AS id');
+    END TRY BEGIN CATCH
+      IF ERROR_MESSAGE() LIKE N'%duplicate%' SET @rejected=1;
+      ELSE THROW;
+    END CATCH;
+    SELECT @source_before=COUNT(*) FROM variable_calls WHERE kind='txdup';
+    SELECT @private_before=COUNT(*) FROM @rows;
+    SET @depth=@@TRANCOUNT;
+    INSERT variable_calls VALUES('dup_ok',23);
+    SELECT @witness=COUNT(*) FROM variable_calls WHERE kind='dup_ok';
+    ROLLBACK TRANSACTION;
+    SELECT id,@rejected AS rejected,@source_before AS source_before,@private_before AS private_before,
+      @depth AS transaction_count,@witness AS later_write,
+      (SELECT COUNT(*) FROM variable_calls WHERE kind='txdup') AS source_after,
+      (SELECT COUNT(*) FROM variable_calls WHERE kind='dup_ok') AS witness_after FROM @rows;
+  expect: {rows: 1,data: [{id: 1,rejected: 1,source_before: 1,private_before: 1,transaction_count: 1,
+    later_write: 1,source_after: 0,witness_after: 0}]}
+- name: An explicit transaction retains source effects after a source THROW
+  sql: |
+    DECLARE @rows TABLE(id INT PRIMARY KEY);
+    DECLARE @rejected INT=0,@source_before INT=-1,@private_before INT=-1,@depth INT=-1,@witness INT=-1;
+    INSERT @rows VALUES(1);
+    BEGIN TRANSACTION;
+    BEGIN TRY
+      INSERT @rows EXEC(N'INSERT variable_calls VALUES(''txthrow'',19); SELECT 2 AS id; THROW 50001,N''source rejected'',1');
+    END TRY BEGIN CATCH
+      IF ERROR_NUMBER()=50001 SET @rejected=1;
+      ELSE THROW;
+    END CATCH;
+    SELECT @source_before=COUNT(*) FROM variable_calls WHERE kind='txthrow';
+    SELECT @private_before=COUNT(*) FROM @rows;
+    SET @depth=@@TRANCOUNT;
+    INSERT variable_calls VALUES('throw_ok',23);
+    SELECT @witness=COUNT(*) FROM variable_calls WHERE kind='throw_ok';
+    ROLLBACK TRANSACTION;
+    SELECT id,@rejected AS rejected,@source_before AS source_before,@private_before AS private_before,
+      @depth AS transaction_count,@witness AS later_write,
+      (SELECT COUNT(*) FROM variable_calls WHERE kind='txthrow') AS source_after,
+      (SELECT COUNT(*) FROM variable_calls WHERE kind='throw_ok') AS witness_after FROM @rows;
+  expect: {rows: 1,data: [{id: 1,rejected: 1,source_before: 1,private_before: 1,transaction_count: 1,
+    later_write: 1,source_after: 0,witness_after: 0}]}
+- name: An incompatible empty source still validates the local target schema
+  sql: |
+    DECLARE @rows TABLE(id INT,label VARCHAR(8));
+    DECLARE @rejected INT=0;
+    BEGIN TRY
+      INSERT @rows EXEC(N'SELECT id FROM variable_inputs WHERE id=-1');
+    END TRY BEGIN CATCH
+      IF ERROR_MESSAGE() LIKE N'%column count%' SET @rejected=1;
+      ELSE THROW;
+    END CATCH;
+    SELECT @rejected AS rejected,COUNT(*) AS remaining FROM @rows;
+  expect: {rows: 1,data: [{rejected: 1,remaining: 0}]}
+- name: Dynamic source code cannot read an outer table variable
+  sql: |
+    DECLARE @rows TABLE(id INT);
+    INSERT @rows EXEC(N'SELECT id FROM @rows');
+  expect: {error: true}
+- name: INSERT EXEC cannot manufacture an undeclared table variable
+  sql: INSERT @not_declared EXEC variable_capture_scope
+  expect: {error: true}
+
+# SQL Server 2022 reference: https://dbfiddle.uk/OSI48LX5
+# Recoverable bounded-text conversion: preserve public source effects while
+# undoing every private target row from the failing capture.
+- name: Explicit source effects survive target text conversion failure and private prefix Undo
+  sql: |
+    SET ANSI_WARNINGS ON;
+    DECLARE @rows TABLE(id INT PRIMARY KEY,label VARCHAR(3));
+    DECLARE @rejected INT=0,@source_before INT=-1,@private_before INT=-1,@depth INT=-1,@witness INT=-1;
+    INSERT @rows VALUES(1,'old');
+    BEGIN TRANSACTION;
+    BEGIN TRY
+      INSERT @rows EXEC(N'INSERT variable_calls VALUES(''cvtarget'',19); SELECT 2 AS id,N''new'' AS label; SELECT 3 AS id,N''too-long'' AS label');
+    END TRY BEGIN CATCH
+      IF ERROR_NUMBER() IN (8152,2628) SET @rejected=1;
+      ELSE THROW;
+    END CATCH;
+    SELECT @source_before=COUNT(*) FROM variable_calls WHERE kind='cvtarget';
+    SELECT @private_before=COUNT(*) FROM @rows;
+    SET @depth=@@TRANCOUNT;
+    INSERT variable_calls VALUES('cvok1',23);
+    SELECT @witness=COUNT(*) FROM variable_calls WHERE kind='cvok1';
+    ROLLBACK TRANSACTION;
+    SELECT id,label,@rejected AS rejected,@source_before AS source_before,@private_before AS private_before,
+      @depth AS transaction_count,@witness AS later_write,
+      (SELECT COUNT(*) FROM variable_calls WHERE kind='cvtarget') AS source_after,
+      (SELECT COUNT(*) FROM variable_calls WHERE kind='cvok1') AS witness_after FROM @rows;
+  expect: {rows: 1,data: [{id: 1,label: old,rejected: 1,source_before: 1,private_before: 1,transaction_count: 1,
+    later_write: 1,source_after: 0,witness_after: 0}]}
+- name: Explicit source effects survive source text conversion failure and private prefix Undo
+  sql: |
+    SET ANSI_WARNINGS ON;
+    DECLARE @rows TABLE(id INT PRIMARY KEY);
+    DECLARE @rejected INT=0,@source_before INT=-1,@private_before INT=-1,@depth INT=-1,@witness INT=-1;
+    INSERT @rows VALUES(1);
+    BEGIN TRANSACTION;
+    BEGIN TRY
+      INSERT @rows EXEC(N'INSERT variable_calls VALUES(''cvsource'',19); SELECT 2 AS id; INSERT variable_calls VALUES(''far-too-long-kind'',29)');
+    END TRY BEGIN CATCH
+      IF ERROR_NUMBER() IN (8152,2628) SET @rejected=1;
+      ELSE THROW;
+    END CATCH;
+    SELECT @source_before=COUNT(*) FROM variable_calls WHERE kind='cvsource';
+    SELECT @private_before=COUNT(*) FROM @rows;
+    SET @depth=@@TRANCOUNT;
+    INSERT variable_calls VALUES('cvok2',23);
+    SELECT @witness=COUNT(*) FROM variable_calls WHERE kind='cvok2';
+    ROLLBACK TRANSACTION;
+    SELECT id,@rejected AS rejected,@source_before AS source_before,@private_before AS private_before,
+      @depth AS transaction_count,@witness AS later_write,
+      (SELECT COUNT(*) FROM variable_calls WHERE kind='cvsource') AS source_after,
+      (SELECT COUNT(*) FROM variable_calls WHERE kind='cvok2') AS witness_after FROM @rows;
+  expect: {rows: 1,data: [{id: 1,rejected: 1,source_before: 1,private_before: 1,transaction_count: 1,
+    later_write: 1,source_after: 0,witness_after: 0}]}
+
+# SQL Server 2022 exact private-DML/source-CATCH controls: https://dbfiddle.uk/eR3YcNlJ
+- name: A private INSERT failure preserves public work from before the statement
+  sql: |
+    DECLARE @rows TABLE(id INT PRIMARY KEY);
+    DECLARE @rejected INT=0,@prefix INT=-1,@remaining INT=-1,@witness INT=-1;
+    INSERT @rows VALUES(1);
+    BEGIN TRANSACTION;
+    INSERT variable_calls VALUES('privprev',11);
+    BEGIN TRY
+      INSERT @rows SELECT TOP (2) id FROM variable_outcome_inputs ORDER BY id DESC;
+    END TRY BEGIN CATCH
+      IF ERROR_MESSAGE() LIKE N'%duplicate%' SET @rejected=1;
+      ELSE THROW;
+    END CATCH;
+    SELECT @prefix=COUNT(*) FROM variable_calls WHERE kind='privprev';
+    SELECT @remaining=COUNT(*) FROM @rows;
+    INSERT variable_calls VALUES('privnext',13);
+    SELECT @witness=COUNT(*) FROM variable_calls WHERE kind='privnext';
+    ROLLBACK TRANSACTION;
+    SELECT id,@rejected AS rejected,@prefix AS public_before,@remaining AS private_count,@witness AS later_write,
+      (SELECT COUNT(*) FROM variable_calls WHERE kind='privprev') AS public_after,
+      (SELECT COUNT(*) FROM variable_calls WHERE kind='privnext') AS witness_after FROM @rows;
+  expect: {rows: 1,data: [{id: 1,rejected: 1,public_before: 1,private_count: 1,later_write: 1,public_after: 0,witness_after: 0}]}
+- name: A private UPDATE failure preserves its prior rows and public transaction
+  sql: |
+    DECLARE @rows TABLE(id INT PRIMARY KEY);
+    DECLARE @rejected INT=0,@prefix INT=-1,@remaining INT=-1,@witness INT=-1;
+    INSERT @rows VALUES(1),(2);
+    BEGIN TRANSACTION;
+    INSERT variable_calls VALUES('updprev',11);
+    BEGIN TRY UPDATE @rows SET id=7; END TRY
+    BEGIN CATCH
+      IF ERROR_MESSAGE() LIKE N'%duplicate%' SET @rejected=1;
+      ELSE THROW;
+    END CATCH;
+    SELECT @prefix=COUNT(*) FROM variable_calls WHERE kind='updprev';
+    SELECT @remaining=COUNT(*) FROM @rows;
+    INSERT variable_calls VALUES('updnext',13);
+    SELECT @witness=COUNT(*) FROM variable_calls WHERE kind='updnext';
+    ROLLBACK TRANSACTION;
+    SELECT id,@rejected AS rejected,@prefix AS public_before,@remaining AS private_count,@witness AS later_write,
+      (SELECT COUNT(*) FROM variable_calls WHERE kind='updprev') AS public_after,
+      (SELECT COUNT(*) FROM variable_calls WHERE kind='updnext') AS witness_after FROM @rows ORDER BY id;
+  expect: {rows: 2,data: [{id: 1,rejected: 1,public_before: 1,private_count: 2,later_write: 1,public_after: 0,witness_after: 0},
+    {id: 2,rejected: 1,public_before: 1,private_count: 2,later_write: 1,public_after: 0,witness_after: 0}]}
+- name: A completed private DELETE retains its own data decision after public rollback
+  sql: |
+    DECLARE @rows TABLE(id INT PRIMARY KEY);
+    INSERT @rows VALUES(1),(2);
+    BEGIN TRANSACTION;
+    INSERT variable_calls VALUES('delprev',11);
+    DELETE @rows WHERE id=2;
+    ROLLBACK TRANSACTION;
+    SELECT id,(SELECT COUNT(*) FROM variable_calls WHERE kind='delprev') AS public_after FROM @rows;
+  expect: {rows: 1,data: [{id: 1,public_after: 0}]}
+- name: A source module catches its own local mutation before capture completion
+  sql: |
+    DECLARE @rows TABLE(id INT PRIMARY KEY);
+    DECLARE @prefix INT=-1;
+    BEGIN TRANSACTION;
+    INSERT @rows EXEC variable_capture_recovery;
+    SELECT @prefix=COUNT(*) FROM variable_calls WHERE kind='srccatch';
+    ROLLBACK TRANSACTION;
+    SELECT id,@prefix AS source_before,(SELECT COUNT(*) FROM variable_calls WHERE kind='srccatch') AS source_after FROM @rows;
+  expect: {rows: 1,data: [{id: 17,source_before: 1,source_after: 0}]}
+
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS variable_capture
+- sql: DROP PROCEDURE IF EXISTS variable_capture_scope
+- sql: DROP PROCEDURE IF EXISTS dbo.variable_pending
+- sql: DROP PROCEDURE IF EXISTS dbo.variable_inner
+- sql: DROP PROCEDURE IF EXISTS dbo.variable_retry
+- sql: DROP TABLE IF EXISTS variable_calls
+- sql: DROP TABLE IF EXISTS variable_inputs
+- sql: DROP PROCEDURE IF EXISTS variable_capture_recovery
+- sql: DROP TABLE IF EXISTS variable_outcome_inputs

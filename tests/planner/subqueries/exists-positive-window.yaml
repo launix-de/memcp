@@ -1,0 +1,123 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Presence-only row windows retain correlation and name validation across SQL dialects
+setup:
+- sql: CREATE TABLE exists_positive_outer(id INT)
+- sql: CREATE TABLE exists_positive_inner(id INT, owner INT)
+- sql: INSERT INTO exists_positive_outer VALUES(1),(2),(3)
+- sql: INSERT INTO exists_positive_inner VALUES(10,1),(10,1),(20,2)
+cleanup:
+- sql: DROP TABLE exists_positive_outer
+- sql: DROP TABLE exists_positive_inner
+test_cases:
+- name: A positive cap ignores ordering while retaining each correlated row domain
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT i.id FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY i.id DESC LIMIT 2) ORDER BY o.id
+  expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+- name: TSQL TOP retains the same presence and NULL projection semantics
+  syntax: tsql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT TOP(2) NULL FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY i.id DESC) ORDER BY o.id
+  expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+- name: PostgreSQL positive cap retains correlated NULL row presence
+  syntax: psql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT NULL FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY i.id DESC LIMIT 2) ORDER BY o.id
+  expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+- name: Negated presence retains empty correlated domains after a positive cap
+  sql: SELECT o.id FROM exists_positive_outer o WHERE NOT EXISTS(SELECT i.id FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY i.id DESC LIMIT 2) ORDER BY o.id
+  expect: {rows: 1, data: [{id: 3}]}
+- name: Ordering alone does not alter MySQL presence
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT i.id FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY i.id DESC) ORDER BY o.id
+  expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+- name: Ordering alone does not alter PostgreSQL negated presence
+  syntax: psql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE NOT EXISTS(SELECT i.id FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY i.id DESC) ORDER BY o.id
+  expect: {rows: 1, data: [{id: 3}]}
+- name: A completed global aggregate still establishes presence for an empty matching domain
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT COUNT(*) AS n FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY n DESC LIMIT 2) ORDER BY o.id
+  expect: {rows: 3, data: [{id: 1}, {id: 2}, {id: 3}]}
+- name: TSQL TOP preserves the completed aggregate row for an empty matching domain
+  syntax: tsql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT TOP(2) COUNT(*) AS n FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY n DESC) ORDER BY o.id
+  expect: {rows: 3, data: [{id: 1}, {id: 2}, {id: 3}]}
+- name: PostgreSQL cap preserves the completed aggregate row for an empty matching domain
+  syntax: psql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT COUNT(*) AS n FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY n DESC LIMIT 2) ORDER BY o.id
+  expect: {rows: 3, data: [{id: 1}, {id: 2}, {id: 3}]}
+- name: A nullable SUM result still establishes completed-row presence
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT SUM(i.id) AS n FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY n DESC LIMIT 2) ORDER BY o.id
+  expect: {rows: 3, data: [{id: 1}, {id: 2}, {id: 3}]}
+- name: TSQL nullable aggregate values do not become row-presence witnesses
+  syntax: tsql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT TOP(2) SUM(i.id) AS n FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY n DESC) ORDER BY o.id
+  expect: {rows: 3, data: [{id: 1}, {id: 2}, {id: 3}]}
+- name: HAVING filters the completed scalar aggregate before presence is tested
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT COUNT(*) AS n FROM exists_positive_inner i WHERE i.owner=o.id HAVING COUNT(*)>0 ORDER BY n DESC LIMIT 2) ORDER BY o.id
+  expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+- name: A zero cap still removes the completed aggregate row
+  noncritical: true
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT COUNT(*) AS n FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY n DESC LIMIT 0) ORDER BY o.id
+  expect: {rows: 0, data: []}
+- name: An offset past the single aggregate row still removes presence
+  noncritical: true
+  syntax: psql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT COUNT(*) AS n FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY n DESC LIMIT 2 OFFSET 1) ORDER BY o.id
+  expect: {rows: 0, data: []}
+- name: A nested scalar aggregate does not aggregate its containing row domain
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT (SELECT COUNT(*) FROM exists_positive_inner) AS n FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY n DESC LIMIT 2) ORDER BY o.id
+  expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+- name: A window aggregate does not invent a row for an empty input domain
+  noncritical: true
+  syntax: psql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT COUNT(*) OVER() AS n FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY i.id DESC LIMIT 2) ORDER BY o.id
+  expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+- name: Explicit groups keep the absence of an empty matching domain
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT COUNT(*) AS n FROM exists_positive_inner i WHERE i.owner=o.id GROUP BY i.owner) ORDER BY o.id
+  expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+- name: A scalar aggregate over an empty scalar input still returns its completed row
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT COUNT(*) WHERE 1=0) ORDER BY o.id
+  expect: {rows: 3, data: [{id: 1}, {id: 2}, {id: 3}]}
+- name: A NULL aggregate over an empty scalar input still returns its completed row
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT SUM(1) WHERE 1=0) ORDER BY o.id
+  expect: {rows: 3, data: [{id: 1}, {id: 2}, {id: 3}]}
+- name: MySQL validates ordering names before presence-only lowering
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT i.id FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY i.missing_order_column LIMIT 2)
+  expect: {error: true, contains: missing_order_column}
+- name: TSQL validates ordering names before presence-only lowering
+  syntax: tsql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT TOP(2) i.id FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY i.missing_order_column)
+  expect: {error: true, contains: missing_order_column}
+- name: PostgreSQL validates ordering names before presence-only lowering
+  syntax: psql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT i.id FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY i.missing_order_column LIMIT 2)
+  expect: {error: true, contains: missing_order_column}
+- name: Aggregate-only ordering retains completed-row presence on empty domains
+  noncritical: true
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT 1 FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY COUNT(*) LIMIT 2) ORDER BY o.id
+  expect: {rows: 3, data: [{id: 1}, {id: 2}, {id: 3}]}
+- name: PostgreSQL aggregate-only ordering retains its global group
+  noncritical: true
+  syntax: psql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT 1 FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY COUNT(*) LIMIT 2) ORDER BY o.id
+  expect: {rows: 3, data: [{id: 1}, {id: 2}, {id: 3}]}
+- name: An aggregate in the second ordering item retains completed-row presence
+  noncritical: true
+  syntax: psql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT 1 FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY 1,COUNT(*) LIMIT 2) ORDER BY o.id
+  expect: {rows: 3, data: [{id: 1}, {id: 2}, {id: 3}]}
+- name: A completed aggregate retains its direct aggregate ordering expression
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT COUNT(*) AS n FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY COUNT(*) DESC LIMIT 2) ORDER BY o.id
+  expect: {rows: 3, data: [{id: 1}, {id: 2}, {id: 3}]}
+- name: A completed aggregate retains a second direct aggregate ordering expression
+  syntax: psql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT COUNT(*) AS n FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY 1,COUNT(*) DESC LIMIT 2) ORDER BY o.id
+  expect: {rows: 3, data: [{id: 1}, {id: 2}, {id: 3}]}
+- name: A window in the second projection retains absence on empty input
+  noncritical: true
+  syntax: psql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT 1 AS marker,COUNT(*) OVER() AS n FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY i.id DESC LIMIT 2) ORDER BY o.id
+  expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+- name: A window in the ordering clause retains absence on empty input
+  noncritical: true
+  syntax: psql
+  sql: SELECT o.id FROM exists_positive_outer o WHERE EXISTS(SELECT 1 FROM exists_positive_inner i WHERE i.owner=o.id ORDER BY COUNT(*) OVER() LIMIT 2) ORDER BY o.id
+  expect: {rows: 2, data: [{id: 1}, {id: 2}]}

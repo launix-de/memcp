@@ -1,0 +1,148 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Actual worker admission is covered by cluster contracts. These two ordinary
+# codecs exercise captured values under hostile helper names, not strict wire.
+# Source-list rebuilding removes only SourceInfo wrappers, preserving AST data.
+metadata:
+  syntax: mysql
+  isolated: true
+  description: Stored view catalog callbacks retain their native access descriptor through both procedure codecs
+setup:
+- sql: CREATE TABLE stored_capture_anchor(id INT PRIMARY KEY)
+- sql: INSERT INTO stored_capture_anchor VALUES(1)
+- sql: CREATE VIEW stored_capture_first AS SELECT id FROM stored_capture_anchor
+- sql: CREATE VIEW stored_capture_second AS SELECT id+1 AS id FROM stored_capture_anchor
+- scm: |-
+    (begin
+      (define restore (lambda (codec)
+        (begin
+          (define source_lists (lambda (node)
+            (match node '() '() (cons head tail) (cons (source_lists head) (source_lists tail)) _ node)))
+          (define names (list 'compiled_scan_access_header 'info_schema_name_matches))
+          (define code (list 'lambda names (close_procedure sql_stored_view_catalog_rows)))
+          (define decoded (if (equal? codec "json") (json_decode_scmer (json_encode code))
+            (apply (eval (optimize (list 'lambda '() (source_lists (scheme (serialize code)))))) '())))
+          (apply decoded (map names (lambda (name)
+            (lambda args (error (concat "unbound stored-view helper: " name)))))))))
+      (globalvars "__restore_stored_view_rows" (close_procedure restore))
+      true)
+cleanup:
+- scm: (globalvars "__restore_stored_view_rows" nil)
+- sql: DROP VIEW IF EXISTS stored_capture_first
+- sql: DROP VIEW IF EXISTS stored_capture_second
+- sql: DROP TABLE IF EXISTS stored_capture_anchor
+test_cases:
+- name: json stored view rows retain complete native catalog values under hostile helper bindings
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_stored_view_rows") "json"))
+      (define rows (restored "memcp-tests" nil (list "table" (list "exact" "stored_capture_first"))))
+      (map rows (lambda (row) (map '("table_catalog" "table_schema" "table_name" "table_type" "engine" "table_rows" "data_length" "table_collation" "table_comment")
+        (lambda (key) (row key))))))
+  expect:
+    result:
+    - - def
+      - memcp-tests
+      - stored_capture_first
+      - VIEW
+      - null
+      - null
+      - null
+      - null
+      - VIEW
+- name: json stored view selection preserves FALSE empty matches and invocation database
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_stored_view_rows") "json"))
+      (list (restored "memcp-tests" nil false)
+        (restored "memcp-tests" nil (list "table" (list "exact" "stored_capture_missing")))
+        (restored "stored_capture_absent_database" nil nil)
+        (map (restored "memcp-tests" nil (list "table" (list "exact" "stored_capture_second")))
+          (lambda (row) (row "table_name")))))
+  expect:
+    result:
+    - []
+    - []
+    - []
+    - - stored_capture_second
+- name: json stored view scan retains actual owner visibility and rollback
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_stored_view_rows") "json"))
+      (define template (sql_find_view nil "memcp-tests" "stored_capture_first"))
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (try (lambda () (begin
+        /* A native catalog-row fixture explicitly retains its data writer. */
+        (insert (table "system" false "views" false tx)
+          '("database" "name" "dialect" "sql" "ir")
+          (list (list "memcp-tests" "stored_capture_pending_json" (car template) (cadr template) (nth template 2)))
+          '() (lambda () true) false nil tx)
+        (define selection (list "table" (list "exact" "stored_capture_pending_json")))
+        (define own (map (restored "memcp-tests" tx selection) (lambda (row) (row "table_name"))))
+        (define outside (restored "memcp-tests" nil selection))
+        (tx_rollback owner)
+        (list own outside (restored "memcp-tests" nil selection))))
+      (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - - stored_capture_pending_json
+    - []
+    - []
+- name: source stored view rows retain complete native catalog values under hostile helper bindings
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_stored_view_rows") "source"))
+      (define rows (restored "memcp-tests" nil (list "table" (list "exact" "stored_capture_first"))))
+      (map rows (lambda (row) (map '("table_catalog" "table_schema" "table_name" "table_type" "engine" "table_rows" "data_length" "table_collation" "table_comment")
+        (lambda (key) (row key))))))
+  expect:
+    result:
+    - - def
+      - memcp-tests
+      - stored_capture_first
+      - VIEW
+      - null
+      - null
+      - null
+      - null
+      - VIEW
+- name: source stored view selection preserves FALSE empty matches and invocation database
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_stored_view_rows") "source"))
+      (list (restored "memcp-tests" nil false)
+        (restored "memcp-tests" nil (list "table" (list "exact" "stored_capture_missing")))
+        (restored "stored_capture_absent_database" nil nil)
+        (map (restored "memcp-tests" nil (list "table" (list "exact" "stored_capture_second")))
+          (lambda (row) (row "table_name")))))
+  expect:
+    result:
+    - []
+    - []
+    - []
+    - - stored_capture_second
+- name: source stored view scan retains actual owner visibility and rollback
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_stored_view_rows") "source"))
+      (define template (sql_find_view nil "memcp-tests" "stored_capture_first"))
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (try (lambda () (begin
+        /* A native catalog-row fixture explicitly retains its data writer. */
+        (insert (table "system" false "views" false tx)
+          '("database" "name" "dialect" "sql" "ir")
+          (list (list "memcp-tests" "stored_capture_pending_source" (car template) (cadr template) (nth template 2)))
+          '() (lambda () true) false nil tx)
+        (define selection (list "table" (list "exact" "stored_capture_pending_source")))
+        (define own (map (restored "memcp-tests" tx selection) (lambda (row) (row "table_name"))))
+        (define outside (restored "memcp-tests" nil selection))
+        (tx_rollback owner)
+        (list own outside (restored "memcp-tests" nil selection))))
+      (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - - stored_capture_pending_source
+    - []
+    - []

@@ -1,0 +1,152 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Local row participants retain their native source decision after authority movement and removal
+setup:
+- scm: (createdatabase "memcp-tests-participant-authority" false)
+- scm: (createdatabase "memcp-tests-participant-container" false)
+- scm: |
+    (begin
+      (registerprocedurelanguage "participant-literal"
+        (lambda (source _context) (lambda () (simplify source))))
+      (createprocedure "memcp-tests-participant-authority" "participant_module"
+        "participant-literal" "7" nil false)
+      (define columns (list (list "column" "id" "INT" '() '())
+        (list "column" "value" "INT" '() '()) (list "unique" "PRIMARY" '("id"))))
+      (createtable "memcp-tests-participant-authority" "progress" columns '("engine" "safe") false nil)
+      (createtable "memcp-tests" "catalog_participant_rows" columns '("engine" "safe") false nil)
+      (insert (table "memcp-tests-participant-authority" false "progress" false nil)
+        '("id" "value") (list (list 0 0)))
+      (insert (table "memcp-tests" false "catalog_participant_rows" false nil)
+        '("id" "value") (list (list 0 0)))
+      (createtable "memcp-tests" "catalog_participant_owner"
+        (list (list "column" "owner" "any" '() '())) '("engine" "memory") false nil)
+      true)
+test_cases:
+- name: A native source and rows in both local databases commit through one owner
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (insert (table "memcp-tests" false "catalog_participant_rows" false tx)
+        '("id" "value") (list (list 1 101)) '() nil false nil tx)
+      (insert (table "memcp-tests-participant-authority" false "progress" false tx)
+        '("id" "value") (list (list 1 11)) '() nil false nil tx)
+      (createprocedure "memcp-tests-participant-authority" "participant_module"
+        "participant-literal" "11" nil true tx)
+      (define own ((procedure "memcp-tests-participant-authority" "participant_module" false tx)))
+      (define outside ((procedure "memcp-tests-participant-authority" "participant_module")))
+      (tx_commit owner)
+      (list own outside ((procedure "memcp-tests-participant-authority" "participant_module"))))
+  expect: {result: [11, 7, 11]}
+- name: Crash after the common native commit is acknowledged
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart before reading either participant
+  action: restart
+- name: The recovered source retains its actual committed callable
+  scm: |
+    (begin
+      (registerprocedurelanguage "participant-literal"
+        (lambda (source _context) (lambda () (simplify source))))
+      ((procedure "memcp-tests-participant-authority" "participant_module")))
+  expect: {result: 11}
+- name: Authority row recovery retains the seed and committed payload exactly
+  sql: SELECT id,value FROM `memcp-tests-participant-authority`.progress ORDER BY id
+  expect: {rows: 2, data: [{id: 0, value: 0}, {id: 1, value: 11}]}
+- name: The other database replays every committed participant row
+  sql: SELECT id,value FROM catalog_participant_rows ORDER BY id
+  expect: {rows: 2, data: [{id: 0, value: 0}, {id: 1, value: 101}]}
+- name: Move the authority through the existing filesystem backed storage owner
+  sql: ALTER DATABASE `memcp-tests-participant-authority` SET STORAGE backend='FakeRemote',prefix='memcp-tests-participant-container/.participant-authority'
+- name: Crash after authority storage movement
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart the moved authority without an old physical alias
+  action: restart
+- name: The moved authority retains its actual source callable
+  scm: |
+    (begin
+      (registerprocedurelanguage "participant-literal"
+        (lambda (source _context) (lambda () (simplify source))))
+      ((procedure "memcp-tests-participant-authority" "participant_module")))
+  expect: {result: 11}
+- name: The moved authority recovers its complete original row set
+  sql: SELECT id,value FROM `memcp-tests-participant-authority`.progress ORDER BY id
+  expect: {rows: 2, data: [{id: 0, value: 0}, {id: 1, value: 11}]}
+- name: Moving the authority never changes its previously settled child rows
+  sql: SELECT id,value FROM catalog_participant_rows ORDER BY id
+  expect: {rows: 2, data: [{id: 0, value: 0}, {id: 1, value: 101}]}
+- name: A later native commit enrolls the moved authority and existing participant again
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (insert (table "memcp-tests" false "catalog_participant_rows" false tx)
+        '("id" "value") (list (list 2 202)) '() nil false nil tx)
+      (insert (table "memcp-tests-participant-authority" false "progress" false tx)
+        '("id" "value") (list (list 2 17)) '() nil false nil tx)
+      (createprocedure "memcp-tests-participant-authority" "participant_module"
+        "participant-literal" "17" nil true tx)
+      (tx_commit owner)
+      ((procedure "memcp-tests-participant-authority" "participant_module")))
+  expect: {result: 17}
+- name: Removing the authority settles its participant inventory before namespace retirement
+  scm: (dropdatabase "memcp-tests-participant-authority" false)
+  expect: {result: true}
+- name: Crash after removing the authority
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart with only the settled child database remaining
+  action: restart
+- name: Settled child rows do not depend on the removed authority namespace
+  sql: SELECT id,value FROM catalog_participant_rows ORDER BY id
+  expect: {rows: 3, data: [{id: 0, value: 0}, {id: 1, value: 101}, {id: 2, value: 202}]}
+- name: A fresh authority with the same name cannot replace historical participant decisions
+  scm: |
+    (begin
+      (createdatabase "memcp-tests-participant-authority" false)
+      (registerprocedurelanguage "participant-literal"
+        (lambda (source _context) (lambda () (simplify source))))
+      (createprocedure "memcp-tests-participant-authority" "participant_module"
+        "participant-literal" "99" nil false)
+      ((procedure "memcp-tests-participant-authority" "participant_module")))
+  expect: {result: 99}
+- name: Existing participant rows survive a different authority incarnation
+  sql: SELECT id,value FROM catalog_participant_rows ORDER BY id
+  expect: {rows: 3, data: [{id: 0, value: 0}, {id: 1, value: 101}, {id: 2, value: 202}]}
+- name: An unaccepted source and participant row remain owned until the crash
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (insert (table "memcp-tests" false "catalog_participant_rows" false tx)
+        '("id" "value") (list (list 3 303)) '() nil false nil tx)
+      (createprocedure "memcp-tests-participant-authority" "participant_module"
+        "participant-literal" "101" nil true tx)
+      (insert (table "memcp-tests" false "catalog_participant_owner" false nil)
+        '("owner") (list (list owner)))
+      (list ((procedure "memcp-tests-participant-authority" "participant_module" false tx))
+        ((procedure "memcp-tests-participant-authority" "participant_module"))))
+  expect: {result: [101, 99]}
+- name: Crash with the actual unaccepted owner still reachable
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart without accepting the final source and row suffix
+  action: restart
+- name: Recovery retains only the previously accepted participant rows
+  sql: SELECT id,value FROM catalog_participant_rows ORDER BY id
+  expect: {rows: 3, data: [{id: 0, value: 0}, {id: 1, value: 101}, {id: 2, value: 202}]}
+- name: The replacement authority retains its own committed source
+  scm: |
+    (begin
+      (registerprocedurelanguage "participant-literal"
+        (lambda (source _context) (lambda () (simplify source))))
+      ((procedure "memcp-tests-participant-authority" "participant_module")))
+  expect: {result: 99}
+cleanup:
+- scm: (dropdatabase "memcp-tests-participant-authority" true)
+- scm: (dropdatabase "memcp-tests-participant-container" true)
+- sql: DROP TABLE IF EXISTS catalog_participant_owner
+- sql: DROP TABLE IF EXISTS catalog_participant_rows

@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import itertools
 import requests
 import signal
+import shlex
 import subprocess
 import socket
 import sys
@@ -74,6 +75,7 @@ from run_sql_tests import (  # noqa: E402
     performance_regression_pct,
     performance_sample_ns,
     performance_measurement_ns,
+    performance_uses_row_template,
     prepare_memcp_data_dir,
     print_memcp_log,
     resolve_timing_aggregation,
@@ -82,7 +84,7 @@ from run_sql_tests import (  # noqa: E402
     publish_performance_scale,
     request_shared_supervisor_restart,
     revision_specific_scm,
-    table_abi_fixture_sources,
+    scm_abi_fixture_sources,
     resolve_timing_samples,
     resolve_warmup_runs,
     run_test_specs,
@@ -664,6 +666,193 @@ class HookDiagnosticsContractTest(unittest.TestCase):
         self.assertIn("./git-pre-commit", test_recipe)
 
 
+class StepResponseContractTest(unittest.TestCase):
+    def run_steps(self, steps, response, **case_options):
+        runner = SQLTestRunner("http://localhost:19991")
+        runner.suite_syntax = "tsql"
+        with mock.patch.object(runner, "ensure_database"), \
+                mock.patch.object(runner, "_record_fail", return_value=False), \
+                mock.patch("run_sql_tests.requests.post", return_value=response) as post, \
+                redirect_stdout(io.StringIO()):
+            result = runner.run_test_case({"steps": steps, **case_options}, "memcp-tests")
+        return result, post
+
+    @staticmethod
+    def response(text, status=200):
+        return SimpleNamespace(status_code=status, text=text, headers={})
+
+    def test_sql_steps_use_suite_case_and_step_dialect_precedence(self):
+        for case_options, step_options, route in (
+            ({}, {}, "tsql"),
+            ({"syntax": "psql"}, {}, "psql"),
+            ({"syntax": "psql"}, {"syntax": "mysql"}, "sql"),
+            ({"syntax": "mysql"}, {"syntax": "tsql"}, "tsql"),
+            ({"syntax": None}, {"syntax": None}, "tsql"),
+        ):
+            for background in (False, True):
+                with self.subTest(case=case_options, step=step_options, background=background):
+                    ok, post = self.run_steps([{
+                        "sql": "SELECT 1 AS value", "session_id": "step-session",
+                        "background": background, **step_options,
+                        "expect": {"rows": 1, "data": [{"value": 1}]},
+                    }], self.response('{"value":1}'), **case_options)
+                    self.assertTrue(ok)
+                    self.assertEqual(post.call_args.args[0], f"http://localhost:19991/{route}/memcp-tests")
+                    self.assertEqual(post.call_args.kwargs["headers"]["X-Session-Id"], "step-session")
+
+    def test_step_assertions_validate_values_and_protocol_completions(self):
+        cases = (
+            ({"rows": 1, "data": [{"value": 7}]}, '{"value":7}', True),
+            ({"rows": 1, "data": [{"value": 7}]}, '{"value":8}', False),
+            ({"result": True}, "true", True),
+            ({"result": True}, "false", False),
+            ({"result": True}, "1", False),
+            ({"affected_rows": 2}, '{"affected_rows":2}', True),
+            ({"affected_rows": 2}, '{"affected_rows":1}', False),
+            ({"result_contains": "wanted"}, '"other"', False),
+            ({"contains": ["wanted"], "not_contains": "other"}, '{"value":"wanted"}', True),
+            ({"contains": "wanted"}, '{"value":"other"}', False),
+            ({"not_contains": "other"}, '{"value":"other"}', False),
+        )
+        for background in (False, True):
+            for expect, text, wanted in cases:
+                with self.subTest(background=background, expect=expect, text=text):
+                    ok, _ = self.run_steps([{
+                        "scm": "true", "background": background, "expect": expect,
+                    }], self.response(text))
+                    self.assertEqual(ok, wanted)
+
+    def test_unasserted_errors_and_missing_responses_do_not_pass(self):
+        for background in (False, True):
+            for response in (None, self.response("Error: failed"), self.response("failed", 500)):
+                with self.subTest(background=background, response=response):
+                    ok, _ = self.run_steps([{"scm": "true", "background": background}], response)
+                    self.assertFalse(ok)
+
+    def test_expected_error_checks_message_and_requires_a_response(self):
+        expect = {"error": True, "contains": "wanted", "not_contains": "forbidden"}
+        for background in (False, True):
+            for response, wanted in (
+                (self.response("Error: wanted", 500), True),
+                (self.response("Error: other", 500), False),
+                (self.response("Error: wanted forbidden", 500), False),
+                (self.response("true"), False),
+                (None, False),
+            ):
+                with self.subTest(background=background, response=response):
+                    ok, _ = self.run_steps([{
+                        "scm": "true", "background": background, "expect": expect,
+                    }], response)
+                    self.assertEqual(ok, wanted)
+
+    def test_explicit_interrupted_step_retains_its_contract(self):
+        for background in (False, True):
+            with self.subTest(background=background):
+                ok, _ = self.run_steps([{
+                    "scm": "true", "background": background,
+                    "expect": {"interrupted_ok": True},
+                }], None)
+                self.assertTrue(ok)
+
+    def test_step_transport_exceptions_require_explicit_interruption(self):
+        for background in (False, True):
+            for interrupted in (False, True):
+                with self.subTest(background=background, interrupted=interrupted):
+                    runner = SQLTestRunner("http://localhost:19991")
+                    with mock.patch("run_sql_tests.requests.post", side_effect=requests.ConnectionError("lost reply")), \
+                            mock.patch.object(runner, "_record_fail", return_value=False), \
+                            redirect_stdout(io.StringIO()):
+                        self.assertEqual(runner.run_test_case({"steps": [{
+                            "scm": "true", "background": background,
+                            "expect": {"interrupted_ok": interrupted},
+                        }]}, "memcp-tests"), interrupted)
+
+    def test_background_worker_must_finish_even_without_explicit_wait(self):
+        runner = SQLTestRunner("http://localhost:19991")
+        worker = mock.Mock()
+        worker.is_alive.return_value = True
+        with mock.patch("run_sql_tests.threading.Thread", return_value=worker), \
+                mock.patch.object(runner, "_record_fail", return_value=False), \
+                redirect_stdout(io.StringIO()):
+            self.assertFalse(runner.run_test_case({"steps": [{
+                "sql": "SELECT 1", "background": True,
+            }]}, "memcp-tests"))
+        worker.join.assert_called_once_with(timeout=60)
+
+
+class FixtureDialectContractTest(unittest.TestCase):
+    @staticmethod
+    def response(text='{"value":1}', status=200):
+        return SimpleNamespace(status_code=status, text=text, headers={})
+
+    def test_case_setup_and_cleanup_inherit_case_and_step_dialects(self):
+        for suite, case, step, route, body_route in (
+            ("tsql", {}, {}, "tsql", "tsql"),
+            (None, {"syntax": "tsql"}, {}, "tsql", "tsql"),
+            ("tsql", {"syntax": "psql"}, {"syntax": "mysql"}, "sql", "psql"),
+            ("tsql", {"syntax": "mysql"}, {"syntax": None}, "sql", "sql"),
+            ("psql", {"syntax": None}, {"syntax": None}, "psql", "psql"),
+        ):
+            with self.subTest(suite=suite, case=case, step=step):
+                runner = SQLTestRunner("http://localhost:19991")
+                runner.suite_syntax = suite
+                with mock.patch.object(runner, "ensure_database"), \
+                        mock.patch("run_sql_tests.requests.post", return_value=self.response()) as post, \
+                        redirect_stdout(io.StringIO()):
+                    self.assertTrue(runner.run_test_case({
+                        "sql": "SELECT 1 AS value", "session_id": "fixture-session",
+                        "setup": [{"sql": "SELECT 101 AS fixture_prepare", **step}],
+                        "cleanup": [{"sql": "SELECT 102 AS fixture_cleanup", **step}],
+                        "expect": {"data": [{"value": 1}]}, **case,
+                    }, "memcp-tests"))
+                phases = set()
+                for call in post.call_args_list:
+                    payload = call.kwargs["data"]
+                    phase = ("prepare" if b"fixture_prepare" in payload else
+                             "cleanup" if b"fixture_cleanup" in payload else "body")
+                    phases.add(phase)
+                    wanted = body_route if phase == "body" else route
+                    self.assertEqual(call.args[0], f"http://localhost:19991/{wanted}/memcp-tests")
+                    self.assertEqual(call.kwargs["headers"]["X-Session-Id"], "fixture-session")
+                self.assertEqual(phases, {"prepare", "body", "cleanup"})
+
+    def test_suite_fixture_steps_can_override_the_suite_dialect(self):
+        for suite, step, route in (
+            ("tsql", {}, "tsql"),
+            ("tsql", {"syntax": "mysql"}, "sql"),
+            (None, {"syntax": "tsql"}, "tsql"),
+            ("psql", {"syntax": None}, "psql"),
+        ):
+            with self.subTest(suite=suite, step=step):
+                runner = SQLTestRunner("http://localhost:19991")
+                runner.suite_syntax = suite
+                operation = {"sql": "SELECT 1 AS value", **step}
+                with mock.patch.object(runner, "ensure_database"), \
+                        mock.patch("run_sql_tests.requests.post", return_value=self.response()) as post, \
+                        redirect_stdout(io.StringIO()):
+                    self.assertTrue(runner.run_setup([operation], "memcp-tests"))
+                    self.assertTrue(runner.run_cleanup([operation], "memcp-tests"))
+                self.assertEqual([call.args[0] for call in post.call_args_list],
+                                 [f"http://localhost:19991/{route}/memcp-tests"] * 2)
+
+    def test_scm_operation_keeps_its_route_with_sql_fixture_steps(self):
+        runner = SQLTestRunner("http://localhost:19991")
+        def respond(url, **kwargs):
+            return self.response("true" if url.endswith("/scm") else '{"value":1}')
+        with mock.patch.object(runner, "ensure_database"), \
+                mock.patch("run_sql_tests.requests.post", side_effect=respond) as post, \
+                redirect_stdout(io.StringIO()):
+            self.assertTrue(runner.run_test_case({
+                "scm": "true", "syntax": "tsql", "expect": {"result": True},
+                "setup": [{"sql": "SELECT 1 AS value"}],
+                "cleanup": [{"sql": "SELECT 1 AS value"}],
+            }, "memcp-tests"))
+        self.assertEqual([call.args[0] for call in post.call_args_list], [
+            "http://localhost:19991/tsql/memcp-tests", "http://localhost:19991/scm",
+            "http://localhost:19991/tsql/memcp-tests",
+        ])
+
+
 class UnicodeSCMTransportContractTest(unittest.TestCase):
     def test_scm_case_uses_selected_fixture_database(self):
         runner = SQLTestRunner("http://localhost:19991")
@@ -803,14 +992,39 @@ class PerformanceScaleContractTest(unittest.TestCase):
 
     def test_unavailable_probe_records_noncritical_failure_without_http(self) -> None:
         runner = SQLTestRunner("http://localhost:1")
-        with mock.patch("run_sql_tests.requests.post") as post:
+        with mock.patch("run_sql_tests.requests.post") as post, \
+                mock.patch("run_sql_tests.subprocess.run",
+                           side_effect=FileNotFoundError("native probe executable unavailable")) as process:
             self.assertFalse(runner.run_test_case({
                 "name": "unavailable native probe", "noncritical": True,
                 "tds": {"statements": [{"sql": "SELECT 1"}]},
             }, "memcp-tests"))
             post.assert_not_called()
+            process.assert_called_once()
         self.assertEqual(runner.failed_critical, 0)
         self.assertEqual(runner.failed_noncritical, 1)
+
+    def test_native_probe_process_failures_remain_case_failures(self) -> None:
+        for protocol in ("mysql", "tds"):
+            for error in (FileNotFoundError("native probe executable unavailable"),
+                          subprocess.TimeoutExpired("native probe", 120)):
+                for noncritical in (False, True):
+                    with self.subTest(protocol=protocol, error=type(error).__name__,
+                                      noncritical=noncritical):
+                        runner = SQLTestRunner("http://localhost:1")
+                        with mock.patch("run_sql_tests.requests.post") as post, \
+                                mock.patch("run_sql_tests.subprocess.run", side_effect=error) as process:
+                            self.assertFalse(runner.run_test_case({
+                                "name": "native probe process failure", "noncritical": noncritical,
+                                protocol: {"statements": [{"sql": "SELECT 1"}]},
+                            }, "memcp-tests"))
+                            post.assert_not_called()
+                            process.assert_called_once()
+                            self.assertEqual(process.call_args.kwargs["timeout"],
+                                             30 if protocol == "mysql" else 120)
+                            self.assertFalse(Path(process.call_args.args[0][-1]).exists())
+                        self.assertEqual(runner.failed_critical, 0 if noncritical else 1)
+                        self.assertEqual(runner.failed_noncritical, 1 if noncritical else 0)
 
     def test_ci_workload_seed_initializes_safe_rows(self) -> None:
         seed = Path(__file__).resolve().parents[1] / "tests/performance/ci-workloads.json"
@@ -1059,7 +1273,92 @@ class CompileBudgetSamplingTests(unittest.TestCase):
         self.assertIn("Planner too slow", output)
 
 
+class FailureDiagnosticDialectContractTest(unittest.TestCase):
+    def test_sql_diagnostics_inherit_case_and_step_frontends(self):
+        for suite, case, step, route in (
+            ("tsql", {}, {}, "tsql"),
+            ("psql", {}, {}, "psql"),
+            (None, {"syntax": "tsql"}, {}, "tsql"),
+            ("tsql", {"syntax": "mysql"}, {}, "sql"),
+            ("tsql", {"syntax": "psql"}, {"syntax": "mysql"}, "sql"),
+            ("tsql", {"syntax": "mysql"}, {"syntax": "tsql"}, "tsql"),
+            ("tsql", {"syntax": None}, {"syntax": None}, "tsql"),
+            ("tsql", {}, {"syntax": "psql"}, "psql"),
+        ):
+            with self.subTest(suite=suite, case=case, step=step):
+                runner = SQLTestRunner("http://localhost:19991")
+                runner.suite_syntax = suite
+                response = SimpleNamespace(status_code=200, text='{"value":1}', headers={})
+                with mock.patch.object(runner, "ensure_database"), \
+                        mock.patch("run_sql_tests.requests.post", return_value=response) as post:
+                    diagnostic = runner._run_on_fail({
+                        **case, "on_fail": [{"sql": "SELECT 1 AS value", **step}],
+                    }, "memcp-tests")
+                self.assertIn('{"value":1}', diagnostic)
+                post.assert_called_once()
+                self.assertEqual(post.call_args.args[0], f"http://localhost:19991/{route}/memcp-tests")
+                self.assertEqual(post.call_args.kwargs["timeout"], 5)
+
+    def test_explicit_scm_and_psql_hooks_keep_their_frontends(self):
+        runner = SQLTestRunner("http://localhost:19991")
+        runner.suite_syntax = "tsql"
+        response = SimpleNamespace(status_code=200, text='{"value":1}', headers={})
+        with mock.patch.object(runner, "ensure_database"), \
+                mock.patch("run_sql_tests.requests.post", return_value=response) as post:
+            diagnostic = runner._run_on_fail({"syntax": "mysql", "on_fail": [
+                {"scm": "true", "syntax": "psql"},
+                {"psql": "SELECT 1 AS value", "syntax": "mysql"},
+            ]}, "memcp-tests")
+        self.assertEqual([call.args[0] for call in post.call_args_list],
+                         ["http://localhost:19991/scm", "http://localhost:19991/psql/memcp-tests"])
+        self.assertIn("[SCM]", diagnostic)
+        self.assertIn("[PSQL]", diagnostic)
+
+
 class FailureAttributionContractTest(unittest.TestCase):
+    def run_fixture_failure_diagnostics(self, *, enabled, warmup, succeeds=False):
+        runner = SQLTestRunner("http://localhost:1", performance_calibration={"scale": 1.0})
+        case = {"name": "owned fixture diagnostic", "sql": "SELECT 1 AS n",
+                "threshold_ms": 1000, "warmup": warmup, "repetitions": 1,
+                "expect": {"rows": 1, "data": [{"n": 1}]},
+                "on_fail": [{"scm": '(list "original compiler context")'}]}
+        response = SimpleNamespace(status_code=200, text=json.dumps({"n": 1 if succeeds else 2}), headers={})
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {"PERF_FIXTURE_TRIAL": "1", "PERF_FIXTURE_ROLE": "B",
+                                         "PERF_FAILURE_DIAGNOSTICS": "1" if enabled else "0"}, clear=True), \
+                mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", ""), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", return_value=True), \
+                mock.patch.object(runner, "execute_sql", return_value=response) as execute, \
+                mock.patch.object(runner, "_run_on_fail", return_value="original diagnostic") as diagnostic, \
+                redirect_stdout(output):
+            passed = runner.run_test_case(case, "memcp-tests")
+        return passed, output.getvalue(), execute.call_count, diagnostic.call_count, runner
+
+    def test_fixture_hooks_are_opt_in_and_cannot_change_failed_verdicts(self):
+        for warmup in (0, 1):
+            for enabled in (False, True):
+                with self.subTest(warmup=warmup, enabled=enabled):
+                    passed, output, requests, hooks, runner = self.run_fixture_failure_diagnostics(
+                        enabled=enabled, warmup=warmup)
+                    self.assertFalse(passed)
+                    self.assertEqual(requests, 1)
+                    self.assertEqual(hooks, int(enabled))
+                    self.assertEqual(runner.failed_critical, 1)
+                    self.assertEqual(runner.perf_results, {})
+                    self.assertEqual("original diagnostic" in output, enabled)
+
+    def test_successful_fixture_never_runs_failure_hooks(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                passed, _, requests, hooks, runner = self.run_fixture_failure_diagnostics(
+                    enabled=enabled, warmup=1, succeeds=True)
+                self.assertTrue(passed)
+                self.assertEqual(requests, 2)
+                self.assertEqual(hooks, 0)
+                self.assertEqual(runner.failed_critical, 0)
+
     def run_multiple_responses(self, values, *, performance=False, warmup=0):
         runner = SQLTestRunner("http://localhost:1", performance_calibration={"scale": 1.0})
         responses = [SimpleNamespace(status_code=200, text=json.dumps({"n": value}), headers={})
@@ -1410,7 +1709,8 @@ class SQLResultPresenceContractTest(unittest.TestCase):
 
 class ResponseExpectationContractTest(unittest.TestCase):
     def matches(self, expect, results) -> bool:
-        response = SimpleNamespace(status_code=200, text=json.dumps(results), headers={})
+        response = SimpleNamespace(status_code=200,
+            text="\n".join(json.dumps(row) for row in results), headers={})
         return SQLTestRunner("http://unused").validate_expectation(
             {"expect": expect}, response, results)
 
@@ -1419,6 +1719,34 @@ class ResponseExpectationContractTest(unittest.TestCase):
             with self.subTest(count=count):
                 self.assertTrue(self.matches({"affected_rows": count}, [{"affected_rows": count}]))
                 self.assertFalse(self.matches({"affected_rows": count + 1}, [{"affected_rows": count}]))
+
+    def test_explicit_dml_completion_rejects_missing_or_mixed_results(self) -> None:
+        runner = SQLTestRunner("http://unused")
+        case = {"expect": {"affected_rows": 0, "rows": 1,
+                           "data": [{"affected_rows": 0}]}}
+        for text, wanted in (
+                ("", True), (" \n", True), ('{"affected_rows":0}', True),
+                ("not JSON", False), ("[]", False), ("null", False),
+                ('{"other":0}', False), ('{"affected_rows":1}', False),
+                ('{"affected_rows":false}', False), ('{"affected_rows":0.0}', False),
+                ('{"affected_rows":0,"other":1}', False),
+                ('{"affected_rows":1,"affected_rows":0}', False),
+                ('{"affected_rows":0}\n{"affected_rows":0}', False),
+                ('{"affected_rows":0}\ninvalid', False),
+                ('[{"affected_rows":0}]', False)):
+            with self.subTest(text=text):
+                response = SimpleNamespace(status_code=200, text=text, headers={})
+                self.assertEqual(runner.validate_expectation(
+                    case, response, runner.parse_jsonl_response(response)), wanted)
+        response = SimpleNamespace(status_code=200, text='{"affected_rows":0}', headers={})
+        for expect in ({"affected_rows": 0, "rows": 0},
+                       {"affected_rows": 0, "data": [{"affected_rows": 1}]},
+                       {"affected_rows": 1}, {"affected_rows": False}):
+            self.assertFalse(runner.validate_expectation(
+                {"expect": expect}, response, [{"affected_rows": 0}]))
+        self.assertFalse(runner.validate_expectation(
+            {"expect": {"affected_rows": 1}},
+            SimpleNamespace(status_code=200, text="", headers={}), []))
 
     def test_expected_null_requires_the_named_field(self) -> None:
         self.assertTrue(self.matches({"data": [{"nullable": None}]}, [{"nullable": None}]))
@@ -1441,6 +1769,109 @@ class ErrorResponseContractTest(unittest.TestCase):
     def test_error_payload_is_a_sql_error(self) -> None:
         response = SimpleNamespace(status_code=200, text="Error: invalid query")
         self.assertTrue(is_error_response(response))
+
+    def test_successful_json_values_and_column_names_are_not_protocol_errors(self) -> None:
+        for value in ("Error: an ordinary value", {"Error": "reported by client"},
+                      {"message": "SQL Error: saved text"},
+                      {"message": "first line\nSCM Error: saved text"}):
+            with self.subTest(value=value):
+                response = SimpleNamespace(status_code=200, text=json.dumps(value), headers={})
+                self.assertFalse(is_error_response(response))
+                runner = SQLTestRunner("http://localhost:1")
+                self.assertTrue(runner.validate_expectation(
+                    {"expect": {"rows": 1, "data": [value]}}, response, [value]))
+                self.assertFalse(runner.validate_expectation(
+                    {"expect": {"error": True}}, response, [value]))
+
+    def test_a_protocol_error_after_streamed_rows_cannot_satisfy_a_result(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        for marker in ("Error: failed", "SQL Error: failed", "SCM Error: failed",
+                       "500 Internal Server Error: failed"):
+            with self.subTest(marker=marker):
+                response = SimpleNamespace(
+                    status_code=200, text='{"value": 1}\n' + marker, headers={})
+                self.assertTrue(is_error_response(response))
+                self.assertFalse(runner.validate_expectation(
+                    {"expect": {"rows": 1, "data": [{"value": 1}]}}, response, [{"value": 1}]))
+                self.assertTrue(runner.validate_expectation(
+                    {"expect": {"error": True, "contains": "failed"}}, response, [{"value": 1}]))
+
+    def test_successful_error_text_cannot_satisfy_an_expected_sql_failure(self) -> None:
+        result = {"message": "Error: previously recorded"}
+        response = SimpleNamespace(status_code=200, text=json.dumps(result), headers={})
+        runner = SQLTestRunner("http://localhost:1")
+        self.assertFalse(runner.validate_expectation(
+            {"expect": {"error": True}}, response, [result]))
+
+    def test_indented_protocol_errors_retain_their_existing_error_contract(self) -> None:
+        for body in ("\n  SQL Error: failed", "\tSCM Error: failed", "Error in query evaluation", "Error\r\n"):
+            with self.subTest(body=body):
+                self.assertTrue(is_error_response(SimpleNamespace(status_code=200, text=body)))
+
+    def test_setup_paths_classify_the_protocol_instead_of_error_looking_data(self) -> None:
+        for kind in ("sql", "scm"):
+            for inline in (False, True):
+                for expected_error in (False, True):
+                    for actual_error in (False, True):
+                        with self.subTest(kind=kind, inline=inline, expected=expected_error, actual=actual_error):
+                            runner = SQLTestRunner("http://localhost:1")
+                            payload = "SQL Error: failed" if actual_error else json.dumps({"Error": "saved text"})
+                            response = SimpleNamespace(status_code=200, text=payload, headers={})
+                            success = SimpleNamespace(status_code=200, text='{"n":1}', headers={})
+                            step = {kind: "setup", "expect": {"error": expected_error}}
+                            def execute(_database, query, *args, **kwargs):
+                                return response if query == "setup" else success
+                            with mock.patch.object(runner, "execute_sql", side_effect=execute), \
+                                    mock.patch("run_sql_tests.requests.post", return_value=response), \
+                                    redirect_stdout(io.StringIO()):
+                                if inline:
+                                    result = runner.run_test_case({
+                                        "sql": "SELECT 1 AS n", "setup": [step],
+                                        "max_plan_size": 0, "max_planner_time_ms": 0,
+                                        "expect": {"rows": 1, "data": [{"n": 1}]},
+                                    }, "memcp-tests")
+                                else:
+                                    result = runner.run_setup([step], "memcp-tests")
+                            self.assertEqual(result, expected_error == actual_error)
+
+    def test_compile_metrics_can_have_an_error_looking_label_without_suppressing_failures(self) -> None:
+        for actual_error in (False, True):
+            with self.subTest(actual_error=actual_error):
+                runner = SQLTestRunner("http://localhost:1")
+                metrics = SimpleNamespace(status_code=200, headers={}, text=(
+                    "SQL Error: failed" if actual_error else json.dumps({
+                        "Error": "saved label", "planner_total_ns": 1000000,
+                    })))
+                success = SimpleNamespace(status_code=200, text='{"n":1}', headers={})
+                def execute(_database, query, *args, **kwargs):
+                    return metrics if query.startswith("EXPLAIN COMPILE ") else success
+                with mock.patch.object(runner, "execute_sql", side_effect=execute), \
+                        redirect_stdout(io.StringIO()):
+                    result = runner.run_test_case({
+                        "sql": "SELECT 1 AS n", "max_plan_size": 0,
+                        "max_planner_time_ms": 1000,
+                        "expect": {"rows": 1, "data": [{"n": 1}]},
+                    }, "memcp-tests")
+                self.assertEqual(result, not actual_error)
+
+    def test_error_looking_plan_data_cannot_bypass_the_plan_size_budget(self) -> None:
+        for limit in (10, 1000):
+            with self.subTest(limit=limit):
+                runner = SQLTestRunner("http://localhost:1")
+                plan = SimpleNamespace(status_code=200, text=json.dumps({
+                    "Error": "saved label", "plan": "x" * 100,
+                }), headers={})
+                success = SimpleNamespace(status_code=200, text='{"n":1}', headers={})
+                def execute(_database, query, *args, **kwargs):
+                    return plan if query.startswith("EXPLAIN ") else success
+                with mock.patch.object(runner, "execute_sql", side_effect=execute), \
+                        redirect_stdout(io.StringIO()):
+                    result = runner.run_test_case({
+                        "sql": "SELECT 1 AS n", "max_plan_size": limit,
+                        "max_planner_time_ms": 0,
+                        "expect": {"rows": 1, "data": [{"n": 1}]},
+                    }, "memcp-tests")
+                self.assertEqual(result, limit >= len(plan.text))
 
 
 class InterruptedRequestContractTest(unittest.TestCase):
@@ -1702,10 +2133,10 @@ class FailFastParallelContractTest(unittest.TestCase):
             fingerprint = performance_case_fingerprint(spec["test_cases"][0], spec["setup"])
             with mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
                     mock.patch.dict(os.environ, {"MEMCP_TEST_WORKTREE": tmp, "PERF_FIXTURE_ROLE": "A"}):
-                mapping = table_abi_fixture_sources(str(path), spec)
+                mapping = scm_abi_fixture_sources(str(path), spec)
                 self.assertEqual(mapping, {new: old, new_plan: old_plan})
                 runner = SQLTestRunner("http://localhost:1")
-                runner._table_abi_sources = mapping
+                runner._scm_abi_sources = mapping
                 response = SimpleNamespace(status_code=200, text="1")
                 with mock.patch("run_sql_tests.requests.post", return_value=response) as post:
                     self.assertTrue(runner.run_setup(spec["setup"], "memcp-tests"))
@@ -1714,7 +2145,7 @@ class FailFastParallelContractTest(unittest.TestCase):
                 # fixture source cannot borrow an older workload.
                 for changed in (new.replace('false', 'true', 1), new.replace('{rows}', '1'),
                                 json.dumps(new), '(unrelated_call)'):
-                    self.assertEqual(table_abi_fixture_sources(str(path), {"scm": changed}), {})
+                    self.assertEqual(scm_abi_fixture_sources(str(path), {"scm": changed}), {})
             self.assertEqual(json.dumps(spec, sort_keys=True), original)
             self.assertEqual(performance_case_fingerprint(spec["test_cases"][0], spec["setup"]), fingerprint)
 
@@ -1724,8 +2155,84 @@ class FailFastParallelContractTest(unittest.TestCase):
                     mock.patch("run_sql_tests.PERF_AB_MODE", mode), \
                     mock.patch.dict(os.environ, {"PERF_FIXTURE_ROLE": role}), \
                     mock.patch("run_sql_tests.yaml.safe_load") as load:
-                self.assertEqual(table_abi_fixture_sources("missing.yaml", {}), {})
+                self.assertEqual(scm_abi_fixture_sources("missing.yaml", {}), {})
                 load.assert_not_called()
+
+    def test_nil_catalog_context_preserves_baseline_workload_and_authority(self) -> None:
+        for old in ('(table "db" "fixture")',
+                    '(table "db" false "fixture" false)',
+                    '(table "DB" true "FIXTURE" true)',
+                    "(list 'table (schema db) false (concat name suffix) false)",
+                    '(list (quote table) "db" false "fixture" false)'):
+            if old == '(table "db" "fixture")':
+                new = '(table "db" false "fixture" false nil)'
+            else:
+                new = old[:-1] + ' nil)'
+            with self.subTest(old=old), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'tests/performance/context.yaml'
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps({'setup': [{'scm': old}]}))
+                case = {'name': 'context probe', 'scm': new, 'threshold_ms': 1,
+                        'expect': {'result': True}}
+                original = json.dumps(case, sort_keys=True)
+                with mock.patch('run_sql_tests.PERF_AB_MODE', 'record'), \
+                        mock.patch.dict(os.environ, {'MEMCP_TEST_WORKTREE': tmp, 'PERF_FIXTURE_ROLE': 'A'}):
+                    self.assertEqual(scm_abi_fixture_sources(str(path), {'test_cases': [case]}), {new: old})
+                    for altered in (new[:-4] + 'tx)', new[:-4] + '(begin (mutate) nil))',
+                                    new.replace('fixture', 'other_fixture'), json.dumps(new)):
+                        if altered != new:
+                            self.assertEqual(scm_abi_fixture_sources(str(path), {'scm': altered}), {})
+                    # Quoted SQL data is not an executable lookup migration.
+                    path.write_text(json.dumps({'scm': "'" + old}))
+                    self.assertEqual(scm_abi_fixture_sources(str(path), {'scm': "'" + new}), {})
+                self.assertEqual(json.dumps(case, sort_keys=True), original)
+
+    def test_cache_domain_abi_preserves_exact_workload_and_parser_family(self) -> None:
+        for domain, parser in (("sql", "parse_sql"), ("psql", "parse_psql"),
+                               ("tsql", "parse_tsql"), ("sparql", "parse_sparql")):
+            old = f'(cached_parse cache (list {parser}) "db" query nil "root" sess true nil)'
+            new = old.replace('cache (list', f'cache "{domain}" (list', 1)
+            with self.subTest(domain=domain), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "tests/performance/cache.yaml"
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps({"test_cases": [{"scm": old}]}))
+                case = {"name": "cache probe", "scm": new, "threshold_ms": 2,
+                        "timing_aggregation": "total", "timing_samples": 100,
+                        "warmup": 0, "expect": {"result": True}}
+                fingerprint = performance_case_fingerprint(case)
+                with mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                        mock.patch.dict(os.environ, {"MEMCP_TEST_WORKTREE": tmp, "PERF_FIXTURE_ROLE": "A"}):
+                    self.assertEqual(scm_abi_fixture_sources(str(path), {"test_cases": [case]}), {new: old})
+                    for changed in (new.replace(f'"{domain}"', '"unknown"', 1),
+                                    new.replace(f'"{domain}"', 'domain', 1),
+                                    new.replace(f'"{domain}"', '(begin (mutate) "sql")', 1),
+                                    new.replace(parser, 'custom_parser'),
+                                    new.replace('query', 'other_query'),
+                                    new.replace('true nil)', 'false nil)'),
+                                    new.replace('sess', 'other_session'), json.dumps(new)):
+                        self.assertEqual(scm_abi_fixture_sources(str(path), {"scm": changed}), {})
+                    for prefix in ("'", "(quote "):
+                        suffix = ")" if prefix.startswith("(") else ""
+                        path.write_text(json.dumps({"scm": prefix + old + suffix}))
+                        self.assertEqual(scm_abi_fixture_sources(str(path), {"scm": prefix + new + suffix}), {})
+                    # The old optional transaction argument may be omitted,
+                    # but an actual capability can never be erased.
+                    old_without_tx = old[:-5] + ')'
+                    path.write_text(json.dumps({"scm": old_without_tx}))
+                    self.assertEqual(scm_abi_fixture_sources(str(path), {"scm": new}), {new: old_without_tx})
+                    self.assertEqual(scm_abi_fixture_sources(str(path), {"scm": new[:-5] + ')'}),
+                                     {new[:-5] + ')': old_without_tx})
+                    for changed in (new[:-5] + ' tx)', new[:-5] + ' (begin (mutate) nil))'):
+                        self.assertEqual(scm_abi_fixture_sources(str(path), {"scm": changed}), {})
+                    # Domain migration composes with only the permitted nil table ABI.
+                    old_combined = '(begin (table "db" "t") ' + old + ')'
+                    new_combined = '(begin (table "db" false "t" false nil) ' + new + ')'
+                    path.write_text(json.dumps({"scm": old_combined}))
+                    self.assertEqual(scm_abi_fixture_sources(str(path), {"scm": new_combined}),
+                                     {new_combined: old_combined})
+                    self.assertEqual(scm_abi_fixture_sources(str(path),
+                        {"scm": new_combined.replace('false nil)', 'false tx)', 1)}), {})
+                self.assertEqual(performance_case_fingerprint(case), fingerprint)
 
     def test_normal_run_keeps_current_revision_physical_scm(self) -> None:
         case = {
@@ -2109,6 +2616,166 @@ class SuiteIsolationContractTest(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertIn('fail_fast_mode="${MEMCP_FAIL_FAST:-0}"', hook)
+
+class SuiteClassificationBatchContractTest(unittest.TestCase):
+    def classify(self, paths: list[Path]) -> subprocess.CompletedProcess:
+        root = Path(__file__).resolve().parents[1]
+        hook = (root / "git-pre-commit").read_text(encoding="utf-8")
+        # Exercise the actual admission block without building or starting MemCP.
+        start = hook.index("parallel_tests=()\n")
+        end = hook.index('\nmax_jobs="${MEMCP_TEST_JOBS:-4}"', start)
+        script = 'test_files_arr=("$@")\n' + hook[start:end] + r'''
+printf 'SCHEDULED\0'
+for tf in "${parallel_tests[@]}"; do printf 'parallel\0%s\0' "$tf"; done
+for tf in "${sequential_tests[@]}"; do printf 'exclusive\0%s\0' "$tf"; done
+for tf in "${debug_parallel_tests[@]}"; do printf 'debug_parallel\0%s\0' "$tf"; done
+for tf in "${debug_sequential_tests[@]}"; do printf 'debug_exclusive\0%s\0' "$tf"; done
+'''
+        environment = dict(os.environ)
+        with tempfile.TemporaryDirectory(prefix="classification-python-") as python_dir:
+            launcher = Path(python_dir) / "python3"
+            launcher.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable) + ' "$@"\n', encoding="utf-8")
+            launcher.chmod(0o755)
+            environment["PATH"] = python_dir + os.pathsep + environment.get("PATH", "")
+            return subprocess.run(
+                ["bash", "-c", script, "classification-contract", *map(str, paths)],
+                cwd=root, env=environment, capture_output=True, timeout=20,
+            )
+
+    def write_suite(self, directory: Path, name: str, metadata: dict,
+                    cases: list[dict] | None = None) -> Path:
+        path = directory / name
+        path.write_text(json.dumps({"metadata": metadata, "test_cases": cases or []}), encoding="utf-8")
+        return path
+
+    def test_batch_preserves_order_and_spaced_paths_in_all_four_phases(self):
+        with tempfile.TemporaryDirectory(prefix="classification paths ") as tmp:
+            root = Path(tmp)
+            paths = [
+                self.write_suite(root, "z shared.yaml", {}),
+                self.write_suite(root, "isolated.yaml", {"isolated": True}),
+                self.write_suite(root, "z debug.yaml", {"scan_debugging": True}),
+                self.write_suite(root, "a shared.yaml", {}),
+                self.write_suite(root, "restart.yaml", {}, [{"name": "restart", "sql": "SHUTDOWN"}]),
+                self.write_suite(root, "debug exclusive.yaml", {"isolated": True, "scan_debugging": True}),
+                self.write_suite(root, "mysql.yaml", {"requires_mysql": True}),
+                self.write_suite(root, "tds.yaml", {"requires_tds": True}),
+                self.write_suite(root, "a debug.yaml", {"scan_debugging": True}),
+            ]
+            result = self.classify(paths)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            fields = result.stdout.decode().split("\0")
+            self.assertEqual(fields[0], "SCHEDULED")
+            self.assertEqual(fields[-1], "")
+            actual = list(zip(fields[1:-1:2], fields[2:-1:2]))
+            self.assertEqual(actual, [
+                ("parallel", str(paths[0])), ("parallel", str(paths[3])),
+                ("exclusive", str(paths[1])), ("exclusive", str(paths[4])),
+                ("exclusive", str(paths[6])), ("exclusive", str(paths[7])),
+                ("debug_parallel", str(paths[2])), ("debug_parallel", str(paths[8])),
+                ("debug_exclusive", str(paths[5])),
+            ])
+
+    def test_invalid_later_metadata_rejects_the_entire_batch_before_scheduling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = self.write_suite(root, "valid first.yaml", {})
+            invalid = self.write_suite(root, "invalid later.yaml", {"scan_debugging": "yes"})
+            result = self.classify([first, invalid])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b"")
+            self.assertIn("metadata.scan_debugging must be boolean", result.stderr.decode())
+
+    def test_debug_restart_conflict_keeps_the_existing_validation_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = self.write_suite(root, "valid debug.yaml", {"scan_debugging": True})
+            invalid = self.write_suite(root, "debug restart.yaml", {"scan_debugging": True},
+                                       [{"name": "restart", "action": "restart"}])
+            result = self.classify([first, invalid])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b"")
+            self.assertIn("scan-diagnostics clusters cannot restart the server", result.stderr.decode())
+
+    def test_empty_classification_has_no_phantom_path_or_phase(self):
+        result = self.classify([])
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stdout, b"SCHEDULED\0")
+
+
+class SuiteArtifactIdentityContractTest(unittest.TestCase):
+    @staticmethod
+    def hook_text():
+        return (Path(__file__).resolve().parents[1] / "git-pre-commit").read_text(encoding="utf-8")
+
+    def run_hook(self, paths, *, failure="", fail_fast=False, parallel=False):
+        hook = self.hook_text()
+        start = hook.index('if [ "$max_jobs" -gt 16 ]; then max_jobs=16; fi\n')
+        start = hook.index("\n", start) + 1
+        artifacts = hook[start:hook.index('\nlockfile=', start)]
+        start = hook.index('if [ "$fail_fast_mode" -eq 1 ]; then\n  for idx')
+        scheduling = hook[start:hook.index('\n  if [ $(( ${#debug_parallel_tests[@]}', start)] + "\nfi\n"
+        start = hook.index('\nfor tf in "${test_files_arr[@]}"; do', hook.index('\nstop_supervisor\n'))
+        results = hook[start:hook.index('\n# Generate coverage report', start)]
+        gate = hook[hook.rindex('\nif [ "$all_passed" = true ]; then'):]
+        # Run the actual artifact, scheduler and gate owners with a finite fake
+        # suite command. No build, server, readiness or test runner is started.
+        script = r'''
+tmpdir=$1; failing_path=$2; fail_fast_mode=$3; parallel=$4; shift 4
+test_files_arr=("$@")
+parallel_tests=(); sequential_tests=("${test_files_arr[@]}")
+if [ "$parallel" = true ]; then
+  parallel_tests=("${test_files_arr[@]}"); sequential_tests=()
+fi
+active_pids=(); max_jobs=2; all_passed=true; failed_files=""; test_port=0
+run_one() {
+  printf 'output:%s\n' "$1" > "$2"
+  if [ "$1" = "$failing_path" ]; then echo FAIL > "$3"; else echo OK > "$3"; fi
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="suite-artifact-contract-") as tmp:
+            result = subprocess.run(
+                ["bash", "-c", script + artifacts + scheduling + results + gate,
+                 "suite-artifact-contract", tmp, failure, str(int(fail_fast)),
+                 str(parallel).lower(), *paths], capture_output=True, text=True, timeout=5,
+            )
+            saved = {path.name: path.read_text(encoding="utf-8") for path in Path(tmp).iterdir()}
+        return result, saved
+
+    def test_later_same_basename_success_cannot_hide_an_earlier_failure(self):
+        paths = ["tests/first dir/shared.yaml", "tests/second dir/shared.yaml"]
+        result, saved = self.run_hook(paths, failure=paths[0])
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Failed test files: " + paths[0], result.stdout)
+        self.assertNotIn("output:" + paths[1], result.stdout)
+        self.assertEqual(saved["suite-0.status"], "FAIL\n")
+        self.assertEqual(saved["suite-1.status"], "OK\n")
+        self.assertEqual(saved["suite-0.out"], "output:" + paths[0] + "\n")
+        self.assertEqual(saved["suite-1.out"], "output:" + paths[1] + "\n")
+        self.assertEqual(saved["suite-index.tsv"], "suite-0\t" + paths[0] + "\nsuite-1\t" + paths[1] + "\n")
+
+    def test_parallel_same_basename_suites_keep_independent_results(self):
+        paths = ["tests/one/shared.yaml", "tests/two/shared.yaml"]
+        result, saved = self.run_hook(paths, parallel=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(saved["suite-0.out"], "output:" + paths[0] + "\n")
+        self.assertEqual(saved["suite-1.out"], "output:" + paths[1] + "\n")
+        self.assertEqual(saved["suite-0.status"], "OK\n")
+        self.assertEqual(saved["suite-1.status"], "OK\n")
+
+    def test_fail_fast_skip_cannot_replace_the_failed_suite_status(self):
+        paths = ["tests/one/shared.yaml", "tests/two/shared.yaml"]
+        result, saved = self.run_hook(paths, failure=paths[0], fail_fast=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(saved["suite-0.status"], "FAIL\n")
+        self.assertEqual(saved["suite-1.status"], "SKIP\n")
+        self.assertNotIn("suite-1.out", saved)
+
+    def test_empty_selection_has_no_suite_artifact(self):
+        result, saved = self.run_hook([])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(saved, {"suite-index.tsv": ""})
+
 
 class ScanDebuggingClusterContractTest(unittest.TestCase):
     def test_parallel_suites_share_one_stable_flag_and_restore_it(self):
@@ -2980,6 +3647,76 @@ class ColdWarmTotalContractTests(unittest.TestCase):
         self.assertTrue(result["passed"])
 
 
+class PerformanceRowCalibrationContractTests(unittest.TestCase):
+    def test_only_executable_row_templates_allow_calibration(self):
+        for case in ({"sql": "SELECT {rows}"}, {"scm": "{rows}"},
+                     {"sparql": "LIMIT {rows}"},
+                     {"sql": "SELECT 1", "setup": [{"scm": "(fixture {rows})"}]}):
+            self.assertTrue(performance_uses_row_template(case))
+        self.assertFalse(performance_uses_row_template({
+            "sql": "SELECT 64", "name": "{rows}",
+            "expect": {"result": "{rows}"}, "cleanup": [{"sql": "DELETE {rows}"}],
+        }))
+
+    def run_round(self, config, case, mode="", no_recalibrate=False):
+        runner = SQLTestRunner("http://localhost:1")
+        runner.perf_baselines = config.copy()
+        runner._config_loaded = True
+        response = SimpleNamespace(status_code=200, text="true", headers={})
+        clock = iter([0, 100_000_000, 100_000_000, 101_000_000,
+                      101_000_000, 102_000_000])
+
+        def save(mutate):
+            mutate(config)
+            return config.copy()
+
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.PERF_AB_MODE", mode), \
+                mock.patch("run_sql_tests.PERF_NORECALIBRATE", no_recalibrate), \
+                mock.patch("run_sql_tests.max_rows_for_ram", return_value=100000), \
+                mock.patch("run_sql_tests.find_memcp_pid", return_value=None), \
+                mock.patch("run_sql_tests.time.monotonic_ns", side_effect=lambda: next(clock)), \
+                mock.patch("run_sql_tests.requests.post", return_value=response) as post, \
+                mock.patch("run_sql_tests._update_runner_config", side_effect=save), \
+                redirect_stdout(io.StringIO()):
+            self.assertTrue(runner.run_test_case(case, "memcp-tests"))
+            runner.save_perf_baselines()
+        result = next(iter(runner.perf_results.values()))
+        self.assertEqual(result["time_ms"], 102)
+        self.assertEqual(result["repetitions"], 3)
+        return result, post
+
+    @staticmethod
+    def case(scm="true"):
+        return {"name": "fixed FK fixture", "scm": scm, "performance_rows": 64,
+                "threshold_ms": 1000, "timing_aggregation": "total",
+                "timing_samples": 3, "warmup": 0, "expect": {"rows": 1}}
+
+    def test_fixed_fixture_repairs_legacy_rows_and_stays_fixed_after_reload(self):
+        for frozen in (False, True):
+            with self.subTest(no_recalibrate=frozen):
+                config = {"fixed FK fixture": {"rows": 576, "time_ms": 100}}
+                for _ in range(3):
+                    result, _ = self.run_round(config, self.case(), no_recalibrate=frozen)
+                    self.assertEqual(result["rows"], 64)
+                    self.assertEqual(config["fixed FK fixture"]["rows"], 64)
+
+    def test_parameterized_fixture_keeps_calibrating_actual_requests(self):
+        config = {}
+        for actual, calibrated in ((64, 192), (192, 576)):
+            result, post = self.run_round(config, self.case("(begin {rows} true)"))
+            self.assertEqual(result["rows"], actual)
+            self.assertEqual(config["fixed FK fixture"]["rows"], calibrated)
+            self.assertEqual(post.call_args.kwargs["data"], f"(begin {actual} true)".encode())
+
+    def test_ab_record_keeps_trusted_seed_for_fixed_fixture(self):
+        key = performance_case_key("?", "fixed FK fixture")
+        config = {key: {"rows": 96, "time_ms": 100}}
+        result, _ = self.run_round(config, self.case(), mode="record")
+        self.assertEqual(result["rows"], 96)
+        self.assertEqual(config[key]["rows"], 96)
+
+
 class RAMAbortOwnershipContractTest(unittest.TestCase):
     def test_connect_only_abort_never_discovers_or_kills_a_process(self):
         import run_sql_tests as runner
@@ -3278,6 +4015,75 @@ class PerformanceDiagnosticEligibilityContractTest(unittest.TestCase):
                         capture_output=True, text=True, timeout=5)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(marker.exists(), expected)
+
+
+class JITFixtureDiagnosticContractTest(unittest.TestCase):
+    def fixture_step(self):
+        import yaml
+        repository = Path(__file__).resolve().parents[1]
+        workflow = yaml.safe_load((repository / '.github/workflows/jit-performance.yml').read_text())
+        steps = [step for job in workflow['jobs'].values() for step in job.get('steps', [])]
+        measurement = next(step for step in steps if step.get('id') == 'measure')
+        self.assertNotIn('MEMCP_PERF_MAP', measurement['run'])
+        self.assertNotIn('PERF_FAILURE_DIAGNOSTICS', measurement['run'])
+        step = next(step for step in steps if step.get('name') == 'Diagnose failed JIT fixture inputs')
+        self.assertEqual(step['if'], "${{ failure() && steps.measure.outcome == 'failure' }}")
+        return step['run']
+
+    def run_diagnostic(self, manifest, exit_status=0):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'candidate').mkdir()
+            (root / 'bin').mkdir()
+            (root / 'maps').mkdir()
+            source_map = root / 'maps/perf-123.map'
+            source_map.write_text('1000 40 actual_import_name\n')
+            trials = root / 'jit-perf-baseline.trials'
+            trials.mkdir()
+            (trials / 'manifest.json').write_text(json.dumps(manifest))
+            marker = root / 'diagnostic.json'
+            stub = root / 'bin/python3'
+            stub.write_text(f'#!{sys.executable}\nimport json,os,sys\nfrom pathlib import Path\n'
+                f'if sys.argv[1]=="-": os.execv({sys.executable!r},[{sys.executable!r}]+sys.argv[1:])\n'
+                'Path(os.environ["PERF_BASELINE_FILE"]).with_suffix(".trials").mkdir(parents=True, exist_ok=False)\n'
+                f'Path({str(marker)!r}).write_text(json.dumps({{"args":sys.argv[1:],"maps":os.environ.get("MEMCP_PERF_MAP"),"hooks":os.environ.get("PERF_FAILURE_DIAGNOSTICS")}}))\n'
+                f'sys.exit({exit_status})\n')
+            stub.chmod(0o700)
+            script = self.fixture_step().replace('/tmp/perf-*.map', str(root / 'maps/perf-*.map'))
+            result = subprocess.run(['bash', '-e', '-c', script], cwd=root,
+                env=dict(os.environ, GITHUB_WORKSPACE=str(root), PATH=str(root / 'bin') + ':' + os.environ['PATH']),
+                capture_output=True, text=True, timeout=5)
+            invoked = json.loads(marker.read_text()) if marker.exists() else None
+            artifact = root / 'jit-fixture-diagnostic.trials/maps/perf-123.map'
+            retained = artifact.read_text() if artifact.exists() else None
+            self.assertEqual(source_map.read_text(), '1000 40 actual_import_name\n')
+            return result, invoked, retained
+
+    def test_completed_candidate_failure_gets_independent_symbol_diagnostics(self):
+        manifest = {'completed': False, 'fixture_events': [
+            {'stage': 'process', 'role': 'A', 'suite': 'tests/performance/first.yaml'},
+            {'stage': 'process', 'role': 'B', 'suite': 'tests/performance/failing.yaml'}]}
+        for status in (0, 7):
+            with self.subTest(status=status):
+                result, invoked, retained = self.run_diagnostic(manifest, status)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual(invoked['args'][-1], 'tests/performance/failing.yaml')
+                self.assertEqual(invoked['maps'], '1')
+                self.assertEqual(invoked['hooks'], '1')
+                self.assertEqual(retained, '1000 40 actual_import_name\n')
+
+    def test_incomplete_or_base_only_work_does_not_start_candidate_diagnostics(self):
+        for manifest in (
+                {'completed': False, 'fixture_events': []},
+                {'completed': False, 'fixture_events': [{'stage': 'clone', 'role': 'B', 'suite': 'x.yaml'}]},
+                {'completed': False, 'fixture_events': [{'stage': 'process', 'role': 'A', 'suite': 'x.yaml'}]},
+                {'completed': True, 'fixture_events': [{'stage': 'process', 'role': 'B', 'suite': 'x.yaml'}]},
+                {'fixture_events': [{'stage': 'process', 'role': 'B', 'suite': 'x.yaml'}]}):
+            with self.subTest(manifest=manifest):
+                result, invoked, retained = self.run_diagnostic(manifest)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIsNone(invoked)
+                self.assertIsNone(retained)
 
 
 class ClusterSuiteSelectionContractTest(unittest.TestCase):

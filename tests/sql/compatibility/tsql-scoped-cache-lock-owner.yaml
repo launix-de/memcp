@@ -1,0 +1,734 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Cache source locks retain the actual owner of a scoped temporary generation
+setup:
+  - sql: DROP TABLE IF EXISTS scoped_lock_new_mysql
+  - sql: DROP TABLE IF EXISTS scoped_lock_new_postgresql
+  - sql: DROP TABLE IF EXISTS scoped_lock_months
+  - sql: DROP TABLE IF EXISTS scoped_lock_sites
+  - sql: DROP TABLE IF EXISTS scoped_lock_targets
+  - sql: CREATE TABLE scoped_lock_months (MDNr INT, BL INT, abrjahr INT)
+  - sql: CREATE TABLE scoped_lock_sites (MDNr INT, BID INT, BNr VARCHAR(8), gueltigbis DATE)
+  - sql: CREATE TABLE scoped_lock_targets (id INT PRIMARY KEY, absendernummer VARCHAR(8), EreignisDatum DATE, meldegrund INT)
+  - sql: INSERT INTO scoped_lock_months VALUES (1,11,2024),(1,11,2024),(2,22,2024),(3,33,2022)
+  - sql: INSERT INTO scoped_lock_sites VALUES (1,11,'123','2024-12-31'),(2,22,'456','2024-12-31'),(3,33,'999','2024-12-31')
+  - sql: INSERT INTO scoped_lock_targets VALUES (1,'00000123',NULL,NULL),(2,'00000456',NULL,NULL),(3,'00000999','2020-01-01',4),(4,'00000999',NULL,NULL)
+test_cases:
+  - name: Transaction retains scoped sources through DISTINCT membership UPDATE
+    session_id: scoped_cache_lock_owner
+    sql: |
+      SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+      SET DATEFORMAT dmy;
+      DROP TABLE IF EXISTS #BetrNr;
+      DROP TABLE IF EXISTS #BSt;
+      BEGIN TRANSACTION;
+      SELECT DISTINCT MDNr, BL INTO #BSt FROM scoped_lock_months WHERE abrjahr>=2023;
+      SELECT DISTINCT RIGHT('00000000'+LTRIM(s.BNr),8) AS BetrNr
+        INTO #BetrNr
+        FROM #BSt AS b INNER JOIN scoped_lock_sites AS s ON b.MDNr=s.MDNr AND b.BL=s.BID
+        WHERE YEAR(s.gueltigbis)>=2023 AND s.BNr IS NOT NULL;
+      UPDATE scoped_lock_targets SET EreignisDatum='30.04.2024',meldegrund=9
+        WHERE EreignisDatum IS NULL AND absendernummer IN (SELECT BetrNr FROM #BetrNr);
+      COMMIT TRANSACTION;
+      SELECT id,CONVERT(VARCHAR(10),EreignisDatum,23) AS event_value,meldegrund AS reason FROM scoped_lock_targets ORDER BY id;
+    expect:
+      rows: 4
+      data: [{id: 1, event_value: '2024-04-30', reason: 9}, {id: 2, event_value: '2024-04-30', reason: 9}, {id: 3, event_value: '2020-01-01', reason: 4}, {id: 4, event_value: null, reason: null}]
+    cleanup:
+      - session_id: scoped_cache_lock_owner
+        sql: IF @@TRANCOUNT>0 ROLLBACK TRANSACTION
+  - name: Warm membership retains the same committed scoped source and full target values
+    session_id: scoped_cache_lock_owner
+    sql: |
+      UPDATE scoped_lock_targets SET EreignisDatum=NULL,meldegrund=NULL WHERE id=1;
+      UPDATE scoped_lock_targets SET EreignisDatum='30.04.2024',meldegrund=9
+        WHERE EreignisDatum IS NULL AND absendernummer IN (SELECT BetrNr FROM #BetrNr);
+      SELECT id,CONVERT(VARCHAR(10),EreignisDatum,23) AS event_value,meldegrund AS reason FROM scoped_lock_targets ORDER BY id;
+    expect:
+      rows: 4
+      data: [{id: 1, event_value: '2024-04-30', reason: 9}, {id: 2, event_value: '2024-04-30', reason: 9}, {id: 3, event_value: '2020-01-01', reason: 4}, {id: 4, event_value: null, reason: null}]
+  - name: Another connection cannot acquire the caller temporary SQL name
+    session_id: scoped_cache_lock_observer
+    sql: 'SELECT BetrNr FROM #BetrNr'
+    expect: {error: true, contains: 'local temporary table does not exist: #BetrNr'}
+  - name: Original TDS batch retains scoped cache sources and ordinary UPDATE completion
+    tds:
+      statements:
+        - sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+        - sql: SET DATEFORMAT dmy
+        - sql: UPDATE scoped_lock_targets SET EreignisDatum=NULL,meldegrund=NULL WHERE id=1
+        - sql: |
+            DROP TABLE IF EXISTS #BetrNr;
+            DROP TABLE IF EXISTS #BSt;
+            BEGIN TRANSACTION;
+            SELECT DISTINCT MDNr, BL INTO #BSt FROM scoped_lock_months WHERE abrjahr>=2023;
+            SELECT DISTINCT RIGHT('00000000'+LTRIM(s.BNr),8) AS BetrNr
+              INTO #BetrNr
+              FROM #BSt AS b INNER JOIN scoped_lock_sites AS s ON b.MDNr=s.MDNr AND b.BL=s.BID
+              WHERE YEAR(s.gueltigbis)>=2023 AND s.BNr IS NOT NULL;
+            UPDATE scoped_lock_targets SET EreignisDatum='30.04.2024',meldegrund=9
+              WHERE EreignisDatum IS NULL AND absendernummer IN (SELECT BetrNr FROM #BetrNr);
+            COMMIT TRANSACTION;
+            SELECT id,CONVERT(VARCHAR(10),EreignisDatum,23) AS event_value,meldegrund AS reason FROM scoped_lock_targets ORDER BY id;
+          expect:
+            rows: 4
+            data: [{id: 1, event_value: '2024-04-30', reason: 9}, {id: 2, event_value: '2024-04-30', reason: 9}, {id: 3, event_value: '2020-01-01', reason: 4}, {id: 4, event_value: null, reason: null}]
+  - name: mysql new transaction-owned relation keeps aggregate rows before and after publication
+    syntax: mysql
+    steps:
+    - session_id: scoped_new_mysql
+      sql: START ACID TRANSACTION
+    - session_id: scoped_new_mysql
+      sql: CREATE TABLE scoped_lock_new_mysql (id INT PRIMARY KEY,value INT)
+    - session_id: scoped_new_mysql
+      sql: INSERT INTO scoped_lock_new_mysql VALUES (1,10),(2,20),(3,NULL)
+    - session_id: scoped_new_mysql
+      sql: SELECT MAX(value) AS highest,COUNT(*) AS n FROM scoped_lock_new_mysql
+      expect:
+        rows: 1
+        data:
+        - highest: 20
+          n: 3
+    - session_id: scoped_new_mysql
+      sql: UPDATE scoped_lock_new_mysql SET value=30 WHERE id=2
+    - session_id: scoped_new_mysql
+      sql: SELECT MAX(value) AS highest,COUNT(*) AS n FROM scoped_lock_new_mysql
+      expect:
+        rows: 1
+        data:
+        - highest: 30
+          n: 3
+    - session_id: scoped_new_mysql
+      sql: COMMIT
+    - session_id: scoped_new_mysql
+      sql: UPDATE scoped_lock_new_mysql SET value=40 WHERE id=2
+    - session_id: scoped_new_mysql
+      sql: SELECT MAX(value) AS highest,COUNT(*) AS n FROM scoped_lock_new_mysql
+      expect:
+        rows: 1
+        data:
+        - highest: 40
+          n: 3
+    cleanup:
+    - session_id: scoped_new_mysql
+      sql: ROLLBACK
+    - sql: DROP TABLE IF EXISTS scoped_lock_new_mysql
+  - name: postgresql new transaction-owned relation keeps aggregate rows before and after publication
+    syntax: postgresql
+    steps:
+    - session_id: scoped_new_postgresql
+      sql: BEGIN
+    - session_id: scoped_new_postgresql
+      sql: CREATE TABLE scoped_lock_new_postgresql (id INT PRIMARY KEY,value INT)
+    - session_id: scoped_new_postgresql
+      sql: INSERT INTO scoped_lock_new_postgresql VALUES (1,10),(2,20),(3,NULL)
+    - session_id: scoped_new_postgresql
+      sql: SELECT MAX(value) AS highest,COUNT(*) AS n FROM scoped_lock_new_postgresql
+      expect:
+        rows: 1
+        data:
+        - highest: 20
+          n: 3
+    - session_id: scoped_new_postgresql
+      sql: UPDATE scoped_lock_new_postgresql SET value=30 WHERE id=2
+    - session_id: scoped_new_postgresql
+      sql: SELECT MAX(value) AS highest,COUNT(*) AS n FROM scoped_lock_new_postgresql
+      expect:
+        rows: 1
+        data:
+        - highest: 30
+          n: 3
+    - session_id: scoped_new_postgresql
+      sql: COMMIT
+    - session_id: scoped_new_postgresql
+      sql: UPDATE scoped_lock_new_postgresql SET value=40 WHERE id=2
+    - session_id: scoped_new_postgresql
+      sql: SELECT MAX(value) AS highest,COUNT(*) AS n FROM scoped_lock_new_postgresql
+      expect:
+        rows: 1
+        data:
+        - highest: 40
+          n: 3
+    cleanup:
+    - session_id: scoped_new_postgresql
+      sql: ROLLBACK
+    - sql: DROP TABLE IF EXISTS scoped_lock_new_postgresql
+  - name: Shared cache admission uses actual caller scope and preserves native foreign-read refusal
+    scm: |
+      (begin
+        (define owner (newsession)) (owner "username" "root")
+        (define scope (new_relation_scope owner nil "transactional"))
+        (define name (concat ".cache-input:" (uuid)))
+        (tx_begin_acid owner) (define constructor (owner "__memcp_tx"))
+        (createtable "memcp-tests" name
+          (list (list "column" "id" "INT" (list) (list))
+            (list "column" "value" "INT" (list) (list)))
+          (list "engine" "memory" "ephemeral" true "scope" scope "scope_key" "input") false constructor)
+        (define source (table "memcp-tests" false name false constructor))
+        (insert source '("id" "value") (list (list 1 17) (list 2 29)) (list) nil false nil constructor)
+        (define before_header (show source "declarations" constructor))
+        (tx_commit owner)
+        (define after_header (show source "declarations" nil))
+        (define state (newsession)) (state "shared" 0) (state "direct" 0)
+        (define shared (lambda () (begin (state "shared" (+ (state "shared") 1)) "shared")))
+        (define read_rows (lambda (tx) (scan tx source (list) (list) (list) (lambda () true)
+          '("id" "value") (lambda (rows id value) (set_assoc rows id value)) (list) merge_assoc)))
+        (define actual (with_autocommit owner nil 0 "committed scoped cache input" (lambda (tx)
+          (with_cache_sources tx (list source) shared (lambda () (begin
+            (state "direct" (+ (state "direct") 1))
+            (define rows (read_rows tx)) (list (get_assoc rows 1) (get_assoc rows 2))))))))
+        (define other (newsession)) (other "username" "root")
+        (define denied (try (lambda () (begin
+          (with_autocommit other nil 0 "foreign scoped cache input" (lambda (tx)
+            (with_cache_sources tx (list source) shared (lambda () (read_rows tx))))) false))
+          (lambda (cause) (strlike (string (failure_value cause)) "%another native relation scope owner%"))))
+        (define public (with_autocommit owner nil 0 "public cache input" (lambda (tx)
+          (with_cache_sources tx (list (table "memcp-tests" false "scoped_lock_targets" false tx))
+            shared (lambda () "unexpected-direct")))))
+        (define intact (with_autocommit owner nil 0 "retained scoped input" read_rows))
+        (define declarations (sql_relation_local_declarations "memcp-tests" name nil))
+        (define same (sql_relation_declarations_match? "memcp-tests" name nil declarations))
+        (define changed (sql_relation_declarations_match? "memcp-tests" name nil
+          (set_assoc declarations "lifetime" "persistent")))
+        (define public_header (show (table "memcp-tests" false "scoped_lock_targets" false nil) "declarations" nil))
+        (close_relation_scope scope)
+        (list actual denied public (state "shared") (state "direct")
+          (list (get_assoc intact 1) (get_assoc intact 2))
+          (list (get_assoc before_header "lifetime") (get_assoc before_header "visibility")
+            (get_assoc after_header "lifetime") (get_assoc after_header "visibility")
+            (get_assoc public_header "lifetime") same changed)))
+    expect:
+      result:
+      - - 17
+        - 29
+      - true
+      - shared
+      - 1
+      - 1
+      - - 17
+        - 29
+      - - invocation
+        - transaction
+        - invocation
+        - null
+        - null
+        - true
+        - false
+  - name: Committed current-scope aggregate inputs remain fresh across explicit and implicit transactions
+    tds:
+      statements:
+      - connection: scope_owner
+        sql: 'DROP TABLE IF EXISTS #cache_scope_input'
+      - connection: scope_owner
+        sql: BEGIN TRAN
+      - connection: scope_owner
+        sql: 'CREATE TABLE #cache_scope_input(id INT PRIMARY KEY,value INT NULL)'
+      - connection: scope_owner
+        sql: 'INSERT #cache_scope_input VALUES(1,10),(2,20),(3,NULL)'
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 30
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: 'SELECT id,value FROM #cache_scope_input ORDER BY id'
+        expect:
+          rows: 3
+          data:
+          - id: 1
+            value: 10
+          - id: 2
+            value: 20
+          - id: 3
+            value: null
+      - connection: scope_owner
+        sql: COMMIT TRAN
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 30
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: 'UPDATE #cache_scope_input SET value=40 WHERE id=1'
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 60
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: 'SELECT id,value FROM #cache_scope_input ORDER BY id'
+        expect:
+          rows: 3
+          data:
+          - id: 1
+            value: 40
+          - id: 2
+            value: 20
+          - id: 3
+            value: null
+      - connection: scope_owner
+        sql: BEGIN TRAN
+      - connection: scope_owner
+        sql: 'UPDATE #cache_scope_input SET value=50 WHERE id=1'
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 70
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: 'SELECT id,value FROM #cache_scope_input ORDER BY id'
+        expect:
+          rows: 3
+          data:
+          - id: 1
+            value: 50
+          - id: 2
+            value: 20
+          - id: 3
+            value: null
+      - connection: scope_foreign
+        sql: 'SELECT id,value FROM #cache_scope_input'
+        expect:
+          error: true
+          contains: ['local temporary table does not exist: #cache_scope_input']
+      - connection: scope_owner
+        sql: ROLLBACK TRAN
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 60
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: 'SELECT id,value FROM #cache_scope_input ORDER BY id'
+        expect:
+          rows: 3
+          data:
+          - id: 1
+            value: 40
+          - id: 2
+            value: 20
+          - id: 3
+            value: null
+      - connection: scope_owner
+        sql: SELECT @@TRANCOUNT AS depth
+        expect:
+          rows: 1
+          data:
+          - depth: 0
+  - name: Two fresh scoped generations with the same SQL names retain their own complete rows
+    tds:
+      statements:
+      - connection: scope_owner
+        sql: 'DROP TABLE IF EXISTS #cache_scope_input'
+      - connection: scope_owner
+        sql: BEGIN TRAN
+      - connection: scope_owner
+        sql: 'CREATE TABLE #cache_scope_input(id INT PRIMARY KEY,value INT NULL)'
+      - connection: scope_owner
+        sql: 'INSERT #cache_scope_input VALUES(1,7),(2,NULL),(3,7)'
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 14
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: COMMIT TRAN
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 14
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: 'SELECT id,value FROM #cache_scope_input ORDER BY id'
+        expect:
+          rows: 3
+          data:
+          - id: 1
+            value: 7
+          - id: 2
+            value: null
+          - id: 3
+            value: 7
+      - connection: scope_owner
+        sql: SELECT @@TRANCOUNT AS depth
+        expect:
+          rows: 1
+          data:
+          - depth: 0
+      - connection: scope_owner
+        sql: 'DROP TABLE IF EXISTS #cache_scope_input'
+      - connection: scope_owner
+        sql: BEGIN TRAN
+      - connection: scope_owner
+        sql: 'CREATE TABLE #cache_scope_input(id INT PRIMARY KEY,value INT NULL)'
+      - connection: scope_owner
+        sql: 'INSERT #cache_scope_input VALUES(1,101),(2,202),(3,NULL)'
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 303
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: COMMIT TRAN
+      - connection: scope_owner
+        sql: 'SELECT SUM(value) AS total,COUNT(*) AS n,COUNT(value) AS populated FROM #cache_scope_input'
+        expect:
+          rows: 1
+          data:
+          - total: 303
+            n: 3
+            populated: 2
+      - connection: scope_owner
+        sql: 'SELECT id,value FROM #cache_scope_input ORDER BY id'
+        expect:
+          rows: 3
+          data:
+          - id: 1
+            value: 101
+          - id: 2
+            value: 202
+          - id: 3
+            value: null
+      - connection: scope_owner
+        sql: SELECT @@TRANCOUNT AS depth
+        expect:
+          rows: 1
+          data:
+          - depth: 0
+      - connection: scope_owner
+        sql: 'DROP TABLE #cache_scope_input'
+  - name: Scoped IN and NOT IN NULL witnesses retain three-valued results across commit rollback and recreated generations
+    tds:
+      statements:
+      - connection: witness_owner
+        sql: 'DROP TABLE IF EXISTS #cache_probes'
+      - connection: witness_owner
+        sql: 'DROP TABLE IF EXISTS #cache_rhs'
+      - connection: witness_owner
+        sql: BEGIN TRAN
+      - connection: witness_owner
+        sql: 'CREATE TABLE #cache_probes(id INT PRIMARY KEY,probe INT NULL)'
+      - connection: witness_owner
+        sql: 'INSERT #cache_probes VALUES(1,NULL),(2,0),(3,1),(4,2),(5,9)'
+      - connection: witness_owner
+        sql: 'CREATE TABLE #cache_rhs(value INT NULL,enabled INT NOT NULL)'
+      - connection: witness_owner
+        sql: 'INSERT #cache_rhs VALUES(NULL,1),(0,1),(0,1),(9,0)'
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: 1
+            not_in_value: 0
+          - id: 3
+            probe: 1
+            in_value: -1
+            not_in_value: -1
+          - id: 4
+            probe: 2
+            in_value: -1
+            not_in_value: -1
+          - id: 5
+            probe: 9
+            in_value: -1
+            not_in_value: -1
+      - connection: witness_owner
+        sql: COMMIT TRAN
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: 1
+            not_in_value: 0
+          - id: 3
+            probe: 1
+            in_value: -1
+            not_in_value: -1
+          - id: 4
+            probe: 2
+            in_value: -1
+            not_in_value: -1
+          - id: 5
+            probe: 9
+            in_value: -1
+            not_in_value: -1
+      - connection: witness_owner
+        sql: 'UPDATE #cache_rhs SET enabled=0 WHERE value IS NULL'
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: 1
+            not_in_value: 0
+          - id: 3
+            probe: 1
+            in_value: 0
+            not_in_value: 1
+          - id: 4
+            probe: 2
+            in_value: 0
+            not_in_value: 1
+          - id: 5
+            probe: 9
+            in_value: 0
+            not_in_value: 1
+      - connection: witness_owner
+        sql: BEGIN TRAN
+      - connection: witness_owner
+        sql: 'UPDATE #cache_rhs SET enabled=1 WHERE value IS NULL'
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: 1
+            not_in_value: 0
+          - id: 3
+            probe: 1
+            in_value: -1
+            not_in_value: -1
+          - id: 4
+            probe: 2
+            in_value: -1
+            not_in_value: -1
+          - id: 5
+            probe: 9
+            in_value: -1
+            not_in_value: -1
+      - connection: witness_owner
+        sql: ROLLBACK TRAN
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: 1
+            not_in_value: 0
+          - id: 3
+            probe: 1
+            in_value: 0
+            not_in_value: 1
+          - id: 4
+            probe: 2
+            in_value: 0
+            not_in_value: 1
+          - id: 5
+            probe: 9
+            in_value: 0
+            not_in_value: 1
+      - connection: witness_owner
+        sql: 'DROP TABLE #cache_rhs'
+      - connection: witness_owner
+        sql: BEGIN TRAN
+      - connection: witness_owner
+        sql: 'CREATE TABLE #cache_rhs(value INT NULL,enabled INT NOT NULL)'
+      - connection: witness_owner
+        sql: 'INSERT #cache_rhs VALUES(NULL,1),(1,1),(0,0)'
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: -1
+            not_in_value: -1
+          - id: 3
+            probe: 1
+            in_value: 1
+            not_in_value: 0
+          - id: 4
+            probe: 2
+            in_value: -1
+            not_in_value: -1
+          - id: 5
+            probe: 9
+            in_value: -1
+            not_in_value: -1
+      - connection: witness_owner
+        sql: COMMIT TRAN
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: -1
+            not_in_value: -1
+          - id: 3
+            probe: 1
+            in_value: 1
+            not_in_value: 0
+          - id: 4
+            probe: 2
+            in_value: -1
+            not_in_value: -1
+          - id: 5
+            probe: 9
+            in_value: -1
+            not_in_value: -1
+      - connection: witness_owner
+        sql: 'DELETE #cache_rhs WHERE value IS NULL'
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: -1
+            not_in_value: -1
+          - id: 2
+            probe: 0
+            in_value: 0
+            not_in_value: 1
+          - id: 3
+            probe: 1
+            in_value: 1
+            not_in_value: 0
+          - id: 4
+            probe: 2
+            in_value: 0
+            not_in_value: 1
+          - id: 5
+            probe: 9
+            in_value: 0
+            not_in_value: 1
+      - connection: witness_owner
+        sql: 'DELETE #cache_rhs'
+      - connection: witness_owner
+        sql: "SELECT p.id,p.probe,\n CASE WHEN p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN\
+          \ NOT (p.probe IN (SELECT value FROM #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS in_value,\n CASE WHEN p.probe\
+          \ NOT IN (SELECT value FROM #cache_rhs WHERE enabled=1) THEN 1\n      WHEN NOT (p.probe NOT IN (SELECT value FROM\
+          \ #cache_rhs WHERE enabled=1)) THEN 0 ELSE -1 END AS not_in_value\nFROM #cache_probes p ORDER BY p.id"
+        expect:
+          rows: 5
+          data:
+          - id: 1
+            probe: null
+            in_value: 0
+            not_in_value: 1
+          - id: 2
+            probe: 0
+            in_value: 0
+            not_in_value: 1
+          - id: 3
+            probe: 1
+            in_value: 0
+            not_in_value: 1
+          - id: 4
+            probe: 2
+            in_value: 0
+            not_in_value: 1
+          - id: 5
+            probe: 9
+            in_value: 0
+            not_in_value: 1
+      - connection: witness_owner
+        sql: SELECT @@TRANCOUNT AS depth
+        expect:
+          rows: 1
+          data:
+          - depth: 0
+      - connection: witness_owner
+        sql: 'DROP TABLE #cache_rhs'
+      - connection: witness_owner
+        sql: 'DROP TABLE #cache_probes'
+cleanup:
+  - sql: DROP TABLE IF EXISTS scoped_lock_targets
+  - sql: DROP TABLE IF EXISTS scoped_lock_sites
+  - sql: DROP TABLE IF EXISTS scoped_lock_months

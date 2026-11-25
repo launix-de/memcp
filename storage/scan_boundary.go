@@ -335,7 +335,7 @@ func newExactScanAccessSchema(columns []string) []scm.Scmer {
 
 func exactScanAccess(schema []scm.Scmer, values []scm.Scmer) scanAccess {
 	count := len(schema) - scanAccessSchemaHeaderSize
-	access := scanAccess{schema: schema, values: values, compiledCount: count, exactAdjacent: true}
+	access := scanAccess{schema: schema, values: values, compiledCount: uint16(count), exactAdjacent: true}
 	if count > 0 {
 		access.firstBoundary = (*scanBoundaryBox)(schema[scanAccessSchemaHeaderSize].Custom(TagScanBoundary))
 	}
@@ -401,7 +401,7 @@ func scanAccessFromAnalyzed(analyzed analyzedBoundaries) scanAccess {
 	schema[0] = newScanAccessHeader(len(segment.items), scanAccessConsumerScan, 0, -1)
 	copy(schema[scanAccessSchemaHeaderSize:], segment.items)
 	return scanAccess{
-		schema: schema, values: segment.values, compiledCount: len(segment.items),
+		schema: schema, values: segment.values, compiledCount: uint16(len(segment.items)),
 		firstBoundary: (*scanBoundaryBox)(segment.items[0].Custom(TagScanBoundary)),
 	}
 }
@@ -414,7 +414,7 @@ func scanAccessAsSegment(access scanAccess) scanAccessSegment {
 		return scanAccessSegment{}
 	}
 	return scanAccessSegment{
-		items:  access.schema[scanAccessSchemaHeaderSize : scanAccessSchemaHeaderSize+access.compiledCount],
+		items:  access.schema[scanAccessSchemaHeaderSize : scanAccessSchemaHeaderSize+int(access.compiledCount)],
 		values: access.values,
 	}
 }

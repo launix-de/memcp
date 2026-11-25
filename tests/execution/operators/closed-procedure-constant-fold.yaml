@@ -1,0 +1,213 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Bounded closed procedure folding proves complete constants without executing residual calls
+setup: []
+test_cases:
+- name: An actual closed comparator folds unequal constants
+  scm: |-
+    (tryfold (list tsql_padded_text_equal "C" "F" "utf8mb4_general_ci"))
+  expect: {result: false}
+- name: Closed comparator folding keeps case padding and NULL semantics
+  scm: |-
+    (list
+      (tryfold (list tsql_padded_text_equal "C " "c" "utf8mb4_general_ci"))
+      (tryfold (list tsql_padded_text_equal "C" "c" "utf8mb4_bin"))
+      (tryfold (list tsql_padded_text_equal nil "c" "utf8mb4_general_ci")))
+  expect: {result: [true, false, null]}
+- name: A repeated scalar parameter is safe to substitute as literal data
+  scm: |-
+    (begin
+      (define helper (close_procedure (lambda (value) (+ value value))))
+      (tryfold (list helper 7)))
+  expect: {result: 14}
+- name: An unused immutable scalar argument does not prevent a constant proof
+  scm: |-
+    (begin
+      (define helper (close_procedure (lambda (value) 19)))
+      (tryfold (list helper 7)))
+  expect: {result: 19}
+- name: Nested closed helpers retain actual lexical callee identity
+  scm: |-
+    (begin
+      (define helper (close_procedure ((lambda (toUpper)
+        (lambda (value) (toUpper value)))
+        (close_procedure (lambda (value) (+ value 3))))))
+      (tryfold (list helper 7)))
+  expect: {result: 10}
+- name: A lazy constant branch does not execute a discarded arithmetic failure
+  scm: |-
+    (begin
+      (define helper (close_procedure (lambda (value)
+        (if (nil? value) 23 (regexp_replace value "[" "z")))))
+      (tryfold (list helper nil)))
+  expect: {result: 23}
+- name: A constant scalar helper survives the ordinary portable closure codec
+  scm: |-
+    (begin
+      (define helper (close_procedure (lambda (value) (+ value value))))
+      (define restored (close_procedure (eval (scheme (serialize helper)))))
+      (tryfold (list restored 8)))
+  expect: {result: 16}
+- name: A dynamic caller expression remains unfurled and executes once normally
+  scm: |-
+    (begin
+      (define state (newsession))
+      (state "calls" 0)
+      (define supplier (close_procedure ((lambda (counter)
+        (lambda () (begin (counter "calls" (+ (counter "calls") 1)) 7))) state)))
+      (define helper (close_procedure (lambda (value) (+ value value))))
+      (define code (list helper (list supplier)))
+      (define rejected (try (lambda () (begin (tryfold code) false)) (lambda (_failure) true)))
+      (list rejected (state "calls") (eval code) (state "calls")))
+  expect: {result: [true, 0, 14, 1]}
+- name: An effectful captured callback is not executed during a constant proof
+  scm: |-
+    (begin
+      (define state (newsession))
+      (state "calls" 0)
+      (define helper (close_procedure ((lambda (counter)
+        (lambda (value) (counter "calls" value))) state)))
+      (list (try (lambda () (begin (tryfold (list helper 7)) false))
+          (lambda (_failure) true)) (state "calls")))
+  expect: {result: [true, 0]}
+- name: A mutable captured list is never frozen into a constant result
+  scm: |-
+    (begin
+      (define state (list 7))
+      (define helper (close_procedure ((lambda (values)
+        (lambda (_value) (car values))) state)))
+      (list (try (lambda () (begin (tryfold (list helper 1)) false))
+          (lambda (_failure) true)) (helper 1)))
+  expect: {result: [true, 7]}
+- name: A failed pure native call remains an executable runtime failure
+  scm: |-
+    (begin
+      (define helper (close_procedure (lambda (value) (regexp_replace value "[" "z"))))
+      (define code (list helper "x"))
+      (list (try (lambda () (begin (tryfold code) false)) (lambda (_failure) true))
+        (try (lambda () (begin (eval code) false)) (lambda (_failure) true))))
+  expect: {result: [true, true]}
+- name: A nonconstant runtime read does not inherit a native name purity contract
+  scm: |-
+    (begin
+      (define state (newsession))
+      (state "value" 11)
+      (define helper (close_procedure ((lambda (toUpper)
+        (lambda (_value) (toUpper "value"))) state)))
+      (list (try (lambda () (begin (tryfold (list helper "x")) false))
+          (lambda (_failure) true)) (helper "x")))
+  expect: {result: [true, 11]}
+- name: Mutable argument data remains outside constant procedure application
+  scm: |-
+    (begin
+      (define helper (close_procedure (lambda (value) (car value))))
+      (list (try (lambda () (begin
+          (tryfold (list helper (list 'quote (list 5)))) false)) (lambda (_failure) true))
+        (helper (list 5))))
+  expect: {result: [true, 5]}
+- name: A mismatched argument vector remains outside constant procedure application
+  scm: |-
+    (begin
+      (define helper (close_procedure (lambda (value) (+ value 1))))
+      (list (try (lambda () (begin (tryfold (list helper 5 99)) false))
+          (lambda (_failure) true)) (helper 5)))
+  expect: {result: [true, 6]}
+- name: An optimized closed regex helper folds its immutable compiled pattern
+  scm: |-
+    (begin
+      (define helper (close_procedure (lambda (value) (regexp_replace value " +$" ""))))
+      (list (tryfold (list helper "abc  ")) (tryfold (list helper nil))))
+  expect: {result: [abc, null]}
+- name: A stateful regex replacement remains residual without executing its callback
+  scm: |-
+    (begin
+      (define state (newsession))
+      (state "calls" 0)
+      (define replacement (close_procedure ((lambda (counter)
+        (lambda (_match) (begin (counter "calls" (+ (counter "calls") 1)) "x"))) state)))
+      (define helper (close_procedure ((lambda (replace)
+        (lambda (value) (regexp_replace value "." replace))) replacement)))
+      (define rejected (try (lambda () (begin (tryfold (list helper "ab")) false))
+        (lambda (_failure) true)))
+      (list rejected (state "calls") (helper "ab") (state "calls")))
+  expect: {result: [true, 0, xx, 2]}
+- name: A named local fallback never resolves through the same-named global comparator
+  scm: |-
+    (begin
+      (define syntax (scheme "(lambda (tsql_padded_text_equal) (begin (define before (tsql_padded_text_equal \"C\" \"F\" \"utf8mb4_general_ci\")) (define tsql_padded_text_equal (lambda (a b c) true)) before))"))
+      (define raw (eval (clone_optimizer_expression syntax)))
+      (define optimized (eval (optimize (clone_optimizer_expression syntax))))
+      (define supplied (lambda (a b c) true))
+      (list (raw supplied) (optimized supplied)))
+  expect: {result: [true, true]}
+- name: Explicitly optimized numbered frames retain the same constant result as raw named frames
+  scm: |-
+    (begin
+      (define raw (close_procedure (lambda (value) (+ value value))))
+      (define numbered (close_procedure (eval (optimize (scheme "(lambda (value) (+ value value))")))))
+      (list (tryfold (list raw 9)) (tryfold (list numbered 9))))
+  expect: {result: [18, 18]}
+- name: A raw named scalar parameter used as a call head never becomes a native name
+  scm: |-
+    (begin
+      (define helper (close_procedure (lambda (toUpper) (toUpper "abc"))))
+      (list (try (lambda () (begin (tryfold (list helper "toUpper")) false))
+          (lambda (_failure) true))
+        (try (lambda () (begin (helper "toUpper") false)) (lambda (_failure) true))))
+  expect: {result: [true, true]}
+- name: Raw nested lambda capture remains outside constant leaf substitution
+  scm: |-
+    (begin
+      (define helper (close_procedure (lambda (value) ((lambda () value)))))
+      (list (try (lambda () (begin (tryfold (list helper 9)) false))
+          (lambda (_failure) true)) (helper 9)))
+  expect: {result: [true, 9]}
+- name: A numbered AST placed in an unnumbered raw frame stays an actual runtime error
+  scm: |-
+    (begin
+      (define numbered (optimize (list 'lambda (list 'value) 'value)))
+      (define malformed (close_procedure (eval
+        (list 'lambda (list 'value) (nth numbered 2)))))
+      (list (try (lambda () (begin (tryfold (list malformed 7)) false))
+          (lambda (_failure) true))
+        (try (lambda () (begin (malformed 7) false)) (lambda (_failure) true))))
+  expect: {result: [true, true]}
+- name: A raw underscore placeholder never acquires the supplied argument value
+  scm: |-
+    (begin
+      (define helper (close_procedure (lambda (_) _)))
+      (list (try (lambda () (begin (tryfold (list helper 7)) false))
+          (lambda (_failure) true)) (helper 7)))
+  expect: {result: [true, null]}
+- name: A global quote alias cannot turn quoted parameter syntax into its scalar argument
+  scm: |-
+    (begin
+      (define install (close_procedure (lambda (code) (eval code))))
+      (install (list 'outer 1 (list 'define '__test_closed_fold_quote_alias 'quote)))
+      (define helper (close_procedure (eval (list 'lambda (list 'value)
+        (list '__test_closed_fold_quote_alias 'value)))))
+      (define raw_ok (expression_equal? (helper 7) 'value))
+      (define folded_ok (try
+        (lambda () (expression_equal? (tryfold (list helper 7)) 'value))
+        (lambda (_nonconstant) true)))
+      (install (list 'outer 1 (list 'define '__test_closed_fold_quote_alias nil)))
+      (list raw_ok folded_ok))
+  expect: {result: [true, true]}
+- name: Explicit fixed named frames bind scalar parameters exactly like unnumbered raw frames
+  scm: |-
+    (begin
+      (define helper (close_procedure (eval (list 'lambda (list 'value)
+        (list '+ 'value 'value) 1))))
+      (list (helper 9) (tryfold (list helper 9))))
+  expect: {result: [18, 18]}
+- name: Explicit fixed named frames preserve NULL and lazy string trimming
+  scm: |-
+    (begin
+      (define helper (close_procedure (eval (list 'lambda (list 'value)
+        (list 'if (list 'nil? 'value) nil
+          (list 'regexp_replace 'value " +$" "")) 1))))
+      (list (tryfold (list helper nil)) (tryfold (list helper "abc  "))))
+  expect: {result: [null, abc]}
+cleanup: []

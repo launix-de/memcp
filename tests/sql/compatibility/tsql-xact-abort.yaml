@@ -1,0 +1,211 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/set-xact-abort-transact-sql
+# https://learn.microsoft.com/sql/t-sql/functions/xact-state-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Runtime transaction error options preserve native undo and uncommittable reads
+setup:
+  - sql: CREATE TABLE xact_option_rows(id INT PRIMARY KEY,value INT)
+  - sql: CREATE TABLE xact_trigger_rows(id INT PRIMARY KEY,value INT)
+  - sql: CREATE TABLE xact_trigger_audit(id INT)
+  - sql: |
+      CREATE TRIGGER xact_trigger_failure ON xact_trigger_rows AFTER INSERT AS BEGIN
+        INSERT xact_trigger_audit SELECT id FROM inserted;
+        UPDATE xact_trigger_rows SET value=8/0 WHERE id IN(SELECT id FROM inserted);
+      END;
+  - sql: |
+      CREATE PROCEDURE xact_option_module AS BEGIN
+        SET XACT_ABORT ON;
+        SELECT @@OPTIONS&16384 AS option_bit;
+      END;
+cleanup:
+  - sql: DROP TRIGGER IF EXISTS xact_trigger_failure
+  - sql: DROP TABLE IF EXISTS xact_trigger_audit
+  - sql: DROP TABLE IF EXISTS xact_trigger_rows
+  - sql: DROP PROCEDURE IF EXISTS xact_option_module
+  - sql: DROP TABLE IF EXISTS xact_option_rows
+test_cases:
+  - name: Ordinary sessions default to XACT_ABORT OFF
+    sql: SELECT @@OPTIONS&16384 AS option_bit
+    expect: {rows: 1, data: [{option_bit: 0}]}
+  - name: Runtime option lists retain the transaction error bit
+    sql: |
+      SET ANSI_WARNINGS,XACT_ABORT ON;
+      SELECT @@OPTIONS&16384 AS enabled;
+      SET XACT_ABORT OFF;
+      SELECT @@OPTIONS&16384 AS disabled;
+    expect: {rows: 2, data: [{enabled: 16384}, {disabled: 0}]}
+  - name: A false branch does not enable transaction error handling
+    sql: IF 1=0 SET XACT_ABORT ON; SELECT @@OPTIONS&16384 AS option_bit
+    expect: {rows: 1, data: [{option_bit: 0}]}
+  - name: Stored procedure options restore their caller
+    sql: SET XACT_ABORT OFF; EXEC xact_option_module; SELECT @@OPTIONS&16384 AS option_bit
+    expect: {rows: 2, data: [{option_bit: 16384}, {option_bit: 0}]}
+  - name: Dynamic options restore their caller
+    sql: |
+      SET XACT_ABORT OFF;
+      EXEC(N'SET XACT_ABORT ON; SELECT @@OPTIONS&16384 AS option_bit;');
+      SELECT @@OPTIONS&16384 AS option_bit;
+    expect: {rows: 2, data: [{option_bit: 16384}, {option_bit: 0}]}
+  - name: XACT_ABORT OFF preserves earlier work after a caught THROW
+    sql: |
+      SET XACT_ABORT OFF;
+      BEGIN TRANSACTION;
+      INSERT xact_option_rows VALUES(101,11);
+      BEGIN TRY THROW 50101,N'caught runtime failure',1; END TRY
+      BEGIN CATCH
+        SELECT ERROR_NUMBER() AS number,XACT_STATE() AS state,@@TRANCOUNT AS depth;
+        SELECT id,value FROM xact_option_rows WHERE id=101;
+      END CATCH;
+      ROLLBACK TRANSACTION;
+    expect: {rows: 2, data: [{number: 50101, state: 1, depth: 1}, {id: 101, value: 11}]}
+  - name: XACT_ABORT ON keeps private reads while a caught THROW forbids commit
+    sql: |
+      SET XACT_ABORT ON;
+      BEGIN TRANSACTION;
+      INSERT xact_option_rows VALUES(102,12);
+      BEGIN TRY THROW 50102,N'caught runtime failure',1; END TRY
+      BEGIN CATCH
+        SELECT ERROR_NUMBER() AS number,XACT_STATE() AS state,@@TRANCOUNT AS depth;
+        SELECT id,value FROM xact_option_rows WHERE id=102;
+        BEGIN TRY COMMIT TRANSACTION; END TRY
+        BEGIN CATCH SELECT ERROR_NUMBER() AS commit_number; END CATCH;
+        SELECT id,value FROM xact_option_rows WHERE id=102;
+        ROLLBACK TRANSACTION;
+      END CATCH;
+      SELECT COUNT(*) AS remaining FROM xact_option_rows WHERE id=102;
+    expect: {rows: 5, data: [{number: 50102, state: -1, depth: 1}, {id: 102, value: 12}, {commit_number: 3930}, {id: 102, value: 12}, {remaining: 0}]}
+  - name: Unhandled runtime errors roll back earlier work and skip the batch suffix
+    tds:
+      statements:
+        - sql: SET XACT_ABORT ON; BEGIN TRANSACTION; INSERT xact_option_rows VALUES(103,13); THROW 50103,N'uncaught runtime failure',1; INSERT xact_option_rows VALUES(104,14)
+          expect: {error: true, contains: [uncaught runtime failure]}
+        - sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+          expect: {rows: 1, data: [{state: 0, depth: 0}]}
+        - sql: SELECT COUNT(*) AS remaining FROM xact_option_rows WHERE id IN(103,104)
+          expect: {rows: 1, data: [{remaining: 0}]}
+  - name: A failed arithmetic UPDATE undoes the statement but retains earlier private rows
+    sql: |
+      SET XACT_ABORT ON;
+      BEGIN TRANSACTION;
+      INSERT xact_option_rows VALUES(105,15),(106,16);
+      BEGIN TRY UPDATE xact_option_rows SET value=CASE WHEN id=106 THEN 2147483647+1 ELSE 25 END WHERE id IN(105,106); END TRY
+      BEGIN CATCH
+        SELECT ERROR_NUMBER() AS number,XACT_STATE() AS state,@@TRANCOUNT AS depth;
+        SELECT id,value FROM xact_option_rows WHERE id IN(105,106) ORDER BY id;
+        ROLLBACK TRANSACTION;
+      END CATCH;
+    expect: {rows: 3, data: [{number: 8115, state: -1, depth: 1}, {id: 105, value: 15}, {id: 106, value: 16}]}
+  - name: RAISERROR does not honor XACT_ABORT and permits an actual commit
+    sql: |
+      SET XACT_ABORT ON;
+      BEGIN TRANSACTION;
+      INSERT xact_option_rows VALUES(107,17);
+      BEGIN TRY RAISERROR(N'user diagnostic',16,1); END TRY
+      BEGIN CATCH SELECT ERROR_NUMBER() AS number,XACT_STATE() AS state,@@TRANCOUNT AS depth; END CATCH;
+      COMMIT TRANSACTION;
+      SELECT id,value FROM xact_option_rows WHERE id=107;
+      DELETE xact_option_rows WHERE id=107;
+    expect: {rows: 2, data: [{number: 50000, state: 1, depth: 1}, {id: 107, value: 17}]}
+  - name: THROW rethrow applies its own transaction policy to a caught RAISERROR
+    sql: |
+      SET XACT_ABORT ON;
+      BEGIN TRANSACTION;
+      INSERT xact_option_rows VALUES(108,18);
+      BEGIN TRY
+        BEGIN TRY RAISERROR(N'rethrown diagnostic',16,1); END TRY
+        BEGIN CATCH THROW; END CATCH;
+      END TRY
+      BEGIN CATCH
+        SELECT ERROR_NUMBER() AS number,XACT_STATE() AS state,@@TRANCOUNT AS depth;
+        SELECT id,value FROM xact_option_rows WHERE id=108;
+        ROLLBACK TRANSACTION;
+      END CATCH;
+    expect: {rows: 2, data: [{number: 50000, state: -1, depth: 1}, {id: 108, value: 18}]}
+  - name: Compile failures in a lower dynamic scope do not doom the caller
+    sql: |
+      SET XACT_ABORT ON;
+      BEGIN TRANSACTION;
+      INSERT xact_option_rows VALUES(109,19);
+      BEGIN TRY EXEC(N'SELECT missing_column FROM xact_option_rows'); END TRY
+      BEGIN CATCH SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth; END CATCH;
+      SELECT id,value FROM xact_option_rows WHERE id=109;
+      ROLLBACK TRANSACTION;
+    expect: {rows: 2, data: [{state: 1, depth: 1}, {id: 109, value: 19}]}
+  - name: Savepoint rollback cannot rehabilitate an uncommittable transaction
+    sql: |
+      SET XACT_ABORT ON;
+      BEGIN TRANSACTION;
+      INSERT xact_option_rows VALUES(110,20);
+      SAVE TRANSACTION before_failure;
+      BEGIN TRY THROW 50110,N'doomed transaction',1; END TRY
+      BEGIN CATCH
+        BEGIN TRY ROLLBACK TRANSACTION before_failure; END TRY
+        BEGIN CATCH SELECT ERROR_NUMBER() AS number,XACT_STATE() AS state,@@TRANCOUNT AS depth; END CATCH;
+        SELECT id,value FROM xact_option_rows WHERE id=110;
+        ROLLBACK TRANSACTION;
+      END CATCH;
+    expect: {rows: 2, data: [{number: 3931, state: -1, depth: 1}, {id: 110, value: 20}]}
+  - name: Ending an uncommittable batch performs a real rollback
+    tds:
+      statements:
+        - sql: SET XACT_ABORT ON; BEGIN TRANSACTION; INSERT xact_option_rows VALUES(111,21); BEGIN TRY THROW 50111,N'caught without rollback',1; END TRY BEGIN CATCH PRINT N'caught'; END CATCH
+          expect: {error: true, contains: [Uncommittable]}
+        - sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+          expect: {rows: 1, data: [{state: 0, depth: 0}]}
+        - sql: SELECT COUNT(*) AS remaining FROM xact_option_rows WHERE id=111
+          expect: {rows: 1, data: [{remaining: 0}]}
+  - name: An uncommittable transaction rejects later writes without losing its earlier private row
+    sql: |
+      SET XACT_ABORT ON;
+      BEGIN TRANSACTION;
+      INSERT xact_option_rows VALUES(112,22);
+      BEGIN TRY THROW 50112,N'doomed before another insert',1; END TRY
+      BEGIN CATCH
+        BEGIN TRY INSERT xact_option_rows VALUES(113,23); END TRY
+        BEGIN CATCH SELECT ERROR_NUMBER() AS number,XACT_STATE() AS state,@@TRANCOUNT AS depth; END CATCH;
+        SELECT id,value FROM xact_option_rows WHERE id IN(112,113) ORDER BY id;
+        ROLLBACK TRANSACTION;
+      END CATCH;
+      SELECT COUNT(*) AS remaining FROM xact_option_rows WHERE id IN(112,113);
+    expect: {rows: 3, data: [{number: 3930, state: -1, depth: 1}, {id: 112, value: 22}, {remaining: 0}]}
+  - name: A caught module failure uses its actual inner option and restores the caller
+    sql: |
+      SET XACT_ABORT OFF;
+      BEGIN TRANSACTION;
+      INSERT xact_option_rows VALUES(114,24);
+      BEGIN TRY EXEC(N'SET XACT_ABORT ON; THROW 50114,N''inner failure'',1;'); END TRY
+      BEGIN CATCH
+        SELECT ERROR_NUMBER() AS number,XACT_STATE() AS state,@@TRANCOUNT AS depth,@@OPTIONS&16384 AS caller_option;
+        SELECT id,value FROM xact_option_rows WHERE id=114;
+        ROLLBACK TRANSACTION;
+      END CATCH;
+    expect: {rows: 2, data: [{number: 50114, state: -1, depth: 1, caller_option: 0}, {id: 114, value: 24}]}
+  - name: A module that disables XACT_ABORT can preserve a strict outer caller
+    sql: |
+      SET XACT_ABORT ON;
+      BEGIN TRANSACTION;
+      INSERT xact_option_rows VALUES(115,25);
+      BEGIN TRY EXEC(N'SET XACT_ABORT OFF; THROW 50115,N''inner failure'',1;'); END TRY
+      BEGIN CATCH SELECT ERROR_NUMBER() AS number,XACT_STATE() AS state,@@TRANCOUNT AS depth,@@OPTIONS&16384 AS caller_option; END CATCH;
+      COMMIT TRANSACTION;
+      SELECT id,value FROM xact_option_rows WHERE id=115;
+      DELETE xact_option_rows WHERE id=115;
+    expect: {rows: 2, data: [{number: 50115, state: 1, depth: 1, caller_option: 16384}, {id: 115, value: 25}]}
+  - name: Trigger default XACT_ABORT dooms an OFF caller after complete statement undo
+    sql: |
+      SET XACT_ABORT OFF;
+      BEGIN TRANSACTION;
+      INSERT xact_option_rows VALUES(116,26);
+      BEGIN TRY INSERT xact_trigger_rows VALUES(116,1); END TRY
+      BEGIN CATCH
+        SELECT ERROR_NUMBER() AS number,XACT_STATE() AS state,@@TRANCOUNT AS depth,@@OPTIONS&16384 AS caller_option;
+        SELECT id,value FROM xact_option_rows WHERE id=116;
+        SELECT COUNT(*) AS trigger_rows FROM xact_trigger_rows WHERE id=116;
+        SELECT COUNT(*) AS audit_rows FROM xact_trigger_audit WHERE id=116;
+        ROLLBACK TRANSACTION;
+      END CATCH;
+    expect: {rows: 4, data: [{number: 8134, state: -1, depth: 1, caller_option: 0}, {id: 116, value: 26}, {trigger_rows: 0}, {audit_rows: 0}]}

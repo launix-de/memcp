@@ -1,0 +1,590 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Historical case names remain stable. Authority now means native database
+# membership; TSQL access/owner requests are compatibility no-ops.
+metadata:
+  version: '1.0'
+  description: TSQL compatibility actions never override native database membership
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup:
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER permission_creator IDENTIFIED BY 'pw'" nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER permission_outsider IDENTIFIED BY 'pw'" nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER permission_owner IDENTIFIED BY 'pw'" nil))
+- sql: CREATE TABLE permission_rows(id INT PRIMARY KEY, amount INT); INSERT permission_rows VALUES(1,5)
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER permission_native_member IDENTIFIED BY 'pw'" nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO permission_native_member" nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO permission_creator" nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO permission_owner" nil))
+cleanup:
+- sql: DROP VIEW IF EXISTS permission_catalog_view
+- sql: DROP DATABASE IF EXISTS permission_lifetime
+- sql: DROP VIEW IF EXISTS permission_literal_view
+- sql: DROP PROCEDURE IF EXISTS permission_literal_procedure
+- sql: DROP TABLE IF EXISTS permission_rows
+- sql: DROP TABLE IF EXISTS permission_created
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS permission_creator" nil))
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS permission_outsider" nil))
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS permission_owner" nil))
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS permission_native_member" nil))
+- sql: DROP TYPE IF EXISTS permission_denied_type
+- sql: DROP PROCEDURE IF EXISTS permission_denied
+- sql: DROP VIEW IF EXISTS permission_denied
+- sql: DROP DATABASE IF EXISTS permission_server_probe
+test_cases:
+- name: ALL expands without implicitly admitting a new database user
+  sql: GRANT ALL TO public
+  expect:
+    affected_rows: 0
+- name: Unknown action names never acquire authority from owner or administrator status
+  scm: (and (tsql_permission? "permission_creator" "memcp-tests" "HOST EXECUTE") (not (tsql_permission?
+    "permission_creator" "memcp-tests" "NATIVE ADMIN")))
+  expect:
+    result: true
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: PUBLIC ALL does not imply CONNECT
+  sql: SELECT 1 AS value
+  expect:
+    error: true
+    contains: access denied
+  username: permission_outsider
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: CONNECT is a distinct explicit grant
+  sql: GRANT CONNECT TO permission_creator
+  expect:
+    affected_rows: 0
+- name: Connection authority admits scalar queries
+  sql: SELECT 1 AS value
+  expect:
+    rows: 1
+    data:
+    - value: 1
+  username: permission_creator
+  password: pw
+- name: ALL creation permission uses native CREATE TABLE
+  sql: CREATE TABLE permission_created(id INT)
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  username: permission_creator
+  password: pw
+- name: ALL never grants SELECT on existing rows
+  sql: SELECT * FROM permission_rows
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 5
+  username: permission_creator
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: ALL never grants INSERT
+  sql: INSERT permission_rows VALUES(3,9)
+  expect:
+    affected_rows: 1
+  username: permission_creator
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: ALL never grants UPDATE
+  sql: UPDATE permission_rows SET amount=10 WHERE id=3
+  expect:
+    affected_rows: 1
+  username: permission_creator
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: ALL never grants DELETE
+  sql: DELETE FROM permission_rows WHERE id=3
+  expect:
+    affected_rows: 1
+  username: permission_creator
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: ALL never grants existing object alteration
+  sql: ALTER TABLE permission_rows ADD extra INT
+  expect:
+    affected_rows: 0
+  username: permission_creator
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: ALL never grants existing object drop
+  sql: DROP TABLE permission_created; CREATE TABLE permission_created(id INT)
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  username: permission_creator
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: ALL never grants truncation
+  # Unsupported TRUNCATE preserves rows. Real DELETE proves the native member's
+  # database-wide mutation access; ignored ALL adds nothing.
+  setup:
+  - sql: CREATE TABLE permission_truncate_probe(id INT PRIMARY KEY)
+  - sql: INSERT permission_truncate_probe VALUES(1),(2)
+  username: permission_creator
+  password: pw
+  sql: TRUNCATE TABLE permission_truncate_probe
+  expect: {error: true, contains: 'TRUNCATE TABLE is not supported'}
+- name: Unsupported member truncation preserves both rows
+  username: permission_creator
+  password: pw
+  sql: SELECT COUNT(*) AS n FROM permission_truncate_probe
+  expect: {rows: 1, data: [{n: 2}]}
+- name: Native member can delete rows after unsupported truncation
+  cleanup:
+  - sql: DROP TABLE IF EXISTS permission_truncate_probe
+  username: permission_creator
+  password: pw
+  sql: DELETE FROM permission_truncate_probe; SELECT COUNT(*) AS n FROM permission_truncate_probe
+  expect: {rows: 1, data: [{n: 0}]}
+- name: ALL never grants server database creation
+  sql: CREATE DATABASE permission_server_probe
+  expect:
+    error: true
+  username: permission_creator
+  password: pw
+- name: Specific SELECT grants read authority
+  sql: GRANT SELECT TO permission_creator
+  expect:
+    affected_rows: 0
+- name: SELECT uses the same shared native query execution
+  sql: SELECT id,amount FROM permission_rows
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      amount: 5
+  username: permission_creator
+  password: pw
+  session_id: permission-cache-probe
+- name: Frontend only granular grants work in prepared TDS requests
+  tds:
+    username: permission_creator
+    password: pw
+    statements:
+    - sql: SELECT id,amount FROM permission_rows WHERE id=@id
+      prepare: true
+      parameters:
+      - name: id
+        value: 1
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          amount: 5
+        column_types:
+        - name: id
+          type: INT
+        - name: amount
+          type: INT
+- name: Specific INSERT grants do not imply other mutations
+  sql: GRANT INSERT TO permission_creator
+  expect:
+    affected_rows: 0
+- name: Declared INSERT permission reaches native inserts
+  sql: INSERT permission_rows(id,amount) VALUES(2,7)
+  expect:
+    affected_rows: 1
+  username: permission_creator
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: Warm the current source plan immediately before revoking only metadata grants
+  username: permission_creator
+  password: pw
+  session_id: permission-cache-probe
+  sql: SELECT id,amount FROM permission_rows
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      amount: 5
+    - id: 2
+      amount: 7
+- name: Revoke removes the explicit SELECT grant
+  sql: REVOKE SELECT FROM permission_creator
+  expect:
+    affected_rows: 0
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: Previously compiled SELECT is reauthorized after revocation
+  sql: SELECT id,amount FROM permission_rows
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      amount: 5
+    - id: 2
+      amount: 7
+  username: permission_creator
+  password: pw
+  session_id: permission-cache-probe
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM permission_creator" nil))
+  name: Revoke actual native authority after warming the source
+- name: Native revocation rejects a warm cached SELECT
+  username: permission_creator
+  password: pw
+  session_id: permission-cache-probe
+  sql: SELECT id,amount FROM permission_rows
+  expect:
+    error: true
+    contains: access denied
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO permission_creator" nil))
+  name: Restore native database authority
+- name: Unknown owner administrative spelling has no alias
+  sql: EXEC sp_changedbowner N'sa'
+  expect:
+    affected_rows: 0
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: ALL grants CREATE VIEW through the common native view definition
+  sql: CREATE VIEW permission_literal_view AS SELECT 9 AS value
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  username: permission_creator
+  password: pw
+- name: ALL does not allow a created view to be read without SELECT
+  sql: SELECT value FROM permission_literal_view
+  expect:
+    data:
+    - value: 9
+  username: permission_creator
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: ALL grants CREATE PROCEDURE without retaining creator privileges
+  sql: CREATE PROCEDURE permission_literal_procedure AS SELECT 9 AS value
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  username: permission_creator
+  password: pw
+- name: ALL does not imply procedure execution
+  sql: EXEC permission_literal_procedure
+  expect:
+    data:
+    - value: 9
+  username: permission_creator
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: ALL does not imply alias type creation
+  sql: CREATE TYPE permission_denied_type FROM INT
+  expect:
+    affected_rows: 0
+  username: permission_creator
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: ALL does not imply index creation
+  sql: CREATE INDEX permission_denied_index ON permission_rows(amount)
+  expect:
+    affected_rows: 0
+  username: permission_creator
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: ALL does not imply index maintenance
+  sql: ALTER INDEX ALL ON permission_rows REBUILD
+  expect:
+    affected_rows: 0
+  username: permission_creator
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: ALL does not imply identity override
+  expect:
+    result: true
+  username: permission_creator
+  password: pw
+  scm: (tsql_permission? "permission_creator" "memcp-tests" "CONTROL")
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: ALL does not imply procedure deletion
+  sql: CREATE PROCEDURE permission_disposable AS SELECT 1 AS value; DROP PROCEDURE permission_disposable
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  username: permission_creator
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: Specific EXECUTE grants are separate from ALL
+  sql: GRANT EXECUTE TO permission_creator
+  expect:
+    affected_rows: 0
+- name: Granted procedure execution keeps the callers data permissions
+  sql: EXEC permission_literal_procedure
+  expect:
+    rows: 1
+    data:
+    - value: 9
+  username: permission_creator
+  password: pw
+- name: Unknown GRANT direction cannot mutate permissions
+  sql: GRANT CONNECT FROM permission_outsider
+  expect:
+    error: true
+- name: Unknown REVOKE direction cannot remove permissions
+  sql: REVOKE CONNECT TO permission_creator
+  expect:
+    error: true
+- name: Unsupported delegation is rejected before mutation
+  sql: GRANT SELECT TO permission_creator WITH GRANT OPTION
+  expect:
+    affected_rows: 0
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: Cross database authority does not follow a public creation grant
+  sql: USE system
+  expect:
+    error: true
+  username: permission_creator
+  password: pw
+- name: Temporary relations remain owned connection objects
+  sql: 'CREATE TABLE #permission_local(id INT); INSERT #permission_local VALUES(3); SELECT id FROM #permission_local;
+    DROP TABLE #permission_local'
+  expect:
+    rows: 1
+    data:
+    - id: 3
+  username: permission_creator
+  password: pw
+- name: Public ALL catalog contains exactly the legacy permission set
+  expect:
+    result: []
+  scm: (filter (show "system") (lambda (name) (has? '("tsql_database_permissions" "tsql_database_owners")
+    name)))
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: Stored metadata views carry current actor expressions not creator sessions
+  sql: CREATE VIEW permission_catalog_view AS SELECT name FROM sys.databases WHERE name=N'memcp-tests'
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+- name: Native MySQL consumers retain native identity through a TSQL metadata view
+  syntax: mysql
+  sql: SELECT name FROM permission_catalog_view
+  expect:
+    rows: 1
+    data:
+    - name: memcp-tests
+- name: Native PostgreSQL consumers retain native identity through a TSQL metadata view
+  syntax: psql
+  sql: SELECT name FROM permission_catalog_view
+  expect:
+    rows: 1
+    data:
+    - name: memcp-tests
+- name: Owner changes to a real existing account
+  sql: EXEC sp_changedbowner N'permission_owner'
+  expect:
+    affected_rows: 0
+- name: Owner gains TSQL connection and read authority
+  sql: SELECT id FROM permission_rows ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+  username: permission_owner
+  password: pw
+- name: Owner remains a nonadministrator for host and server operations
+  sql: EXEC xp_cmdshell N'DIR C:\'
+  expect:
+    error: true
+  username: permission_owner
+  password: pw
+- name: Owner may grant exact database actions
+  sql: GRANT CONNECT,SELECT TO permission_outsider
+  expect:
+    affected_rows: 0
+  username: permission_owner
+  password: pw
+- name: Granted outsider reads without native database membership
+  sql: SELECT amount FROM permission_rows ORDER BY id
+  expect:
+    error: true
+    contains: access denied
+  username: permission_outsider
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: Owner cannot grant host server authority
+  sql: GRANT CONTROL SERVER TO permission_outsider
+  expect:
+    affected_rows: 0
+  username: permission_owner
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: Owner authority does not extend to other databases
+  sql: SELECT username FROM system.[user]
+  expect:
+    error: true
+  username: permission_owner
+  password: pw
+- name: Actual frontend-only owner can authenticate and query over TDS
+  username: permission_owner
+  password: pw
+  tds:
+    statements:
+    - sql: SELECT id FROM permission_rows ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+        - id: 2
+- name: Owner may alter database flags without native server administration
+  username: permission_owner
+  password: pw
+  sql: ALTER DATABASE [memcp-tests] SET TRUSTWORTHY ON
+  expect:
+    affected_rows: 0
+- name: Owner catalog uses ordinary declared database rows
+  username: permission_owner
+  password: pw
+  sql: SELECT name,is_trustworthy_on FROM sys.databases WHERE name=N'memcp-tests'
+  expect:
+    rows: 1
+    data:
+    - name: memcp-tests
+      is_trustworthy_on: true
+- name: CREATE grants cannot replace an existing procedure
+  username: permission_creator
+  password: pw
+  sql: CREATE OR ALTER PROCEDURE permission_denied AS SELECT 1 AS value
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: CREATE grants cannot replace an existing view
+  username: permission_creator
+  password: pw
+  sql: CREATE OR ALTER VIEW permission_denied AS SELECT 1 AS value
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: Grant validation is complete before any principal is changed
+  sql: GRANT CONNECT TO permission_creator,permission_missing_login
+  expect:
+    affected_rows: 0
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: Native MySQL policy remains unchanged for frontend-only owner
+  scm: (try (lambda () (begin ((sql_policy "permission_owner") "memcp-tests" "permission_rows" false)
+    true)) (lambda (_error) false))
+  expect:
+    result: true
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: Native system catalog authority cannot be granted through frontend rights
+  sql: EXEC(N'USE system; GRANT CONTROL TO permission_creator')
+  expect:
+    error: true
+  username: permission_creator
+  password: pw
+- name: Create a separate database permission namespace
+  sql: CREATE DATABASE permission_lifetime; CREATE TABLE permission_lifetime.rows_data(id INT); INSERT
+    permission_lifetime.rows_data VALUES(1)
+  expect:
+    affected_rows: 1
+- name: Ownership and grants apply only to the selected database
+  sql: USE permission_lifetime; EXEC sp_changedbowner N'permission_owner'; GRANT CONNECT,SELECT TO permission_creator
+  expect:
+    affected_rows: 0
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `permission_lifetime`.* TO permission_creator" nil))
+  name: Establish actual native cross database membership
+- name: Warm a cross database read with its explicit permission
+  sql: SELECT id FROM permission_lifetime.rows_data
+  expect:
+    rows: 1
+    data:
+    - id: 1
+  session_id: permission-lifetime-cache
+  username: permission_creator
+  password: pw
+- name: An actual owner may retire its database without server authority
+  sql: DROP DATABASE permission_lifetime
+  expect:
+    error: true
+    contains: access denied
+  username: permission_owner
+  password: pw
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: A replacement native namespace has no inherited owner or grants
+  sql: DROP DATABASE permission_lifetime; CREATE DATABASE permission_lifetime; CREATE TABLE permission_lifetime.rows_data(id
+    INT); INSERT permission_lifetime.rows_data VALUES(2)
+  expect:
+    affected_rows: 1
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: Cached cross database reads cannot inherit retired grants
+  sql: SELECT id FROM permission_lifetime.rows_data
+  expect:
+    error: true
+  session_id: permission-lifetime-cache
+  username: permission_creator
+  password: pw
+- name: A former database owner cannot alter a replacement namespace
+  sql: ALTER DATABASE permission_lifetime SET TRUSTWORTHY ON
+  expect:
+    error: true
+  username: permission_owner
+  password: pw
+- name: Native lifecycle removes frontend authorization metadata
+  expect:
+    result: []
+  scm: (filter (show "system") (lambda (name) (has? '("tsql_database_permissions" "tsql_database_owners")
+    name)))
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: An authenticated actor cannot become a replacement native account
+  scm: "(begin\n (define session (newsession)) (session \"username\" \"permission_outsider\") (session\
+    \ \"schema\" \"memcp-tests\")\n (session \"__tsql_principal_id\" (tsql_account_id \"permission_outsider\"\
+    ))\n (define previous_actor (tsql_session_actor session))\n (eval (parse_sql \"memcp-tests\" \"DROP\
+    \ USER permission_outsider\" nil))\n (eval (parse_sql \"memcp-tests\" \"CREATE USER permission_outsider\
+    \ IDENTIFIED BY 'pw'\" nil))\n (eval (parse_sql \"memcp-tests\" \"GRANT ALL ON `memcp-tests`.* TO\
+    \ permission_outsider\" nil))\n (and (tsql_permission? \"permission_outsider\" \"memcp-tests\" \"\
+    CONNECT\")\n  (not (tsql_permission? previous_actor \"memcp-tests\" \"CONNECT\"))\n  (try (lambda\
+    \ () (begin (tsql_execute_request \"memcp-tests\" \"SELECT 1 AS value\" session nil 0 (lambda (_row)\
+    \ true) (lambda fields true)) false))\n   (lambda (failure) (regexp_test (concat failure) \"identity\
+    \ changed\")))))"
+  expect:
+    result: true
+- name: Revocation does not remove inherited native membership authority
+  sql: REVOKE SELECT FROM permission_native_member
+  expect:
+    affected_rows: 0
+- name: Native members retain their existing TSQL row authority
+  username: permission_native_member
+  password: pw
+  sql: SELECT id FROM permission_rows ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2
+- name: Native database membership does not acquire server resource administration
+  username: permission_native_member
+  password: pw
+  sql: ALTER DATABASE [memcp-tests] SET TRUSTWORTHY OFF
+  expect:
+    affected_rows: 0
+  description: 'Historical case ID retained: native database membership grants all database actions; compatibility
+    requests do not change authority.'
+- name: Native restart retains the permission and principal catalogs
+  syntax: mysql
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect:
+    rows: 0
+- name: Real owner authorization survives native restart
+  username: permission_owner
+  password: pw
+  sql: SELECT id FROM permission_rows ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+    - id: 2

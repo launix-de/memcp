@@ -1,0 +1,2165 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Historical ordinary column generators use parallel native row journals and one original transaction decision
+setup:
+- sql: DROP TABLE IF EXISTS generated_forward
+- sql: DROP TABLE IF EXISTS generated_allocator
+- sql: DROP TABLE IF EXISTS generated_nested
+- sql: DROP TABLE IF EXISTS generated_native_masks
+- sql: DROP TABLE IF EXISTS generated_property_target_a
+- sql: DROP TABLE IF EXISTS generated_property_target_b
+- sql: DROP TABLE IF EXISTS generated_property_owner_a
+- sql: DROP TABLE IF EXISTS generated_property_owner_b
+- sql: DROP TABLE IF EXISTS generated_logged
+- sql: DROP TABLE IF EXISTS generated_rewind_prior
+- sql: DROP TABLE IF EXISTS generated_history
+- sql: DROP TABLE IF EXISTS generated_capture
+- sql: DROP TABLE IF EXISTS generated_audit
+- sql: DROP TABLE IF EXISTS generated_rollback
+- sql: DROP TABLE IF EXISTS generated_savepoint
+- sql: DROP TABLE IF EXISTS generated_prefix
+- sql: DROP TABLE IF EXISTS generated_nullable
+- sql: DROP TABLE IF EXISTS generated_values
+- sql: DROP TABLE IF EXISTS generated_auto
+- sql: DROP TABLE IF EXISTS generated_batch
+- sql: DROP TABLE IF EXISTS generated_failure
+- sql: DROP TABLE IF EXISTS generated_unpublished
+- sql: DROP TABLE IF EXISTS generated_parallel
+- sql: DROP TABLE IF EXISTS generated_guid_conflict
+- sql: CREATE TABLE generated_history(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_history VALUES(1,10),(2,20),(3,30),(4,40)
+- scm: (rebuild (table "memcp-tests" false "generated_history" false nil) true false nil true)
+- sql: INSERT generated_history VALUES(5,50),(6,60)
+- sql: CREATE TABLE generated_capture(id INT NOT NULL PRIMARY KEY,token UNIQUEIDENTIFIER NOT NULL)
+- sql: CREATE TABLE generated_audit(kind INT,n INT)
+- sql: CREATE TRIGGER generated_history_update ON generated_history AFTER UPDATE AS INSERT generated_audit SELECT 1,COUNT(*) FROM inserted
+- sql: CREATE TRIGGER generated_history_insert ON generated_history AFTER INSERT AS INSERT generated_audit SELECT 2,COUNT(*) FROM inserted
+- sql: CREATE TRIGGER generated_history_delete ON generated_history AFTER DELETE AS INSERT generated_audit SELECT 3,COUNT(*) FROM deleted
+- sql: CREATE TABLE generated_rollback(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_rollback VALUES(1,10),(2,20),(3,30)
+- sql: CREATE TABLE generated_savepoint(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_savepoint VALUES(1,10),(2,20),(3,30)
+- sql: CREATE TABLE generated_prefix(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_prefix VALUES(1,10),(2,20),(3,30)
+- sql: CREATE TABLE generated_nullable(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_nullable VALUES(1,10),(2,20),(3,30)
+- sql: CREATE TABLE generated_values(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_values VALUES(1,10),(2,20),(3,30)
+- sql: CREATE TABLE generated_auto(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_auto VALUES(1,10),(2,20),(3,30)
+- sql: CREATE TABLE generated_batch(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_batch VALUES(1,10),(2,20),(3,30)
+- sql: CREATE TABLE generated_failure(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_failure VALUES(1,10),(2,20),(3,30)
+- sql: CREATE TABLE generated_unpublished(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_unpublished VALUES(1,10),(2,20),(3,30)
+- sql: CREATE TABLE generated_parallel(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_parallel VALUES(1,10),(2,20),(3,30)
+- sql: CREATE TABLE generated_guid_conflict(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_guid_conflict VALUES(1,10),(2,20),(3,30)
+- sql: CREATE TABLE generated_logged(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_logged VALUES(1,10),(2,20)
+- scm: (altertable (table "memcp-tests" false "generated_logged" false nil) "engine" "logged")
+- sql: CREATE TABLE generated_rewind_prior(id INT PRIMARY KEY,value INT DEFAULT(7))
+- sql: INSERT generated_rewind_prior VALUES(1,7)
+- sql: CREATE TABLE generated_native_masks(id INT PRIMARY KEY,value INT)
+- sql: INSERT generated_native_masks VALUES(1,10),(2,20),(3,30)
+- sql: CREATE TABLE generated_property_target_a(id INT PRIMARY KEY,value INT)
+- sql: INSERT generated_property_target_a VALUES(1,10),(2,20)
+- sql: CREATE TABLE generated_property_owner_a(id INT PRIMARY KEY,old_guid UNIQUEIDENTIFIER ROWGUIDCOL DEFAULT NEWID())
+- sql: INSERT generated_property_owner_a(id) VALUES(1)
+- sql: CREATE TABLE generated_property_target_b(id INT PRIMARY KEY,value INT)
+- sql: INSERT generated_property_target_b VALUES(1,10),(2,20)
+- sql: CREATE TABLE generated_property_owner_b(id INT PRIMARY KEY,old_guid UNIQUEIDENTIFIER ROWGUIDCOL DEFAULT NEWID())
+- sql: INSERT generated_property_owner_b(id) VALUES(1)
+- sql: CREATE TABLE generated_nested(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_nested VALUES(1,10),(2,20),(3,30)
+- sql: CREATE TABLE generated_allocator(id INT IDENTITY(100,1) NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_allocator(value) VALUES(10),(20)
+- sql: CREATE TABLE generated_forward(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_forward VALUES(1,10),(2,20),(3,30)
+- sql: DROP TABLE IF EXISTS generated_joint_existing
+- sql: DROP TABLE IF EXISTS generated_joint_rollback
+- sql: DROP TABLE IF EXISTS generated_joint_savepoint
+- sql: DROP TABLE IF EXISTS generated_joint_reuse
+- sql: DROP TABLE IF EXISTS generated_joint_created
+- sql: DROP TABLE IF EXISTS generated_joint_rollback_created
+- sql: DROP TABLE IF EXISTS generated_joint_savepoint_created
+- sql: DROP TABLE IF EXISTS generated_joint_capture
+- sql: CREATE TABLE generated_joint_existing(id INT NOT NULL PRIMARY KEY,marker INT NOT NULL)
+- sql: INSERT generated_joint_existing VALUES(1,11),(2,22)
+- sql: CREATE TABLE generated_joint_rollback(id INT NOT NULL PRIMARY KEY,marker INT NOT NULL)
+- sql: INSERT generated_joint_rollback VALUES(1,11),(2,22)
+- sql: CREATE TABLE generated_joint_savepoint(id INT NOT NULL PRIMARY KEY,marker INT NOT NULL)
+- sql: INSERT generated_joint_savepoint VALUES(1,11),(2,22)
+- sql: CREATE TABLE generated_joint_reuse(id INT NOT NULL PRIMARY KEY,token UNIQUEIDENTIFIER NULL,marker INT NOT NULL)
+- sql: INSERT generated_joint_reuse VALUES(1,'00000000-0000-4000-8000-000000000001',11),(2,'00000000-0000-4000-8000-000000000002',22)
+- sql: CREATE TABLE generated_joint_capture(kind INT NOT NULL,id INT NOT NULL,token UNIQUEIDENTIFIER NOT NULL,PRIMARY KEY(kind,id))
+- sql: DROP TABLE IF EXISTS generated_joint_failure_created
+- sql: DROP TABLE IF EXISTS generated_joint_failure
+- sql: CREATE TABLE generated_joint_failure(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_joint_failure VALUES(1,10),(2,20),(3,30)
+- sql: DROP TABLE IF EXISTS generated_admission_scope
+- sql: DROP TABLE IF EXISTS generated_admission_probe
+- sql: DROP TABLE IF EXISTS generated_admission_enforced
+- sql: DROP TABLE IF EXISTS generated_admission_ref
+- sql: DROP TABLE IF EXISTS generated_admission_audit
+- sql: DROP TABLE IF EXISTS generated_admission_checked_scope
+- sql: CREATE TABLE generated_admission_probe(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT generated_admission_probe VALUES(1,10)
+- sql: CREATE TABLE generated_admission_ref(id INT NOT NULL PRIMARY KEY)
+- sql: INSERT generated_admission_ref VALUES(1)
+- sql: CREATE TABLE generated_admission_enforced(id INT NOT NULL PRIMARY KEY,parent_id INT NOT NULL,value INT NOT NULL,note VARCHAR(8) NOT NULL
+    DEFAULT('base'))
+- sql: INSERT generated_admission_enforced VALUES(1,1,10,'a'),(2,1,20,'b')
+- sql: ALTER TABLE generated_admission_enforced ADD CONSTRAINT generated_admission_fk FOREIGN KEY(parent_id) REFERENCES generated_admission_ref(id)
+- sql: ALTER TABLE generated_admission_enforced ADD CONSTRAINT generated_admission_check CHECK(value>=0)
+- sql: CREATE TABLE generated_admission_audit(id INT NOT NULL,old_value INT NOT NULL,new_value INT NOT NULL,note VARCHAR(8) NOT NULL)
+- syntax: mysql
+  sql: CREATE TRIGGER generated_admission_before BEFORE UPDATE ON generated_admission_enforced FOR EACH ROW SET NEW.value=NEW.value+100
+- sql: CREATE TRIGGER generated_admission_after ON generated_admission_enforced AFTER UPDATE AS INSERT generated_admission_audit SELECT i.id,d.value,i.value,i.note
+    FROM inserted i INNER JOIN deleted d ON i.id=d.id
+- sql: DROP TABLE IF EXISTS generated_admission_rollback_scope
+cleanup:
+- sql: DROP TABLE IF EXISTS generated_admission_rollback_scope
+- sql: DROP TABLE IF EXISTS generated_admission_scope
+- sql: DROP TABLE IF EXISTS generated_admission_probe
+- sql: DROP TABLE IF EXISTS generated_admission_enforced
+- sql: DROP TABLE IF EXISTS generated_admission_ref
+- sql: DROP TABLE IF EXISTS generated_admission_audit
+- sql: DROP TABLE IF EXISTS generated_admission_checked_scope
+- sql: DROP TABLE IF EXISTS generated_joint_failure_created
+- sql: DROP TABLE IF EXISTS generated_joint_failure
+- sql: DROP TABLE IF EXISTS generated_joint_capture
+- sql: DROP TABLE IF EXISTS generated_joint_savepoint_created
+- sql: DROP TABLE IF EXISTS generated_joint_rollback_created
+- sql: DROP TABLE IF EXISTS generated_joint_created
+- sql: DROP TABLE IF EXISTS generated_joint_reuse
+- sql: DROP TABLE IF EXISTS generated_joint_savepoint
+- sql: DROP TABLE IF EXISTS generated_joint_rollback
+- sql: DROP TABLE IF EXISTS generated_joint_existing
+- sql: DROP TABLE IF EXISTS generated_forward
+- sql: DROP TABLE IF EXISTS generated_allocator
+- sql: DROP TABLE IF EXISTS generated_nested
+- sql: DROP TABLE IF EXISTS generated_history
+- sql: DROP TABLE IF EXISTS generated_capture
+- sql: DROP TABLE IF EXISTS generated_audit
+- sql: DROP TABLE IF EXISTS generated_rollback
+- sql: DROP TABLE IF EXISTS generated_savepoint
+- sql: DROP TABLE IF EXISTS generated_prefix
+- sql: DROP TABLE IF EXISTS generated_nullable
+- sql: DROP TABLE IF EXISTS generated_values
+- sql: DROP TABLE IF EXISTS generated_auto
+- sql: DROP TABLE IF EXISTS generated_batch
+- sql: DROP TABLE IF EXISTS generated_failure
+- sql: DROP TABLE IF EXISTS generated_unpublished
+- sql: DROP TABLE IF EXISTS generated_parallel
+- sql: DROP TABLE IF EXISTS generated_guid_conflict
+- sql: DROP TABLE IF EXISTS generated_logged
+- sql: DROP TABLE IF EXISTS generated_rewind_prior
+- sql: DROP TABLE IF EXISTS generated_native_masks
+- sql: DROP TABLE IF EXISTS generated_property_target_a
+- sql: DROP TABLE IF EXISTS generated_property_target_b
+- sql: DROP TABLE IF EXISTS generated_property_owner_a
+- sql: DROP TABLE IF EXISTS generated_property_owner_b
+test_cases:
+- name: Historical main delta and original-T rows receive distinct stable UUID values without DML trigger events
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE generated_history SET value=11 WHERE id=1
+    - connection: owner
+      sql: INSERT generated_history VALUES(7,70)
+    - connection: owner
+      sql: DELETE generated_history WHERE id=2
+    - connection: owner
+      sql: ALTER TABLE generated_history ADD token UNIQUEIDENTIFIER ROWGUIDCOL NOT NULL CONSTRAINT DF_generated_token DEFAULT NEWID()
+    - connection: owner
+      sql: SELECT id,value,CASE WHEN token IS NULL THEN 0 ELSE 1 END AS materialized FROM generated_history ORDER BY id
+      expect:
+        rows: 6
+        data:
+        - id: 1
+          value: 11
+          materialized: 1
+        - id: 3
+          value: 30
+          materialized: 1
+        - id: 4
+          value: 40
+          materialized: 1
+        - id: 5
+          value: 50
+          materialized: 1
+        - id: 6
+          value: 60
+          materialized: 1
+        - id: 7
+          value: 70
+          materialized: 1
+    - connection: owner
+      sql: SELECT COUNT(*) AS n,COUNT(DISTINCT token) AS distinct_tokens FROM generated_history
+      expect:
+        rows: 1
+        data:
+        - n: 6
+          distinct_tokens: 6
+    - connection: owner
+      sql: SELECT kind,n FROM generated_audit ORDER BY kind
+      expect:
+        rows: 3
+        data:
+        - kind: 1
+          n: 1
+        - kind: 2
+          n: 1
+        - kind: 3
+          n: 1
+    - connection: observer
+      sql: SELECT id,value FROM generated_history ORDER BY id
+      expect:
+        rows: 6
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+        - id: 3
+          value: 30
+        - id: 4
+          value: 40
+        - id: 5
+          value: 50
+        - id: 6
+          value: 60
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'generated_history') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: INSERT generated_capture SELECT id,token FROM generated_history
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT COUNT(*) AS n,COUNT(DISTINCT h.token) AS distinct_tokens FROM generated_history h JOIN generated_capture c ON h.id=c.id AND
+        h.token=c.token
+      expect:
+        rows: 1
+        data:
+        - n: 6
+          distinct_tokens: 6
+- name: Fresh generated declaration exposes its actual default ordinal and row-guid marker
+  sql: SELECT c.name,CAST(c.is_nullable AS INT) AS nullable,CAST(c.is_rowguidcol AS INT) AS row_guid,c.max_length,d.name AS default_name,d.parent_column_id
+    FROM sys.columns c JOIN sys.default_constraints d ON d.parent_object_id=c.object_id AND d.parent_column_id=c.column_id WHERE c.object_id=OBJECT_ID(N'generated_history')
+    AND c.name=N'token'
+  expect:
+    rows: 1
+    data:
+    - name: token
+      nullable: 0
+      row_guid: 1
+      max_length: 16
+      default_name: DF_generated_token
+      parent_column_id: 3
+- name: Later real UPDATE preserves realized UUIDs and invokes only its own transition event
+  tds:
+    statements:
+    - connection: owner
+      sql: UPDATE generated_history SET value=31 WHERE id=3
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM generated_history h JOIN generated_capture c ON h.id=c.id AND h.token=c.token
+      expect:
+        rows: 1
+        data:
+        - n: 6
+    - connection: owner
+      sql: SELECT kind,SUM(n) AS changed FROM generated_audit GROUP BY kind ORDER BY kind
+      expect:
+        rows: 3
+        data:
+        - kind: 1
+          changed: 2
+        - kind: 2
+          changed: 1
+        - kind: 3
+          changed: 1
+- name: Future INSERT evaluates the original generator per missing cell
+  tds:
+    statements:
+    - connection: owner
+      sql: INSERT generated_history(id,value) VALUES(8,80),(9,90)
+    - connection: owner
+      sql: SELECT id,value,CASE WHEN token IS NULL THEN 0 ELSE 1 END AS materialized FROM generated_history WHERE id>=8 ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 8
+          value: 80
+          materialized: 1
+        - id: 9
+          value: 90
+          materialized: 1
+    - connection: owner
+      sql: SELECT COUNT(*) AS n,COUNT(DISTINCT token) AS distinct_tokens FROM generated_history
+      expect:
+        rows: 1
+        data:
+        - n: 8
+          distinct_tokens: 8
+    - connection: owner
+      sql: INSERT generated_capture SELECT id,token FROM generated_history WHERE id>=8
+- name: Explicit NULL assignment remains rejected without changing any realized historical value
+  tds:
+    statements:
+    - connection: owner
+      sql: UPDATE generated_history SET token=NULL WHERE id=1
+      expect:
+        error: true
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM generated_history h JOIN generated_capture c ON h.id=c.id AND h.token=c.token
+      expect:
+        rows: 1
+        data:
+        - n: 8
+- name: Rollback restores complete pre-ADD rows and removes generated metadata
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE generated_rollback SET value=11 WHERE id=1
+    - connection: owner
+      sql: INSERT generated_rollback VALUES(4,40)
+    - connection: owner
+      sql: ALTER TABLE generated_rollback ADD token UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID()
+    - connection: owner
+      sql: SELECT COUNT(*) AS n,COUNT(DISTINCT token) AS distinct_tokens FROM generated_rollback
+      expect:
+        rows: 1
+        data:
+        - n: 4
+          distinct_tokens: 4
+    - connection: observer
+      sql: SELECT id,value FROM generated_rollback ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+        - id: 3
+          value: 30
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT id,value FROM generated_rollback ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+        - id: 3
+          value: 30
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'generated_rollback') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+- name: Savepoint before ADD restores only its suffix then permits the same native column name again
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE generated_savepoint SET value=11 WHERE id=1
+    - connection: owner
+      sql: SAVE TRANSACTION generated_before_add
+    - connection: owner
+      sql: ALTER TABLE generated_savepoint ADD token UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID()
+    - connection: owner
+      sql: UPDATE generated_savepoint SET value=21 WHERE id=2
+    - connection: owner
+      sql: ROLLBACK TRANSACTION generated_before_add
+    - connection: owner
+      sql: SELECT id,value FROM generated_savepoint ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 11
+        - id: 2
+          value: 20
+        - id: 3
+          value: 30
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'generated_savepoint') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: ALTER TABLE generated_savepoint ADD token UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID()
+    - connection: owner
+      sql: SELECT COUNT(*) AS n,COUNT(DISTINCT token) AS distinct_tokens FROM generated_savepoint
+      expect:
+        rows: 1
+        data:
+        - n: 3
+          distinct_tokens: 3
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: Savepoint after ADD retains exact generated cells while removing later DML
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE generated_prefix ADD token UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID()
+    - connection: owner
+      sql: INSERT generated_capture SELECT id+100,token FROM generated_prefix
+    - connection: owner
+      sql: SAVE TRANSACTION generated_after_add
+    - connection: owner
+      sql: UPDATE generated_prefix SET token=NEWID(),value=99 WHERE id=1
+    - connection: owner
+      sql: INSERT generated_prefix(id,value) VALUES(4,40)
+    - connection: owner
+      sql: ROLLBACK TRANSACTION generated_after_add
+    - connection: owner
+      sql: SELECT p.id,p.value,CASE WHEN p.token=c.token THEN 1 ELSE 0 END AS original_token FROM generated_prefix p JOIN generated_capture c
+        ON c.id=p.id+100 ORDER BY p.id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 10
+          original_token: 1
+        - id: 2
+          value: 20
+          original_token: 1
+        - id: 3
+          value: 30
+          original_token: 1
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: Nullable UUID default without WITH VALUES preserves historical NULL and only generates future cells
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE generated_nullable ADD token UNIQUEIDENTIFIER NULL DEFAULT NEWID()
+    - connection: owner
+      sql: SELECT id,value,token FROM generated_nullable ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 10
+          token: null
+        - id: 2
+          value: 20
+          token: null
+        - id: 3
+          value: 30
+          token: null
+    - connection: owner
+      sql: INSERT generated_nullable(id,value) VALUES(4,40)
+    - connection: owner
+      sql: SELECT COUNT(token) AS generated,COUNT(*) AS n FROM generated_nullable
+      expect:
+        rows: 1
+        data:
+        - generated: 1
+          n: 4
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: Nullable WITH VALUES materializes a distinct UUID for every historical visible row
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE generated_values ADD token UNIQUEIDENTIFIER NULL DEFAULT NEWID() WITH VALUES
+    - connection: owner
+      sql: SELECT COUNT(*) AS n,COUNT(DISTINCT token) AS distinct_tokens FROM generated_values
+      expect:
+        rows: 1
+        data:
+        - n: 3
+          distinct_tokens: 3
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: One implicit statement retains ordinary autocommit semantics for generated ADD
+  tds:
+    statements:
+    - connection: owner
+      sql: ALTER TABLE generated_auto ADD token UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID()
+    - connection: owner
+      sql: SELECT COUNT(*) AS n,COUNT(DISTINCT token) AS distinct_tokens FROM generated_auto
+      expect:
+        rows: 1
+        data:
+        - n: 3
+          distinct_tokens: 3
+- name: A later column-name conflict restores the complete multi-ADD statement and preserves prior DML
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE generated_batch SET value=11 WHERE id=1
+    - connection: owner
+      sql: BEGIN TRY ALTER TABLE generated_batch ADD prefix INT NOT NULL DEFAULT(7),token UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID(),value INT
+        NULL; SELECT 0 AS duplicate_column; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS duplicate_column; END CATCH
+      expect:
+        rows: 1
+        data:
+        - duplicate_column: 2705
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 1
+          depth: 1
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'generated_batch') AND name IN(N'prefix',N'token')
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: SELECT id,value FROM generated_batch ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 11
+        - id: 2
+          value: 20
+        - id: 3
+          value: 30
+    - connection: observer
+      sql: SELECT id,value FROM generated_batch ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+        - id: 3
+          value: 30
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: A real third-row generator exception restores all batch columns and retains its original committable prefix
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+     (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "generated_failure" false tx))
+     (define calls (newsession)) (calls "n" 0)
+     (define gate (mutex))
+     (try (lambda () (begin
+      (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+       (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+        (lambda (n update) (begin (update '("value" 11)) (+ n 1))) 0 +)))
+      (define failed (try (lambda () (createcolumns target
+       (list (list "prefix" "INT" '() '("null" false "default" 7) nil)
+        (list "token" "INT" '() '("null" false "default_expression" "1" "default_deferred" true)
+         (lambda () (gate (lambda () (begin
+          (define n (+ (calls "n") 1)) (calls "n" n)
+          (if (equal? n 3) (error (list "tsql-error" 50001 "generator fixture" 1)) n))))))) tx))
+        (lambda (cause) (equal? (failure_value cause) '("tsql-error" 50001 "generator fixture" 1)))))
+      (define own (scan tx target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define observed (scan nil target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define absent (and (nil? (show target "column" "prefix" false tx)) (nil? (show target "column" "token" false tx))))
+      (define state (tx_state tx)) (tx_commit owner)
+      (list failed (calls "n") state absent (sort own (lambda (a b) (< (car a) (car b)))) (sort observed (lambda (a b) (< (car a) (car b)))))))
+      (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+  expect:
+    result:
+    - true
+    - 3
+    - active
+    - true
+    - &id004
+      - - 1
+        - 11
+      - - 2
+        - 20
+      - - 3
+        - 30
+    - &id005
+      - - 1
+        - 10
+      - - 2
+        - 20
+      - - 3
+        - 30
+- name: Crash preserves realized committed UUID values instead of rerunning the generator
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart opens row-initialized columns through their original decision
+  action: restart
+- name: Cold recovery preserves every captured UUID exact value and complete public rows
+  sql: SELECT h.id,h.value,CASE WHEN h.token=c.token THEN 1 ELSE 0 END AS same_token FROM generated_history h JOIN generated_capture c ON c.id=h.id
+    ORDER BY h.id
+  expect:
+    rows: 8
+    data:
+    - id: 1
+      value: 11
+      same_token: 1
+    - id: 3
+      value: 31
+      same_token: 1
+    - id: 4
+      value: 40
+      same_token: 1
+    - id: 5
+      value: 50
+      same_token: 1
+    - id: 6
+      value: 60
+      same_token: 1
+    - id: 7
+      value: 70
+      same_token: 1
+    - id: 8
+      value: 80
+      same_token: 1
+    - id: 9
+      value: 90
+      same_token: 1
+- name: Cold recovery preserves only the committed prefix of the failed initialization
+  sql: SELECT id,value FROM generated_failure ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 11
+    - id: 2
+      value: 20
+    - id: 3
+      value: 30
+- name: Crash during a generator leaves unaccepted wider row WAL below the old public header
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+     (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "generated_unpublished" false tx))
+     (define calls (newsession)) (calls "n" 0)
+     (createcolumns target (list
+      (list "token" "UNIQUEIDENTIFIER" '() '("null" false "default_expression" "NEWID")
+       (lambda () (begin (define n (+ (calls "n") 1)) (calls "n" n)
+        (if (equal? n 3) (crash) (uuid_v4)))))) tx))
+  expect:
+    interrupted_ok: true
+- name: Restart rejects unaccepted initialized row versions without requiring their column header
+  action: restart
+- name: Unpublished wider WAL never hides original rows or publishes a column
+  sql: SELECT id,value,COL_LENGTH(N'generated_unpublished',N'token') AS token_length FROM generated_unpublished ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 10
+      token_length: null
+    - id: 2
+      value: 20
+      token_length: null
+    - id: 3
+      value: 30
+      token_length: null
+- name: Existing parallel native scans invoke a generator once per historical row and bound their highwater
+  scm: |
+    (begin
+     (define previous (settings "ShardSize"))
+     (try
+      (lambda () (begin
+       (define target (table "memcp-tests" false "generated_parallel" false nil))
+       (insert target '("id" "value") (produceN 125 (lambda (index) (begin (define id (+ index 4)) (list id (* id 10))))))
+       (settings "ShardSize" 32)
+       (rebuild target true true nil true)
+       (settings "ShardSize" previous)
+       (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+       (define tx (owner "__memcp_tx"))
+       (define calls (newsession)) (calls "n" 0) (define gate (mutex))
+       (try
+        (lambda () (begin
+         (createcolumns target
+          (list (list "sequence" "INT" '() '("null" false "default_expression" "1" "default_deferred" true)
+           (lambda () (gate (lambda () (begin
+            (define n (+ (calls "n") 1)) (calls "n" n) n)))))) tx)
+         (define rows (scan tx target '() '() '() (lambda () true) '("sequence")
+          (lambda (items value) (merge items (list value))) '() merge))
+         (tx_commit owner)
+         (list (calls "n") (count rows) (sort rows <))))
+        (lambda (cause) (begin (tx_rollback owner) (error cause))))))
+      (lambda (cause) (begin (settings "ShardSize" previous) (error cause)))))
+  expect:
+    result:
+    - 128
+    - 128
+    - - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+      - 7
+      - 8
+      - 9
+      - 10
+      - 11
+      - 12
+      - 13
+      - 14
+      - 15
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      - 21
+      - 22
+      - 23
+      - 24
+      - 25
+      - 26
+      - 27
+      - 28
+      - 29
+      - 30
+      - 31
+      - 32
+      - 33
+      - 34
+      - 35
+      - 36
+      - 37
+      - 38
+      - 39
+      - 40
+      - 41
+      - 42
+      - 43
+      - 44
+      - 45
+      - 46
+      - 47
+      - 48
+      - 49
+      - 50
+      - 51
+      - 52
+      - 53
+      - 54
+      - 55
+      - 56
+      - 57
+      - 58
+      - 59
+      - 60
+      - 61
+      - 62
+      - 63
+      - 64
+      - 65
+      - 66
+      - 67
+      - 68
+      - 69
+      - 70
+      - 71
+      - 72
+      - 73
+      - 74
+      - 75
+      - 76
+      - 77
+      - 78
+      - 79
+      - 80
+      - 81
+      - 82
+      - 83
+      - 84
+      - 85
+      - 86
+      - 87
+      - 88
+      - 89
+      - 90
+      - 91
+      - 92
+      - 93
+      - 94
+      - 95
+      - 96
+      - 97
+      - 98
+      - 99
+      - 100
+      - 101
+      - 102
+      - 103
+      - 104
+      - 105
+      - 106
+      - 107
+      - 108
+      - 109
+      - 110
+      - 111
+      - 112
+      - 113
+      - 114
+      - 115
+      - 116
+      - 117
+      - 118
+      - 119
+      - 120
+      - 121
+      - 122
+      - 123
+      - 124
+      - 125
+      - 126
+      - 127
+      - 128
+- name: A logged table journals generated stored cells under the same original decision
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE generated_logged ADD token UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID()
+    - connection: owner
+      sql: INSERT generated_capture SELECT id+200,token FROM generated_logged
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: owner
+      sql: SELECT id,value,CASE WHEN token IS NULL THEN 0 ELSE 1 END AS materialized FROM generated_logged ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+          materialized: 1
+        - id: 2
+          value: 20
+          materialized: 1
+- name: Crash retains logged generated row values without another generator invocation
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart opens the logged generated declaration and realized values
+  action: restart
+- name: Logged process recovery keeps exact captured generated values
+  sql: SELECT g.id,g.value,CASE WHEN g.token=c.token THEN 1 ELSE 0 END AS same_token FROM generated_logged g JOIN generated_capture c ON c.id=g.id+200
+    ORDER BY g.id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 10
+      same_token: 1
+    - id: 2
+      value: 20
+      same_token: 1
+- name: Rewind of generated ADD retains prior other-table work and permits checked baseline target DML
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE generated_rewind_prior SET value=8 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE generated_rewind_prior ADD CONSTRAINT DF_generated_rewind_prior DEFAULT(7) FOR id
+    - connection: owner
+      sql: SAVE TRANSACTION retained_before_add
+    - connection: owner
+      sql: ALTER TABLE generated_rollback ADD token UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID()
+    - connection: owner
+      sql: ROLLBACK TRANSACTION retained_before_add
+    - connection: owner
+      sql: UPDATE generated_rollback SET value=12 WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM generated_rollback ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 12
+        - id: 2
+          value: 20
+        - id: 3
+          value: 30
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'generated_rollback') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: observer
+      sql: SELECT id,value FROM generated_rollback ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 10
+        - id: 2
+          value: 20
+        - id: 3
+          value: 30
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: owner
+      sql: SELECT value FROM generated_rewind_prior
+      expect:
+        rows: 1
+        data:
+        - value: 8
+- name: Exactly once counts the original visible inserted updated and deleted row overlays
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+     (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "generated_native_masks" false tx))
+     (define calls (newsession)) (calls "n" 0) (define gate (mutex))
+     (try (lambda () (begin
+      (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+       (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+        (lambda (n update) (begin (update '("value" 11)) (+ n 1))) 0 +)))
+      (with_table_mutation (list target) (list "delete" '()) tx owner (lambda (bound)
+       (scan bound target '() '() '("id") (lambda (id) (equal? id 2)) '("$update")
+        (lambda (n update) (begin (update) (+ n 1))) 0 +)))
+      (with_table_mutation (list target) (list "insert" '()) tx owner (lambda (bound)
+       (insert target '("id" "value") (list (list 4 40)) '() nil false nil bound)))
+      (createcolumns target
+       (list (list "token" "INT" '() '("null" false "default_expression" "1" "default_deferred" true)
+        (lambda () (gate (lambda () (begin (define n (+ (calls "n") 1)) (calls "n" n) n)))))) tx)
+      (define rows (scan tx target '() '() '() (lambda () true) '("id" "value" "token")
+       (lambda (rows id value token) (merge rows (list (list id value token)))) '() merge))
+      (define observer (scan nil target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define same (identical? tx (owner "__memcp_tx")))
+      (tx_commit owner)
+      (list same (calls "n") (sort (map rows (lambda (row) (list (car row) (cadr row)))) (lambda (a b) (< (car a) (car b))))
+       (sort (map rows (lambda (row) (nth row 2))) <) (sort observer (lambda (a b) (< (car a) (car b)))))))
+      (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+  expect:
+    result:
+    - true
+    - 3
+    - - - 1
+        - 11
+      - - 3
+        - 30
+      - - 4
+        - 40
+    - - 1
+      - 2
+      - 3
+    - - - 1
+        - 10
+      - - 2
+        - 20
+      - - 3
+        - 30
+- name: Unordered property removal before the unrelated property-layout operation composes one original decision
+  noncritical: true
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE generated_property_owner_a ALTER COLUMN old_guid DROP ROWGUIDCOL
+    - connection: owner
+      sql: ALTER TABLE generated_property_target_a ADD token UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID()
+    - connection: owner
+      sql: SELECT id,value,CASE WHEN token IS NULL THEN 0 ELSE 1 END AS materialized FROM generated_property_target_a ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+          materialized: 1
+        - id: 2
+          value: 20
+          materialized: 1
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS row_guid FROM sys.columns WHERE object_id=OBJECT_ID(N'generated_property_owner_a') AND name=N'old_guid'
+      expect:
+        rows: 1
+        data:
+        - row_guid: 0
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: Generated append before the unrelated property-layout operation composes one original decision
+  noncritical: true
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE generated_property_target_b ADD token UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID()
+    - connection: owner
+      sql: ALTER TABLE generated_property_owner_b ALTER COLUMN old_guid DROP ROWGUIDCOL
+    - connection: owner
+      sql: SELECT id,value,CASE WHEN token IS NULL THEN 0 ELSE 1 END AS materialized FROM generated_property_target_b ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 10
+          materialized: 1
+        - id: 2
+          value: 20
+          materialized: 1
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS row_guid FROM sys.columns WHERE object_id=OBJECT_ID(N'generated_property_owner_b') AND name=N'old_guid'
+      expect:
+        rows: 1
+        data:
+        - row_guid: 0
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: Atomic inline property claim rejects a second row-guid column and preserves the first declaration
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: BEGIN TRY ALTER TABLE generated_history ADD other_token UNIQUEIDENTIFIER ROWGUIDCOL NOT NULL DEFAULT NEWID(); SELECT 0 AS role_conflict;
+        END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS role_conflict; END CATCH
+      expect:
+        rows: 1
+        data:
+        - role_conflict: 4925
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 1
+          depth: 1
+    - connection: owner
+      sql: SELECT name,CAST(is_rowguidcol AS INT) AS row_guid FROM sys.columns WHERE object_id=OBJECT_ID(N'generated_history') AND name IN(N'token',N'other_token')
+        ORDER BY name
+      expect:
+        rows: 1
+        data:
+        - name: token
+          row_guid: 1
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM generated_history h JOIN generated_capture c ON c.id=h.id AND c.token=h.token
+      expect:
+        rows: 1
+        data:
+        - n: 8
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: The row-guid marker does not add an implicit UNIQUE constraint or replace supplied values
+  steps:
+  - sql: INSERT generated_history(id,value,token) SELECT 10,100,token FROM generated_history WHERE id=1
+  - sql: SELECT h.id,h.value,CASE WHEN h.token=p.token THEN 1 ELSE 0 END AS supplied FROM generated_history h JOIN generated_history p ON p.id=1
+      WHERE h.id=10
+    expect:
+      rows: 1
+      data:
+      - id: 10
+        value: 100
+        supplied: 1
+  - sql: SELECT COUNT(*) AS n,COUNT(DISTINCT token) AS distinct_tokens FROM generated_history
+    expect:
+      rows: 1
+      data:
+      - n: 9
+        distinct_tokens: 8
+- name: Nested original-transaction declaration from a row initializer is rejected before effects and restores its owner
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+     (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "generated_nested" false tx))
+     (define calls (newsession)) (calls "n" 0)
+     (try (lambda () (begin
+      (define failed (try (lambda () (createcolumns target
+       (list (list "nested_token" "UNIQUEIDENTIFIER" '() '("null" false "default_expression" "NEWID")
+        (lambda () (begin (calls "n" (+ (calls "n") 1)) (createcolumn target "nested_extra" "INT" '() '("null" true) nil nil tx) (uuid_v4))))) tx))
+       (lambda (_cause) true)))
+      (define rows (scan tx target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define observed (scan nil target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define absent (and (nil? (show target "column" "nested_token" false tx))
+       (nil? (show target "column" "nested_extra" false tx))))
+      (define state (tx_state tx)) (tx_commit owner)
+      (list failed (calls "n") state absent (sort rows (lambda (a b) (< (car a) (car b))))
+       (sort observed (lambda (a b) (< (car a) (car b)))))))
+      (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+  expect:
+    result:
+    - true
+    - 1
+    - active
+    - true
+    - - - 1
+        - 10
+      - - 2
+        - 20
+      - - 3
+        - 30
+    - - - 1
+        - 10
+      - - 2
+        - 20
+      - - 3
+        - 30
+- name: Nested original-transaction mutation from a row initializer is rejected before effects and restores its owner
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+     (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "generated_nested" false tx))
+     (define calls (newsession)) (calls "n" 0)
+     (try (lambda () (begin
+      (define failed (try (lambda () (createcolumns target
+       (list (list "nested_token" "UNIQUEIDENTIFIER" '() '("null" false "default_expression" "NEWID")
+        (lambda () (begin (calls "n" (+ (calls "n") 1)) (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound) (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update") (lambda (n update) (begin (update '("value" 99)) (+ n 1))) 0 +))) (uuid_v4))))) tx))
+       (lambda (_cause) true)))
+      (define rows (scan tx target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define observed (scan nil target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define absent (and (nil? (show target "column" "nested_token" false tx))
+       (nil? (show target "column" "nested_extra" false tx))))
+      (define state (tx_state tx)) (tx_commit owner)
+      (list failed (calls "n") state absent (sort rows (lambda (a b) (< (car a) (car b))))
+       (sort observed (lambda (a b) (< (car a) (car b)))))))
+      (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+  expect:
+    result:
+    - true
+    - 1
+    - active
+    - true
+    - - - 1
+        - 10
+      - - 2
+        - 20
+      - - 3
+        - 30
+    - - - 1
+        - 10
+      - - 2
+        - 20
+      - - 3
+        - 30
+- name: Historical row initialization preserves allocated identities and only a subsequent real INSERT advances the allocator
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE generated_allocator SET value=11 WHERE id=100
+    - connection: owner
+      sql: SELECT CAST(IDENT_CURRENT(N'generated_allocator') AS BIGINT) AS current_id
+      expect:
+        rows: 1
+        data:
+        - current_id: 101
+    - connection: owner
+      sql: ALTER TABLE generated_allocator ADD token UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID()
+    - connection: owner
+      sql: SELECT CAST(IDENT_CURRENT(N'generated_allocator') AS BIGINT) AS current_id
+      expect:
+        rows: 1
+        data:
+        - current_id: 101
+    - connection: owner
+      sql: SELECT id,value,CASE WHEN token IS NULL THEN 0 ELSE 1 END AS materialized FROM generated_allocator ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 100
+          value: 11
+          materialized: 1
+        - id: 101
+          value: 20
+          materialized: 1
+    - connection: observer
+      sql: SELECT id,value FROM generated_allocator ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 100
+          value: 10
+        - id: 101
+          value: 20
+    - connection: owner
+      sql: INSERT generated_allocator(value) VALUES(30)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT CAST(IDENT_CURRENT(N'generated_allocator') AS BIGINT) AS current_id
+      expect:
+        rows: 1
+        data:
+        - current_id: 102
+    - connection: observer
+      sql: SELECT id,value,CASE WHEN token IS NULL THEN 0 ELSE 1 END AS materialized FROM generated_allocator ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 100
+          value: 11
+          materialized: 1
+        - id: 101
+          value: 20
+          materialized: 1
+        - id: 102
+          value: 30
+          materialized: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n,COUNT(DISTINCT token) AS distinct_tokens FROM generated_allocator
+      expect:
+        rows: 1
+        data:
+        - n: 3
+          distinct_tokens: 3
+- name: Crash retains the generated declaration and its independent unchanged allocator owner
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart restores generated cells and their table identity allocation provenance
+  action: restart
+- name: Cold recovery keeps full generated identity rows and allocates the next actual INSERT once
+  steps:
+  - sql: SELECT CAST(IDENT_CURRENT(N'generated_allocator') AS BIGINT) AS current_id
+    expect:
+      rows: 1
+      data:
+      - current_id: 102
+  - sql: INSERT generated_allocator(value) VALUES(40)
+  - sql: SELECT id,value,CASE WHEN token IS NULL THEN 0 ELSE 1 END AS materialized FROM generated_allocator ORDER BY id
+    expect:
+      rows: 4
+      data:
+      - id: 100
+        value: 11
+        materialized: 1
+      - id: 101
+        value: 20
+        materialized: 1
+      - id: 102
+        value: 30
+        materialized: 1
+      - id: 103
+        value: 40
+        materialized: 1
+  - sql: SELECT COUNT(*) AS n,COUNT(DISTINCT token) AS distinct_tokens FROM generated_allocator
+    expect:
+      rows: 1
+      data:
+      - n: 4
+        distinct_tokens: 4
+  - sql: SELECT CAST(IDENT_CURRENT(N'generated_allocator') AS BIGINT) AS current_id
+    expect:
+      rows: 1
+      data:
+      - current_id: 103
+- name: An original pending row followed through two rebuilt generations retains its WAL while generated ADD commits
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+     (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "generated_forward" false tx))
+     (try (lambda () (begin
+      (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+       (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+        (lambda (n update) (begin (update '("value" 11)) (+ n 1))) 0 +)))
+      (rebuild target true false tx true)
+      (rebuild target true false tx true)
+      (createcolumns target (list
+       (list "token" "UNIQUEIDENTIFIER" '() '("null" false "default_expression" "NEWID")
+        (lambda () (uuid_v4)))) tx)
+      (define own (scan tx target '() '() '() (lambda () true) '("id" "value" "token")
+       (lambda (rows id value token) (merge rows (list (list id value (not (nil? token)))))) '() merge))
+      (define observer (scan nil target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define same (identical? tx (owner "__memcp_tx")))
+      (tx_commit owner)
+      (list same (sort own (lambda (a b) (< (car a) (car b))))
+       (sort observer (lambda (a b) (< (car a) (car b)))))))
+      (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+  expect:
+    result:
+    - true
+    - - - 1
+        - 11
+        - true
+      - - 2
+        - 20
+        - true
+      - - 3
+        - 30
+        - true
+    - - - 1
+        - 10
+      - - 2
+        - 20
+      - - 3
+        - 30
+- name: Committed generated cells after old-generation WAL drain preserve complete rows and distinct UUIDs
+  steps:
+  - sql: SELECT id,value,CASE WHEN token IS NULL THEN 0 ELSE 1 END AS materialized FROM generated_forward ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        value: 11
+        materialized: 1
+      - id: 2
+        value: 20
+        materialized: 1
+      - id: 3
+        value: 30
+        materialized: 1
+  - sql: SELECT COUNT(*) AS n,COUNT(DISTINCT token) AS distinct_tokens FROM generated_forward
+    expect:
+      rows: 1
+      data:
+      - n: 3
+        distinct_tokens: 3
+- name: A public rebuild consumes realized generated values after private input retirement
+  steps:
+  - sql: INSERT generated_capture SELECT id+1000,token FROM generated_forward
+  - scm: (rebuild (table "memcp-tests" false "generated_forward" false nil) true false nil true)
+  - sql: SELECT f.id,f.value,CASE WHEN f.token=c.token THEN 1 ELSE 0 END AS original_token FROM generated_forward f JOIN generated_capture c ON
+      c.id=f.id+1000 ORDER BY f.id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        value: 11
+        original_token: 1
+      - id: 2
+        value: 20
+        original_token: 1
+      - id: 3
+        value: 30
+        original_token: 1
+- name: Own CREATE and primary key share one original decision with historical generated ADD
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE TABLE generated_joint_created(id INT NOT NULL IDENTITY,ready BIT NOT NULL DEFAULT(0),token UNIQUEIDENTIFIER NOT NULL DEFAULT
+        NEWID())
+    - connection: owner
+      sql: ALTER TABLE generated_joint_created ADD CONSTRAINT generated_joint_created_pk PRIMARY KEY(id)
+    - connection: owner
+      sql: INSERT generated_joint_created(ready) VALUES(0),(1)
+    - connection: owner
+      sql: UPDATE generated_joint_existing SET marker=15 WHERE id=1
+    - connection: owner
+      sql: INSERT generated_joint_existing VALUES(3,33)
+    - connection: owner
+      sql: DELETE generated_joint_existing WHERE id=2
+    - connection: owner
+      sql: ALTER TABLE generated_joint_existing ADD token UNIQUEIDENTIFIER NOT NULL ROWGUIDCOL CONSTRAINT generated_joint_existing_token_default
+        DEFAULT NEWID()
+    - connection: owner
+      sql: INSERT generated_joint_capture SELECT 1,id,token FROM generated_joint_existing
+    - connection: owner
+      sql: INSERT generated_joint_capture SELECT 2,id,token FROM generated_joint_created
+    - connection: owner
+      sql: SELECT e.id,e.marker,CASE WHEN e.token=c.token THEN 1 ELSE 0 END AS unchanged_uuid,LEN(CONVERT(VARCHAR(36),e.token)) AS uuid_width
+        FROM generated_joint_existing e JOIN generated_joint_capture c ON c.kind=1 AND c.id=e.id ORDER BY e.id
+      expect:
+        rows: 2
+        data: &id001
+        - id: 1
+          marker: 15
+          unchanged_uuid: 1
+          uuid_width: 36
+        - id: 3
+          marker: 33
+          unchanged_uuid: 1
+          uuid_width: 36
+    - connection: owner
+      sql: SELECT e.id,CAST(e.ready AS INT) AS ready,CASE WHEN e.token=c.token THEN 1 ELSE 0 END AS unchanged_uuid FROM generated_joint_created
+        e JOIN generated_joint_capture c ON c.kind=2 AND c.id=e.id ORDER BY e.id
+      expect:
+        rows: 2
+        data: &id002
+        - id: 1
+          ready: 0
+          unchanged_uuid: 1
+        - id: 2
+          ready: 1
+          unchanged_uuid: 1
+    - connection: owner
+      sql: SELECT COUNT(*) AS n,COUNT(token) AS nonnull_n,COUNT(DISTINCT token) AS distinct_n FROM generated_joint_existing
+      expect:
+        rows: 1
+        data:
+        - n: 2
+          nonnull_n: 2
+          distinct_n: 2
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'generated_joint_existing') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: observer
+      sql: SELECT id,marker FROM generated_joint_existing ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          marker: 11
+        - id: 2
+          marker: 22
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'generated_joint_existing',N'token') AS absent_length
+      expect:
+        rows: 1
+        data:
+        - absent_length: null
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'generated_joint_created',N'U') AS absent_id
+      expect:
+        rows: 1
+        data:
+        - absent_id: null
+    - connection: observer
+      sql: SELECT kind,id,CONVERT(VARCHAR(36),token) AS token FROM generated_joint_capture ORDER BY kind,id
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT e.id,e.marker,CASE WHEN e.token=c.token THEN 1 ELSE 0 END AS unchanged_uuid,LEN(CONVERT(VARCHAR(36),e.token)) AS uuid_width
+        FROM generated_joint_existing e JOIN generated_joint_capture c ON c.kind=1 AND c.id=e.id ORDER BY e.id
+      expect:
+        rows: 2
+        data: *id001
+    - connection: observer
+      sql: SELECT e.id,CAST(e.ready AS INT) AS ready,CASE WHEN e.token=c.token THEN 1 ELSE 0 END AS unchanged_uuid FROM generated_joint_created
+        e JOIN generated_joint_capture c ON c.kind=2 AND c.id=e.id ORDER BY e.id
+      expect:
+        rows: 2
+        data: *id002
+- name: Restart the accepted compound creation and generated rows
+  action: restart
+- name: Compound recovery retains all captured UUIDs created rows and declaration facts
+  tds:
+    statements:
+    - connection: owner
+      sql: SELECT e.id,e.marker,CASE WHEN e.token=c.token THEN 1 ELSE 0 END AS unchanged_uuid,LEN(CONVERT(VARCHAR(36),e.token)) AS uuid_width
+        FROM generated_joint_existing e JOIN generated_joint_capture c ON c.kind=1 AND c.id=e.id ORDER BY e.id
+      expect:
+        rows: 2
+        data: *id001
+    - connection: owner
+      sql: SELECT e.id,CAST(e.ready AS INT) AS ready,CASE WHEN e.token=c.token THEN 1 ELSE 0 END AS unchanged_uuid FROM generated_joint_created
+        e JOIN generated_joint_capture c ON c.kind=2 AND c.id=e.id ORDER BY e.id
+      expect:
+        rows: 2
+        data: *id002
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'generated_joint_existing') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM generated_joint_capture
+      expect:
+        rows: 1
+        data:
+        - n: 4
+- name: Whole rollback undoes created data prefix rows generated values and appended declaration
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE TABLE generated_joint_rollback_created(id INT NOT NULL,value INT NOT NULL)
+    - connection: owner
+      sql: ALTER TABLE generated_joint_rollback_created ADD CONSTRAINT generated_joint_rollback_pk PRIMARY KEY(id)
+    - connection: owner
+      sql: INSERT generated_joint_rollback_created VALUES(7,71)
+    - connection: owner
+      sql: UPDATE generated_joint_rollback SET marker=19 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE generated_joint_rollback ADD token UNIQUEIDENTIFIER NOT NULL ROWGUIDCOL CONSTRAINT generated_joint_rollback_token_default
+        DEFAULT NEWID()
+    - connection: owner
+      sql: INSERT generated_joint_capture SELECT 3,id,token FROM generated_joint_rollback
+    - connection: owner
+      sql: SELECT e.id,e.marker,CASE WHEN e.token=c.token THEN 1 ELSE 0 END AS unchanged_uuid FROM generated_joint_rollback e JOIN generated_joint_capture
+        c ON c.kind=3 AND c.id=e.id ORDER BY e.id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          marker: 19
+          unchanged_uuid: 1
+        - id: 2
+          marker: 22
+          unchanged_uuid: 1
+    - connection: owner
+      sql: SELECT id,value FROM generated_joint_rollback_created ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          value: 71
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'generated_joint_rollback_created',N'U') AS absent_id
+      expect:
+        rows: 1
+        data:
+        - absent_id: null
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,marker FROM generated_joint_rollback ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          marker: 11
+        - id: 2
+          marker: 22
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'generated_joint_rollback',N'token') AS absent_length
+      expect:
+        rows: 1
+        data:
+        - absent_length: null
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'generated_joint_rollback_created',N'U') AS absent_id
+      expect:
+        rows: 1
+        data:
+        - absent_id: null
+    - connection: observer
+      sql: SELECT kind,id FROM generated_joint_capture WHERE kind=3
+      expect:
+        rows: 0
+        data: []
+- name: Savepoint rewinds generated ADD while retaining earlier created generation key and row prefix
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE generated_joint_savepoint SET marker=19 WHERE id=1
+    - connection: owner
+      sql: CREATE TABLE generated_joint_savepoint_created(id INT NOT NULL,value INT NOT NULL)
+    - connection: owner
+      sql: ALTER TABLE generated_joint_savepoint_created ADD CONSTRAINT generated_joint_savepoint_pk PRIMARY KEY(id)
+    - connection: owner
+      sql: INSERT generated_joint_savepoint_created VALUES(7,71)
+    - connection: owner
+      sql: SAVE TRANSACTION generated_joint_before_add
+    - connection: owner
+      sql: ALTER TABLE generated_joint_savepoint ADD token UNIQUEIDENTIFIER NOT NULL ROWGUIDCOL CONSTRAINT generated_joint_savepoint_token_default
+        DEFAULT NEWID()
+    - connection: owner
+      sql: INSERT generated_joint_capture SELECT 4,id,token FROM generated_joint_savepoint
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'generated_joint_savepoint') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION generated_joint_before_add
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'generated_joint_savepoint',N'token') AS absent_length
+      expect:
+        rows: 1
+        data:
+        - absent_length: null
+    - connection: owner
+      sql: SELECT id,marker FROM generated_joint_savepoint ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          marker: 19
+        - id: 2
+          marker: 22
+    - connection: owner
+      sql: SELECT id,value FROM generated_joint_savepoint_created ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          value: 71
+    - connection: owner
+      sql: SELECT kind,id FROM generated_joint_capture WHERE kind=4
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: INSERT generated_joint_savepoint_created VALUES(8,81)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,marker FROM generated_joint_savepoint ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          marker: 19
+        - id: 2
+          marker: 22
+    - connection: observer
+      sql: SELECT id,value FROM generated_joint_savepoint_created ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 7
+          value: 71
+        - id: 8
+          value: 81
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'generated_joint_savepoint',N'token') AS absent_length
+      expect:
+        rows: 1
+        data:
+        - absent_length: null
+- name: Generated reuse of a retired visible spelling keeps both immutable physical column bindings
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.generated_joint_reuse.token',N'previous_token',N'COLUMN'
+    - connection: owner
+      sql: ALTER TABLE generated_joint_reuse ADD token UNIQUEIDENTIFIER NOT NULL ROWGUIDCOL CONSTRAINT generated_joint_reuse_token_default DEFAULT
+        NEWID()
+    - connection: owner
+      sql: INSERT generated_joint_capture SELECT 5,id,token FROM generated_joint_reuse
+    - connection: owner
+      sql: SELECT e.id,CONVERT(VARCHAR(36),e.previous_token) AS previous_token,e.marker,CASE WHEN e.token=c.token THEN 1 ELSE 0 END AS unchanged_uuid
+        FROM generated_joint_reuse e JOIN generated_joint_capture c ON c.kind=5 AND c.id=e.id ORDER BY e.id
+      expect:
+        rows: 2
+        data: &id003
+        - id: 1
+          previous_token: 00000000-0000-4000-8000-000000000001
+          marker: 11
+          unchanged_uuid: 1
+        - id: 2
+          previous_token: 00000000-0000-4000-8000-000000000002
+          marker: 22
+          unchanged_uuid: 1
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,marker FROM generated_joint_reuse ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          marker: 11
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          marker: 22
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'generated_joint_reuse',N'previous_token') AS absent_length
+      expect:
+        rows: 1
+        data:
+        - absent_length: null
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT e.id,CONVERT(VARCHAR(36),e.previous_token) AS previous_token,e.marker,CASE WHEN e.token=c.token THEN 1 ELSE 0 END AS unchanged_uuid
+        FROM generated_joint_reuse e JOIN generated_joint_capture c ON c.kind=5 AND c.id=e.id ORDER BY e.id
+      expect:
+        rows: 2
+        data: *id003
+- name: Restart compound decisions after rollback savepoint and name reuse
+  action: restart
+- name: Cold compound values preserve original decisions and both old and new UUID storage
+  tds:
+    statements:
+    - connection: owner
+      sql: SELECT e.id,e.marker,CASE WHEN e.token=c.token THEN 1 ELSE 0 END AS unchanged_uuid,LEN(CONVERT(VARCHAR(36),e.token)) AS uuid_width
+        FROM generated_joint_existing e JOIN generated_joint_capture c ON c.kind=1 AND c.id=e.id ORDER BY e.id
+      expect:
+        rows: 2
+        data: *id001
+    - connection: owner
+      sql: SELECT e.id,CAST(e.ready AS INT) AS ready,CASE WHEN e.token=c.token THEN 1 ELSE 0 END AS unchanged_uuid FROM generated_joint_created
+        e JOIN generated_joint_capture c ON c.kind=2 AND c.id=e.id ORDER BY e.id
+      expect:
+        rows: 2
+        data: *id002
+    - connection: owner
+      sql: SELECT e.id,CONVERT(VARCHAR(36),e.previous_token) AS previous_token,e.marker,CASE WHEN e.token=c.token THEN 1 ELSE 0 END AS unchanged_uuid
+        FROM generated_joint_reuse e JOIN generated_joint_capture c ON c.kind=5 AND c.id=e.id ORDER BY e.id
+      expect:
+        rows: 2
+        data: *id003
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'generated_joint_reuse') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: owner
+      sql: SELECT id,marker FROM generated_joint_rollback ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          marker: 11
+        - id: 2
+          marker: 22
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'generated_joint_rollback',N'token') AS absent_length
+      expect:
+        rows: 1
+        data:
+        - absent_length: null
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'generated_joint_rollback_created',N'U') AS absent_id
+      expect:
+        rows: 1
+        data:
+        - absent_id: null
+    - connection: owner
+      sql: SELECT id,marker FROM generated_joint_savepoint ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          marker: 19
+        - id: 2
+          marker: 22
+    - connection: owner
+      sql: SELECT id,value FROM generated_joint_savepoint_created ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 7
+          value: 71
+        - id: 8
+          value: 81
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'generated_joint_savepoint',N'token') AS absent_length
+      expect:
+        rows: 1
+        data:
+        - absent_length: null
+    - connection: owner
+      sql: SELECT kind,id FROM generated_joint_capture WHERE kind IN(3,4) ORDER BY kind,id
+      expect:
+        rows: 0
+        data: []
+- name: A real generator failure drains and undoes the full ADD batch while retaining genuine prior private creation
+  scm: |-
+    (begin
+     (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+     (define tx (owner "__memcp_tx"))
+     (define target (table "memcp-tests" false "generated_joint_failure" false tx))
+     (define calls (newsession)) (calls "n" 0)
+     (define gate (mutex))
+     (try (lambda () (begin
+      (createtable "memcp-tests" "generated_joint_failure_created"
+       (list (list "column" "id" "INT" '() '("null" false))) '("engine" "safe") false tx)
+      (define created (table "memcp-tests" false "generated_joint_failure_created" false tx))
+      (createkey created "generated_joint_failure_pk" true '("id") tx)
+      (insert created '("id") (list (list 7)) '() nil false nil tx)
+      (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+       (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+        (lambda (n update) (begin (update '("value" 11)) (+ n 1))) 0 +)))
+      (define failed (try (lambda () (createcolumns target
+       (list (list "prefix" "INT" '() '("null" false "default" 7) nil)
+        (list "token" "INT" '() '("null" false "default_expression" "1" "default_deferred" true)
+         (lambda () (gate (lambda () (begin
+          (define n (+ (calls "n") 1)) (calls "n" n)
+          (if (equal? n 3) (error (list "tsql-error" 50001 "generator fixture" 1)) n))))))) tx))
+        (lambda (cause) (equal? (failure_value cause) '("tsql-error" 50001 "generator fixture" 1)))))
+      (define own (scan tx target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define observed (scan nil target '() '() '() (lambda () true) '("id" "value")
+       (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+      (define absent (and (nil? (show target "column" "prefix" false tx)) (nil? (show target "column" "token" false tx))))
+      (define created_rows (scan tx created '() '() '() (lambda () true) '("id")
+       (lambda (items id) (merge items (list (list id)))) '() merge))
+      (define created_absent (nil? (table "memcp-tests" false "generated_joint_failure_created" false nil)))
+      (define state (tx_state tx)) (tx_commit owner)
+      (define committed_created (scan nil (table "memcp-tests" false "generated_joint_failure_created" false nil) '() '() '() (lambda () true) '("id")
+       (lambda (items id) (merge items (list (list id)))) '() merge))
+      (list failed (calls "n") state absent (sort own (lambda (a b) (< (car a) (car b)))) (sort observed (lambda (a b) (< (car a) (car b)))) created_rows created_absent committed_created)))
+      (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+  expect:
+    result:
+    - true
+    - 3
+    - active
+    - true
+    - *id004
+    - *id005
+    - - - 7
+    - true
+    - - - 7
+- name: The committed failure prefix retains all public values and the independently created generation
+  tds:
+    statements:
+    - sql: SELECT id,value FROM generated_joint_failure ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 11
+        - id: 2
+          value: 20
+        - id: 3
+          value: 30
+    - sql: SELECT id FROM generated_joint_failure_created
+      expect:
+        rows: 1
+        data:
+        - id: 7
+    - sql: SELECT COL_LENGTH(N'generated_joint_failure',N'prefix') AS prefix_length,COL_LENGTH(N'generated_joint_failure',N'token') AS token_length
+      expect:
+        rows: 1
+        data:
+        - prefix_length: null
+          token_length: null
+- name: CREATE-first checked row admission preserves raw event and database boundaries through its original decision
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "generated_admission_probe" false tx))
+      (define signals (newsession)) (signals "foreign_calls" 0)
+      (define rows (lambda (bound)
+        (scan bound target '() '() '() (lambda () true) '("id" "value")
+          (lambda (items id value) (merge items (list (list id value)))) '() merge)))
+      (define raw (lambda () (try (lambda () (begin
+        (scan tx target '() '() '() (lambda () true) '("$update")
+          (lambda (n update) (begin (update '("value" 99)) (+ n 1))) 0 +)
+        false)) (lambda (cause)
+          (equal? (failure_value cause) "catalog transaction mutations require an owned unpublished table")))))
+      (try (lambda () (begin
+        (createtable "memcp-tests" "generated_admission_scope"
+          (list (list "column" "id" "INT" '() '("null" false))) '("engine" "safe") false tx)
+        (define created (table "memcp-tests" false "generated_admission_scope" false tx))
+        (createkey created "generated_admission_scope_pk" true '("id") tx)
+        (insert created '("id") (list (list 7)) '() nil false nil tx)
+        (define raw_before (raw))
+        (define wrong_event (try (lambda () (begin
+          (with_table_mutation (list target) (list "insert" '()) tx owner (lambda (bound)
+            (scan bound target '() '() '() (lambda () true) '("$update")
+              (lambda (n update) (begin (update '("value" 99)) (+ n 1))) 0 +)))
+          false)) (lambda (cause)
+            (equal? (failure_value cause) "private declaration input requires its checked UPDATE producer"))))
+        (define foreign (table "system" false "views" false nil))
+        (define wrong_database (try (lambda () (begin
+          (with_table_mutation (list foreign) (list "update" '("name")) tx owner (lambda (bound)
+            (signals "foreign_calls" (+ (signals "foreign_calls") 1))))
+          false)) (lambda (cause)
+            (equal? (failure_value cause) "catalog transaction mutations require an owned unpublished table"))))
+        (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+          (scan bound target '() '() '() (lambda () true) '("$update")
+            (lambda (n update) (begin (update '("value" 11)) (+ n 1))) 0 +)))
+        (define raw_after (raw))
+        (define own (rows tx)) (define observer (rows nil))
+        (define hidden (nil? (table "memcp-tests" false "generated_admission_scope" false nil)))
+        (define state (tx_state tx))
+        (tx_commit owner)
+        (list raw_before wrong_event wrong_database (signals "foreign_calls") raw_after state own observer hidden
+          (rows nil)
+          (scan nil (table "memcp-tests" false "generated_admission_scope" false nil) '() '() '() (lambda () true) '("id")
+            (lambda (items id) (merge items (list (list id)))) '() merge))))
+        (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+  expect:
+    result:
+    - true
+    - true
+    - true
+    - 0
+    - true
+    - active
+    - - - 1
+        - 11
+    - - - 1
+        - 10
+    - true
+    - - - 1
+        - 11
+    - - - 7
+- name: CREATE-first checked inputs preserve complete columns keys foreign CHECK and BEFORE AFTER programs
+  tds:
+    statements:
+    - sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+      connection: owner
+    - sql: BEGIN TRANSACTION
+      connection: owner
+    - sql: CREATE TABLE generated_admission_checked_scope(id INT NOT NULL PRIMARY KEY)
+      connection: owner
+    - sql: INSERT generated_admission_checked_scope VALUES(7)
+      connection: owner
+    - sql: UPDATE generated_admission_enforced SET value=12 WHERE id=1
+      connection: owner
+    - sql: SELECT id,parent_id,value,note FROM generated_admission_enforced ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          value: 112
+          note: a
+        - id: 2
+          parent_id: 1
+          value: 20
+          note: b
+      connection: owner
+    - sql: SELECT id,old_value,new_value,note FROM generated_admission_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 112
+          note: a
+      connection: owner
+    - sql: UPDATE generated_admission_enforced SET id=2 WHERE id=1
+      expect:
+        error: true
+      connection: owner
+    - sql: UPDATE generated_admission_enforced SET parent_id=999 WHERE id=1
+      expect:
+        error: true
+      connection: owner
+    - sql: UPDATE generated_admission_enforced SET value=-101 WHERE id=1
+      expect:
+        error: true
+      connection: owner
+    - sql: SELECT id,parent_id,value,note FROM generated_admission_enforced ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          value: 112
+          note: a
+        - id: 2
+          parent_id: 1
+          value: 20
+          note: b
+      connection: owner
+    - sql: SELECT id,old_value,new_value,note FROM generated_admission_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 112
+          note: a
+      connection: owner
+    - sql: SELECT id FROM generated_admission_checked_scope
+      expect:
+        rows: 1
+        data:
+        - id: 7
+      connection: owner
+    - connection: observer
+      sql: SELECT id,parent_id,value,note FROM generated_admission_enforced ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          value: 10
+          note: a
+        - id: 2
+          parent_id: 1
+          value: 20
+          note: b
+    - connection: observer
+      sql: SELECT id,old_value,new_value,note FROM generated_admission_audit ORDER BY id
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'generated_admission_checked_scope',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null
+    - sql: COMMIT TRANSACTION
+      connection: owner
+    - sql: SELECT id,parent_id,value,note FROM generated_admission_enforced ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          value: 112
+          note: a
+        - id: 2
+          parent_id: 1
+          value: 20
+          note: b
+      connection: owner
+    - sql: SELECT id,old_value,new_value,note FROM generated_admission_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 112
+          note: a
+      connection: owner
+    - sql: SELECT id FROM generated_admission_checked_scope
+      expect:
+        rows: 1
+        data:
+        - id: 7
+      connection: owner
+- name: Rollback retires the CREATE-first checked input and all real row programs without exposing its generation
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE TABLE generated_admission_rollback_scope(id INT NOT NULL PRIMARY KEY)
+    - connection: owner
+      sql: INSERT generated_admission_rollback_scope VALUES(8)
+    - connection: owner
+      sql: UPDATE generated_admission_enforced SET value=13 WHERE id=1
+    - connection: owner
+      sql: SELECT id,parent_id,value,note FROM generated_admission_enforced ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          value: 113
+          note: a
+        - id: 2
+          parent_id: 1
+          value: 20
+          note: b
+    - connection: owner
+      sql: SELECT id,old_value,new_value,note FROM generated_admission_audit ORDER BY old_value
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 112
+          note: a
+        - id: 1
+          old_value: 112
+          new_value: 113
+          note: a
+    - connection: owner
+      sql: SELECT id FROM generated_admission_rollback_scope
+      expect:
+        rows: 1
+        data:
+        - id: 8
+    - connection: observer
+      sql: SELECT id,parent_id,value,note FROM generated_admission_enforced ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          value: 112
+          note: a
+        - id: 2
+          parent_id: 1
+          value: 20
+          note: b
+    - connection: observer
+      sql: SELECT id,old_value,new_value,note FROM generated_admission_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 112
+          note: a
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'generated_admission_rollback_scope',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,parent_id,value,note FROM generated_admission_enforced ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          value: 112
+          note: a
+        - id: 2
+          parent_id: 1
+          value: 20
+          note: b
+    - connection: observer
+      sql: SELECT id,old_value,new_value,note FROM generated_admission_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 10
+          new_value: 112
+          note: a
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'generated_admission_rollback_scope',N'U') AS object_id
+      expect:
+        rows: 1
+        data:
+        - object_id: null

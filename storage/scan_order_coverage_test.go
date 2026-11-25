@@ -299,7 +299,7 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 		}
 	}
 	tbl.Insert([]string{"id", "bucket", "rank"}, values, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 
 	equalSymbol := scm.Symbol("equal?")
 	equalFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
@@ -322,11 +322,19 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 	shard := tbl.ActiveShards()[0]
 	shard.mu.RLock()
 	var buildBuf [8]uint32
-	shard.iterateIndexForce(nil, runtimeScanAccess(bounds), len(shard.deltaRows()), buildBuf[:], false,
+	_, columnInput101, finishColumnInput101 := shard.t.readDataContext(nil)
+	defer finishColumnInput101.release()
+	columnAccess101 := runtimeScanAccess(bounds)
+	columnAccess101.columnInput = columnInput101
+	shard.iterateIndexForce(nil, columnAccess101, len(shard.deltaRows()), buildBuf[:], false,
 		func([]uint32) bool { return false })
 	shard.mu.RUnlock()
 	run := func(acceptCols []string, accept scm.Scmer) *shardqueue {
-		queue := shard.scan_order(coveredRuntimeScanAccess(bounds),
+		_, columnInput1, finishColumnInput1 := shard.t.readDataContext(nil)
+		defer finishColumnInput1.release()
+		columnAccess1 := coveredRuntimeScanAccess(bounds)
+		columnAccess1.columnInput = columnInput1
+		queue := shard.scan_order(columnAccess1,
 			[]string{"bucket"}, condition, acceptCols, accept,
 			[]scm.Scmer{scm.NewString("rank")}, []func(...scm.Scmer) scm.Scmer{order},
 			0, 0, limit, nil, nil, nil)
@@ -398,7 +406,7 @@ func TestOrderedComparisonReaderLifetime(t *testing.T) {
 		values[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString(value)}
 	}
 	tbl.Insert([]string{"id", "label"}, values, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	// Keep a genuine current compressed dictionary as this generation's
 	// comparison column rather than relying on adaptive format selection.
@@ -418,37 +426,47 @@ func TestOrderedComparisonReaderLifetime(t *testing.T) {
 	_, order := persistableTestOrder(false)
 	sortcols := []scm.Scmer{scm.NewString("label")}
 	sortdirs := []func(...scm.Scmer) scm.Scmer{order}
-	run := func() *shardqueue {
-		return shard.scan_order(scanAccess{}, nil, trueCondition(), nil, scm.NewNil(),
-			sortcols, sortdirs, 0, 0, 2, nil, nil, nil)
-	}
-	queue := run()
-	if queue.scols[0](queue.items[0]).String() != inputs[1] {
-		t.Fatal("shard return released the queue's comparison reader")
-	}
-	consumeDirectScanOrder(queue, &scanOrderTableSpec{callback: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-		return scm.NewInt(1)
-	})}, nil, 0, 0, 1, scm.NewInt(0), false, scm.NewInt(0))
-
-	queue = run()
 	func() {
-		defer func() {
-			if recover() == nil {
-				t.Fatal("consumer panic was lost")
-			}
-		}()
-		consumeDirectScanOrder(queue, &scanOrderTableSpec{callback: scm.NewFunc(func(...scm.Scmer) scm.Scmer {
-			panic("consumer failed")
+		_, columnInput, finishInput := shard.t.readDataContext(nil)
+		defer finishInput.release()
+		run := func() *shardqueue {
+			columnAccess2 := scanAccess{}
+			columnAccess2.columnInput = columnInput
+			return shard.scan_order(columnAccess2, nil, trueCondition(), nil, scm.NewNil(),
+				sortcols, sortdirs, 0, 0, 2, nil, nil, nil)
+		}
+		queue := run()
+		if queue.scols[0](queue.items[0]).String() != inputs[1] {
+			t.Fatal("shard return released the queue's comparison reader")
+		}
+		consumeDirectScanOrder(queue, &scanOrderTableSpec{columnInput: columnInput, callback: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+			return scm.NewInt(1)
 		})}, nil, 0, 0, 1, scm.NewInt(0), false, scm.NewInt(0))
-	}()
 
+		queue = run()
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("consumer panic was lost")
+				}
+			}()
+			consumeDirectScanOrder(queue, &scanOrderTableSpec{columnInput: columnInput, callback: scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+				panic("consumer failed")
+			})}, nil, 0, 0, 1, scm.NewInt(0), false, scm.NewInt(0))
+		}()
+
+	}()
 	func() {
 		defer func() {
 			if recover() == nil {
 				t.Fatal("comparison panic was lost")
 			}
 		}()
-		shard.scan_order(scanAccess{}, nil, trueCondition(), nil, scm.NewNil(), sortcols,
+		_, columnInput3, finishColumnInput3 := shard.t.readDataContext(nil)
+		defer finishColumnInput3.release()
+		columnAccess3 := scanAccess{}
+		columnAccess3.columnInput = columnInput3
+		shard.scan_order(columnAccess3, nil, trueCondition(), nil, scm.NewNil(), sortcols,
 			[]func(...scm.Scmer) scm.Scmer{func(...scm.Scmer) scm.Scmer { panic("comparison failed") }},
 			0, 0, 2, nil, nil, nil)
 	}()

@@ -1,0 +1,141 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Necessary catalog name selectors preserve SQL collation, complete declaration kinds and invocation
+    visibility
+setup:
+- sql: CREATE TABLE catalog_name_parent(id INT PRIMARY KEY,flag INT)
+- sql: ALTER TABLE catalog_name_parent ADD CONSTRAINT catalog_name_default DEFAULT 7 FOR flag
+- sql: ALTER TABLE catalog_name_parent ADD CONSTRAINT catalog_name_check CHECK(flag>=0)
+- sql: CREATE TABLE catalog_name_child(id INT PRIMARY KEY,parent_id INT,CONSTRAINT catalog_name_foreign FOREIGN
+    KEY(parent_id) REFERENCES catalog_name_parent(id))
+- sql: CREATE VIEW catalog_name_view AS SELECT id FROM catalog_name_parent
+- sql: CREATE PROCEDURE catalog_name_proc AS SELECT 7 AS value
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS catalog_name_proc
+- sql: DROP VIEW IF EXISTS catalog_name_view
+- sql: DROP TABLE IF EXISTS catalog_name_child
+- sql: DROP TABLE IF EXISTS catalog_name_parent
+- sql: DROP TABLE IF EXISTS catalog_name_later
+test_cases:
+- name: Literal object name retains the complete U declaration domain
+  sql: SELECT name,RTRIM(type) AS kind FROM sys.objects WHERE name=N'catalog_name_parent'
+  expect:
+    rows: 1
+    data:
+    - name: catalog_name_parent
+      kind: U
+- name: Literal object name retains the complete V declaration domain
+  sql: SELECT name,RTRIM(type) AS kind FROM sys.objects WHERE name=N'catalog_name_view'
+  expect:
+    rows: 1
+    data:
+    - name: catalog_name_view
+      kind: V
+- name: Literal object name retains the complete D declaration domain
+  sql: SELECT name,RTRIM(type) AS kind FROM sys.objects WHERE name=N'catalog_name_default'
+  expect:
+    rows: 1
+    data:
+    - name: catalog_name_default
+      kind: D
+- name: Literal object name retains the complete C declaration domain
+  sql: SELECT name,RTRIM(type) AS kind FROM sys.objects WHERE name=N'catalog_name_check'
+  expect:
+    rows: 1
+    data:
+    - name: catalog_name_check
+      kind: C
+- name: Literal object name retains the complete F declaration domain
+  sql: SELECT name,RTRIM(type) AS kind FROM sys.objects WHERE name=N'catalog_name_foreign'
+  expect:
+    rows: 1
+    data:
+    - name: catalog_name_foreign
+      kind: F
+- name: Literal object name retains the complete P declaration domain
+  sql: SELECT name,RTRIM(type) AS kind FROM sys.objects WHERE name=N'catalog_name_proc'
+  expect:
+    rows: 1
+    data:
+    - name: catalog_name_proc
+      kind: P
+- name: Unqualified literal name retains padded case insensitive equality
+  sql: SELECT name FROM sys.objects WHERE N'CATALOG_NAME_PARENT '=name
+  expect:
+    rows: 1
+    data:
+    - name: catalog_name_parent
+- name: Explicit right literal binary collation remains authoritative
+  sql: SELECT name FROM sys.objects WHERE name=N'CATALOG_NAME_PARENT' COLLATE Latin1_General_100_BIN2
+  expect:
+    rows: 0
+    data: []
+- name: A disjunction retains both object name alternatives
+  sql: SELECT name FROM sys.objects WHERE name=N'catalog_name_parent' OR name=N'catalog_name_view' ORDER BY name
+  expect:
+    rows: 2
+    data:
+    - name: catalog_name_parent
+    - name: catalog_name_view
+- name: Qualified legacy name joins the actual containing table
+  sql: SELECT a.name,b.name AS containing FROM sysobjects a JOIN sysobjects b ON a.parent_obj=b.id WHERE a.name=N'catalog_name_foreign'
+  expect:
+    rows: 1
+    data:
+    - name: catalog_name_foreign
+      containing: catalog_name_child
+- name: A nullable outer catalog source preserves its unmatched row
+  sql: SELECT a.name,b.name AS matched FROM sys.objects a LEFT JOIN sys.objects b ON b.object_id=a.parent_object_id
+    AND b.name=N'catalog_name_missing' WHERE a.name=N'catalog_name_parent'
+  expect:
+    rows: 1
+    data:
+    - name: catalog_name_parent
+      matched: null
+- name: Missing object name has an empty source
+  sql: SELECT name FROM sys.objects WHERE name=N'catalog_name_missing'
+  expect:
+    rows: 0
+    data: []
+- name: Warm a missing declaration name
+  sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name=N'catalog_name_later'
+  expect:
+    rows: 1
+    data:
+    - n: 0
+  session_id: catalog-name-fresh
+- name: Publish a matching native declaration
+  sql: CREATE TABLE catalog_name_later(id INT)
+- name: A cached named source sees the new declaration
+  sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name=N'catalog_name_later'
+  expect:
+    rows: 1
+    data:
+    - n: 1
+  session_id: catalog-name-fresh
+- name: Retire the matching native declaration
+  sql: DROP TABLE catalog_name_later
+- name: A cached named source sees retirement
+  sql: SELECT COUNT(*) AS n FROM sys.objects WHERE name=N'catalog_name_later'
+  expect:
+    rows: 1
+    data:
+    - n: 0
+  session_id: catalog-name-fresh
+- name: Qualified catalog EXISTS sees the named native relation
+  sql: SELECT CASE WHEN EXISTS(SELECT * FROM [memcp-tests].sys.objects WHERE name=N'catalog_name_parent') THEN 1
+    ELSE 0 END AS present
+  expect:
+    rows: 1
+    data:
+    - present: 1
+- name: Qualified catalog EXISTS rejects an absent native declaration
+  sql: SELECT CASE WHEN EXISTS(SELECT * FROM [memcp-tests].sys.objects WHERE name=N'catalog_name_missing') THEN
+    1 ELSE 0 END AS present
+  expect:
+    rows: 1
+    data:
+    - present: 0

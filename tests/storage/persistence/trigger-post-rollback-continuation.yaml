@@ -1,0 +1,788 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Whole original transaction undo precedes native trigger continuation with independent ordinary suffix
+    decisions
+setup:
+- sql: DROP TABLE IF EXISTS abort_prepare_sql
+- sql: DROP TABLE IF EXISTS abort_prepare_unsealable
+- sql: DROP TABLE IF EXISTS abort_prepare_opaque
+- sql: DROP TABLE IF EXISTS abort_prepare_identity
+- sql: DROP TABLE IF EXISTS abort_identity_source
+- sql: DROP TABLE IF EXISTS abort_identity_target
+- sql: DROP TABLE IF EXISTS abort_before_audit
+- sql: DROP TABLE IF EXISTS abort_leaf_audit
+- sql: DROP TABLE IF EXISTS abort_before_source
+- sql: DROP TABLE IF EXISTS abort_leaf_source
+- sql: DROP TABLE IF EXISTS abort_anchor
+- sql: DROP TABLE IF EXISTS abort_fk_child
+- sql: DROP TABLE IF EXISTS abort_fk_parent
+- sql: DROP TABLE IF EXISTS abort_unique_target
+- sql: DROP TABLE IF EXISTS abort_fk_source
+- sql: DROP TABLE IF EXISTS abort_checked
+- sql: DROP TABLE IF EXISTS abort_check_source
+- sql: DROP TABLE IF EXISTS abort_zero
+- sql: DROP TABLE IF EXISTS abort_audit
+- sql: DROP TABLE IF EXISTS abort_user_log
+- sql: DROP TABLE IF EXISTS abort_core
+- sql: DROP TABLE IF EXISTS abort_prefix
+- sql: DROP PROCEDURE IF EXISTS abort_suffix_procedure
+- sql: CREATE TABLE abort_core(id INT NOT NULL PRIMARY KEY,value INT NOT NULL,mode INT NOT NULL)
+- sql: INSERT abort_core VALUES(1,10,0),(2,20,0)
+- sql: CREATE TABLE abort_prefix(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+- sql: INSERT abort_prefix VALUES(1,7)
+- sql: CREATE TABLE abort_audit(id INT NOT NULL PRIMARY KEY,kind INT,old_value INT,new_value INT,local_value INT)
+- sql: CREATE TABLE abort_user_log(id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,kind INT)
+- sql: CREATE TABLE abort_zero(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT abort_zero VALUES(1,10)
+- sql: CREATE TABLE abort_checked(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: ALTER TABLE abort_checked ADD CONSTRAINT CK_abort_checked CHECK(value>=0)
+- sql: CREATE TABLE abort_check_source(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT abort_check_source VALUES(1,10)
+- sql: CREATE TABLE abort_fk_parent(id INT NOT NULL PRIMARY KEY)
+- sql: INSERT abort_fk_parent VALUES(1)
+- sql: CREATE TABLE abort_fk_child(id INT NOT NULL PRIMARY KEY,parent_id INT)
+- sql: ALTER TABLE abort_fk_child ADD CONSTRAINT FK_abort_child FOREIGN KEY(parent_id) REFERENCES abort_fk_parent(id)
+- sql: CREATE TABLE abort_unique_target(id INT NOT NULL PRIMARY KEY,value INT NOT NULL UNIQUE)
+- sql: INSERT abort_unique_target VALUES(1,5)
+- sql: CREATE TABLE abort_fk_source(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT abort_fk_source VALUES(1,10)
+- sql: CREATE TABLE abort_before_source(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT abort_before_source VALUES(1,10)
+- sql: CREATE TABLE abort_leaf_source(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT abort_leaf_source VALUES(1,10)
+- sql: CREATE TABLE abort_before_audit(id INT NOT NULL PRIMARY KEY,old_value INT,new_value INT)
+- sql: CREATE TABLE abort_leaf_audit(id INT NOT NULL PRIMARY KEY,old_value INT,new_value INT)
+- sql: CREATE TABLE abort_anchor(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT abort_anchor VALUES(1,1)
+- sql: CREATE PROCEDURE abort_suffix_procedure @saved INT AS INSERT abort_audit VALUES(301,3,0,0,@saved)
+- sql: CREATE TRIGGER abort_audit_user ON abort_audit AFTER INSERT AS INSERT abort_user_log(kind) VALUES(2)
+- sql: CREATE TRIGGER abort_core_user ON abort_core AFTER UPDATE AS INSERT abort_user_log(kind) VALUES(1)
+- sql: |-
+    CREATE TRIGGER abort_core_rollback ON abort_core AFTER UPDATE AS BEGIN
+     IF EXISTS(SELECT 1 FROM inserted WHERE mode=1)
+     BEGIN
+      DECLARE @saved INT=41;
+      INSERT abort_audit VALUES(100,1,0,0,@saved);
+      IF @saved=41
+      BEGIN
+       RAISERROR('trigger continuation witness',16,7);
+       PRINT 'before rollback';
+       ROLLBACK TRANSACTION;
+      END;
+      PRINT 'after rollback';
+      IF UPDATE(value)
+      BEGIN
+       INSERT abort_audit SELECT 200+i.id,2,d.value,i.value,@saved FROM inserted i JOIN deleted d ON i.id=d.id;
+       EXEC abort_suffix_procedure @saved;
+       UPDATE abort_core SET value=77,mode=0 WHERE id=1;
+      END;
+     END;
+    END
+- sql: |-
+    CREATE TRIGGER abort_zero_rollback ON abort_zero AFTER UPDATE AS BEGIN
+     ROLLBACK TRANSACTION;
+     DECLARE @old_count INT;
+     SELECT @old_count=COUNT(*) FROM deleted;
+     INSERT abort_audit SELECT 400,4,@old_count,COUNT(*),0 FROM inserted;
+    END
+- sql: |-
+    CREATE TRIGGER abort_check_rollback ON abort_check_source AFTER UPDATE AS BEGIN
+     ROLLBACK TRANSACTION;
+     INSERT abort_checked VALUES(10,10);
+     INSERT abort_checked VALUES(11,20);
+     INSERT abort_checked VALUES(12,-1);
+     INSERT abort_checked VALUES(13,30);
+    END
+- sql: |-
+    CREATE TRIGGER abort_fk_rollback ON abort_fk_source AFTER UPDATE AS BEGIN
+     ROLLBACK TRANSACTION;
+     INSERT abort_fk_child VALUES(20,1);
+     INSERT abort_unique_target VALUES(2,7);
+     INSERT abort_fk_child VALUES(21,999);
+     INSERT abort_unique_target VALUES(3,9);
+    END
+- scm: (altertable (table "memcp-tests" false "abort_audit" false nil) "engine" "logged")
+- sql: CREATE TABLE abort_prepare_sql(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT abort_prepare_sql VALUES(1,10)
+- sql: CREATE TABLE abort_prepare_unsealable(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT abort_prepare_unsealable VALUES(1,10)
+- sql: CREATE TABLE abort_prepare_opaque(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT abort_prepare_opaque VALUES(1,10)
+- sql: CREATE TABLE abort_prepare_identity(id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,value INT)
+- sql: CREATE TRIGGER abort_prepare_sql_rollback ON abort_prepare_sql AFTER UPDATE AS BEGIN ROLLBACK; INSERT abort_audit VALUES(902,9,0,0,0); END
+cleanup:
+- sql: DROP TABLE IF EXISTS abort_prepare_sql
+- sql: DROP TABLE IF EXISTS abort_prepare_unsealable
+- sql: DROP TABLE IF EXISTS abort_prepare_opaque
+- sql: DROP TABLE IF EXISTS abort_prepare_identity
+- sql: DROP TABLE IF EXISTS abort_identity_source
+- sql: DROP TABLE IF EXISTS abort_identity_target
+- sql: DROP TABLE IF EXISTS abort_before_audit
+- sql: DROP TABLE IF EXISTS abort_leaf_audit
+- sql: DROP TABLE IF EXISTS abort_before_source
+- sql: DROP TABLE IF EXISTS abort_leaf_source
+- sql: DROP TABLE IF EXISTS abort_anchor
+- sql: DROP TABLE IF EXISTS abort_fk_child
+- sql: DROP TABLE IF EXISTS abort_fk_parent
+- sql: DROP TABLE IF EXISTS abort_unique_target
+- sql: DROP TABLE IF EXISTS abort_fk_source
+- sql: DROP TABLE IF EXISTS abort_checked
+- sql: DROP TABLE IF EXISTS abort_check_source
+- sql: DROP TABLE IF EXISTS abort_zero
+- sql: DROP TABLE IF EXISTS abort_audit
+- sql: DROP TABLE IF EXISTS abort_user_log
+- sql: DROP TABLE IF EXISTS abort_core
+- sql: DROP TABLE IF EXISTS abort_prefix
+- sql: DROP PROCEDURE IF EXISTS abort_suffix_procedure
+test_cases:
+- name: Original transaction prefix rolls back while exact trigger suffix and nested procedure commit without user
+    triggers
+  tds:
+    statements:
+    - sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+      connection: owner
+    - sql: UPDATE abort_prefix SET value=12 WHERE id=1
+      connection: owner
+    - sql: UPDATE abort_core SET value=11 WHERE id=1
+      connection: owner
+    - sql: UPDATE abort_core SET value=50,mode=1 WHERE id=1; UPDATE abort_prefix SET value=999 WHERE id=1
+      expect:
+        error: true
+        messages:
+        - text: before rollback
+        - text: after rollback
+      connection: owner
+    - sql: SELECT id,value,mode FROM abort_core ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 77
+          mode: 0
+        - id: 2
+          value: 20
+          mode: 0
+      connection: observer
+    - sql: SELECT id,value FROM abort_prefix ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 7
+      connection: observer
+    - sql: SELECT id,kind,old_value,new_value,local_value FROM abort_audit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 201
+          kind: 2
+          old_value: 11
+          new_value: 50
+          local_value: 41
+        - id: 301
+          kind: 3
+          old_value: 0
+          new_value: 0
+          local_value: 41
+      connection: observer
+    - sql: SELECT COUNT(*) AS n FROM abort_user_log
+      expect:
+        rows: 1
+        data:
+        - n: 0
+      connection: observer
+    - sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 0
+          depth: 0
+      connection: owner
+    - sql: UPDATE abort_core SET value=78 WHERE id=1
+      connection: owner
+    - sql: SELECT COUNT(*) AS n FROM abort_user_log
+      expect:
+        rows: 1
+        data:
+        - n: 1
+      connection: owner
+- name: Empty source transitions remain actual zero row relations after rollback
+  tds:
+    statements:
+    - sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+      connection: owner
+    - sql: UPDATE abort_zero SET value=99 WHERE id=999
+      expect:
+        error: true
+      connection: owner
+    - sql: SELECT id,value FROM abort_zero ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+      connection: observer
+    - sql: SELECT id,kind,old_value,new_value,local_value FROM abort_audit WHERE id=400
+      expect:
+        rows: 1
+        data:
+        - id: 400
+          kind: 4
+          old_value: 0
+          new_value: 0
+          local_value: 0
+      connection: observer
+    - sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 0
+          depth: 0
+      connection: owner
+- name: Real suffix CHECK failure preserves earlier committed leaves and suppresses the later sentinel
+  tds:
+    statements:
+    - sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+      connection: owner
+    - sql: UPDATE abort_check_source SET value=50 WHERE id=1
+      expect:
+        error: true
+      connection: owner
+    - sql: SELECT id,value FROM abort_check_source ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+      connection: observer
+    - sql: SELECT id,value FROM abort_checked ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 10
+          value: 10
+        - id: 11
+          value: 20
+      connection: observer
+    - sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 0
+          depth: 0
+      connection: owner
+    - sql: INSERT abort_checked VALUES(14,-1)
+      expect:
+        error: true
+      connection: owner
+    - sql: SELECT id,value FROM abort_checked ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 10
+          value: 10
+        - id: 11
+          value: 20
+      connection: owner
+- name: Internal FK and uniqueness enforcement survive the user trigger suppression profile
+  tds:
+    statements:
+    - sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+      connection: owner
+    - sql: UPDATE abort_fk_source SET value=50 WHERE id=1
+      expect:
+        error: true
+      connection: owner
+    - sql: SELECT id,value FROM abort_fk_source ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+      connection: observer
+    - sql: SELECT id,parent_id FROM abort_fk_child ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 20
+          parent_id: 1
+      connection: observer
+    - sql: SELECT id,value FROM abort_unique_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 5
+        - id: 2
+          value: 7
+      connection: observer
+    - sql: INSERT abort_fk_child VALUES(22,999)
+      expect:
+        error: true
+      connection: owner
+    - sql: INSERT abort_unique_target VALUES(3,7)
+      expect:
+        error: true
+      connection: owner
+    - sql: SELECT id,parent_id FROM abort_fk_child ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 20
+          parent_id: 1
+      connection: owner
+    - sql: SELECT id,value FROM abort_unique_target ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 5
+        - id: 2
+          value: 7
+      connection: owner
+- name: Process crash after continuation leaves keeps their ordinary durable decisions
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart after hard process failure uses the same native fixture store
+  action: restart
+- name: Restart restores original rows and every safe or logged suffix commit
+  steps:
+  - sql: SELECT id,value,mode FROM abort_core ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: 78
+        mode: 0
+      - id: 2
+        value: 20
+        mode: 0
+  - sql: SELECT id,value FROM abort_prefix ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        value: 7
+  - sql: SELECT id,kind,old_value,new_value,local_value FROM abort_audit ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 201
+        kind: 2
+        old_value: 11
+        new_value: 50
+        local_value: 41
+      - id: 301
+        kind: 3
+        old_value: 0
+        new_value: 0
+        local_value: 41
+      - id: 400
+        kind: 4
+        old_value: 0
+        new_value: 0
+        local_value: 0
+  - sql: SELECT id,value FROM abort_checked ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 10
+        value: 10
+      - id: 11
+        value: 20
+  - sql: SELECT id,parent_id FROM abort_fk_child ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 20
+        parent_id: 1
+- name: Original cleanup failure prevents resume until the same owner retires its resource
+  scm: |
+    (begin
+     (define owner (newsession)) (owner "username" "root")
+     (define external (newsession)) (external "username" "root")
+     (define signals (newsession))
+     (define await (lambda (key tx remaining)
+      (if (signals "failed") (error (signals "failed"))
+       (signals key) true
+       (<= remaining 0) (error "native continuation cleanup rendezvous timed out")
+       (begin (sleep tx 0.0001) (await key tx (- remaining 1))))))
+     (define held (new_relation_scope external nil "independent"))
+     (define private_name (concat ".abort-cleanup:" (uuid)))
+     (createtable "memcp-tests" private_name (list (list "column" "id" "INT" '() '()))
+      (list "engine" "memory" "ephemeral" true "scope" held) false nil)
+     (define private (table "memcp-tests" false private_name false nil))
+     (define target (table "memcp-tests" false "abort_before_source" false nil))
+     (define audit (table "memcp-tests" false "abort_before_audit" false nil))
+     (registertriggerlanguage "abort-before-cleanup-observer"
+      (close_procedure (lambda (_source _context)
+       (lambda (OLD NEW session completion)
+        (request_transaction_abort completion (lambda () (begin
+        (define fresh (newsession)) (fresh "username" "root")
+        (signals "fresh" fresh)
+        (list
+         (lambda (execute OLD NEW payload) (begin
+          (signals "callback_n" (+ 1 (coalesceNil (signals "callback_n") 0)))
+          (signals "held_cap" execute) (signals "held_old" OLD)
+          (execute fresh (lambda (leaf) (begin
+           (signals "leaf" leaf)
+           true
+           (signals "producer_n" (+ 1 (coalesceNil (signals "producer_n") 0)))
+           (define old_value (scan leaf OLD '() '() '() (lambda () true) '("value") (lambda (n v) (+ n v)) 0 +))
+           (define new_value (scan leaf NEW '() '() '() (lambda () true) '("value") (lambda (n v) (+ n v)) 0 +))
+           (with_table_mutation (list audit) (list "insert" '()) leaf fresh (lambda (bound)
+            (insert audit '("id" "old_value" "new_value") (list (list 71 old_value new_value)) '() nil false nil bound))))))))
+         '("inert" 41)))))))) false false true)
+     (tx_begin_acid owner)
+     (createstatementtrigger target "native_abort_probe" "after_statement" "abort-before-cleanup-observer" "observe" '("update") false false (owner "__memcp_tx"))
+     (tx_commit owner)
+     (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+     (tx_get_or_compute_resource tx "original-cleanup-observer" (lambda () held))
+     (define anchor (table "memcp-tests" false "abort_anchor" false nil))
+     (parallel
+      (try (lambda () (begin
+       (tx_begin_acid external)
+       (with_table_mutation (list anchor) (list "update" '("value")) (external "__memcp_tx") external
+        (lambda (bound)
+         (with_table_mutation (list private) (list "insert" '()) bound external
+          (lambda (_private) (begin (signals "ready" true) (await "release" bound 10000) true)))))
+       (tx_rollback external)
+       (signals "done" true)))
+       (lambda (cause) (begin (signals "failed" (string (failure_value cause))) (signals "done" true) (error cause))))
+      (try (lambda () (begin
+       (await "ready" tx 10000)
+       (define failed (try (lambda () (begin
+        (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+         (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+          (lambda (n update) (begin (update '("value" 40)) (+ n 1))) 0 +))) false))
+         (lambda (_cause) true)))
+       (signals "first_failed" failed)
+       (signals "before_calls" (coalesceNil (signals "callback_n") 0))
+       (signals "before_rows" (scan nil target '() '() '() (lambda () true) '("id" "value")
+        (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+       (signals "release" true)
+       (await "done" tx 10000)
+       (tx_rollback owner)))
+       (lambda (cause) (begin (signals "release" true) (signals "failed" (string (failure_value cause))) (error cause)))))
+     (define stale (newsession)) (stale "username" "root") (stale "__memcp_tx" (signals "leaf"))
+     (define no_reset (try (lambda () (begin (tx_begin stale) false)) (lambda (_cause) true)))
+     (define no_write (try (lambda () (begin
+      (with_table_mutation (list audit) (list "insert" '()) (signals "leaf") owner (lambda (_bound) true)) false)) (lambda (_cause) true)))
+     (define no_cap (try (lambda () (begin ((signals "held_cap") (signals "fresh") (lambda (_tx) true)) false)) (lambda (_cause) true)))
+     (define no_old (try (lambda () (begin
+      (scan nil (signals "held_old") '() '() '() (lambda () true) '("id") (lambda (n _id) (+ n 1)) 0 +) false)) (lambda (_cause) true)))
+     (list (signals "first_failed") (signals "before_calls")
+      (sort (signals "before_rows") (lambda (a b) (< (car a) (car b))))
+      (signals "callback_n") (signals "producer_n") (tx_state tx) (nil? (owner "transaction"))
+      no_reset no_write no_cap no_old
+      (sort (scan nil audit '() '() '() (lambda () true) '("id" "old_value" "new_value")
+       (lambda (rows id old new) (merge rows (list (list id old new)))) '() merge)
+       (lambda (a b) (< (car a) (car b))))))
+  expect:
+    result:
+    - true
+    - 0
+    - - - 1
+        - 10
+    - 1
+    - 1
+    - aborted
+    - true
+    - true
+    - true
+    - true
+    - true
+    - - - 71
+        - 10
+        - 40
+- name: Committed suffix cleanup retries its decision without replaying its producer
+  scm: |
+    (begin
+     (define owner (newsession)) (owner "username" "root")
+     (define external (newsession)) (external "username" "root")
+     (define signals (newsession))
+     (define await (lambda (key tx remaining)
+      (if (signals "failed") (error (signals "failed"))
+       (signals key) true
+       (<= remaining 0) (error "native continuation cleanup rendezvous timed out")
+       (begin (sleep tx 0.0001) (await key tx (- remaining 1))))))
+     (define held (new_relation_scope external nil "independent"))
+     (define private_name (concat ".abort-cleanup:" (uuid)))
+     (createtable "memcp-tests" private_name (list (list "column" "id" "INT" '() '()))
+      (list "engine" "memory" "ephemeral" true "scope" held) false nil)
+     (define private (table "memcp-tests" false private_name false nil))
+     (define target (table "memcp-tests" false "abort_leaf_source" false nil))
+     (define audit (table "memcp-tests" false "abort_leaf_audit" false nil))
+     (registertriggerlanguage "abort-leaf-cleanup-observer"
+      (close_procedure (lambda (_source _context)
+       (lambda (OLD NEW session completion)
+        (request_transaction_abort completion (lambda () (begin
+        (define fresh (newsession)) (fresh "username" "root")
+        (signals "fresh" fresh)
+        (list
+         (lambda (execute OLD NEW payload) (begin
+          (signals "callback_n" (+ 1 (coalesceNil (signals "callback_n") 0)))
+          (signals "held_cap" execute) (signals "held_old" OLD)
+          (execute fresh (lambda (leaf) (begin
+           (signals "leaf" leaf)
+           (tx_get_or_compute_resource leaf "leaf-cleanup-observer" (lambda () held))
+           (signals "producer_n" (+ 1 (coalesceNil (signals "producer_n") 0)))
+           (define old_value (scan leaf OLD '() '() '() (lambda () true) '("value") (lambda (n v) (+ n v)) 0 +))
+           (define new_value (scan leaf NEW '() '() '() (lambda () true) '("value") (lambda (n v) (+ n v)) 0 +))
+           (with_table_mutation (list audit) (list "insert" '()) leaf fresh (lambda (bound)
+            (insert audit '("id" "old_value" "new_value") (list (list 72 old_value new_value)) '() nil false nil bound))))))))
+         '("inert" 41)))))))) false false true)
+     (tx_begin_acid owner)
+     (createstatementtrigger target "native_abort_leaf_probe" "after_statement" "abort-leaf-cleanup-observer" "observe" '("update") false false (owner "__memcp_tx"))
+     (tx_commit owner)
+     (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+     true
+     (define anchor (table "memcp-tests" false "abort_anchor" false nil))
+     (parallel
+      (try (lambda () (begin
+       (tx_begin_acid external)
+       (with_table_mutation (list anchor) (list "update" '("value")) (external "__memcp_tx") external
+        (lambda (bound)
+         (with_table_mutation (list private) (list "insert" '()) bound external
+          (lambda (_private) (begin (signals "ready" true) (await "release" bound 10000) true)))))
+       (tx_rollback external)
+       (signals "done" true)))
+       (lambda (cause) (begin (signals "failed" (string (failure_value cause))) (signals "done" true) (error cause))))
+      (try (lambda () (begin
+       (await "ready" tx 10000)
+       (define failed (try (lambda () (begin
+        (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+         (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+          (lambda (n update) (begin (update '("value" 40)) (+ n 1))) 0 +))) false))
+         (lambda (cause) (begin (signals "first_failure" cause) true))))
+       (signals "first_failed" (and failed
+        (not (transaction_abort_transfer? (signals "first_failure")))
+        (equal? (tx_state (signals "leaf")) "committed")))
+       (signals "before_calls" (coalesceNil (signals "callback_n") 0))
+       (signals "before_rows" (scan nil target '() '() '() (lambda () true) '("id" "value")
+        (lambda (rows id value) (merge rows (list (list id value)))) '() merge))
+       (signals "release" true)
+       (await "done" tx 10000)
+       (tx_rollback owner)))
+       (lambda (cause) (begin (signals "release" true) (signals "failed" (string (failure_value cause))) (error cause)))))
+     (define stale (newsession)) (stale "username" "root") (stale "__memcp_tx" (signals "leaf"))
+     (define no_reset (try (lambda () (begin (tx_begin stale) false)) (lambda (_cause) true)))
+     (define no_write (try (lambda () (begin
+      (with_table_mutation (list audit) (list "insert" '()) (signals "leaf") owner (lambda (_bound) true)) false)) (lambda (_cause) true)))
+     (define no_cap (try (lambda () (begin ((signals "held_cap") (signals "fresh") (lambda (_tx) true)) false)) (lambda (_cause) true)))
+     (define no_old (try (lambda () (begin
+      (scan nil (signals "held_old") '() '() '() (lambda () true) '("id") (lambda (n _id) (+ n 1)) 0 +) false)) (lambda (_cause) true)))
+     (list (signals "first_failed") (signals "before_calls")
+      (sort (signals "before_rows") (lambda (a b) (< (car a) (car b))))
+      (signals "callback_n") (signals "producer_n") (tx_state tx) (nil? (owner "transaction"))
+      no_reset no_write no_cap no_old
+      (sort (scan nil audit '() '() '() (lambda () true) '("id" "old_value" "new_value")
+       (lambda (rows id old new) (merge rows (list (list id old new)))) '() merge)
+       (lambda (a b) (< (car a) (car b))))))
+  expect:
+    result:
+    - true
+    - 1
+    - - - 1
+        - 10
+    - 1
+    - 1
+    - aborted
+    - true
+    - true
+    - true
+    - true
+    - true
+    - - - 72
+        - 10
+        - 40
+- name: Table variable values survive rollback into the remaining trigger body
+  noncritical: true
+  tds:
+    statements:
+    - sql: CREATE TRIGGER abort_table_variable_rollback ON abort_zero AFTER DELETE AS BEGIN DECLARE @saved TABLE(id
+        INT); INSERT @saved VALUES(9); ROLLBACK; INSERT abort_audit SELECT 900,9,id,id,id FROM @saved; END
+      connection: owner
+    - sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+      connection: owner
+    - sql: DELETE abort_zero WHERE id=1
+      expect:
+        error: true
+      connection: owner
+    - sql: SELECT id,local_value FROM abort_audit WHERE id=900
+      expect:
+        rows: 1
+        data:
+        - id: 900
+          local_value: 9
+      connection: observer
+- name: Cursor scope can resume its next fetch after whole trigger rollback
+  noncritical: true
+  tds:
+    statements:
+    - sql: CREATE TRIGGER abort_cursor_rollback ON abort_zero AFTER INSERT AS BEGIN DECLARE @id INT; DECLARE kept
+        CURSOR LOCAL STATIC FOR SELECT id FROM inserted; OPEN kept; ROLLBACK; FETCH NEXT FROM kept INTO @id; INSERT
+        abort_audit VALUES(901,9,@id,@id,@id); CLOSE kept; DEALLOCATE kept; END
+      connection: owner
+    - sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+      connection: owner
+    - sql: INSERT abort_zero VALUES(9,90)
+      expect:
+        error: true
+      connection: owner
+    - sql: SELECT id,local_value FROM abort_audit WHERE id=901
+      expect:
+        rows: 1
+        data:
+        - id: 901
+          local_value: 9
+      connection: observer
+- name: Connection identity metadata includes the final autonomous trigger insert
+  noncritical: true
+  tds:
+    statements:
+    - connection: owner
+      sql: CREATE TABLE abort_identity_source(id INT NOT NULL PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT abort_identity_source VALUES(1,1)
+    - connection: owner
+      sql: CREATE TABLE abort_identity_target(id INT IDENTITY(100,1) NOT NULL PRIMARY KEY,value INT)
+    - connection: owner
+      sql: CREATE TRIGGER abort_identity_rollback ON abort_identity_source AFTER UPDATE AS BEGIN ROLLBACK; INSERT
+        abort_identity_target(value) VALUES(9); END
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE abort_identity_source SET value=2 WHERE id=1
+      expect:
+        error: true
+    - connection: observer
+      sql: SELECT id,value FROM abort_identity_target
+      expect:
+        rows: 1
+        data:
+        - id: 100
+          value: 9
+    - connection: owner
+      sql: SELECT CAST(@@IDENTITY AS BIGINT) AS last_identity
+      expect:
+        rows: 1
+        data:
+        - last_identity: 100
+
+- name: Caught native preparation failures still abort the entire original transaction without retrying preparation
+  scm: |
+    (begin
+     (registertriggerlanguage "abort-preparation-observer"
+      (close_procedure (lambda (mode _context)
+       (lambda (OLD NEW session completion) (begin
+        (define probe (session "abort_preparation_probe"))
+        (define prepare (lambda () (begin
+         (probe "prepare_n" (+ 1 (coalesceNil (probe "prepare_n") 0)))
+         (if (equal? mode "opaque") (error (probe "cause"))
+          (list (lambda (_execute _OLD _NEW _payload) (probe "suffix" true)) session)))))
+        (try (lambda () (request_transaction_abort completion prepare))
+         (lambda (failure) (probe "first_cause" (transaction_abort_failure failure))))
+        (try (lambda () (request_transaction_abort completion (lambda () (begin
+          (probe "replayed" true) (error "repeated abort preparation executed")))))
+         (lambda (failure) (probe "second_cause" (transaction_abort_failure failure))))
+        true)))) false false true)
+     (define run (lambda (mode) (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define probe (newsession)) (owner "abort_preparation_probe" probe)
+      (define marker (list "opaque preparation witness" 73)) (probe "cause" marker)
+      (define target (table "memcp-tests" false (concat "abort_prepare_" mode) false nil))
+      (define prefix (table "memcp-tests" false "abort_prefix" false nil))
+      (tx_begin_acid owner)
+      (createstatementtrigger target (concat "native_abort_prepare_" mode) "after_statement"
+       "abort-preparation-observer" mode '("update") false false (owner "__memcp_tx"))
+      (tx_commit owner)
+      (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+      (with_table_mutation (list prefix) (list "update" '("value")) tx owner (lambda (bound)
+       (scan bound prefix '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+        (lambda (n update) (begin (update '("value" 99)) (+ n 1))) 0 +)))
+      (try (lambda ()
+       (with_table_mutation (list target) (list "update" '("value")) tx owner (lambda (bound)
+        (scan bound target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+         (lambda (n update) (begin (update '("value" 50)) (+ n 1))) 0 +))))
+       (lambda (failure) (begin
+        (probe "terminal" (transaction_abort_transfer? failure))
+        (probe "final_cause" (transaction_abort_failure failure)))))
+      (define same_cause (lambda (cause)
+       (if (equal? mode "opaque") (identical? (failure_value cause) marker)
+        (equal? (string (failure_value cause)) "native continuation payload requires immutable scalar or list data"))))
+      (list (probe "prepare_n") (nil? (probe "replayed")) (nil? (probe "suffix"))
+       (probe "terminal") (same_cause (probe "first_cause"))
+       (same_cause (probe "second_cause")) (same_cause (probe "final_cause"))
+       (tx_state tx) (nil? (owner "transaction"))
+       (scan nil prefix '() '() '() (lambda () true) '("id" "value")
+        (lambda (rows id value) (merge rows (list (list id value)))) '() merge)
+       (scan nil target '() '() '() (lambda () true) '("id" "value")
+        (lambda (rows id value) (merge rows (list (list id value)))) '() merge)))))
+     (map '("unsealable" "opaque") run))
+  expect:
+    result:
+    - &id001
+      - 1
+      - true
+      - true
+      - true
+      - true
+      - true
+      - true
+      - aborted
+      - true
+      - - - 1
+          - 7
+      - - - 1
+          - 10
+    - *id001
+- name: Identity setting survives rollback while the valid remaining trigger insert executes
+  noncritical: true
+  tds:
+    statements:
+    - connection: owner
+      sql: SET IDENTITY_INSERT abort_prepare_identity ON
+    - connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE abort_prefix SET value=99 WHERE id=1
+    - connection: owner
+      sql: UPDATE abort_prepare_sql SET value=50 WHERE id=1
+      expect:
+        error: true
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 0
+          depth: 0
+    - connection: observer
+      sql: SELECT id,value FROM abort_prefix
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 7
+    - connection: observer
+      sql: SELECT id,value FROM abort_prepare_sql
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+    - connection: observer
+      sql: SELECT id,kind,local_value FROM abort_audit WHERE id=902
+      expect:
+        rows: 1
+        data:
+        - id: 902
+          kind: 9
+          local_value: 0
+    - connection: owner
+      sql: SET IDENTITY_INSERT abort_prepare_identity OFF

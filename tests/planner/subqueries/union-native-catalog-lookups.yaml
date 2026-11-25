@@ -1,0 +1,85 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Native object sources and finite catalog declarations share ordinary UNION scalar lookup semantics
+setup:
+- sql: CREATE TABLE union_catalog_relations(object_id INT PRIMARY KEY,name NVARCHAR(48))
+- sql: CREATE TABLE union_catalog_modules(object_id INT PRIMARY KEY,name NVARCHAR(48))
+- sql: CREATE TABLE union_catalog_requests(id INT PRIMARY KEY)
+- sql: INSERT union_catalog_relations VALUES(101,N'current_relation'),(102,N'other_relation')
+- sql: INSERT union_catalog_modules VALUES(201,N'current_module')
+- sql: INSERT union_catalog_requests VALUES(101),(201),(999),(2000000001)
+test_cases:
+- name: A nested native and declared object UNION supports a scalar name lookup
+  sql: |
+    SELECT (SELECT TOP(1) n.name FROM (
+      SELECT object_id,name FROM (
+        SELECT object_id,name FROM union_catalog_relations
+        UNION ALL SELECT object_id,name FROM union_catalog_modules
+      ) current_objects
+      UNION ALL SELECT 2000000001,CAST(N'virtual_one' AS NVARCHAR(48))
+      UNION ALL SELECT 2000000002,CAST(N'virtual_two' AS NVARCHAR(48))
+    ) n WHERE n.object_id=101) AS name
+  expect: {rows: 1,data: [{name: current_relation}]}
+- name: Finite catalog declarations remain visible beside native object rows
+  sql: |
+    SELECT (SELECT TOP(1) n.name FROM (
+      SELECT object_id,name FROM union_catalog_relations
+      UNION ALL SELECT object_id,name FROM union_catalog_modules
+      UNION ALL SELECT 2000000001,CAST(N'virtual_one' AS NVARCHAR(48))
+    ) n WHERE n.object_id=2000000001) AS name
+  expect: {rows: 1,data: [{name: virtual_one}]}
+- name: An absent native or virtual object retains scalar NULL
+  sql: |
+    SELECT (SELECT TOP(1) n.name FROM (
+      SELECT object_id,name FROM union_catalog_relations
+      UNION ALL SELECT object_id,name FROM union_catalog_modules
+      UNION ALL SELECT 2000000001,CAST(N'virtual_one' AS NVARCHAR(48))
+    ) n WHERE n.object_id=999) AS name
+  expect: {rows: 1,data: [{name: null}]}
+- name: Correlated catalog lookups bind each complete caller object ID
+  sql: |
+    SELECT request.id,(SELECT TOP(1) n.name FROM (
+      SELECT object_id,name FROM (
+        SELECT object_id,name FROM union_catalog_relations
+        UNION ALL SELECT object_id,name FROM union_catalog_modules
+      ) current_objects
+      UNION ALL SELECT 2000000001,CAST(N'virtual_one' AS NVARCHAR(48))
+    ) n WHERE n.object_id=request.id) AS name
+    FROM union_catalog_requests request ORDER BY request.id
+  expect:
+    rows: 4
+    data: [{id: 101,name: current_relation},{id: 201,name: current_module},{id: 999,name: null},{id: 2000000001,name: virtual_one}]
+- name: A generic unbounded scalar UNION still checks multiple rows
+  sql: |
+    SELECT (SELECT n.name FROM (
+      SELECT object_id,name FROM union_catalog_relations
+      UNION ALL SELECT object_id,name FROM union_catalog_modules
+    ) n WHERE n.object_id IN(101,201)) AS name
+  expect: {error: true,contains: more than one row}
+- name: Actual object names compose with native catalog caller rows
+  sql: SELECT o.name AS declared_name,OBJECT_NAME(o.object_id) AS resolved_name FROM sys.objects o WHERE o.name=N'union_catalog_relations'
+  expect: {rows: 1,data: [{declared_name: union_catalog_relations,resolved_name: union_catalog_relations}]}
+- name: Actual virtual catalog object IDs roundtrip through the same source owner
+  sql: SELECT OBJECT_NAME(OBJECT_ID(N'sys.objects')) AS name
+  expect: {rows: 1,data: [{name: objects}]}
+- name: Native object changes precede a later identical lookup execution
+  sql: UPDATE union_catalog_relations SET name=N'renamed_relation' WHERE object_id=101
+  expect: {affected_rows: 1}
+- name: A repeated scalar UNION lookup does not retain the previous native tuple
+  sql: |
+    SELECT (SELECT TOP(1) n.name FROM (
+      SELECT object_id,name FROM (
+        SELECT object_id,name FROM union_catalog_relations
+        UNION ALL SELECT object_id,name FROM union_catalog_modules
+      ) current_objects
+      UNION ALL SELECT 2000000001,CAST(N'virtual_one' AS NVARCHAR(48))
+      UNION ALL SELECT 2000000002,CAST(N'virtual_two' AS NVARCHAR(48))
+    ) n WHERE n.object_id=101) AS name
+  expect: {rows: 1,data: [{name: renamed_relation}]}
+cleanup:
+- sql: DROP TABLE IF EXISTS union_catalog_requests
+- sql: DROP TABLE IF EXISTS union_catalog_modules
+- sql: DROP TABLE IF EXISTS union_catalog_relations

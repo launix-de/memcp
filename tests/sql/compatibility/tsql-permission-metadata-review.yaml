@@ -1,0 +1,134 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Historical case names remain stable. Authority now means native database
+# membership; TSQL access/owner requests are compatibility no-ops.
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Metadata reflects real native membership and its revocation
+setup:
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER review_metadata_reader IDENTIFIED BY 'pw'" nil))
+- sql: CREATE TABLE review_metadata_rows(id INT PRIMARY KEY,protected_value NVARCHAR(73))
+- sql: CREATE DATABASE review_hidden_database
+- sql: CREATE TABLE review_hidden_database.hidden_rows(hidden_value NVARCHAR(91))
+- sql: CREATE DATABASE review_connected_database
+- sql: CREATE TABLE review_connected_database.connected_rows(hidden_value NVARCHAR(91))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `review_connected_database`.* TO review_metadata_reader"
+    nil))
+- sql: CREATE VIEW review_cross_database_view AS SELECT hidden_value FROM review_connected_database.connected_rows
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO review_metadata_reader" nil))
+cleanup:
+- sql: DROP VIEW IF EXISTS review_cross_database_view
+- sql: DROP TABLE IF EXISTS review_metadata_rows
+- sql: DROP DATABASE IF EXISTS review_hidden_database
+- sql: DROP DATABASE IF EXISTS review_connected_database
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS review_metadata_reader" nil))
+test_cases:
+- name: Authorized metadata path returns the declared columns before revocation
+  username: review_metadata_reader
+  password: pw
+  session_id: review-metadata-warm
+  sql: EXEC sp_columns @table_name=N'review_metadata_rows'
+  expect:
+    rows: 2
+- name: View column description preserves the caller authority for cross database sources
+  username: review_metadata_reader
+  password: pw
+  sql: EXEC sp_columns @table_name=N'review_cross_database_view'
+  expect:
+    rows: 1
+- name: Global information schema never reveals a database without CONNECT
+  username: review_metadata_reader
+  password: pw
+  sql: SELECT column_name FROM information_schema.columns WHERE table_catalog=N'review_hidden_database'
+    AND table_name=N'hidden_rows'
+  expect:
+    rows: 0
+- name: Revoke the action while retaining connection access
+  sql: REVOKE SELECT FROM review_metadata_reader
+  expect:
+    affected_rows: 0
+- name: Ignored action revoke retains metadata visibility
+  username: review_metadata_reader
+  password: pw
+  session_id: review-metadata-warm
+  sql: EXEC sp_columns @table_name=N'review_metadata_rows'
+  expect:
+    rows: 2
+- scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM review_metadata_reader" nil))
+  name: Revoke actual native database membership
+- name: Ordinary source execution is rejected after revocation
+  username: review_metadata_reader
+  password: pw
+  session_id: review-metadata-warm
+  sql: SELECT protected_value FROM review_metadata_rows
+  expect:
+    error: true
+    contains: access denied
+- name: Warm metadata procedure cannot reveal columns after revocation
+  username: review_metadata_reader
+  password: pw
+  session_id: review-metadata-warm
+  sql: EXEC sp_columns @table_name=N'review_metadata_rows'
+  expect:
+    error: true
+    contains: access denied
+- name: Direct metadata RPC cannot bypass the revoked source action
+  tds:
+    username: review_metadata_reader
+    password: pw
+    expect_login_error: true
+  description: 'Historical metadata-path ID retained: after native membership revocation a new TDS connection
+    fails at login; the matching post-regrant probe below exercises the actual RPC/prepare.'
+- name: Parameter metadata inference cannot recover protected column contracts
+  username: review_metadata_reader
+  password: pw
+  sql: EXEC sp_describe_undeclared_parameters @tsql=N'SELECT id FROM review_metadata_rows WHERE protected_value=@secret'
+  expect:
+    error: true
+    contains: access denied
+- name: Information schema cannot recover protected columns after revocation
+  username: review_metadata_reader
+  password: pw
+  sql: SELECT column_name FROM information_schema.columns WHERE table_catalog=N'memcp-tests' AND table_name=N'review_metadata_rows'
+  expect:
+    error: true
+    contains: access denied
+- name: Pure TDS prepare rechecks the current action before returning metadata
+  tds:
+    username: review_metadata_reader
+    password: pw
+    expect_login_error: true
+  description: 'Historical metadata-path ID retained: after native membership revocation a new TDS connection
+    fails at login; the matching post-regrant probe below exercises the actual RPC/prepare.'
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO review_metadata_reader" nil))
+  name: Restore actual native database membership
+- name: Warm metadata path recovers after native regrant
+  username: review_metadata_reader
+  password: pw
+  session_id: review-metadata-warm
+  sql: EXEC sp_columns @table_name=N'review_metadata_rows'
+  expect:
+    rows: 2
+- name: Native regrant restores actual metadata RPC
+  tds:
+    username: review_metadata_reader
+    password: pw
+    statements:
+    - sql: sp_columns
+      parameters:
+      - name: table_name
+        value: review_metadata_rows
+      expect:
+        rows: 2
+- name: Native regrant restores actual prepared metadata
+  tds:
+    username: review_metadata_reader
+    password: pw
+    statements:
+    - sql: SELECT protected_value FROM review_metadata_rows
+      prepare_only: true
+      expect:
+        columns:
+        - protected_value

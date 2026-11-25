@@ -27,7 +27,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (list (failure "INSERT identity_mode_a(id,value) VALUES(50,8)")
@@ -58,7 +58,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT dbo.identity_mode_a ON")
@@ -93,14 +93,14 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
       (list (failure "DECLARE @bad NVARCHAR(10)=N'bad'; INSERT identity_mode_a(value) VALUES(CAST(@bad AS INT))")
         (failure "INSERT identity_mode_a DEFAULT VALUES")
         ((run "SELECT COUNT(*) AS n FROM identity_mode_a") "n")
-        (reserve_ids (table "memcp-tests" false "identity_mode_a" false) 1))
+        (reserve_ids (table "memcp-tests" false "identity_mode_a" false nil) 1))
     )
   expect:
     result:
@@ -130,14 +130,14 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
       (list (failure "INSERT identity_mode_a(value) SELECT value FROM identity_mode_plain")
         (failure "INSERT TOP(0) identity_mode_a(value) VALUES(3)")
         (failure "INSERT TOP(0) identity_mode_a DEFAULT VALUES")
-        (reserve_ids (table "memcp-tests" false "identity_mode_a" false) 1))
+        (reserve_ids (table "memcp-tests" false "identity_mode_a" false nil) 1))
     )
   expect:
     result:
@@ -167,12 +167,12 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (list (failure "INSERT identity_mode_a(id,value) SELECT value,value FROM identity_mode_plain")
         (failure "INSERT TOP(0) identity_mode_a(id,value) VALUES(40,3)")
-        (reserve_ids (table "memcp-tests" false "identity_mode_a" false) 1))
+        (reserve_ids (table "memcp-tests" false "identity_mode_a" false nil) 1))
     )
   expect:
     result:
@@ -201,7 +201,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
@@ -237,7 +237,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
@@ -274,7 +274,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (define text "INSERT identity_mode_a(id,value) VALUES(42,3)")
@@ -310,7 +310,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON
@@ -346,7 +346,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
@@ -356,7 +356,7 @@ test_cases:
       (define denied (try (lambda () (begin
         (tsql_execute_request "memcp-tests" "INSERT identity_mode_a(id,value) VALUES(8,3)" other nil 0
           (lambda (row) true) (lambda fields true)) 0))
-        (lambda (cause) (match cause '("tsql-error" number _message _state) number _ (error cause)))))
+        (lambda (cause) (match (failure_value cause) '("tsql-error" number _message _state) number _ (error cause)))))
       (run "INSERT identity_mode_a(id,value) VALUES(9,4)")
       (list denied ((run "SELECT id FROM identity_mode_a") "id"))
     )
@@ -385,7 +385,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
@@ -420,7 +420,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
@@ -453,7 +453,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "EXEC(N'SET IDENTITY_INSERT identity_mode_a ON; INSERT identity_mode_a(id,value) VALUES(60,3)')")
@@ -485,7 +485,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
@@ -519,7 +519,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "BEGIN TRY EXEC(N'SET IDENTITY_INSERT identity_mode_a ON; THROW 51011, N''stop'', 1'); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS caught; END CATCH")
@@ -551,7 +551,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "CREATE PROCEDURE identity_mode_proc AS BEGIN SET IDENTITY_INSERT identity_mode_a ON; INSERT identity_mode_a(id,value) VALUES(90,3); RETURN; END")
@@ -584,7 +584,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "CREATE PROCEDURE identity_mode_proc AS BEGIN SET IDENTITY_INSERT identity_mode_a OFF; INSERT identity_mode_a(value) VALUES(4); RETURN; END")
@@ -619,7 +619,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
@@ -654,7 +654,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
@@ -690,7 +690,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
@@ -724,7 +724,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
@@ -732,7 +732,7 @@ test_cases:
         (run "INSERT identity_mode_a(id,value) VALUES(18,3),(NULL,4)") false))
         (lambda (cause) (strlike (string cause) "%IDENTITY cannot be assigned NULL%"))))
       (list rejected ((run "SELECT COUNT(*) AS n FROM identity_mode_a") "n")
-        (reserve_ids (table "memcp-tests" false "identity_mode_a" false) 1))
+        (reserve_ids (table "memcp-tests" false "identity_mode_a" false nil) 1))
     )
   expect:
     result:
@@ -761,7 +761,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
@@ -769,7 +769,7 @@ test_cases:
         (run "INSERT identity_mode_a(id,value) VALUES(DEFAULT,3)") false))
         (lambda (_cause) true)))
       (list rejected ((run "SELECT COUNT(*) AS n FROM identity_mode_a") "n")
-        (reserve_ids (table "memcp-tests" false "identity_mode_a" false) 1))
+        (reserve_ids (table "memcp-tests" false "identity_mode_a" false nil) 1))
     )
   expect:
     result:
@@ -798,7 +798,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (parse_tsql "memcp-tests" "INSERT identity_mode_a(id,value) VALUES(19,3)" nil (newsession) nil)
@@ -832,7 +832,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
@@ -1089,7 +1089,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "DROP TABLE identity_mode_a")
@@ -1100,7 +1100,7 @@ test_cases:
       (run "CREATE TABLE identity_mode_a(id TINYINT IDENTITY(255,1),value INT)")
       (run "SET IDENTITY_INSERT identity_mode_a ON")
       (list (failure text) ((run "SELECT COUNT(*) AS n FROM identity_mode_a") "n")
-        (reserve_ids (table "memcp-tests" false "identity_mode_a" false) 1))
+        (reserve_ids (table "memcp-tests" false "identity_mode_a" false nil) 1))
     )
   expect:
     result:
@@ -1129,7 +1129,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "DROP TABLE identity_mode_a")
@@ -1171,17 +1171,18 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")
-      (renametable "memcp-tests" "identity_mode_a" "identity_mode_renamed")
+      (define rename_target (table "memcp-tests" false "identity_mode_a" false nil))
+      (renametable rename_target "identity_mode_renamed" false (show rename_target "identity" nil) nil)
       (define blocked (failure "SET IDENTITY_INSERT identity_mode_b ON"))
       (run "INSERT identity_mode_renamed(id,value) VALUES(29,4)")
       (run "SET IDENTITY_INSERT identity_mode_renamed OFF")
       (define denied (failure "INSERT identity_mode_renamed(id,value) VALUES(30,5)"))
       (define value ((run "SELECT id FROM identity_mode_renamed") "id"))
-      (renametable "memcp-tests" "identity_mode_renamed" "identity_mode_a")
+      (renametable rename_target "identity_mode_a" false (show rename_target "identity" nil) nil)
       (list blocked denied value)
     )
   expect:
@@ -1213,12 +1214,12 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "INSERT identity_mode_a(value) VALUES(4)")
       (run "CREATE VIEW identity_mode_view AS SELECT id,value FROM identity_mode_a")
-      (define ir (nth (sql_find_view "memcp-tests" "identity_mode_view") 2))
+      (define ir (nth (sql_find_view nil "memcp-tests" "identity_mode_view") 2))
       (define out (newsession))
       (with_autocommit s nil nil "ordinary view consumer" (lambda (tx)
         (sql_execute_formula s tx (sql_queryplan_compile_formula tx
@@ -1255,7 +1256,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "INSERT identity_mode_a VALUES(4)")
@@ -1293,7 +1294,7 @@ test_cases:
         (out "row"))))
       (define failure (lambda (text) (try
         (lambda () (begin (run text) (error "expected failure")))
-        (lambda (cause) (match cause
+        (lambda (cause) (match (failure_value cause)
           '("tsql-error" number _message _state) number
           _ (error "unexpected failure" cause))))))
       (run "SET IDENTITY_INSERT identity_mode_a ON")

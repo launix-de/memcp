@@ -1,0 +1,176 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: Lexical ON scopes and null extension of a nested LEFT JOIN
+setup:
+- sql: CREATE TABLE scoped_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE scoped_head(id INT PRIMARY KEY,parent_id INT,code INT)
+- sql: CREATE TABLE scoped_child(id INT PRIMARY KEY,code INT,label NVARCHAR(12))
+- sql: CREATE TABLE scoped_nullable_head(parent_id INT,code INT)
+- sql: CREATE TABLE scoped_tail(id INT PRIMARY KEY,child_id INT)
+- sql: INSERT INTO scoped_parent VALUES(1),(2),(3)
+- sql: INSERT INTO scoped_head VALUES(10,1,7),(11,1,NULL),(12,2,8)
+- sql: INSERT INTO scoped_child VALUES(20,7,N'twenty'),(21,7,N'twenty-one'),(22,NULL,N'other')
+- sql: INSERT INTO scoped_nullable_head VALUES(1,7)
+- sql: INSERT INTO scoped_tail VALUES(30,20),(31,20),(32,NULL)
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.scoped_join_view
+- sql: DROP TABLE IF EXISTS scoped_tail
+- sql: DROP TABLE IF EXISTS scoped_nullable_head
+- sql: DROP TABLE IF EXISTS scoped_child
+- sql: DROP TABLE IF EXISTS scoped_head
+- sql: DROP TABLE IF EXISTS scoped_parent
+test_cases:
+- name: A null-accepting inner ON matches a real nullable head and excludes a synthetic one
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid
+    FROM dbo.scoped_parent a LEFT JOIN dbo.scoped_head b LEFT JOIN dbo.scoped_child c
+      ON b.code=c.code OR b.code IS NULL ON a.id=b.parent_id
+    ORDER BY a.id,b.id,c.id
+  expect:
+    rows: 7
+    data: [{aid: 1,bid: 10,cid: 20},{aid: 1,bid: 10,cid: 21},
+      {aid: 1,bid: 11,cid: 20},{aid: 1,bid: 11,cid: 21},{aid: 1,bid: 11,cid: 22},
+      {aid: 2,bid: 12,cid: null},{aid: 3,bid: null,cid: null}]
+- name: A parenthesized right LEFT JOIN retains an unmatched real head
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid FROM scoped_parent a
+    LEFT JOIN (scoped_head b LEFT JOIN scoped_child c ON b.code=c.code)
+    ON a.id=b.parent_id WHERE a.id=2
+  expect: {rows: 1,data: [{aid: 2,bid: 12,cid: null}]}
+- name: An outer WHERE can select the synthetic head produced by the nested join
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid FROM scoped_parent a
+    LEFT JOIN scoped_head b LEFT JOIN scoped_child c ON b.code=c.code
+    ON a.id=b.parent_id WHERE b.id IS NULL
+  expect: {rows: 1,data: [{aid: 3,bid: null,cid: null}]}
+- name: The local inner ON cannot see the enclosing left operand
+  sql: |
+    SELECT a.id FROM scoped_parent a LEFT JOIN scoped_head b LEFT JOIN scoped_child c
+    ON a.id=c.id ON a.id=b.parent_id
+  expect: {error: true,contains: unknown relation alias}
+- name: An enclosing ON depending on the nullable child requires a whole relation unit
+  sql: |
+    SELECT a.id FROM scoped_parent a LEFT JOIN scoped_head b LEFT JOIN scoped_child c
+    ON b.code=c.code ON a.id=b.parent_id AND c.id=21
+  expect: {rows: 3,data: [{id: 1},{id: 2},{id: 3}]}
+- name: A head with only nullable columns retains the complete relation unit
+  sql: |
+    SELECT a.id FROM scoped_parent a LEFT JOIN scoped_nullable_head b LEFT JOIN scoped_child c
+    ON b.code=c.code ON a.id=b.parent_id
+  expect: {rows: 4,data: [{id: 1},{id: 1},{id: 2},{id: 3}]}
+- name: An ON with a volatile function requires the original join unit
+  sql: |
+    SELECT a.id FROM scoped_parent a LEFT JOIN scoped_head b LEFT JOIN scoped_child c
+    ON b.code=c.code ON a.id=b.parent_id AND NEWID()=NEWID()
+  expect: {rows: 3,data: [{id: 1},{id: 2},{id: 3}]}
+- name: Repeated aliased joins keep earlier child names visible in the enclosing ON
+  sql: |
+    SELECT a.id AS aid,b1.id AS bid1,c1.id AS cid1,b2.id AS bid2,c2.id AS cid2
+    FROM scoped_parent a
+    LEFT JOIN scoped_head b1 LEFT JOIN scoped_child c1 ON b1.code=c1.code
+      ON a.id=b1.parent_id AND b1.id=10
+    LEFT JOIN scoped_head b2 LEFT JOIN scoped_child c2 ON b2.code IS NULL AND c2.id=22
+      ON a.id=b2.parent_id AND b2.id=11 AND c1.id=21
+    WHERE a.id=1 ORDER BY c1.id
+  expect: {rows: 2,data: [{aid: 1,bid1: 10,cid1: 20,bid2: null,cid2: null},
+      {aid: 1,bid1: 10,cid1: 21,bid2: 11,cid2: 22}]}
+- name: A stored view retains lexical ON scopes and qualified source names
+  sql: |
+    CREATE VIEW dbo.scoped_join_view AS
+    SELECT dbo.scoped_parent.id AS aid,dbo.scoped_head.id AS bid,dbo.scoped_child.label AS label
+    FROM dbo.scoped_parent LEFT OUTER JOIN dbo.scoped_head LEFT OUTER JOIN dbo.scoped_child
+      ON dbo.scoped_head.code=dbo.scoped_child.code
+      ON dbo.scoped_parent.id=dbo.scoped_head.parent_id
+- name: Reading the stored view preserves declared output types through null extension
+  tds:
+    statements:
+    - sql: SELECT aid,bid,label FROM dbo.scoped_join_view WHERE aid=2
+      expect:
+        rows: 1
+        data: [{aid: 2,bid: 12,label: null}]
+        column_types: [{name: aid,type: INT},{name: bid,type: INT},{name: label,type: NVARCHAR,length: 12}]
+- name: Every LEFT child uses head presence even after an earlier child is null
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid,d.id AS did
+    FROM scoped_parent a LEFT JOIN scoped_head b
+      LEFT JOIN scoped_child c ON b.code=c.code
+      LEFT JOIN scoped_tail d ON c.id=d.child_id OR c.id IS NULL
+      ON a.id=b.parent_id
+    WHERE a.id>=2 ORDER BY a.id,d.id
+  expect: {rows: 4,data: [{aid: 2,bid: 12,cid: null,did: 30},
+      {aid: 2,bid: 12,cid: null,did: 31},{aid: 2,bid: 12,cid: null,did: 32},
+      {aid: 3,bid: null,cid: null,did: null}]}
+- name: A later child can read the head and its preceding nullable child
+  sql: |
+    SELECT b.id AS bid,c.id AS cid,d.id AS did
+    FROM scoped_parent a LEFT JOIN scoped_head b
+      LEFT JOIN scoped_child c ON b.code=c.code
+      LEFT JOIN scoped_tail d ON b.code=7 AND c.id=d.child_id
+      ON a.id=b.parent_id WHERE b.id=10 ORDER BY c.id,d.id
+  expect: {rows: 3,data: [{bid: 10,cid: 20,did: 30},{bid: 10,cid: 20,did: 31},
+      {bid: 10,cid: 21,did: null}]}
+- name: An earlier child ON cannot read a later child alias
+  sql: |
+    SELECT a.id FROM scoped_parent a LEFT JOIN scoped_head b
+      LEFT JOIN scoped_child c ON c.id=d.child_id
+      LEFT JOIN scoped_tail d ON c.id=d.child_id
+      ON a.id=b.parent_id
+  expect: {error: true,contains: unknown relation alias}
+- name: A later child ON cannot read the enclosing left operand
+  sql: |
+    SELECT a.id FROM scoped_parent a LEFT JOIN scoped_head b
+      LEFT JOIN scoped_child c ON b.code=c.code
+      LEFT JOIN scoped_tail d ON a.id=d.id
+      ON a.id=b.parent_id
+  expect: {error: true,contains: unknown relation alias}
+- name: An enclosing ON depending on the last child retains its relation boundary
+  sql: |
+    SELECT a.id FROM scoped_parent a LEFT JOIN scoped_head b
+      LEFT JOIN scoped_child c ON b.code=c.code
+      LEFT JOIN scoped_tail d ON c.id=d.child_id
+      ON a.id=b.parent_id AND d.id=30
+  expect: {rows: 3,data: [{id: 1},{id: 2},{id: 3}]}
+- name: A recursively nested right operand retains its complete nullable boundary
+  sql: |
+    SELECT a.id FROM scoped_parent a LEFT JOIN scoped_head b
+      LEFT JOIN scoped_child c LEFT JOIN scoped_tail d ON c.id=d.child_id
+      ON b.code=c.code ON a.id=b.parent_id
+  expect: {rows: 6,data: [{id: 1},{id: 1},{id: 1},{id: 1},{id: 2},{id: 3}]}
+- name: Ordinary LEFT joins can sort past intervening nullable dependencies
+  sql: |
+    SELECT a.id AS aid,b.id AS bid,c.id AS cid,d.id AS did
+    FROM scoped_parent a LEFT JOIN scoped_head b ON a.id=b.parent_id
+      LEFT JOIN scoped_child c ON b.id IS NOT NULL AND b.code=c.code
+      LEFT JOIN scoped_tail d ON b.id IS NOT NULL AND (c.id=d.child_id OR c.id IS NULL)
+    WHERE a.id>=2 ORDER BY a.id,d.id
+  expect: {rows: 4,data: [{aid: 2,bid: 12,cid: null,did: 30},
+      {aid: 2,bid: 12,cid: null,did: 31},{aid: 2,bid: 12,cid: null,did: 32},
+      {aid: 3,bid: null,cid: null,did: null}]}
+- name: A nullable head with a null-accepting child ON excludes synthetic matches
+  sql: |
+    SELECT a.id AS aid,b.parent_id AS parent,c.id AS cid
+    FROM scoped_parent a LEFT JOIN scoped_nullable_head b LEFT JOIN scoped_child c
+      ON b.code=c.code OR b.code IS NULL ON a.id=b.parent_id
+    ORDER BY a.id,c.id
+  expect: {rows: 4,data: [{aid: 1,parent: 1,cid: 20},{aid: 1,parent: 1,cid: 21},
+      {aid: 2,parent: null,cid: null},{aid: 3,parent: null,cid: null}]}
+- name: Add a real null-valued row without introducing a non-null declaration witness
+  sql: INSERT INTO scoped_nullable_head VALUES(2,NULL)
+- name: Retaining the unit distinguishes real null head values from synthetic ones
+  sql: |
+    SELECT a.id AS aid,b.code,c.id AS cid
+    FROM scoped_parent a LEFT JOIN scoped_nullable_head b LEFT JOIN scoped_child c
+      ON b.code=c.code OR b.code IS NULL ON a.id=b.parent_id
+    ORDER BY a.id,c.id
+  expect: {rows: 6,data: [{aid: 1,code: 7,cid: 20},{aid: 1,code: 7,cid: 21},
+      {aid: 2,code: null,cid: 20},{aid: 2,code: null,cid: 21},{aid: 2,code: null,cid: 22},
+      {aid: 3,code: null,cid: null}]}
+- name: Retained nullable units preserve aggregate cardinality and null values
+  sql: |
+    SELECT COUNT(*) AS total,COUNT(b.parent_id) AS heads,COUNT(b.code) AS codes,COUNT(c.id) AS children
+    FROM scoped_parent a LEFT JOIN scoped_nullable_head b LEFT JOIN scoped_child c
+      ON b.code=c.code OR b.code IS NULL ON a.id=b.parent_id
+  expect: {rows: 1,data: [{total: 6,heads: 5,codes: 2,children: 5}]}

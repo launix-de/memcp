@@ -1,0 +1,34 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: HTTP result data can contain error names and messages without becoming protocol failures
+setup:
+- sql: "SELECT 'Error: saved setup text' AS message"
+- scm: '(list "Error" "saved setup text")'
+test_cases:
+- name: A SQL value can contain a recorded error message
+  sql: "SELECT 'Error: recorded text' AS message"
+  expect: {rows: 1,data: [{message: 'Error: recorded text'}]}
+- name: A result column can be named Error
+  sql: SELECT 1 AS Error
+  expect: {rows: 1,data: [{Error: 1}]}
+- name: A TSQL value can contain the SQL error protocol prefix
+  syntax: tsql
+  sql: "SELECT N'SQL Error: recorded text' AS message"
+  expect: {rows: 1,data: [{message: 'SQL Error: recorded text'}]}
+- name: A PostgreSQL value can contain the SCM error protocol prefix
+  syntax: psql
+  sql: "SELECT 'SCM Error: recorded text' AS message"
+  expect: {rows: 1,data: [{message: 'SCM Error: recorded text'}]}
+- name: A JSON scalar can be an ordinary error-looking string
+  scm: '"Error: recorded text"'
+  expect: {result: 'Error: recorded text'}
+- name: Real invalid column references still produce protocol errors
+  sql: SELECT missing_response_error_column
+  expect: {error: true,contains: missing_response_error_column}
+- name: Per-case SQL and SCM setup retain ordinary error-looking data
+  setup:
+  - sql: "SELECT 'Error: per-case saved text' AS message"
+  - scm: '(list "Error" "per-case saved text")'
+  sql: SELECT 1 AS n
+  expect: {rows: 1,data: [{n: 1}]}

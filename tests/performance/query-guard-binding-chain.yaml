@@ -6,22 +6,7 @@ metadata:
   isolated: true
 test_cases:
 - name: Dependent guard bindings compile once and retain session semantics
-  scm: |
-    (begin
-      (define session (newsession))
-      (session "step" 1)
-      (define planning (sql_queryplan_compile_session session nil))
-      (define last_value (reduce (produceN 256) (lambda (previous i)
-        (planner_guard_runtime_binding
-          (list (quote +) previous (list (quote session) "step")) planning '())) 0))
-      (planner_record_guard_condition (list (quote equal?) last_value 256) planning)
-      (define guard (sql_queryplan_guard_from_session planning))
-      (define compiled (sql_queryplan_compile_formula nil guard))
-      (if (equal? (jit? compiled) (jit-enabled?)) true (error "guard fell back from JIT"))
-      (define first (compiled session nil nil nil))
-      (session "step" 2)
-      (define second (compiled session nil nil nil))
-      (if (and first (not second)) true (error "guard lost binding dependencies")))
+  scm: "(begin\n  (define session (newsession))\n  (session \"step\" 1)\n  (define planning (sql_queryplan_compile_session session nil nil nil))\n  (define last_value (reduce (produceN 256) (lambda (previous i)\n    (planner_guard_runtime_binding\n      (list (quote +) previous (list (quote session) \"step\")) planning '())) 0))\n  (planner_record_guard_condition (list (quote equal?) last_value 256) planning)\n  (define guard (sql_queryplan_guard_from_session planning))\n  (define compiled (sql_queryplan_compile_formula nil guard))\n  (if (equal? (jit? compiled) (jit-enabled?)) true (error \"guard fell back from JIT\"))\n  (define first (compiled session nil nil nil))\n  (session \"step\" 2)\n  (define second (compiled session nil nil nil))\n  (if (and first (not second)) true (error \"guard lost binding dependencies\")))\n"
   expect:
     data: [true]
   performance_rows: 256
@@ -29,25 +14,7 @@ test_cases:
   timing_samples: 1
   threshold_ms: 5000
 - name: Quoted preparation metadata is opaque to sampling and cache guards
-  scm: |
-    (begin
-      (define session (newsession))
-      (session "value" 7)
-      (session "__prepare_stage_probe" (lambda () true))
-      (define planning (sql_queryplan_compile_session session nil))
-      (define payload (list (quote quote) (list (quote session) "__prepare_stage_probe")))
-      (define expression (list (quote list) payload (list (quote session) "value")))
-      (define bound (planner_bind_session_values expression planning))
-      (planner_literal_value (list (quote session) "__prepare_stage_probe") planning)
-      (planner_record_session_value_guards
-        (list (quote session) "__prepare_stage_probe") planning)
-      (if (equal? (cadr bound) payload) true (error "sampling rewrote quoted metadata"))
-      (define compiled (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))
-      (session "__prepare_stage_probe" (lambda () false))
-      (define unchanged (compiled session nil nil nil))
-      (session "value" 8)
-      (if (and unchanged (not (compiled session nil nil nil))) true
-        (error "cache guard confused metadata with executable session inputs")))
+  scm: "(begin\n  (define session (newsession))\n  (session \"value\" 7)\n  (session \"__prepare_stage_probe\" (lambda () true))\n  (define planning (sql_queryplan_compile_session session nil nil nil))\n  (define payload (list (quote quote) (list (quote session) \"__prepare_stage_probe\")))\n  (define expression (list (quote list) payload (list (quote session) \"value\")))\n  (define bound (planner_bind_session_values expression planning))\n  (planner_literal_value (list (quote session) \"__prepare_stage_probe\") planning)\n  (planner_record_session_value_guards\n    (list (quote session) \"__prepare_stage_probe\") planning)\n  (if (equal? (cadr bound) payload) true (error \"sampling rewrote quoted metadata\"))\n  (define compiled (sql_queryplan_compile_formula nil (sql_queryplan_guard_from_session planning)))\n  (session \"__prepare_stage_probe\" (lambda () false))\n  (define unchanged (compiled session nil nil nil))\n  (session \"value\" 8)\n  (if (and unchanged (not (compiled session nil nil nil))) true\n    (error \"cache guard confused metadata with executable session inputs\")))\n"
   expect:
     data: [true]
   performance_rows: 1

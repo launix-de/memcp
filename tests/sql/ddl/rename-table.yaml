@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # RENAME TABLE and ALTER TABLE ADD FULLTEXT
 
 metadata:
@@ -5,6 +7,7 @@ metadata:
   description: "RENAME TABLE support and ADD FULLTEXT no-op"
 
 setup:
+  - sql: "DROP TABLE IF EXISTS ren_native"
   - sql: "DROP TABLE IF EXISTS ren_new"
   - sql: "DROP TABLE IF EXISTS ren_old"
 
@@ -52,6 +55,37 @@ test_cases:
       data:
         - { cnt: 3 }
 
+  - name: Cursor-stability rename retains the exact native generation
+    scm: |
+      (begin
+        (define target (table "memcp-tests" false "ren_new" false nil))
+        (define identity (show target "identity" nil))
+        (define caller (newsession))
+        (caller "username" "root")
+        (with_query_request caller nil 0 "native rename" "cursor-stability"
+          (lambda (statement)
+            (statement "native rename" false (lambda (tx)
+              (renametable target "ren_native" true identity tx)))))
+        (define renamed (table "memcp-tests" false "ren_native" false nil))
+        (define kept (and (identical? renamed target)
+          (equal? (show renamed "identity" nil) identity)
+          (nil? (table "memcp-tests" false "ren_new" false nil))))
+        (with_query_request caller nil 0 "native rename back" "cursor-stability"
+          (lambda (statement)
+            (statement "native rename back" false (lambda (tx)
+              (renametable renamed "ren_new" true identity tx)))))
+        kept)
+    expect: {result: true}
+
+  - name: Cursor-stability rename round trip preserves complete stored rows
+    sql: SELECT id,name FROM ren_new ORDER BY id
+    expect:
+      rows: 3
+      data:
+        - {id: 1,name: Alice}
+        - {id: 2,name: Bob}
+        - {id: 3,name: Charlie}
+
   - name: "ALTER TABLE ADD FULLTEXT no-op"
     sql: "ALTER TABLE ren_new ADD FULLTEXT search(name)"
 
@@ -62,6 +96,48 @@ test_cases:
       data:
         - { cnt: 3 }
 
+  - name: Public DROP retires the renamed visible table
+    steps:
+    - sql: DROP TABLE IF EXISTS drop_visible_before
+    - sql: DROP TABLE IF EXISTS drop_visible_after
+    - sql: CREATE TABLE drop_visible_before(id INT PRIMARY KEY,payload INT)
+    - sql: INSERT INTO drop_visible_before VALUES(7,11)
+    - sql: RENAME TABLE drop_visible_before TO drop_visible_after
+    - sql: SELECT id,payload FROM drop_visible_after ORDER BY id
+      expect:
+        data:
+        - id: 7
+          payload: 11
+    - sql: DROP TABLE drop_visible_after
+    - scm: (nil? (table "memcp-tests" false "drop_visible_after" false nil))
+      expect:
+        result: true
+  - name: Public DROP does not use a renamed generation hidden behind a reused old name
+    steps:
+    - sql: DROP TABLE IF EXISTS drop_visible_before
+    - sql: DROP TABLE IF EXISTS drop_visible_after
+    - sql: CREATE TABLE drop_visible_before(id INT PRIMARY KEY,payload INT)
+    - sql: INSERT INTO drop_visible_before VALUES(7,11)
+    - sql: RENAME TABLE drop_visible_before TO drop_visible_after
+    - sql: CREATE TABLE drop_visible_before(id INT PRIMARY KEY,payload INT)
+    - sql: INSERT INTO drop_visible_before VALUES(7,22)
+    - sql: DROP TABLE drop_visible_before
+    - sql: SELECT id,payload FROM drop_visible_after ORDER BY id
+      expect:
+        data:
+        - id: 7
+          payload: 11
+    - scm: (nil? (table "memcp-tests" false "drop_visible_before" false nil))
+      expect:
+        result: true
+    - sql: DROP TABLE drop_visible_after
+    - scm: (nil? (table "memcp-tests" false "drop_visible_after" false nil))
+      expect:
+        result: true
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS ren_native"
   - sql: "DROP TABLE IF EXISTS ren_new"
   - sql: "DROP TABLE IF EXISTS ren_old"
+  - sql: "DROP TABLE IF EXISTS drop_visible_before"
+  - sql: "DROP TABLE IF EXISTS drop_visible_after"

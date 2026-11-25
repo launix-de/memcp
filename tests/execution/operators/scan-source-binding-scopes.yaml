@@ -1,0 +1,285 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Invocation source reuse preserves lexical data, bindings and lazy execution
+setup: []
+cleanup: []
+test_cases:
+- name: Symbolic quote retains source-shaped values as complete data
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define datum (list 'list source source))
+      (define code (list 'quote datum))
+      (define expected datum)
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function nil))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true
+- name: Callable quote retains source-shaped values as complete data
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define datum (list 'list source source))
+      (define code (list quote datum))
+      (define expected datum)
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function nil))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true
+- name: Symbolic lambda retains its shadowed transaction capability
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define body (list 'list source source))
+      (define code (list (list 'lambda (list 'tx) body) 42))
+      (define expected (list "error" "table requires a native transaction capability or nil"))
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function nil))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true
+- name: Callable lambda retains its shadowed transaction capability
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define body (list 'list source source))
+      (define code (list (list lambda (list 'tx) body) 42))
+      (define expected (list "error" "table requires a native transaction capability or nil"))
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function nil))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true
+- name: Symbolic explicit-frame lambda retains its shadowed transaction capability
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define body (list 'list source source))
+      (define code (list (list 'lambda (list 'tx) body 1) 42))
+      (define expected (list "error" "table requires a native transaction capability or nil"))
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function nil))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true
+- name: Callable explicit-frame lambda retains its shadowed transaction capability
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define body (list 'list source source))
+      (define code (list (list lambda (list 'tx) body 1) 42))
+      (define expected (list "error" "table requires a native transaction capability or nil"))
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function nil))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true
+- name: Symbolic lambda retains the actual local table producer
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define replacement (scheme "(lambda (database database_ic name name_ic context) (concat name \"-local\"))"))
+      (define code (list (list 'lambda (list 'table) (list 'list source source)) replacement))
+      (define expected (list "scan_source_scope_missing-local" "scan_source_scope_missing-local"))
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function nil))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true
+- name: Callable explicit-frame lambda retains the actual local table producer
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define replacement (scheme "(lambda (database database_ic name name_ic context) (concat name \"-local\"))"))
+      (define code (list (list lambda (list 'table) (list 'list source source) 1) replacement))
+      (define expected (list "scan_source_scope_missing-local" "scan_source_scope_missing-local"))
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function nil))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true
+- name: A later DEFINE retains the earlier closure lexical source owner
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define replacement (scheme "(lambda (database database_ic name name_ic context) \"local-producer\")"))
+      (define code (list 'begin
+        (list 'define 'read (list 'lambda '() (list 'list source source)))
+        (list 'define 'table replacement)
+        (list 'read)))
+      (define expected (list "local-producer" "local-producer"))
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function nil))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true
+- name: A later SET retains the earlier closure lexical source owner
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define replacement (scheme "(lambda (database database_ic name name_ic context) \"local-producer\")"))
+      (define code (list 'begin
+        (list 'define 'read (list 'lambda '() (list 'list source source)))
+        (list 'set 'table replacement)
+        (list 'read)))
+      (define expected (list "local-producer" "local-producer"))
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function nil))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true
+- name: Match bindings retain both transaction and source producer ownership
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define replacement (scheme "(lambda (database database_ic name name_ic context) context)"))
+      (define code (list 'match (list 'list 42 replacement)
+        (list 'list 'tx 'table) (list 'list source source)))
+      (define expected (list 42 42))
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function nil))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true
+- name: A local list constructor retains selection construction and its error
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define selection (list 'list "schema" (list 'list "exact" "memcp-tests")))
+      (define metadata (list 'information_schema_rows "information_schema" "tables" 'tx selection))
+      (define replacement (scheme "(lambda args (error \"selector-list-shadow\"))"))
+      (define code (list (list 'lambda (list 'list) (list list metadata metadata)) replacement))
+      (define expected (list "error" "selector-list-shadow"))
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function nil))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true
+- name: Fresh helper allocation preserves an existing same-spelled local value
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define code (list 'begin (list 'define '__published_callables_0 19)
+        (list 'list '__published_callables_0 source source)))
+      (define expected (list 19 nil nil))
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function nil))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true
+- name: An unused native source never validates its invalid transaction
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define code (list 'if false (list 'list source source) "safe"))
+      (define expected "safe")
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function 42))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true
+- name: An unused metadata source never executes its unsupported producer
+  scm: |
+    (begin
+      (define source (list 'table "memcp-tests" false "scan_source_scope_missing" false 'tx))
+      (define metadata (list 'information_schema_rows "information_schema" "scope_missing_catalog" 'tx nil))
+      (define code (list 'if false (list 'list metadata metadata) "safe"))
+      (define expected "safe")
+      (define run (lambda (program optimized) (begin
+        (define frame (list 'lambda (list 'tx) program))
+        (define function (eval (if optimized (optimize frame) frame)))
+        (try (lambda () (function nil))
+          (lambda (cause) (list "error" (failure_value cause)))))))
+      (define transformed (bind_invocation_scan_sources code))
+      (and (expression_equal? (run code false) expected)
+        (expression_equal? (run transformed false) expected)
+        (expression_equal? (run transformed true) expected)))
+  expect:
+    result: true

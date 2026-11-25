@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # ALTER TABLE DROP COLUMN IF EXISTS: must not error when column is absent.
 
 metadata:
@@ -39,5 +41,353 @@ test_cases:
     expect:
       error: true
 
+  - name: mysql repeated ADD DROP rebinds physical column identity
+    steps:
+    - sql: DROP TABLE IF EXISTS ddl_reuse_mysql
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: CREATE TABLE ddl_reuse_mysql(id INT PRIMARY KEY,value INT)
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: INSERT INTO ddl_reuse_mysql VALUES(1,17),(2,23)
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: ALTER TABLE ddl_reuse_mysql ADD COLUMN marker INT DEFAULT 7
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: SELECT id,value,marker FROM ddl_reuse_mysql ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+          marker: 7
+        - id: 2
+          value: 23
+          marker: 7
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: ALTER TABLE ddl_reuse_mysql DROP COLUMN marker
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: SELECT * FROM ddl_reuse_mysql ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+        - id: 2
+          value: 23
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: ALTER TABLE ddl_reuse_mysql ADD COLUMN marker INT DEFAULT 19
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: SELECT id,value,marker FROM ddl_reuse_mysql ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+          marker: 19
+        - id: 2
+          value: 23
+          marker: 19
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: ALTER TABLE ddl_reuse_mysql DROP COLUMN marker
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: SELECT * FROM ddl_reuse_mysql ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+        - id: 2
+          value: 23
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: ALTER TABLE ddl_reuse_mysql ADD COLUMN marker INT DEFAULT 31
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: SELECT id,value,marker FROM ddl_reuse_mysql ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+          marker: 31
+        - id: 2
+          value: 23
+          marker: 31
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: ALTER TABLE ddl_reuse_mysql DROP COLUMN marker
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: SELECT * FROM ddl_reuse_mysql ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+        - id: 2
+          value: 23
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+    - sql: DROP TABLE ddl_reuse_mysql
+      syntax: mysql
+      session_id: repeated-ddl-mysql
+  - name: psql repeated ADD DROP rebinds physical column identity
+    steps:
+    - sql: DROP TABLE IF EXISTS ddl_reuse_psql
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: CREATE TABLE ddl_reuse_psql(id INT PRIMARY KEY,value INT)
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: INSERT INTO ddl_reuse_psql VALUES(1,17),(2,23)
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: ALTER TABLE ddl_reuse_psql ADD COLUMN marker INT DEFAULT 7
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: SELECT id,value,marker FROM ddl_reuse_psql ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+          marker: 7
+        - id: 2
+          value: 23
+          marker: 7
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: ALTER TABLE ddl_reuse_psql DROP COLUMN marker
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: SELECT * FROM ddl_reuse_psql ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+        - id: 2
+          value: 23
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: ALTER TABLE ddl_reuse_psql ADD COLUMN marker INT DEFAULT 19
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: SELECT id,value,marker FROM ddl_reuse_psql ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+          marker: 19
+        - id: 2
+          value: 23
+          marker: 19
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: ALTER TABLE ddl_reuse_psql DROP COLUMN marker
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: SELECT * FROM ddl_reuse_psql ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+        - id: 2
+          value: 23
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: ALTER TABLE ddl_reuse_psql ADD COLUMN marker INT DEFAULT 31
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: SELECT id,value,marker FROM ddl_reuse_psql ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+          marker: 31
+        - id: 2
+          value: 23
+          marker: 31
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: ALTER TABLE ddl_reuse_psql DROP COLUMN marker
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: SELECT * FROM ddl_reuse_psql ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+        - id: 2
+          value: 23
+      syntax: psql
+      session_id: repeated-ddl-psql
+    - sql: DROP TABLE ddl_reuse_psql
+      syntax: psql
+      session_id: repeated-ddl-psql
+  - name: MySQL repeated optional DROP follows absent and newly added declarations
+    steps:
+    - sql: DROP TABLE IF EXISTS ddl_reuse_optional
+    - sql: CREATE TABLE ddl_reuse_optional(id INT PRIMARY KEY)
+    - sql: INSERT INTO ddl_reuse_optional VALUES(1)
+    - sql: ALTER TABLE ddl_reuse_optional DROP COLUMN IF EXISTS marker
+    - sql: ALTER TABLE ddl_reuse_optional ADD COLUMN marker INT DEFAULT 7
+    - sql: ALTER TABLE ddl_reuse_optional DROP COLUMN IF EXISTS marker
+    - sql: SELECT * FROM ddl_reuse_optional
+      expect:
+        rows: 1
+        data:
+        - id: 1
+    - sql: ALTER TABLE ddl_reuse_optional ADD COLUMN marker INT DEFAULT 9
+    - sql: SELECT * FROM ddl_reuse_optional
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          marker: 9
+    - sql: ALTER TABLE ddl_reuse_optional DROP COLUMN IF EXISTS marker
+    - sql: SELECT * FROM ddl_reuse_optional
+      expect:
+        rows: 1
+        data:
+        - id: 1
+    - sql: DROP TABLE ddl_reuse_optional
+  - name: mysql cached ALTER DEFAULT binds the newly added column
+    steps:
+    - sql: DROP TABLE IF EXISTS ddl_default_reuse_mysql
+      syntax: mysql
+      session_id: default-reuse-mysql
+    - sql: CREATE TABLE ddl_default_reuse_mysql(id INT PRIMARY KEY,value INT DEFAULT 7)
+      syntax: mysql
+      session_id: default-reuse-mysql
+    - sql: ALTER TABLE ddl_default_reuse_mysql ALTER COLUMN value SET DEFAULT 99
+      syntax: mysql
+      session_id: default-reuse-mysql
+    - sql: INSERT INTO ddl_default_reuse_mysql(id) VALUES(1)
+      syntax: mysql
+      session_id: default-reuse-mysql
+    - sql: ALTER TABLE ddl_default_reuse_mysql DROP COLUMN value
+      syntax: mysql
+      session_id: default-reuse-mysql
+    - sql: ALTER TABLE ddl_default_reuse_mysql ADD COLUMN value INT DEFAULT 11
+      syntax: mysql
+      session_id: default-reuse-mysql
+    - sql: ALTER TABLE ddl_default_reuse_mysql ALTER COLUMN value SET DEFAULT 99
+      syntax: mysql
+      session_id: default-reuse-mysql
+    - sql: INSERT INTO ddl_default_reuse_mysql(id) VALUES(2)
+      syntax: mysql
+      session_id: default-reuse-mysql
+    - sql: SELECT id,value FROM ddl_default_reuse_mysql ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 11
+        - id: 2
+          value: 99
+      syntax: mysql
+      session_id: default-reuse-mysql
+    - sql: DROP TABLE ddl_default_reuse_mysql
+      syntax: mysql
+      session_id: default-reuse-mysql
+  - name: psql cached ALTER DEFAULT binds the newly added column
+    steps:
+    - sql: DROP TABLE IF EXISTS ddl_default_reuse_psql
+      syntax: psql
+      session_id: default-reuse-psql
+    - sql: CREATE TABLE ddl_default_reuse_psql(id INT PRIMARY KEY,value INT DEFAULT 7)
+      syntax: psql
+      session_id: default-reuse-psql
+    - sql: ALTER TABLE ddl_default_reuse_psql ALTER COLUMN value SET DEFAULT 99
+      syntax: psql
+      session_id: default-reuse-psql
+    - sql: INSERT INTO ddl_default_reuse_psql(id) VALUES(1)
+      syntax: psql
+      session_id: default-reuse-psql
+    - sql: ALTER TABLE ddl_default_reuse_psql DROP COLUMN value
+      syntax: psql
+      session_id: default-reuse-psql
+    - sql: ALTER TABLE ddl_default_reuse_psql ADD COLUMN value INT DEFAULT 11
+      syntax: psql
+      session_id: default-reuse-psql
+    - sql: ALTER TABLE ddl_default_reuse_psql ALTER COLUMN value SET DEFAULT 99
+      syntax: psql
+      session_id: default-reuse-psql
+    - sql: INSERT INTO ddl_default_reuse_psql(id) VALUES(2)
+      syntax: psql
+      session_id: default-reuse-psql
+    - sql: SELECT id,value FROM ddl_default_reuse_psql ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 11
+        - id: 2
+          value: 99
+      syntax: psql
+      session_id: default-reuse-psql
+    - sql: DROP TABLE ddl_default_reuse_psql
+      syntax: psql
+      session_id: default-reuse-psql
+
+  - name: mysql rejected DROP preserves its implicit column default and complete rows
+    steps:
+    - sql: DROP TABLE IF EXISTS ddl_failed_default_drop
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+    - sql: CREATE TABLE ddl_failed_default_drop(id INT PRIMARY KEY,marker INT DEFAULT 7,UNIQUE KEY uq_failed_default_drop(marker))
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+    - sql: INSERT INTO ddl_failed_default_drop VALUES(1,17),(2,19)
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+    - sql: ALTER TABLE ddl_failed_default_drop DROP COLUMN marker
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+      expect:
+        error: true
+    - sql: SELECT id,marker FROM ddl_failed_default_drop ORDER BY id
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+      expect:
+        rows: 2
+        data:
+        - {id: 1, marker: 17}
+        - {id: 2, marker: 19}
+    - sql: INSERT INTO ddl_failed_default_drop(id) VALUES(3)
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+    - sql: SELECT id,marker FROM ddl_failed_default_drop ORDER BY id
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+      expect:
+        rows: 3
+        data:
+        - {id: 1, marker: 17}
+        - {id: 2, marker: 19}
+        - {id: 3, marker: 7}
+    - sql: DROP TABLE ddl_failed_default_drop
+      syntax: mysql
+      session_id: failed-default-drop-mysql
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS adci_t"
+  - sql: "DROP TABLE IF EXISTS ddl_reuse_mysql"
+  - sql: "DROP TABLE IF EXISTS ddl_reuse_psql"
+  - sql: "DROP TABLE IF EXISTS ddl_reuse_optional"
+  - sql: "DROP TABLE IF EXISTS ddl_default_reuse_mysql"
+  - sql: "DROP TABLE IF EXISTS ddl_default_reuse_psql"
+  - sql: "DROP TABLE IF EXISTS ddl_failed_default_drop"

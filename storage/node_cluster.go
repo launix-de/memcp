@@ -156,8 +156,8 @@ func (cluster *nodeCluster) handle(session *scanRPCSession, ctx context.Context,
 		return cluster.handleTryRead(ctx, source, data)
 	case "cluster.location", "cluster.location_update", "cluster.schema_locations":
 		return cluster.handleLocations(ctx, source, method, data)
-	case "cluster.reserve_ids":
-		return cluster.handleIDReservation(ctx, data)
+	case "cluster.table_ids":
+		return cluster.handleIDReservation(ctx, source, data)
 	case "cluster.report":
 		var resource mosiResource
 		if err := unmarshalNode(data, &resource); err != nil {
@@ -335,6 +335,11 @@ func startNodeCluster(secretFile, address, seed, databases string, bootstrap boo
 			return err
 		}
 	}
+	finishStart, err := beginNodeServiceStart()
+	if err != nil {
+		return err
+	}
+	defer finishStart()
 	if err := prepareSharedClusterMounts(databases); err != nil {
 		return err
 	}

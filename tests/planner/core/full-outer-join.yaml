@@ -1,0 +1,202 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: FULL joined operand prototype and positive semantic result targets
+setup:
+- sql: CREATE TABLE full_left(id INT,k INT,keep_row INT)
+- sql: CREATE TABLE full_right(id INT,k INT,keep_row INT)
+- sql: CREATE TABLE full_empty(id INT,k INT)
+- sql: CREATE TABLE full_prototype_output(left_id INT,right_id INT)
+- sql: INSERT full_left VALUES(1,10,1),(1,10,1),(2,NULL,1),(3,30,0)
+- sql: INSERT full_right VALUES(4,10,1),(4,10,1),(5,NULL,1),(6,60,1)
+- sql: CREATE VIEW full_left_view AS SELECT id,k FROM full_left WHERE keep_row=1
+- sql: CREATE VIEW full_right_view AS SELECT id,k FROM full_right
+cleanup:
+- sql: DROP VIEW IF EXISTS full_left_view
+- sql: DROP VIEW IF EXISTS full_right_view
+- sql: DROP TABLE IF EXISTS full_left
+- sql: DROP TABLE IF EXISTS full_right
+- sql: DROP TABLE IF EXISTS full_empty
+- sql: DROP TABLE IF EXISTS full_prototype_output
+test_cases:
+- name: Common logical producer prototype executes through ordinary decorrelation and native operators
+  scm: |
+    (begin
+      (define left (list "l" "memcp-tests" "full_left" false true
+        (sql_relation_local_declarations "memcp-tests" "full_left" nil)))
+      (define right (list "r" "memcp-tests" "full_right" false true
+        (sql_relation_local_declarations "memcp-tests" "full_right" nil)))
+      (define left_id (list 'get_column "l" false "id" false))
+      (define right_id (list 'get_column "r" false "id" false))
+      (define left_key (list 'get_column "l" false "k" false))
+      (define right_key (list 'get_column "r" false "k" false))
+      (define query (make_full_outer_join_union "memcp-tests" left right
+        (sql_comparison_expr "eq" left_key right_key)
+        (list "left_id" left_id "right_id" right_id)))
+      (define request (newsession)) (request "username" "root")
+      (with_session request (lambda ()
+        (with_autocommit request nil 0 "full join prototype" (lambda (tx) (begin
+          (define planning (newsession))
+          (define target (table "memcp-tests" false "full_prototype_output" false tx))
+          (define plan (sql_queryplan_compile_formula tx (build_queryplan_term query planning tx)))
+          (sql_execute_formula request tx plan (lambda (row)
+            (insert target '("left_id" "right_id") (list (list (row "left_id") (row "right_id")))
+              '() nil false nil tx))
+            (lambda args true)))))))
+      true)
+  expect: {result: true}
+- name: The common logical producer retains the complete output bag in native storage
+  sql: SELECT left_id,right_id FROM full_prototype_output ORDER BY left_id,right_id
+  expect:
+    rows: 8
+    data: [{left_id: null,right_id: 5},{left_id: null,right_id: 6},
+      {left_id: 1,right_id: 4},{left_id: 1,right_id: 4},{left_id: 1,right_id: 4},{left_id: 1,right_id: 4},
+      {left_id: 2,right_id: null},{left_id: 3,right_id: null}]
+- name: Explicit LEFT plus anti control retains duplicate matches and both unmatched bags
+  sql: |
+    SELECT l.id AS left_id,r.id AS right_id FROM full_left l LEFT JOIN full_right r ON l.k=r.k
+    UNION ALL
+    SELECT CAST(NULL AS INT) AS left_id,r.id AS right_id FROM full_right r
+    WHERE NOT EXISTS(SELECT 1 FROM full_left l WHERE l.k=r.k)
+    ORDER BY left_id,right_id
+  expect:
+    rows: 8
+    data: [{left_id: null,right_id: 5},{left_id: null,right_id: 6},
+      {left_id: 1,right_id: 4},{left_id: 1,right_id: 4},{left_id: 1,right_id: 4},{left_id: 1,right_id: 4},
+      {left_id: 2,right_id: null},{left_id: 3,right_id: null}]
+- name: SQL frontend anti control preserves right duplicates without nullable-key inference
+  syntax: sql
+  sql: SELECT r.id FROM full_right r WHERE NOT EXISTS(SELECT 1 FROM full_left l WHERE l.k=r.k) ORDER BY r.id
+  expect: {rows: 2,data: [{id: 5},{id: 6}]}
+- name: PostgreSQL frontend sees the same anti presence semantics
+  syntax: psql
+  sql: SELECT r.id FROM full_right r WHERE NOT EXISTS(SELECT 1 FROM full_left l WHERE l.k=r.k) ORDER BY r.id
+  expect: {rows: 2,data: [{id: 5},{id: 6}]}
+# Frontend integration retains the common producer's complete operand boundary.
+- name: FULL retains matching multiplicity and separate NULL-key unmatched rows
+  sql: SELECT l.id AS left_id,r.id AS right_id FROM full_left l FULL OUTER JOIN full_right r ON l.k=r.k ORDER BY l.id,r.id
+  expect:
+    rows: 8
+    data: [{left_id: null,right_id: 5},{left_id: null,right_id: 6},
+      {left_id: 1,right_id: 4},{left_id: 1,right_id: 4},{left_id: 1,right_id: 4},{left_id: 1,right_id: 4},
+      {left_id: 2,right_id: null},{left_id: 3,right_id: null}]
+- name: A constant false ON preserves every row from both sides
+  sql: SELECT COUNT(*) AS total FROM full_left l FULL JOIN full_right r ON 1=0
+  expect: {rows: 1,data: [{total: 8}]}
+- name: An empty left operand preserves every right duplicate
+  sql: SELECT r.id FROM full_empty l FULL JOIN full_right r ON l.k=r.k ORDER BY r.id
+  expect: {rows: 4,data: [{id: 4},{id: 4},{id: 5},{id: 6}]}
+- name: An empty right operand preserves every left duplicate
+  sql: SELECT l.id FROM full_left l FULL JOIN full_empty r ON l.k=r.k ORDER BY l.id
+  expect: {rows: 4,data: [{id: 1},{id: 1},{id: 2},{id: 3}]}
+- name: Two empty operands produce no fabricated NULL row
+  sql: SELECT l.id,r.id FROM full_empty l FULL JOIN full_empty r ON l.k=r.k
+  expect: {rows: 0}
+- name: Left-only ON predicate leaves rejected left and right rows unmatched
+  sql: SELECT COUNT(*) AS total FROM full_left l FULL JOIN full_right r ON l.k=r.k AND l.keep_row=0
+  expect: {rows: 1,data: [{total: 8}]}
+- name: WHERE applies after ON match classification and NULL extension
+  sql: SELECT COUNT(*) AS total FROM full_left l FULL JOIN full_right r ON l.k=r.k WHERE l.keep_row=0
+  expect: {rows: 1,data: [{total: 1}]}
+- name: Ordinary views remain logical input producers under FULL
+  sql: SELECT COUNT(*) AS total FROM full_left_view l FULL JOIN full_right_view r ON l.k=r.k
+  expect: {rows: 1,data: [{total: 7}]}
+- name: An entire nullable joined left operand retains its boundary under FULL
+  sql: SELECT COUNT(*) AS total FROM (full_left l LEFT JOIN full_empty e ON l.k=e.k) FULL JOIN full_right r ON l.k=r.k
+  expect: {rows: 1,data: [{total: 8}]}
+- name: An enclosing left join consumes the complete FULL operand
+  sql: SELECT COUNT(*) AS total FROM (full_left l FULL JOIN full_right r ON l.k=r.k) LEFT JOIN full_empty e ON e.k=r.k
+  expect: {rows: 1,data: [{total: 8}]}
+- name: A complete FULL operand remains intact under an enclosing LEFT projection
+  sql: |
+    SELECT l.id AS left_id,r.id AS right_id,e.id AS empty_id
+    FROM (full_left l FULL JOIN full_right r ON l.k=r.k)
+    LEFT JOIN full_empty e ON e.k=r.k ORDER BY l.id,r.id
+  expect:
+    rows: 8
+    data: [{left_id: null,right_id: 5,empty_id: null},{left_id: null,right_id: 6,empty_id: null},
+      {left_id: 1,right_id: 4,empty_id: null},{left_id: 1,right_id: 4,empty_id: null},
+      {left_id: 1,right_id: 4,empty_id: null},{left_id: 1,right_id: 4,empty_id: null},
+      {left_id: 2,right_id: null,empty_id: null},{left_id: 3,right_id: null,empty_id: null}]
+- name: Two FULL boundaries preserve all four logical branch bags
+  sql: |
+    SELECT l.id AS left_id,r.id AS right_id,t.id AS third_id
+    FROM (full_left l FULL JOIN full_right r ON l.k=r.k)
+    FULL JOIN (VALUES(7,10),(8,30),(9,90)) t(id,k) ON COALESCE(l.k,r.k)=t.k
+    ORDER BY l.id,r.id,t.id
+  expect:
+    rows: 9
+    data: [{left_id: null,right_id: null,third_id: 9},
+      {left_id: null,right_id: 5,third_id: null},{left_id: null,right_id: 6,third_id: null},
+      {left_id: 1,right_id: 4,third_id: 7},{left_id: 1,right_id: 4,third_id: 7},
+      {left_id: 1,right_id: 4,third_id: 7},{left_id: 1,right_id: 4,third_id: 7},
+      {left_id: 2,right_id: null,third_id: null},{left_id: 3,right_id: null,third_id: 8}]
+- name: An enclosing INNER ON sees its input and both aliases of the FULL operand
+  sql: |
+    SELECT a.k AS anchor_key,l.id AS left_id,r.id AS right_id
+    FROM (VALUES(10),(60)) a(k)
+    INNER JOIN (full_left l FULL JOIN full_right r ON l.k=r.k) ON a.k=COALESCE(l.k,r.k)
+    ORDER BY a.k,l.id,r.id
+  expect:
+    rows: 5
+    data: [{anchor_key: 10,left_id: 1,right_id: 4},{anchor_key: 10,left_id: 1,right_id: 4},
+      {anchor_key: 10,left_id: 1,right_id: 4},{anchor_key: 10,left_id: 1,right_id: 4},
+      {anchor_key: 60,left_id: null,right_id: 6}]
+- name: SQL frontend FULL result target shares the common logical capability
+  noncritical: true
+  syntax: sql
+  sql: SELECT COUNT(*) AS total FROM full_left l FULL JOIN full_right r ON l.k=r.k
+  expect: {rows: 1,data: [{total: 8}]}
+- name: PostgreSQL frontend FULL result target shares the common logical capability
+  noncritical: true
+  syntax: psql
+  sql: SELECT COUNT(*) AS total FROM full_left l FULL JOIN full_right r ON l.k=r.k
+  expect: {rows: 1,data: [{total: 8}]}
+- name: Volatile operand values require a real evaluation-sharing contract
+  noncritical: true
+  sql: |
+    SELECT COUNT(*) AS total,SUM(CASE WHEN l.nonce IS NULL THEN 1 ELSE 0 END) AS missing_left
+    FROM (SELECT id,k,NEWID() AS nonce FROM full_left) l FULL JOIN full_right r ON l.k=r.k
+  expect: {rows: 1,data: [{total: 8,missing_left: 2}]}
+- name: SQL COUNT keeps the complete joined UNION ALL bag
+  syntax: sql
+  sql: |
+    SELECT COUNT(*) AS total FROM (
+      SELECT l.id AS left_id,r.id AS right_id FROM full_left l LEFT JOIN full_right r ON l.k=r.k
+      UNION ALL
+      SELECT NULL AS left_id,r.id AS right_id FROM full_right r
+      WHERE NOT EXISTS(SELECT 1 FROM full_left l WHERE l.k=r.k)
+    ) AS complete_rows
+  expect: {rows: 1,data: [{total: 8}]}
+- name: PostgreSQL COUNT keeps the complete joined UNION ALL bag
+  syntax: psql
+  sql: |
+    SELECT COUNT(*) AS total FROM (
+      SELECT l.id AS left_id,r.id AS right_id FROM full_left l LEFT JOIN full_right r ON l.k=r.k
+      UNION ALL
+      SELECT NULL AS left_id,r.id AS right_id FROM full_right r
+      WHERE NOT EXISTS(SELECT 1 FROM full_left l WHERE l.k=r.k)
+    ) AS complete_rows
+  expect: {rows: 1,data: [{total: 8}]}
+- name: COUNT keeps grouped branch boundaries rather than counting their input rows
+  sql: |
+    SELECT COUNT(*) AS total FROM (
+      SELECT k FROM full_left GROUP BY k
+      UNION ALL
+      SELECT k FROM full_right GROUP BY k
+    ) AS groups
+  expect: {rows: 1,data: [{total: 6}]}
+- name: COUNT keeps a branch local TOP window
+  noncritical: true
+  sql: |
+    SELECT COUNT(*) AS total FROM (
+      SELECT TOP 2 id FROM full_left
+      UNION ALL
+      SELECT TOP 1 id FROM full_right
+    ) AS limited_rows
+  expect: {rows: 1,data: [{total: 3}]}
+- name: Direct base COUNT still retains UNION ALL multiplicity
+  sql: SELECT COUNT(*) AS total FROM (SELECT id FROM full_left UNION ALL SELECT id FROM full_right) AS all_rows
+  expect: {rows: 1,data: [{total: 8}]}

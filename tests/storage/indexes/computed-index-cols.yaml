@@ -449,3 +449,64 @@ test_cases:
           candidateCount: 4
           outputCount: 4
           result: ok
+
+
+  # Synthesized computed mappers use the ordinary compiler without changing input ownership.
+  - name: Raw named replacement mapper retains NULL empty Unicode and trailing spaces
+    scm: |
+      (begin
+        (define source (list (quote lambda) (list (quote value))
+          (list regexp_replace (quote value) " +$" "")))
+        (define unchanged (list (quote lambda) (list (quote value))
+          (list regexp_replace (quote value) " +$" "")))
+        (define descriptor (compile_scan_computed_index (eval source) (list "value")))
+        (define actual (map (list nil "" " " "a " "a b  " "ä  " "a\t ")
+          (lambda (value) ((cadr descriptor) value))))
+        (if (and (expression_equal? source unchanged)
+          (equal? (json_encode actual)
+            (json_encode (list nil "" "" "a" "a b" "ä" "a\t"))))
+          "ok" (error "compiled replacement changed input syntax or values")))
+    expect:
+      data: [ok]
+  - name: Optimized numbered multi-argument mapper preserves its actual argument slots
+    scm: |
+      (begin
+        (define source (list (quote lambda) (list (quote unused) (quote value))
+          (list (quote concat) (list regexp_replace (quote value) " +$" "") (quote unused))))
+        (define descriptor (compile_scan_computed_index (eval (optimize source)) (list "unused" "value")))
+        (define actual (map (list (list "!" "a  ") (list "?" "b") (list "+" ""))
+          (lambda (values) (apply (cadr descriptor) values))))
+        (if (equal? (json_encode actual) (json_encode (list "a!" "b?" "+")))
+          "ok" (error "computed mapper lost numbered argument ownership")))
+    expect:
+      data: [ok]
+  - name: Materialized array inputs remain immutable data across distinct compiler invocations
+    scm: |
+      (begin
+        (define bindings (newsession))
+        (define evaluate (lambda (values) (begin
+          (bindings "values" values)
+          (define descriptor (compile_scan_computed_index
+            (lambda (value) (sql_in (bindings "values") value)) (list "value")))
+          (map (list 1 2 3 4 5 nil) (lambda (value) ((cadr descriptor) value))))))
+        (define first (list 1 3))
+        (define second (list 2 4 nil))
+        (define actual (list (evaluate first) (evaluate second)))
+        (define expected (map (list first second) (lambda (values)
+          (map (list 1 2 3 4 5 nil) (lambda (value) (sql_in values value))))))
+        (if (equal? (json_encode actual) (json_encode expected)) "ok"
+          (error "compiler changed materialized array input semantics")))
+    expect:
+      data: [ok]
+  - name: Invalid literal replacement pattern remains a row-time failure
+    scm: |
+      (begin
+        (define source (list (quote lambda) (list (quote value))
+          (list regexp_replace (quote value) "[" "")))
+        (define descriptor (compile_scan_computed_index (eval source) (list "value")))
+        (define null_value ((cadr descriptor) nil))
+        (define failed (try (lambda () (begin ((cadr descriptor) "a") false)) (lambda (_failure) true)))
+        (if (and (nil? null_value) failed) "ok"
+          (error "invalid replacement pattern changed NULL or error timing")))
+    expect:
+      data: [ok]

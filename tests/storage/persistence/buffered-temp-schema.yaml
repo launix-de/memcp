@@ -30,7 +30,7 @@ test_cases:
   - name: "Temporary column is published immediately"
     scm: &create_computed_column |
       (createcolumn
-        (table "memcp-tests" false "buffered_schema_base" false)
+        (table "memcp-tests" false "buffered_schema_base" false nil)
         "cached_value" "int" '() '("temp" true)
         '("id") (lambda (id) (* id 2)))
 
@@ -47,7 +47,7 @@ test_cases:
   - name: "Temporary ordered column metadata is published immediately"
     scm: &create_ordered_column |
       (createcolumn
-        (table "memcp-tests" false "buffered_schema_base" false)
+        (table "memcp-tests" false "buffered_schema_base" false nil)
         "ordered_position" "int" '()
         (list
           "temp" true
@@ -81,7 +81,7 @@ test_cases:
           (list "engine" "cache" "oninit"
             (lambda ()
               (insert
-                (table "memcp-tests" false ".buffered_schema_cache" false)
+                (table "memcp-tests" false ".buffered_schema_cache" false nil)
                 (list "cache_key")
                 (list (list seed))
                 (list)
@@ -107,7 +107,7 @@ test_cases:
           (list "engine" "memory" "oninit"
             (lambda ()
               (insert
-                (table "memcp-tests" false "buffered_schema_memory" false)
+                (table "memcp-tests" false "buffered_schema_memory" false nil)
                 (list "value")
                 (list (list seed))
                 (list)
@@ -126,7 +126,10 @@ test_cases:
   - name: "Durable DDL flushes the complete buffered schema"
     sql: "CREATE TABLE buffered_schema_flush (id INT) ENGINE=SAFE"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Crash after the later durable schema publication"
     scm: "(crash)"
@@ -135,6 +138,11 @@ test_cases:
 
   - name: "Restart after buffered schema flush"
     action: restart
+
+  - name: "MySQL declaration state after restart: Durable DDL flushes the complete buffered schema"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE buffered_schema_flush"
+    expect: {rows: 1,data: [{Table: "buffered_schema_flush"}]}
 
   - name: "Idempotent temp create reruns persisted initialization"
     scm: *create_temp_table

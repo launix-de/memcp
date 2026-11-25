@@ -1,0 +1,750 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Genuine bounded NULL history supports original-transaction checked writes without a future DEFAULT or row backfill
+setup:
+- sql: DROP TABLE IF EXISTS np_rows
+- sql: DROP TABLE IF EXISTS np_rollback
+- sql: DROP TABLE IF EXISTS np_after_save
+- sql: DROP TABLE IF EXISTS np_before_save
+- sql: DROP TABLE IF EXISTS np_failure
+- sql: DROP TABLE IF EXISTS np_crash
+- sql: DROP TABLE IF EXISTS np_uncommitted
+- sql: DROP TABLE IF EXISTS np_empty
+- sql: DROP TABLE IF EXISTS np_sql
+- sql: DROP TABLE IF EXISTS np_pg
+- sql: DROP TABLE IF EXISTS np_source
+- sql: DROP TABLE IF EXISTS np_duplicate
+- sql: DROP TABLE IF EXISTS np_heartbeat
+- sql: CREATE TABLE np_source(id INT PRIMARY KEY,name VARCHAR(49) NULL)
+- sql: INSERT np_source VALUES(1,'alpha'),(2,NULL),(3,'')
+- sql: CREATE TABLE np_duplicate(id INT,name VARCHAR(49))
+- sql: INSERT np_duplicate VALUES(1,'first'),(1,'second'),(2,'single')
+- sql: CREATE TABLE np_heartbeat(id INT PRIMARY KEY,value INT)
+- sql: INSERT np_heartbeat VALUES(1,7)
+- sql: CREATE TABLE np_rows(id INT PRIMARY KEY,parent_id INT NULL,payload INT NOT NULL)
+- sql: INSERT np_rows VALUES(1,1,11),(2,2,22)
+- sql: CREATE TABLE np_rollback(id INT PRIMARY KEY,parent_id INT NULL,payload INT NOT NULL)
+- sql: INSERT np_rollback VALUES(1,1,11),(2,2,22)
+- sql: CREATE TABLE np_after_save(id INT PRIMARY KEY,parent_id INT NULL,payload INT NOT NULL)
+- sql: INSERT np_after_save VALUES(1,1,11),(2,2,22)
+- sql: CREATE TABLE np_before_save(id INT PRIMARY KEY,parent_id INT NULL,payload INT NOT NULL)
+- sql: INSERT np_before_save VALUES(1,1,11),(2,2,22)
+- sql: CREATE TABLE np_failure(id INT PRIMARY KEY,parent_id INT NULL,payload INT NOT NULL)
+- sql: INSERT np_failure VALUES(1,1,11),(2,2,22)
+- sql: CREATE TABLE np_crash(id INT PRIMARY KEY,parent_id INT NULL,payload INT NOT NULL)
+- sql: INSERT np_crash VALUES(1,1,11),(2,2,22)
+- sql: CREATE TABLE np_uncommitted(id INT PRIMARY KEY,parent_id INT NULL,payload INT NOT NULL)
+- sql: INSERT np_uncommitted VALUES(1,1,11),(2,2,22)
+- sql: CREATE TABLE np_empty(id INT PRIMARY KEY,parent_id INT NULL,payload INT NOT NULL)
+- sql: CREATE TABLE np_sql(id INT PRIMARY KEY,parent_id INT NULL,payload INT NOT NULL)
+- sql: INSERT np_sql VALUES(1,1,11),(2,2,22)
+- sql: CREATE TABLE np_pg(id INT PRIMARY KEY,parent_id INT NULL,payload INT NOT NULL)
+- sql: INSERT np_pg VALUES(1,1,11),(2,2,22)
+- sql: INSERT np_rows VALUES(3,99,33),(4,3,44),(5,NULL,55)
+- scm: (rebuild (table "memcp-tests" false "np_rows" false nil) true false nil true)
+- sql: DELETE np_rows WHERE id=2
+- sql: INSERT np_rows VALUES(6,2,66)
+cleanup:
+- sql: DROP TABLE IF EXISTS np_rows
+- sql: DROP TABLE IF EXISTS np_rollback
+- sql: DROP TABLE IF EXISTS np_after_save
+- sql: DROP TABLE IF EXISTS np_before_save
+- sql: DROP TABLE IF EXISTS np_failure
+- sql: DROP TABLE IF EXISTS np_crash
+- sql: DROP TABLE IF EXISTS np_uncommitted
+- sql: DROP TABLE IF EXISTS np_empty
+- sql: DROP TABLE IF EXISTS np_sql
+- sql: DROP TABLE IF EXISTS np_pg
+- sql: DROP TABLE IF EXISTS np_source
+- sql: DROP TABLE IF EXISTS np_duplicate
+- sql: DROP TABLE IF EXISTS np_heartbeat
+test_cases:
+- name: Nested inner COMMIT retains the nullable prefix for correlated UPDATE in the original transaction
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT ON
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE np_heartbeat SET value=9 WHERE id=1
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE np_rows ADD new_name VARCHAR(50) NULL
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - depth: 1
+    - connection: owner
+      sql: SELECT name,CAST(is_nullable AS INT) AS nullable_flag,default_object_id FROM sys.columns WHERE object_id=OBJECT_ID(N'np_rows') AND
+        name=N'new_name'
+      expect:
+        rows: 1
+        data:
+        - name: new_name
+          nullable_flag: 1
+          default_object_id: 0
+    - connection: owner
+      sql: SELECT id,parent_id,payload,new_name FROM np_rows ORDER BY id
+      expect:
+        rows: 5
+        data:
+        - id: 1
+          parent_id: 1
+          payload: 11
+          new_name: null
+        - id: 3
+          parent_id: 99
+          payload: 33
+          new_name: null
+        - id: 4
+          parent_id: 3
+          payload: 44
+          new_name: null
+        - id: 5
+          parent_id: null
+          payload: 55
+          new_name: null
+        - id: 6
+          parent_id: 2
+          payload: 66
+          new_name: null
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'np_rows',N'new_name') AS width
+      expect:
+        rows: 1
+        data:
+        - width: null
+    - connection: observer
+      sql: SELECT id,parent_id,payload FROM np_rows ORDER BY id
+      expect:
+        rows: 5
+        data:
+        - id: 1
+          parent_id: 1
+          payload: 11
+        - id: 3
+          parent_id: 99
+          payload: 33
+        - id: 4
+          parent_id: 3
+          payload: 44
+        - id: 5
+          parent_id: null
+          payload: 55
+        - id: 6
+          parent_id: 2
+          payload: 66
+    - connection: owner
+      sql: UPDATE np_rows SET new_name=(SELECT CONVERT(VARCHAR(49),ISNULL(name,'')) FROM np_source WHERE np_source.id=np_rows.parent_id) WHERE
+        new_name IS NULL
+    - connection: owner
+      sql: SELECT id,parent_id,payload,new_name FROM np_rows ORDER BY id
+      expect:
+        rows: 5
+        data:
+        - id: 1
+          parent_id: 1
+          payload: 11
+          new_name: alpha
+        - id: 3
+          parent_id: 99
+          payload: 33
+          new_name: null
+        - id: 4
+          parent_id: 3
+          payload: 44
+          new_name: ''
+        - id: 5
+          parent_id: null
+          payload: 55
+          new_name: null
+        - id: 6
+          parent_id: 2
+          payload: 66
+          new_name: ''
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM np_heartbeat
+      expect:
+        rows: 1
+        data:
+        - value: 9
+          depth: 1
+    - connection: observer
+      sql: SELECT value FROM np_heartbeat
+      expect:
+        rows: 1
+        data:
+        - value: 7
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,parent_id,payload,new_name FROM np_rows ORDER BY id
+      expect:
+        rows: 5
+        data:
+        - id: 1
+          parent_id: 1
+          payload: 11
+          new_name: alpha
+        - id: 3
+          parent_id: 99
+          payload: 33
+          new_name: null
+        - id: 4
+          parent_id: 3
+          payload: 44
+          new_name: ''
+        - id: 5
+          parent_id: null
+          payload: 55
+          new_name: null
+        - id: 6
+          parent_id: 2
+          payload: 66
+          new_name: ''
+    - connection: observer
+      sql: SELECT name,CAST(is_nullable AS INT) AS nullable_flag,default_object_id FROM sys.columns WHERE object_id=OBJECT_ID(N'np_rows') AND
+        name=N'new_name'
+      expect:
+        rows: 1
+        data:
+        - name: new_name
+          nullable_flag: 1
+          default_object_id: 0
+    - connection: observer
+      sql: SELECT value,@@TRANCOUNT AS depth FROM np_heartbeat
+      expect:
+        rows: 1
+        data:
+        - value: 9
+          depth: 0
+- name: Future omitted and explicit inputs remain distinct without an invented DEFAULT
+  sql: INSERT np_rows(id,parent_id,payload) VALUES(7,1,77); INSERT np_rows(id,parent_id,payload,new_name) VALUES(8,3,88,'explicit'); SELECT id,parent_id,payload,new_name
+    FROM np_rows ORDER BY id
+  expect:
+    rows: 7
+    data:
+    - id: 1
+      parent_id: 1
+      payload: 11
+      new_name: alpha
+    - id: 3
+      parent_id: 99
+      payload: 33
+      new_name: null
+    - id: 4
+      parent_id: 3
+      payload: 44
+      new_name: ''
+    - id: 5
+      parent_id: null
+      payload: 55
+      new_name: null
+    - id: 6
+      parent_id: 2
+      payload: 66
+      new_name: ''
+    - id: 7
+      parent_id: 1
+      payload: 77
+      new_name: null
+    - id: 8
+      parent_id: 3
+      payload: 88
+      new_name: explicit
+- name: Old projection inputs remain valid across private ADD and full rollback
+  tds:
+    statements:
+    - connection: owner
+      sql: SELECT id,parent_id,payload FROM np_rollback ORDER BY id
+      prepare: true
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          payload: 11
+        - id: 2
+          parent_id: 2
+          payload: 22
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: ALTER TABLE np_rollback ADD new_name VARCHAR(50) NULL
+    - connection: owner
+      sql: UPDATE np_rollback SET new_name=(SELECT CONVERT(VARCHAR(49),ISNULL(name,'')) FROM np_source WHERE np_source.id=np_rollback.parent_id)
+        WHERE new_name IS NULL
+    - connection: owner
+      sql: INSERT np_rollback(id,parent_id,payload,new_name) VALUES(3,3,33,'private')
+    - connection: owner
+      sql: SELECT id,parent_id,payload,new_name FROM np_rollback ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          parent_id: 1
+          payload: 11
+          new_name: alpha
+        - id: 2
+          parent_id: 2
+          payload: 22
+          new_name: ''
+        - id: 3
+          parent_id: 3
+          payload: 33
+          new_name: private
+    - connection: observer
+      sql: SELECT id,parent_id,payload FROM np_rollback ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          payload: 11
+        - id: 2
+          parent_id: 2
+          payload: 22
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: owner
+      sql: SELECT id,parent_id,payload FROM np_rollback ORDER BY id
+      prepare: true
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          payload: 11
+        - id: 2
+          parent_id: 2
+          payload: 22
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'np_rollback',N'new_name') AS width
+      expect:
+        rows: 1
+        data:
+        - width: null
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - depth: 0
+- name: A savepoint after ADD restores NULL cells and permits a new checked update
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: ALTER TABLE np_after_save ADD new_name VARCHAR(50) NULL
+    - connection: owner
+      sql: SAVE TRAN after_append
+    - connection: owner
+      sql: UPDATE np_after_save SET new_name=(SELECT CONVERT(VARCHAR(49),ISNULL(name,'')) FROM np_source WHERE np_source.id=np_after_save.parent_id)
+        WHERE new_name IS NULL
+    - connection: owner
+      sql: INSERT np_after_save(id,parent_id,payload,new_name) VALUES(3,1,33,'suffix')
+    - connection: owner
+      sql: ROLLBACK TRAN after_append
+    - connection: owner
+      sql: SELECT id,parent_id,payload,new_name FROM np_after_save ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          payload: 11
+          new_name: null
+        - id: 2
+          parent_id: 2
+          payload: 22
+          new_name: null
+    - connection: owner
+      sql: SELECT name,CAST(is_nullable AS INT) AS nullable_flag,default_object_id FROM sys.columns WHERE object_id=OBJECT_ID(N'np_after_save')
+        AND name=N'new_name'
+      expect:
+        rows: 1
+        data:
+        - name: new_name
+          nullable_flag: 1
+          default_object_id: 0
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - depth: 1
+    - connection: owner
+      sql: UPDATE np_after_save SET new_name=(SELECT CONVERT(VARCHAR(49),ISNULL(name,'')) FROM np_source WHERE np_source.id=np_after_save.parent_id)
+        WHERE new_name IS NULL
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,parent_id,payload,new_name FROM np_after_save ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          payload: 11
+          new_name: alpha
+        - id: 2
+          parent_id: 2
+          payload: 22
+          new_name: ''
+- name: A savepoint before ADD removes both declaration and row suffix while retaining unrelated prefix
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE np_heartbeat SET value=10 WHERE id=1
+    - connection: owner
+      sql: SAVE TRAN before_append
+    - connection: owner
+      sql: ALTER TABLE np_before_save ADD new_name VARCHAR(50) NULL
+    - connection: owner
+      sql: UPDATE np_before_save SET new_name=(SELECT CONVERT(VARCHAR(49),ISNULL(name,'')) FROM np_source WHERE np_source.id=np_before_save.parent_id)
+        WHERE new_name IS NULL
+    - connection: owner
+      sql: INSERT np_before_save(id,parent_id,payload,new_name) VALUES(3,1,33,'suffix')
+    - connection: owner
+      sql: ROLLBACK TRAN before_append
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'np_before_save',N'new_name') AS width
+      expect:
+        rows: 1
+        data:
+        - width: null
+    - connection: owner
+      sql: SELECT id,parent_id,payload FROM np_before_save ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          payload: 11
+        - id: 2
+          parent_id: 2
+          payload: 22
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM np_heartbeat
+      expect:
+        rows: 1
+        data:
+        - value: 10
+          depth: 1
+    - connection: observer
+      sql: SELECT value FROM np_heartbeat
+      expect:
+        rows: 1
+        data:
+        - value: 9
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,parent_id,payload FROM np_before_save ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          payload: 11
+        - id: 2
+          parent_id: 2
+          payload: 22
+    - connection: observer
+      sql: SELECT value FROM np_heartbeat
+      expect:
+        rows: 1
+        data:
+        - value: 10
+- name: A later transaction can reappend the aborted name with genuine clean NULL history
+  sql: ALTER TABLE np_before_save ADD new_name VARCHAR(50) NULL; SELECT id,parent_id,payload,new_name FROM np_before_save ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      parent_id: 1
+      payload: 11
+      new_name: null
+    - id: 2
+      parent_id: 2
+      payload: 22
+      new_name: null
+- name: A failed scalar UPDATE preserves NULL prefix and a committable original declaration
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: ALTER TABLE np_failure ADD new_name VARCHAR(50) NULL
+    - connection: owner
+      sql: UPDATE np_failure SET new_name=(SELECT name FROM np_duplicate WHERE np_duplicate.id=np_failure.parent_id)
+      expect:
+        error: true
+        contains:
+        - scalar subselect returned more than one row
+    - connection: owner
+      sql: SELECT id,parent_id,payload,new_name FROM np_failure ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          payload: 11
+          new_name: null
+        - id: 2
+          parent_id: 2
+          payload: 22
+          new_name: null
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - depth: 1
+    - connection: owner
+      sql: SELECT name,CAST(is_nullable AS INT) AS nullable_flag,default_object_id FROM sys.columns WHERE object_id=OBJECT_ID(N'np_failure') AND
+        name=N'new_name'
+      expect:
+        rows: 1
+        data:
+        - name: new_name
+          nullable_flag: 1
+          default_object_id: 0
+    - connection: owner
+      sql: UPDATE np_failure SET new_name=(SELECT CONVERT(VARCHAR(49),ISNULL(name,'')) FROM np_source WHERE np_source.id=np_failure.parent_id)
+        WHERE new_name IS NULL
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,parent_id,payload,new_name FROM np_failure ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 1
+          payload: 11
+          new_name: alpha
+        - id: 2
+          parent_id: 2
+          payload: 22
+          new_name: ''
+- name: An empty predecessor admits INSERT in the same transaction without historical backfill
+  sql: BEGIN TRAN; ALTER TABLE np_empty ADD new_name VARCHAR(50) NULL; INSERT np_empty(id,parent_id,payload) VALUES(1,1,11); INSERT np_empty(id,parent_id,payload,new_name)
+    VALUES(2,2,22,'new'); COMMIT TRAN; SELECT id,parent_id,payload,new_name FROM np_empty ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      parent_id: 1
+      payload: 11
+      new_name: null
+    - id: 2
+      parent_id: 2
+      payload: 22
+      new_name: new
+- name: sql checked UPDATE uses the same pending header and original rollback
+  session_id: nullable-prefix-sql
+  steps:
+  - syntax: sql
+    session_id: nullable-prefix-sql
+    sql: BEGIN
+  - syntax: sql
+    session_id: nullable-prefix-sql
+    sql: ALTER TABLE np_sql ADD COLUMN new_name VARCHAR(50) NULL
+  - syntax: sql
+    session_id: nullable-prefix-sql
+    sql: UPDATE np_sql SET new_name='bound' WHERE id=1
+  - syntax: sql
+    session_id: nullable-prefix-sql
+    sql: SELECT id,parent_id,payload,new_name FROM np_sql ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        parent_id: 1
+        payload: 11
+        new_name: bound
+      - id: 2
+        parent_id: 2
+        payload: 22
+        new_name: null
+  - syntax: sql
+    session_id: nullable-prefix-sql
+    sql: ROLLBACK
+  - syntax: sql
+    session_id: nullable-prefix-sql
+    sql: SELECT id,parent_id,payload FROM np_sql ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        parent_id: 1
+        payload: 11
+      - id: 2
+        parent_id: 2
+        payload: 22
+- name: postgresql checked UPDATE uses the same pending header and original rollback
+  session_id: nullable-prefix-postgresql
+  steps:
+  - syntax: postgresql
+    session_id: nullable-prefix-postgresql
+    sql: BEGIN
+  - syntax: postgresql
+    session_id: nullable-prefix-postgresql
+    sql: ALTER TABLE np_pg ADD COLUMN new_name VARCHAR(50) NULL
+  - syntax: postgresql
+    session_id: nullable-prefix-postgresql
+    sql: UPDATE np_pg SET new_name='bound' WHERE id=1
+  - syntax: postgresql
+    session_id: nullable-prefix-postgresql
+    sql: SELECT id,parent_id,payload,new_name FROM np_pg ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        parent_id: 1
+        payload: 11
+        new_name: bound
+      - id: 2
+        parent_id: 2
+        payload: 22
+        new_name: null
+  - syntax: postgresql
+    session_id: nullable-prefix-postgresql
+    sql: ROLLBACK
+  - syntax: postgresql
+    session_id: nullable-prefix-postgresql
+    sql: SELECT id,parent_id,payload FROM np_pg ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        parent_id: 1
+        payload: 11
+      - id: 2
+        parent_id: 2
+        payload: 22
+- name: An accepted append and checked row mutation share one durable decision
+  sql: BEGIN TRAN; ALTER TABLE np_crash ADD new_name VARCHAR(50) NULL; UPDATE np_crash SET new_name=(SELECT CONVERT(VARCHAR(49),ISNULL(name,''))
+    FROM np_source WHERE np_source.id=np_crash.parent_id) WHERE new_name IS NULL; INSERT np_crash(id,parent_id,payload) VALUES(3,1,33); COMMIT
+    TRAN; SELECT id,parent_id,payload,new_name FROM np_crash ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      parent_id: 1
+      payload: 11
+      new_name: alpha
+    - id: 2
+      parent_id: 2
+      payload: 22
+      new_name: ''
+    - id: 3
+      parent_id: 1
+      payload: 33
+      new_name: null
+- name: Crash after the accepted nullable prefix and row decision
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart the accepted nullable prefix decision
+  action: restart
+- name: Recovery restores genuine NULL prefixes and explicit checked values before exposure
+  sql: SELECT id,parent_id,payload,new_name FROM np_crash ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      parent_id: 1
+      payload: 11
+      new_name: alpha
+    - id: 2
+      parent_id: 2
+      payload: 22
+      new_name: ''
+    - id: 3
+      parent_id: 1
+      payload: 33
+      new_name: null
+- name: Recovered history never becomes a future DEFAULT
+  sql: INSERT np_crash(id,parent_id,payload) VALUES(4,2,44); SELECT id,parent_id,payload,new_name FROM np_crash ORDER BY id
+  expect:
+    rows: 4
+    data:
+    - id: 1
+      parent_id: 1
+      payload: 11
+      new_name: alpha
+    - id: 2
+      parent_id: 2
+      payload: 22
+      new_name: ''
+    - id: 3
+      parent_id: 1
+      payload: 33
+      new_name: null
+    - id: 4
+      parent_id: 2
+      payload: 44
+      new_name: null
+- name: An unaccepted append keeps declaration and checked rows private
+  session_id: np-abort-crash
+  steps:
+  - session_id: np-abort-crash
+    sql: BEGIN TRAN
+  - session_id: np-abort-crash
+    sql: ALTER TABLE np_uncommitted ADD new_name VARCHAR(50) NULL
+  - session_id: np-abort-crash
+    sql: UPDATE np_uncommitted SET new_name=(SELECT CONVERT(VARCHAR(49),ISNULL(name,'')) FROM np_source WHERE np_source.id=np_uncommitted.parent_id)
+      WHERE new_name IS NULL
+  - session_id: np-abort-crash
+    sql: SELECT id,parent_id,payload,new_name FROM np_uncommitted ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        parent_id: 1
+        payload: 11
+        new_name: alpha
+      - id: 2
+        parent_id: 2
+        payload: 22
+        new_name: ''
+- name: Crash without accepting the original nullable append
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart without the unaccepted nullable append
+  action: restart
+- name: Recovery excludes both unaccepted declaration and row suffix
+  sql: SELECT id,parent_id,payload FROM np_uncommitted ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      parent_id: 1
+      payload: 11
+    - id: 2
+      parent_id: 2
+      payload: 22
+- name: Recovered old metadata has no unaccepted nullable declaration
+  sql: SELECT COL_LENGTH(N'np_uncommitted',N'new_name') AS width
+  expect:
+    rows: 1
+    data:
+    - width: null

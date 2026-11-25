@@ -200,7 +200,7 @@ func (r *recMap) partForSourceShard(shard *storageShard) *recMapShard {
 // Guarded CASE/short-circuit consumers keep their row-bound probes. A general
 // batch conversion must preserve filtering and LIMIT before projection-only work.
 func recMapReadTarget(currentTx *TxContext, target recMapTarget, columns []string,
-	mapper, ifNull scm.Scmer) scm.Scmer {
+	mapper, ifNull scm.Scmer, columnInput nativeTableInput) scm.Scmer {
 	if target.shard == nil {
 		return scm.Apply(ifNull)
 	}
@@ -209,14 +209,15 @@ func recMapReadTarget(currentTx *TxContext, target recMapTarget, columns []strin
 	target.shard.ensureLoaded()
 	skipShardReadLock := target.shard.hasWriteOwnerForTx(currentTx)
 	target.shard.ensureMainCount(skipShardReadLock, currentTx)
+	initializedColumns := target.shard.initializedColumnInput(columnInput)
 	storages := make([]ColumnStorage, len(columns))
 	readers := make([]ColumnReader, len(columns))
 	for i, column := range columns {
-		storages[i] = target.shard.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
+		storages[i] = target.shard.getColumnStorageInput(column, skipShardReadLock, initializedColumns, currentTx)
 		// This explicitly row-bound fallback must not admit or lease a decoded
 		// dictionary in each outer probe. Prepared selected-domain consumers
 		// use the existing batch mapper below instead.
-		readers[i] = newCachedColumnReaderTx(storages[i], currentTx, false, ReadCompressed)
+		readers[i] = newCachedColumnReaderTx(storages[i], currentTx, false, ReadCompressed, nil, columnInput)
 	}
 	if !skipShardReadLock {
 		target.shard.mu.RLock()
@@ -229,7 +230,7 @@ func recMapReadTarget(currentTx *TxContext, target recMapTarget, columns []strin
 		} else if _, proxy := storages[i].(*StorageComputeProxy); proxy {
 			values[i] = readers[i].GetValue(target.recid)
 		} else {
-			values[i] = target.shard.getDelta(int(target.recid-target.shard.main_count), column)
+			values[i] = target.shard.getDeltaInput(int(target.recid-target.shard.main_count), column, initializedColumns)
 		}
 	}
 	return scm.Apply(mapper, values...)
@@ -274,19 +275,33 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 			}
 		}
 	}
+	type boundInput struct {
+		tx      *TxContext
+		columns nativeTableInput
+	}
+	inputs := make(map[*table]boundInput)
+	for shard := range groups {
+		if _, exists := inputs[shard.t]; !exists {
+			tx, columns, finish := shard.t.readDataContext(currentTx)
+			defer finish.release()
+			inputs[shard.t] = boundInput{tx, columns}
+		}
+	}
 	prepared := scm.PrepareSerialProc(mapper)
 	for shard, positions := range groups {
-		release := shard.acquireSnapshotRead(currentTx)
 		func() {
+			currentTx, columnInput := inputs[shard.t].tx, inputs[shard.t].columns
+			release := shard.acquireSnapshotRead(currentTx)
 			defer release.Release()
 			shard.ensureLoaded()
 			skipShardReadLock := shard.hasWriteOwnerForTx(currentTx)
 			shard.ensureMainCount(skipShardReadLock, currentTx)
+			initializedColumns := shard.initializedColumnInput(columnInput)
 			storages := make([]ColumnStorage, len(columns))
 			readers := make([]ColumnReader, len(columns))
 			for i, column := range columns {
-				storages[i] = shard.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
-				readers[i] = newCachedColumnReaderTx(storages[i], currentTx, false, projectionColumnReadHints(storages[i], len(positions), currentTx))
+				storages[i] = shard.getColumnStorageInput(column, skipShardReadLock, initializedColumns, currentTx)
+				readers[i] = newCachedColumnReaderTx(storages[i], currentTx, false, projectionColumnReadHints(storages[i], len(positions), currentTx), shard.t, columnInput)
 			}
 			if !skipShardReadLock {
 				shard.mu.RLock()
@@ -303,7 +318,7 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 					} else if _, proxy := storages[i].(*StorageComputeProxy); proxy {
 						position.values[i] = readers[i].GetValue(position.target.recid)
 					} else {
-						position.values[i] = shard.getDelta(int(position.target.recid-shard.main_count), column)
+						position.values[i] = shard.getDeltaInput(int(position.target.recid-shard.main_count), column, initializedColumns)
 					}
 				}
 			}
@@ -364,20 +379,48 @@ func newRecMapValueMapper(currentTx *TxContext, mapping *recMap, columns []strin
 	})
 }
 
-func recMapCallClosure(shard *storageShard, currentTx *TxContext) *func(uint32, ...scm.Scmer) scm.Scmer {
+func recMapCallClosure(shard *storageShard, currentTx *TxContext) (*func(uint32, ...scm.Scmer) scm.Scmer, func()) {
+	type dataInput struct {
+		context *TxContext
+		columns nativeTableInput
+		finish  nativeTableReadRelease
+	}
 	type cachedLookup struct {
 		mapping *recMap
 		part    *recMapShard
+		input   *dataInput
 	}
 	var cached atomic.Pointer[cachedLookup]
+	var closed atomic.Bool
+	var inputsMu, closeMu sync.Mutex
+	inputs := make(map[*table]*dataInput)
+	bindInput := func(target *table) *dataInput {
+		inputsMu.Lock()
+		defer inputsMu.Unlock()
+		if closed.Load() {
+			panic("native RecMap input has finished")
+		}
+		if target == nil {
+			return &dataInput{context: currentTx}
+		}
+		if input := inputs[target]; input != nil {
+			return input
+		}
+		context, columnInput, finish := target.readDataContext(currentTx)
+		inputs[target] = &dataInput{context: context, columns: columnInput, finish: finish}
+		return inputs[target]
+	}
 	fn := func(recid uint32, args ...scm.Scmer) scm.Scmer {
+		if closed.Load() {
+			panic("native RecMap input has finished")
+		}
 		if len(args) != 4 || !args[0].IsCustom(TagRecMap) {
 			panic("$recmap_call expects recmap, columns, mapperFn, and ifNullFn")
 		}
 		rm := RecMapFromScmer(args[0])
 		lookup := cached.Load()
 		if lookup == nil || lookup.mapping != rm {
-			lookup = &cachedLookup{mapping: rm, part: rm.partForSourceShard(shard)}
+			lookup = &cachedLookup{mapping: rm, part: rm.partForSourceShard(shard), input: bindInput(rm.target)}
 			cached.Store(lookup)
 		}
 		if lookup.part == nil {
@@ -390,9 +433,42 @@ func recMapCallClosure(shard *storageShard, currentTx *TxContext) *func(uint32, 
 			return scm.Apply(args[3])
 		}
 		columns := scmerSliceToStrings(mustScmerSlice(args[1], "$recmap_call columns"))
-		return recMapReadTarget(currentTx, lookup.part.targets[position], columns, args[2], args[3])
+		return recMapReadTarget(lookup.input.context, lookup.part.targets[position], columns, args[2], args[3], lookup.input.columns)
 	}
-	return &fn
+	closeInput := func() {
+		closeMu.Lock()
+		defer closeMu.Unlock()
+		closed.Store(true)
+		cached.Store(nil)
+		inputsMu.Lock()
+		pending := make([]*dataInput, 0, len(inputs))
+		for _, input := range inputs {
+			pending = append(pending, input)
+		}
+		inputsMu.Unlock()
+		var first any
+		for _, input := range pending {
+			if input.finish.topology == nil {
+				continue
+			}
+			func() {
+				defer func() {
+					if failure := recover(); failure != nil && first == nil {
+						first = failure
+					}
+				}()
+				input.finish.release()
+				input.finish, input.context = nativeTableReadRelease{}, nil
+			}()
+		}
+		if first != nil {
+			panic(first)
+		}
+		inputsMu.Lock()
+		inputs = nil
+		inputsMu.Unlock()
+	}
+	return &fn, closeInput
 }
 
 // recMapBuildRows is owned by one serial shard scan. The table-level combine
@@ -845,6 +921,17 @@ func (r *recMap) orderRecSet(currentTx *TxContext, sortSides, sortColumns []stri
 	if limit == 0 || r.count == 0 {
 		return result
 	}
+	inputs := make(map[*table]*TxContext, 2)
+	columnInputs := make(map[*table]nativeTableInput, 2)
+	for _, source := range []*table{r.source, r.target} {
+		if _, bound := inputs[source]; bound {
+			continue
+		}
+		dataTx, columnInput, finishData := source.readDataContext(currentTx)
+		inputs[source] = dataTx
+		columnInputs[source] = columnInput
+		defer finishData.release()
+	}
 	rows := make([]recMapOrderRow, 0, r.count)
 	for partIndex := range r.shards {
 		part := &r.shards[partIndex]
@@ -853,7 +940,7 @@ func (r *recMap) orderRecSet(currentTx *TxContext, sortSides, sortColumns []stri
 				sourceRecID: recid, target: part.targets[rowIndex], values: make([]scm.Scmer, len(sortColumns))})
 		}
 	}
-	fillRecMapOrderValues(currentTx, rows, sortSides, sortColumns)
+	fillRecMapOrderValues(inputs, columnInputs, rows, sortSides, sortColumns)
 	less := make([]func(scm.Scmer, scm.Scmer) bool, len(sortDirections))
 	for i, relation := range sortDirections {
 		less[i] = scm.OrderRelationLess(relation)
@@ -908,7 +995,7 @@ func (r *recMap) orderRecSet(currentTx *TxContext, sortSides, sortColumns []stri
 	return result
 }
 
-func fillRecMapOrderValues(currentTx *TxContext, rows []recMapOrderRow, sides, columns []string) {
+func fillRecMapOrderValues(inputs map[*table]*TxContext, columnInputs map[*table]nativeTableInput, rows []recMapOrderRow, sides, columns []string) {
 	for column, side := range sides {
 		groups := make(map[*storageShard][]int)
 		for rowIndex := range rows {
@@ -923,18 +1010,24 @@ func fillRecMapOrderValues(currentTx *TxContext, rows []recMapOrderRow, sides, c
 			}
 		}
 		for shard, indexes := range groups {
-			release := shard.acquireSnapshotRead(currentTx)
 			func() {
+				currentTx, bound := inputs[shard.t]
+				if !bound {
+					panic("ordered mapping lost its admitted source input")
+				}
+				release := shard.acquireSnapshotRead(currentTx)
 				defer release.Release()
 				shard.ensureLoaded()
 				skipLock := shard.hasWriteOwnerForTx(currentTx)
 				shard.ensureMainCount(skipLock, currentTx)
-				storage := shard.getColumnStorageOrPanic(columns[column], skipLock, currentTx)
+				columnInput := columnInputs[shard.t]
+				initializedColumns := shard.initializedColumnInput(columnInput)
+				storage := shard.getColumnStorageInput(columns[column], skipLock, initializedColumns, currentTx)
 				hints := ReadAuto
 				if currentTx != nil && currentTx.queryActive.Load() {
 					hints = ReadDecoded
 				}
-				reader := newCachedColumnReaderTx(storage, currentTx, false, hints)
+				reader := newCachedColumnReaderTx(storage, currentTx, false, hints, shard.t, columnInput)
 				if !skipLock {
 					shard.mu.RLock()
 					defer shard.mu.RUnlock()
@@ -949,7 +1042,7 @@ func fillRecMapOrderValues(currentTx *TxContext, rows []recMapOrderRow, sides, c
 					} else if _, proxy := storage.(*StorageComputeProxy); proxy {
 						rows[rowIndex].values[column] = reader.GetValue(recid)
 					} else {
-						rows[rowIndex].values[column] = shard.getDelta(int(recid-shard.main_count), columns[column])
+						rows[rowIndex].values[column] = shard.getDeltaInput(int(recid-shard.main_count), columns[column], initializedColumns)
 					}
 				}
 			}()
@@ -1001,7 +1094,7 @@ func scanRecMap(currentTx *TxContext, source scm.Scmer, accessSchema scm.Scmer, 
 	})
 	if sourceRecSet != nil {
 		sourceRecSet.scan(currentTx, accessSchema, accessValues, filterCols, filterFn,
-			callbackCols, reduce, scm.NewNil(), combine, false)
+			callbackCols, reduce, scm.NewNil(), combine, false, nil)
 	} else {
 		sourceTable.scan(currentTx, accessSchema, accessValues, filterCols, filterFn,
 			callbackCols, reduce, scm.NewNil(), combine, false)
@@ -1076,19 +1169,23 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 		return result
 	}
 	result.source = previous.source
+	sourceTx, sourceColumns, finishSource := previous.source.readDataContext(currentTx)
+	defer finishSource.release()
 	rows := make([]recMapSourceRow, 0, previous.count)
 	targetPositions := make(map[*storageShard][]int)
 	for partIndex := range previous.shards {
 		part := &previous.shards[partIndex]
 		func() {
+			currentTx, columnInput := sourceTx, sourceColumns
 			release := part.sourceShard.acquireSnapshotRead(currentTx)
 			defer release.Release()
 			part.sourceShard.ensureLoaded()
 			skipLock := part.sourceShard.hasWriteOwnerForTx(currentTx)
 			part.sourceShard.ensureMainCount(skipLock, currentTx)
+			initializedColumns := part.sourceShard.initializedColumnInput(columnInput)
 			storages := make([]ColumnStorage, len(sourceCols))
 			for i, column := range sourceCols {
-				storages[i] = part.sourceShard.getColumnStorageOrPanic(column, skipLock, currentTx)
+				storages[i] = part.sourceShard.getColumnStorageInput(column, skipLock, initializedColumns, currentTx)
 			}
 			if !skipLock {
 				part.sourceShard.mu.RLock()
@@ -1102,7 +1199,7 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 					} else if _, proxy := storages[columnIndex].(*StorageComputeProxy); proxy {
 						values[columnIndex] = storages[columnIndex].GetValue(recid)
 					} else {
-						values[columnIndex] = part.sourceShard.getDelta(int(recid-part.sourceShard.main_count), column)
+						values[columnIndex] = part.sourceShard.getDeltaInput(int(recid-part.sourceShard.main_count), column, initializedColumns)
 					}
 				}
 				rows = append(rows, recMapSourceRow{shard: part.sourceShard, recid: recid, key: values, target: part.targets[i]})
@@ -1113,16 +1210,30 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 			}
 		}()
 	}
+	type boundTarget struct {
+		tx      *TxContext
+		columns nativeTableInput
+	}
+	targetInputs := make(map[*table]boundTarget)
+	for shard := range targetPositions {
+		if _, exists := targetInputs[shard.t]; !exists {
+			tx, columns, finish := shard.t.readDataContext(currentTx)
+			defer finish.release()
+			targetInputs[shard.t] = boundTarget{tx, columns}
+		}
+	}
 	for shard, positions := range targetPositions {
 		func() {
+			currentTx, columnInput := targetInputs[shard.t].tx, targetInputs[shard.t].columns
 			release := shard.acquireSnapshotRead(currentTx)
 			defer release.Release()
 			shard.ensureLoaded()
 			skipLock := shard.hasWriteOwnerForTx(currentTx)
 			shard.ensureMainCount(skipLock, currentTx)
+			initializedColumns := shard.initializedColumnInput(columnInput)
 			storages := make([]ColumnStorage, len(previousTargetCols))
 			for i, column := range previousTargetCols {
-				storages[i] = shard.getColumnStorageOrPanic(column, skipLock, currentTx)
+				storages[i] = shard.getColumnStorageInput(column, skipLock, initializedColumns, currentTx)
 			}
 			if !skipLock {
 				shard.mu.RLock()
@@ -1137,7 +1248,7 @@ func extendRecMap(currentTx *TxContext, previous *recMap, sourceCols, previousTa
 					} else if _, proxy := storages[columnIndex].(*StorageComputeProxy); proxy {
 						value = storages[columnIndex].GetValue(previousTarget.recid)
 					} else {
-						value = shard.getDelta(int(previousTarget.recid-shard.main_count), column)
+						value = shard.getDeltaInput(int(previousTarget.recid-shard.main_count), column, initializedColumns)
 					}
 					rows[position].key = append(rows[position].key, value)
 				}
@@ -1195,6 +1306,8 @@ func (r *recSet) collectRecMapRows(currentTx *TxContext, sourceKeyCols []string,
 	if r == nil || r.table == nil || r.count == 0 {
 		return nil
 	}
+	currentTx, columnInput, finishData := r.table.readDataContext(currentTx)
+	defer finishData.release()
 	atomic.StoreUint64(&r.table.lastAccessed, uint64(time.Now().UnixNano()))
 	rows := make([]recMapSourceRow, 0, r.count)
 	ss := SessionStateFromTx(currentTx)
@@ -1214,12 +1327,13 @@ func (r *recSet) collectRecMapRows(currentTx *TxContext, sourceKeyCols []string,
 			shard.ensureLoaded()
 			skipShardReadLock := shard.hasWriteOwnerForTx(currentTx)
 			shard.ensureMainCount(skipShardReadLock, currentTx)
+			initializedColumns := shard.initializedColumnInput(columnInput)
 			allCols := append(append([]string(nil), sourceKeyCols...), valueCols...)
 			columns := make([]ColumnStorage, len(allCols))
 			readers := make([]ColumnReader, len(allCols))
 			for i, column := range allCols {
-				columns[i] = shard.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
-				readers[i] = newCachedColumnReaderTx(columns[i], currentTx, false, projectionColumnReadHints(columns[i], int(part.count), currentTx))
+				columns[i] = shard.getColumnStorageInput(column, skipShardReadLock, initializedColumns, currentTx)
+				readers[i] = newCachedColumnReaderTx(columns[i], currentTx, false, projectionColumnReadHints(columns[i], int(part.count), currentTx), shard.t, columnInput)
 			}
 			if !skipShardReadLock {
 				shard.mu.RLock()
@@ -1252,7 +1366,7 @@ func (r *recSet) collectRecMapRows(currentTx *TxContext, sourceKeyCols []string,
 					} else if _, proxy := columns[i].(*StorageComputeProxy); proxy {
 						item = readers[i].GetValue(recid)
 					} else {
-						item = shard.getDelta(int(recid-shard.main_count), column)
+						item = shard.getDeltaInput(int(recid-shard.main_count), column, initializedColumns)
 					}
 					if i < len(sourceKeyCols) {
 						key[i] = item
@@ -1277,10 +1391,12 @@ func recMapKeyHasNull(key []scm.Scmer) bool {
 	return false
 }
 
-func (r *recMap) image() *recSet {
+func (r *recMap) image(currentTx *TxContext) *recSet {
 	if r == nil || r.target == nil {
 		return &recSet{}
 	}
+	currentTx, _, finishData := r.target.readDataContext(currentTx)
+	defer finishData.release()
 	result := &recSet{table: r.target}
 	byShard := make(map[*storageShard][]uint32)
 	for _, part := range r.shards {
@@ -1300,7 +1416,7 @@ func (r *recMap) image() *recSet {
 			}
 		}
 		ids = ids[:write]
-		release := shard.acquireSnapshotRead(nil)
+		release := shard.acquireSnapshotRead(currentTx)
 		shard.mu.RLock()
 		universe := shard.main_count + uint32(len(shard.deltaRows()))
 		shard.mu.RUnlock()

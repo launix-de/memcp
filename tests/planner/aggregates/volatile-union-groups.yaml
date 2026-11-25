@@ -1,0 +1,82 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  syntax: tsql
+  description: Volatile UNION ALL groups stream one bag into native scoped relations
+setup:
+- sql: CREATE TABLE volatile_group_marker(id INT)
+- sql: CREATE TABLE volatile_group_values(id INT, category NVARCHAR(12) COLLATE utf8mb4_general_ci, amount INT)
+- sql: INSERT volatile_group_values VALUES(1,N'alpha',10),(2,N'ALPHA',20),(3,NULL,NULL),(4,N'beta',5),(5,NULL,7)
+cleanup:
+- sql: DROP TABLE IF EXISTS volatile_group_marker
+- sql: DROP TABLE IF EXISTS volatile_group_values
+test_cases:
+- name: A catalog branch and stored branch share bag and DISTINCT semantics
+  sql: |
+    SELECT COUNT(*) AS n,COUNT(DISTINCT category) AS kinds,SUM(amount) AS total
+    FROM (SELECT category,amount FROM volatile_group_values UNION ALL
+      SELECT CAST(N'Alpha' AS NVARCHAR(12)) COLLATE utf8mb4_general_ci,30
+      FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_group_marker') AS items
+  expect: {rows: 1,data: [{n: 6,kinds: 2,total: 72}]}
+- name: Group keys preserve NULL and declared case insensitive collation across branches
+  sql: |
+    SELECT category AS category,COUNT(*) AS n,COUNT(DISTINCT amount) AS kinds,SUM(amount) AS total
+    FROM (SELECT category,amount FROM volatile_group_values UNION ALL
+      SELECT CAST(N'Alpha' AS NVARCHAR(12)) COLLATE utf8mb4_general_ci,30
+      FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_group_marker') AS items
+    GROUP BY category ORDER BY COALESCE(category,N'')
+  expect: {rows: 3,data: [{category: null,n: 2,kinds: 1,total: 7},{category: alpha,n: 3,kinds: 3,total: 60},{category: beta,n: 1,kinds: 1,total: 5}]}
+- name: HAVING and ordered TOP apply after whole bag grouping
+  sql: |
+    SELECT TOP(1) LOWER(category) AS category,SUM(amount) AS total
+    FROM (SELECT category,amount FROM volatile_group_values UNION ALL
+      SELECT CAST(N'Alpha' AS NVARCHAR(12)) COLLATE utf8mb4_general_ci,30
+      FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_group_marker') AS items
+    GROUP BY category HAVING COUNT(*)>1 ORDER BY SUM(amount) DESC
+  expect: {rows: 1,data: [{category: alpha,total: 60}]}
+- name: Empty UNION bags preserve scalar aggregate neutral values
+  sql: |
+    SELECT COUNT(*) AS n,COUNT(DISTINCT category) AS kinds,SUM(amount) AS total
+    FROM (SELECT category,amount FROM volatile_group_values WHERE id<0 UNION ALL
+      SELECT CAST(N'Alpha' AS NVARCHAR(12)),30 FROM information_schema.tables
+      WHERE table_name=N'volatile_group_missing') AS items
+  expect: {rows: 1,data: [{n: 0,kinds: 0,total: null}]}
+- name: OFFSET applies to the completed ordered groups after HAVING
+  sql: |
+    SELECT category,SUM(amount) AS total
+    FROM (SELECT category,amount FROM volatile_group_values UNION ALL
+      SELECT CAST(N'Alpha' AS NVARCHAR(12)) COLLATE utf8mb4_general_ci,30
+      FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_group_marker') AS items
+    GROUP BY category HAVING COUNT(*)>1 ORDER BY SUM(amount) DESC OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY
+  expect: {rows: 1,data: [{category: null,total: 7}]}
+- name: Conflicting explicit branch collations are rejected by the shared SQL contract
+  sql: |
+    SELECT COUNT(DISTINCT category) AS kinds
+    FROM (SELECT category COLLATE utf8mb4_general_ci AS category FROM volatile_group_values UNION ALL
+      SELECT N'alpha' COLLATE utf8mb4_bin FROM information_schema.tables
+      WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_group_marker') AS items
+  expect: {error: true,contains: [collations]}
+- name: Separate invocations bind current session values before streaming
+  sql: |
+    DECLARE @offset INT=3,@value INT;
+    SELECT @value=SUM(amount+@offset) FROM (SELECT amount FROM volatile_group_values UNION ALL
+      SELECT 30 FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_group_marker') AS items;
+    SET @offset=7;
+    SELECT @value=SUM(amount+@offset) FROM (SELECT amount FROM volatile_group_values UNION ALL
+      SELECT 30 FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_group_marker') AS items;
+    SELECT @value AS total
+  expect: {rows: 1,data: [{total: 107}]}
+- name: Stored input mutation does not reuse an earlier volatile group payload
+  sql: INSERT volatile_group_values VALUES(6,N'gamma',11)
+  expect: {affected_rows: 1}
+- name: Runtime catalog membership can change between otherwise identical compilations
+  sql: DROP TABLE volatile_group_marker
+  expect: {rows: 0, result_not_contains: '"affected_rows"'}
+- name: A later volatile invocation observes current catalog and stored rows
+  sql: |
+    SELECT COUNT(*) AS n,COUNT(DISTINCT category) AS kinds,SUM(amount) AS total
+    FROM (SELECT category,amount FROM volatile_group_values UNION ALL
+      SELECT CAST(N'Alpha' AS NVARCHAR(12)) COLLATE utf8mb4_general_ci,30
+      FROM information_schema.tables WHERE table_catalog=N'memcp-tests' AND table_name=N'volatile_group_marker') AS items
+  expect: {rows: 1,data: [{n: 6,kinds: 3,total: 53}]}

@@ -98,10 +98,10 @@ setup:
       )
   - scm: |
       (begin
-        (insert (table "memcp-tests" false "lookup_group_items" false) '("id" "code" "bucket" "label")
+        (insert (table "memcp-tests" false "lookup_group_items" false nil) '("id" "code" "bucket" "label")
           (map (produceN 20000) (lambda (i)
             (list i (concat "c" i) (concat "b" (mod i 4)) (concat "label " i)))))
-        (rebuild (table "memcp-tests" false "lookup_group_items" false) true false)
+        (rebuild (table "memcp-tests" false "lookup_group_items" false nil) true false)
         20000)
 
 cleanup:
@@ -255,9 +255,9 @@ test_cases:
       - sql: "CREATE TABLE ungrouped_aggregate_perf (id INT PRIMARY KEY, value INT)"
       - scm: |
           (begin
-            (insert (table "memcp-tests" false "ungrouped_aggregate_perf" false) '("id" "value")
+            (insert (table "memcp-tests" false "ungrouped_aggregate_perf" false nil) '("id" "value")
               (map (produceN {rows}) (lambda (i) (list i i))))
-            (rebuild (table "memcp-tests" false "ungrouped_aggregate_perf" false) true false)
+            (rebuild (table "memcp-tests" false "ungrouped_aggregate_perf" false nil) true false)
             {rows})
     sql: "SELECT SUM(value) AS total FROM ungrouped_aggregate_perf"
     expect:
@@ -290,9 +290,9 @@ test_cases:
         (session "schema" "memcp-tests")
         (define resultrow (lambda (_row) true))
         (define formula
-          (cached_parse (newcachemap) (list parse_sql) "memcp-tests"
+          (cached_parse (newcachemap) "sql" (list parse_sql) "memcp-tests"
             "SELECT bucket AS value, COUNT(*) AS amount FROM lookup_group_items WHERE TRUE GROUP BY bucket"
-            (lambda (_schema _table _write) true) "root" session true))
+            (lambda (_schema _table _write) true) "root" session true nil))
         (define elapsed
           (with_session session (lambda ()
             (with_autocommit session nil 0 "group lookup setup" (lambda (tx) (begin
@@ -344,7 +344,7 @@ test_cases:
     scm: |
       (begin
         (define plan (serialize (optimize
-          (compile_scan_plan 'scan nil (list 'table "memcp-tests" false "lookup_group_items" false)
+          (compile_scan_plan 'scan nil (list 'table "memcp-tests" false "lookup_group_items" false nil)
             (list "id") (list 'lambda (list 'id) true)
             (list "id") (list 'lambda (list 'acc 'id)
               (list 'set_assoc 'acc 'id
@@ -358,7 +358,7 @@ test_cases:
     scm: |
       (begin
         (define plan (serialize (optimize
-          (compile_scan_plan 'scan nil (list 'table "memcp-tests" false "lookup_group_items" false)
+          (compile_scan_plan 'scan nil (list 'table "memcp-tests" false "lookup_group_items" false nil)
             (list "id") (list 'lambda (list 'id) true)
             (list "id") (list 'lambda (list 'acc 'id)
               (list 'begin
@@ -373,7 +373,7 @@ test_cases:
     scm: |
       (begin
         (define plan (serialize (optimize
-          (compile_scan_plan 'scan nil (list 'table "memcp-tests" false "lookup_group_items" false)
+          (compile_scan_plan 'scan nil (list 'table "memcp-tests" false "lookup_group_items" false nil)
             (list "id") (list 'lambda (list 'id) true)
             (list "id") (list 'lambda (list 'acc 'id)
               (list 'set_assoc 'acc 'id true))
@@ -386,7 +386,7 @@ test_cases:
     scm: |
       (begin
         (define plan (serialize (optimize
-          (compile_scan_plan 'scan nil (list 'table "memcp-tests" false "lookup_group_items" false)
+          (compile_scan_plan 'scan nil (list 'table "memcp-tests" false "lookup_group_items" false nil)
             (list "id") (list 'lambda (list 'id) true)
             (list "id") (list 'lambda (list 'acc 'id)
               (list 'begin (list 'set_assoc 'acc 'id true) 'id))
@@ -407,7 +407,7 @@ test_cases:
             'acc
             (list merge 'acc 'value))))
         (define plan (serialize (optimize
-          (compile_scan_plan 'scan nil (list 'table "memcp-tests" false "lookup_group_items" false)
+          (compile_scan_plan 'scan nil (list 'table "memcp-tests" false "lookup_group_items" false nil)
             (list "id") (list 'lambda (list 'id) true)
             (list "id") (list 'lambda (list 'acc 'id)
               (list wrapped 'acc

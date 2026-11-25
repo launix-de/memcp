@@ -1,0 +1,346 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Default catalog joins retain complete named declarations and avoid repeated inner metadata work
+  syntax: sql
+  isolated: true
+  reuse_fixture: true
+  restart_after_setup: true
+setup:
+- sql: DROP TABLE IF EXISTS catalog_default_000
+- sql: DROP TABLE IF EXISTS catalog_default_001
+- sql: DROP TABLE IF EXISTS catalog_default_002
+- sql: DROP TABLE IF EXISTS catalog_default_003
+- sql: DROP TABLE IF EXISTS catalog_default_004
+- sql: DROP TABLE IF EXISTS catalog_default_005
+- sql: DROP TABLE IF EXISTS catalog_default_006
+- sql: DROP TABLE IF EXISTS catalog_default_007
+- sql: DROP TABLE IF EXISTS catalog_default_008
+- sql: DROP TABLE IF EXISTS catalog_default_009
+- sql: DROP TABLE IF EXISTS catalog_default_010
+- sql: DROP TABLE IF EXISTS catalog_default_011
+- sql: DROP TABLE IF EXISTS catalog_default_012
+- sql: DROP TABLE IF EXISTS catalog_default_013
+- sql: DROP TABLE IF EXISTS catalog_default_014
+- sql: DROP TABLE IF EXISTS catalog_default_015
+- sql: DROP TABLE IF EXISTS catalog_default_016
+- sql: DROP TABLE IF EXISTS catalog_default_017
+- sql: DROP TABLE IF EXISTS catalog_default_018
+- sql: DROP TABLE IF EXISTS catalog_default_019
+- sql: DROP TABLE IF EXISTS catalog_default_020
+- sql: DROP TABLE IF EXISTS catalog_default_021
+- sql: DROP TABLE IF EXISTS catalog_default_022
+- sql: DROP TABLE IF EXISTS catalog_default_023
+- scm: "(createtable \"memcp-tests\" \"catalog_default_000\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_000\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_000_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_001\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_001\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_001_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_002\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_002\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_002_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_003\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_003\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_003_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_004\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_004\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_004_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_005\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_005\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_005_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_006\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_006\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_006_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_007\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_007\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_007_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_008\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_008\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_008_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_009\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_009\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_009_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_010\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_010\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_010_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_011\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_011\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_011_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_012\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_012\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_012_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_013\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_013\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_013_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_014\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_014\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_014_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_015\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_015\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_015_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_016\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_016\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_016_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_017\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_017\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_017_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_018\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_018\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_018_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_019\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_019\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_019_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_020\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_020\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_020_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_021\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_021\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_021_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_022\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_022\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_022_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+- scm: "(createtable \"memcp-tests\" \"catalog_default_023\" (list\n (list \"column\" \"id\" \"INT\" '() '(\"primary\"\
+    \ true))\n (list \"column\" \"flag\" \"INT\" '() '(\"default\" 9 \"default_name\" \"legacy_default_023\"))\n\
+    \ (list \"column\" \"quantity\" \"INT\" '() '(\"default\" 3 \"default_name\" \"DF_catalog_default_023_quantity\"\
+    ))\n (list \"column\" \"plain_a\" \"INT\" '() '())\n (list \"column\" \"plain_b\" \"INT\" '() '())\n (list \"\
+    column\" \"plain_c\" \"INT\" '() '())) '(\"engine\" \"safe\") false nil)"
+test_cases:
+- name: Default owner and legacy column joins retain every nonstandard declaration
+  syntax: tsql
+  sql: "SELECT   \n        b.name AS TABLE_NAME, \n        d.name AS COLUMN_NAME, \n        a.name AS CONSTRAINT_NAME,\
+    \ \n        c.text AS DEFAULT_VALUE,\n        'DF_' + b.name + '_' + d.name AS STANDARD_NAME\n\nFROM sys.objects\
+    \ a INNER JOIN \n        (SELECT name, object_id \n         FROM sys.objects  \n         WHERE type = 'U') b\
+    \ on (a.parent_object_id = b.object_id) \n                      INNER JOIN sys.syscomments c ON (a.object_id\
+    \ = c.id) \n                      INNER JOIN sys.syscolumns d ON (d.cdefault = a.object_id)                \
+    \                           \n WHERE a.type = 'D' and a.name <> 'DF_' + b.name + '_' + d.name\n and schema_name(schema_id)='dbo'\n\
+    \ ORDER BY b.name, a.name"
+  performance_rows: 24
+  warmup: 0
+  timing_samples: 3
+  timing_aggregation: total
+  threshold_ms: 20000
+  expect:
+    rows: 24
+    data:
+    - TABLE_NAME: catalog_default_000
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_000
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_000_flag
+    - TABLE_NAME: catalog_default_001
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_001
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_001_flag
+    - TABLE_NAME: catalog_default_002
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_002
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_002_flag
+    - TABLE_NAME: catalog_default_003
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_003
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_003_flag
+    - TABLE_NAME: catalog_default_004
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_004
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_004_flag
+    - TABLE_NAME: catalog_default_005
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_005
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_005_flag
+    - TABLE_NAME: catalog_default_006
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_006
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_006_flag
+    - TABLE_NAME: catalog_default_007
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_007
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_007_flag
+    - TABLE_NAME: catalog_default_008
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_008
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_008_flag
+    - TABLE_NAME: catalog_default_009
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_009
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_009_flag
+    - TABLE_NAME: catalog_default_010
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_010
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_010_flag
+    - TABLE_NAME: catalog_default_011
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_011
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_011_flag
+    - TABLE_NAME: catalog_default_012
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_012
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_012_flag
+    - TABLE_NAME: catalog_default_013
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_013
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_013_flag
+    - TABLE_NAME: catalog_default_014
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_014
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_014_flag
+    - TABLE_NAME: catalog_default_015
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_015
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_015_flag
+    - TABLE_NAME: catalog_default_016
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_016
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_016_flag
+    - TABLE_NAME: catalog_default_017
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_017
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_017_flag
+    - TABLE_NAME: catalog_default_018
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_018
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_018_flag
+    - TABLE_NAME: catalog_default_019
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_019
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_019_flag
+    - TABLE_NAME: catalog_default_020
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_020
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_020_flag
+    - TABLE_NAME: catalog_default_021
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_021
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_021_flag
+    - TABLE_NAME: catalog_default_022
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_022
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_022_flag
+    - TABLE_NAME: catalog_default_023
+      COLUMN_NAME: flag
+      CONSTRAINT_NAME: legacy_default_023
+      DEFAULT_VALUE: '9'
+      STANDARD_NAME: DF_catalog_default_023_flag
+- name: An invocation catalog COUNT reduces business cardinality before native group insertion
+  syntax: tsql
+  setup:
+  - sql: CREATE TABLE catalog_count_rows(id INT PRIMARY KEY)
+  - scm: |
+      (begin
+        (define rows (try
+          (lambda () (table "memcp-tests" false "catalog_count_rows" false nil))
+          (lambda (cause)
+            (if (and (string? cause)
+              (equal? cause "table expects database, database_ignorecase, name, name_ignorecase"))
+              (table "memcp-tests" false "catalog_count_rows" false)
+              (error cause)))))
+        (insert rows (list "id")
+          (map (produceN 8192) (lambda (id) (list id))))
+        (rebuild rows true false))
+  sql: |
+    SELECT COUNT(*) AS n FROM catalog_count_rows b
+    JOIN syscolumns c ON c.name=N'id'
+    JOIN sysobjects o ON o.id=c.id AND o.name=N'catalog_count_rows'
+    WHERE OBJECTPROPERTY(o.id,N'IsUserTable')=1 AND b.id>=0
+  expect: {rows: 1,data: [{n: 8192}]}
+  cleanup:
+  - sql: DROP TABLE IF EXISTS catalog_count_rows
+  performance_rows: 8192
+  threshold_ms: 1500
+  warmup: 0
+  timing_samples: 3
+  timing_aggregation: total
+
+cleanup:
+- sql: DROP TABLE catalog_default_023
+- sql: DROP TABLE catalog_default_022
+- sql: DROP TABLE catalog_default_021
+- sql: DROP TABLE catalog_default_020
+- sql: DROP TABLE catalog_default_019
+- sql: DROP TABLE catalog_default_018
+- sql: DROP TABLE catalog_default_017
+- sql: DROP TABLE catalog_default_016
+- sql: DROP TABLE catalog_default_015
+- sql: DROP TABLE catalog_default_014
+- sql: DROP TABLE catalog_default_013
+- sql: DROP TABLE catalog_default_012
+- sql: DROP TABLE catalog_default_011
+- sql: DROP TABLE catalog_default_010
+- sql: DROP TABLE catalog_default_009
+- sql: DROP TABLE catalog_default_008
+- sql: DROP TABLE catalog_default_007
+- sql: DROP TABLE catalog_default_006
+- sql: DROP TABLE catalog_default_005
+- sql: DROP TABLE catalog_default_004
+- sql: DROP TABLE catalog_default_003
+- sql: DROP TABLE catalog_default_002
+- sql: DROP TABLE catalog_default_001
+- sql: DROP TABLE catalog_default_000

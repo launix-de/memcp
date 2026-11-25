@@ -1,0 +1,593 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Legacy login catalog projects native account identity and durable SQL-login registration/change dates; historical
+    accounts are adopted once without inventing prior native history
+setup:
+- scm: (if (has? (show) "master") true (createdatabase "master"))
+- scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s nil
+    0 "CREATE USER login_catalog_member IDENTIFIED BY 'pw'" (lambda (tx) (mysql_run_sql_statement tx "system" "CREATE USER login_catalog_member
+    IDENTIFIED BY 'pw'" s (lambda (_row) true) (lambda args true)))))
+- scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s nil
+    0 "GRANT ALL ON `memcp-tests`.* TO login_catalog_member" (lambda (tx) (mysql_run_sql_statement tx "system" "GRANT ALL ON `memcp-tests`.*
+    TO login_catalog_member" s (lambda (_row) true) (lambda args true)))))
+- scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s nil
+    0 "CREATE USER login_catalog_other IDENTIFIED BY 'pw'" (lambda (tx) (mysql_run_sql_statement tx "system" "CREATE USER login_catalog_other
+    IDENTIFIED BY 'pw'" s (lambda (_row) true) (lambda args true)))))
+- scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s nil
+    0 "GRANT ALL ON `memcp-tests`.* TO login_catalog_other" (lambda (tx) (mysql_run_sql_statement tx "system" "GRANT ALL ON `memcp-tests`.*
+    TO login_catalog_other" s (lambda (_row) true) (lambda args true)))))
+- scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s nil
+    0 "GRANT ALL ON `master`.* TO login_catalog_member" (lambda (tx) (mysql_run_sql_statement tx "system" "GRANT ALL ON `master`.*
+    TO login_catalog_member" s (lambda (_row) true) (lambda args true)))))
+- sql: CREATE TABLE login_catalog_saved(name NVARCHAR(128) PRIMARY KEY,sid VARBINARY(85),created DATETIME,changed DATETIME)
+- sql: INSERT login_catalog_saved SELECT name,sid,createdate,updatedate FROM sys.syslogins WHERE name IN(N'root',N'login_catalog_member',N'login_catalog_other')
+cleanup:
+- sql: DROP TABLE IF EXISTS login_catalog_saved
+- scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s nil
+    0 "DROP USER IF EXISTS login_catalog_added" (lambda (tx) (mysql_run_sql_statement tx "system" "DROP USER IF EXISTS login_catalog_added"
+    s (lambda (_row) true) (lambda args true)))))
+- scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s nil
+    0 "DROP USER IF EXISTS login_catalog_other" (lambda (tx) (mysql_run_sql_statement tx "system" "DROP USER IF EXISTS login_catalog_other"
+    s (lambda (_row) true) (lambda args true)))))
+- scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s nil
+    0 "DROP USER IF EXISTS login_catalog_member" (lambda (tx) (mysql_run_sql_statement tx "system" "DROP USER IF EXISTS login_catalog_member"
+    s (lambda (_row) true) (lambda args true)))))
+test_cases:
+- name: Native administrator sees real account names and fixed-role membership
+  sql: SELECT name,loginname,sysadmin,securityadmin,serveradmin,setupadmin,processadmin,diskadmin,dbcreator,bulkadmin,hasaccess,isntname,isntgroup,isntuser,denylogin,password
+    FROM sys.syslogins WHERE name IN(N'root',N'login_catalog_member',N'login_catalog_other') ORDER BY name
+  expect:
+    rows: 3
+    data:
+    - name: login_catalog_member
+      loginname: login_catalog_member
+      sysadmin: 0
+      securityadmin: 0
+      serveradmin: 0
+      setupadmin: 0
+      processadmin: 0
+      diskadmin: 0
+      dbcreator: 0
+      bulkadmin: 0
+      hasaccess: 1
+      isntname: 0
+      isntgroup: 0
+      isntuser: 0
+      denylogin: 0
+      password: null
+    - name: login_catalog_other
+      loginname: login_catalog_other
+      sysadmin: 0
+      securityadmin: 0
+      serveradmin: 0
+      setupadmin: 0
+      processadmin: 0
+      diskadmin: 0
+      dbcreator: 0
+      bulkadmin: 0
+      hasaccess: 1
+      isntname: 0
+      isntgroup: 0
+      isntuser: 0
+      denylogin: 0
+      password: null
+    - name: root
+      loginname: root
+      sysadmin: 1
+      securityadmin: 0
+      serveradmin: 0
+      setupadmin: 0
+      processadmin: 0
+      diskadmin: 0
+      dbcreator: 0
+      bulkadmin: 0
+      hasaccess: 1
+      isntname: 0
+      isntgroup: 0
+      isntuser: 0
+      denylogin: 0
+      password: null
+- name: Nonadministrator sees only its own native account
+  sql: SELECT name,loginname,sysadmin,password FROM sys.syslogins ORDER BY name
+  expect:
+    rows: 1
+    data:
+    - name: login_catalog_member
+      loginname: login_catalog_member
+      sysadmin: 0
+      password: null
+  username: login_catalog_member
+  password: pw
+  session_id: login-catalog-member
+- name: Explicit master catalog has the same unprivileged visibility
+  sql: SELECT name,sysadmin,password FROM master.sys.syslogins ORDER BY name
+  expect:
+    rows: 1
+    data:
+    - name: login_catalog_member
+      sysadmin: 0
+      password: null
+  username: login_catalog_member
+  password: pw
+- name: Current login SID is the same declared native principal as the modern catalog
+  sql: SELECT l.name,CASE WHEN l.sid=p.sid AND l.sid=SUSER_SID() THEN 1 ELSE 0 END AS same_sid FROM sys.syslogins l INNER JOIN
+    sys.server_principals p ON l.sid=p.sid WHERE l.name=SUSER_SNAME()
+  expect:
+    rows: 1
+    data:
+    - name: root
+      same_sid: 1
+- name: Legacy names resolve without a sys qualifier
+  sql: SELECT name,loginname FROM syslogins WHERE name=SUSER_SNAME()
+  expect:
+    rows: 1
+    data:
+    - name: root
+      loginname: root
+- name: Catalog lookup shares the existing declared virtual identity
+  sql: SELECT OBJECT_NAME(OBJECT_ID(N'sys.syslogins',N'V')) AS catalog_name,CASE WHEN OBJECT_ID(N'sys.syslogins',N'U') IS NULL
+    THEN 1 ELSE 0 END AS not_table
+  expect:
+    rows: 1
+    data:
+    - catalog_name: syslogins
+      not_table: 1
+- name: No password material is exposed even to the native administrator
+  sql: SELECT name,password FROM sys.syslogins WHERE name IN(N'root',N'login_catalog_member',N'login_catalog_other') ORDER BY name
+  expect:
+    rows: 3
+    data:
+    - name: login_catalog_member
+      password: null
+    - name: login_catalog_other
+      password: null
+    - name: root
+      password: null
+- name: Absent legacy usage metrics and login defaults remain explicitly nullable
+  sql: SELECT name,status,totcpu,totio,spacelimit,timelimit,resultlimit,dbname,language FROM sys.syslogins WHERE name=N'root'
+  expect:
+    rows: 1
+    data:
+    - name: root
+      status: null
+      totcpu: null
+      totio: null
+      spacelimit: null
+      timelimit: null
+      resultlimit: null
+      dbname: null
+      language: null
+- name: SQL-login registration and change dates are real persisted native values
+  sql: SELECT name,CASE WHEN createdate IS NOT NULL AND updatedate IS NOT NULL AND accdate=createdate AND createdate<=GETDATE()
+    AND updatedate<=GETDATE() THEN 1 ELSE 0 END AS registered FROM sys.syslogins WHERE name IN(N'root',N'login_catalog_member',N'login_catalog_other')
+    ORDER BY name
+  expect:
+    rows: 3
+    data:
+    - name: login_catalog_member
+      registered: 1
+    - name: login_catalog_other
+      registered: 1
+    - name: root
+      registered: 1
+- name: All legacy login columns bind with their declared SQL wire types
+  tds:
+    statements:
+    - sql: SELECT [sid],[status],[createdate],[updatedate],[accdate],[totcpu],[totio],[spacelimit],[timelimit],[resultlimit],[name],[dbname],[password],[language],[denylogin],[hasaccess],[isntname],[isntgroup],[isntuser],[sysadmin],[securityadmin],[serveradmin],[setupadmin],[processadmin],[diskadmin],[dbcreator],[bulkadmin],[loginname]
+        FROM master.sys.syslogins WHERE 1=0
+      expect:
+        rows: 0
+        column_types:
+        - name: sid
+          type: VARBINARY
+          length: 85
+        - name: status
+          type: SMALLINT
+        - name: createdate
+          type: DATETIME
+        - name: updatedate
+          type: DATETIME
+        - name: accdate
+          type: DATETIME
+        - name: totcpu
+          type: INT
+        - name: totio
+          type: INT
+        - name: spacelimit
+          type: INT
+        - name: timelimit
+          type: INT
+        - name: resultlimit
+          type: INT
+        - name: name
+          type: NVARCHAR
+          length: 128
+        - name: dbname
+          type: NVARCHAR
+          length: 128
+        - name: password
+          type: NVARCHAR
+          length: 128
+        - name: language
+          type: NVARCHAR
+          length: 128
+        - name: denylogin
+          type: INT
+        - name: hasaccess
+          type: INT
+        - name: isntname
+          type: INT
+        - name: isntgroup
+          type: INT
+        - name: isntuser
+          type: INT
+        - name: sysadmin
+          type: INT
+        - name: securityadmin
+          type: INT
+        - name: serveradmin
+          type: INT
+        - name: setupadmin
+          type: INT
+        - name: processadmin
+          type: INT
+        - name: diskadmin
+          type: INT
+        - name: dbcreator
+          type: INT
+        - name: bulkadmin
+          type: INT
+        - name: loginname
+          type: NVARCHAR
+          length: 128
+- name: Registered login dates retain SQLServer nonnullable metadata
+  tds:
+    statements:
+    - sql: SELECT [sid],[status],[createdate],[updatedate],[accdate],[totcpu],[totio],[spacelimit],[timelimit],[resultlimit],[name],[dbname],[password],[language],[denylogin],[hasaccess],[isntname],[isntgroup],[isntuser],[sysadmin],[securityadmin],[serveradmin],[setupadmin],[processadmin],[diskadmin],[dbcreator],[bulkadmin],[loginname]
+        FROM master.sys.syslogins WHERE 1=0
+      expect:
+        rows: 0
+        column_types:
+        - name: sid
+          type: VARBINARY
+          length: 85
+          nullable: true
+        - name: status
+          type: SMALLINT
+          nullable: true
+        - name: createdate
+          type: DATETIME
+          nullable: false
+        - name: updatedate
+          type: DATETIME
+          nullable: false
+        - name: accdate
+          type: DATETIME
+          nullable: false
+        - name: totcpu
+          type: INT
+          nullable: true
+        - name: totio
+          type: INT
+          nullable: true
+        - name: spacelimit
+          type: INT
+          nullable: true
+        - name: timelimit
+          type: INT
+          nullable: true
+        - name: resultlimit
+          type: INT
+          nullable: true
+        - name: name
+          type: NVARCHAR
+          length: 128
+          nullable: false
+        - name: dbname
+          type: NVARCHAR
+          length: 128
+          nullable: true
+        - name: password
+          type: NVARCHAR
+          length: 128
+          nullable: true
+        - name: language
+          type: NVARCHAR
+          length: 128
+          nullable: true
+        - name: denylogin
+          type: INT
+          nullable: true
+        - name: hasaccess
+          type: INT
+          nullable: true
+        - name: isntname
+          type: INT
+          nullable: true
+        - name: isntgroup
+          type: INT
+          nullable: true
+        - name: isntuser
+          type: INT
+          nullable: true
+        - name: sysadmin
+          type: INT
+          nullable: true
+        - name: securityadmin
+          type: INT
+          nullable: true
+        - name: serveradmin
+          type: INT
+          nullable: true
+        - name: setupadmin
+          type: INT
+          nullable: true
+        - name: processadmin
+          type: INT
+          nullable: true
+        - name: diskadmin
+          type: INT
+          nullable: true
+        - name: dbcreator
+          type: INT
+          nullable: true
+        - name: bulkadmin
+          type: INT
+          nullable: true
+        - name: loginname
+          type: NVARCHAR
+          length: 128
+          nullable: false
+- name: A warm catalog lookup observes an absent native account
+  session_id: login-catalog-admin
+  sql: SELECT name,sysadmin FROM sys.syslogins WHERE name=N'login_catalog_added'
+  expect:
+    rows: 0
+    data: []
+- name: Native account creation is visible to an already compiled catalog query
+  setup:
+  - scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s
+      nil 0 "CREATE USER login_catalog_added IDENTIFIED BY 'pw'" (lambda (tx) (mysql_run_sql_statement tx "system" "CREATE USER
+      login_catalog_added IDENTIFIED BY 'pw'" s (lambda (_row) true) (lambda args true)))))
+  cleanup:
+  - scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s
+      nil 0 "DROP USER IF EXISTS login_catalog_added" (lambda (tx) (mysql_run_sql_statement tx "system" "DROP USER IF EXISTS login_catalog_added"
+      s (lambda (_row) true) (lambda args true)))))
+  sql: SELECT name,sysadmin FROM sys.syslogins WHERE name=N'login_catalog_added'
+  expect:
+    rows: 1
+    data:
+    - name: login_catalog_added
+      sysadmin: 0
+  session_id: login-catalog-admin
+- name: Revoking native database membership revokes cached catalog admission
+  setup:
+  - scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s
+      nil 0 "REVOKE ALL ON `memcp-tests`.* FROM login_catalog_member" (lambda (tx) (mysql_run_sql_statement tx "system" "REVOKE
+      ALL ON `memcp-tests`.* FROM login_catalog_member" s (lambda (_row) true) (lambda args true)))))
+  cleanup:
+  - scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s
+      nil 0 "GRANT ALL ON `memcp-tests`.* TO login_catalog_member" (lambda (tx) (mysql_run_sql_statement tx "system" "GRANT ALL
+      ON `memcp-tests`.* TO login_catalog_member" s (lambda (_row) true) (lambda args true)))))
+  username: login_catalog_member
+  password: pw
+  session_id: login-catalog-member
+  sql: SELECT name FROM sys.syslogins
+  expect:
+    error: true
+    contains: access denied
+- name: Restored native membership reopens the same catalog with the same account
+  sql: SELECT name,sysadmin FROM sys.syslogins
+  expect:
+    rows: 1
+    data:
+    - name: login_catalog_member
+      sysadmin: 0
+  username: login_catalog_member
+  password: pw
+  session_id: login-catalog-member
+- name: Underlying private credential table stays inaccessible
+  sql: SELECT password FROM system.user
+  expect:
+    error: true
+    contains: access denied
+  username: login_catalog_member
+  password: pw
+- name: Changing the actual native administrator capability refreshes catalog visibility
+  setup:
+  - scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s
+      nil 0 "UPDATE system.user SET admin=TRUE WHERE username='login_catalog_member'" (lambda (tx) (mysql_run_sql_statement tx
+      "system" "UPDATE system.user SET admin=TRUE WHERE username='login_catalog_member'" s (lambda (_row) true) (lambda args true)))))
+  cleanup:
+  - scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s
+      nil 0 "UPDATE system.user SET admin=FALSE WHERE username='login_catalog_member'" (lambda (tx) (mysql_run_sql_statement tx
+      "system" "UPDATE system.user SET admin=FALSE WHERE username='login_catalog_member'" s (lambda (_row) true) (lambda args true)))))
+  username: login_catalog_member
+  password: pw
+  session_id: login-catalog-member
+  sql: SELECT name,sysadmin FROM sys.syslogins WHERE name IN(N'root',N'login_catalog_member',N'login_catalog_other') ORDER BY name
+  expect:
+    rows: 3
+    data:
+    - name: login_catalog_member
+      sysadmin: 1
+    - name: login_catalog_other
+      sysadmin: 0
+    - name: root
+      sysadmin: 1
+- name: Removing the actual administrator capability restores current-login visibility
+  username: login_catalog_member
+  password: pw
+  session_id: login-catalog-member
+  sql: SELECT name,sysadmin FROM sys.syslogins ORDER BY name
+  expect:
+    rows: 1
+    data:
+    - name: login_catalog_member
+      sysadmin: 0
+- name: Repeated account metadata initialization retains registration identity and dates
+  scm: (sql_initialize_account_incarnations)
+  expect:
+    result: true
+- name: Save the actual post-change metadata before an unchanged update
+  sql: DELETE FROM login_catalog_saved; INSERT login_catalog_saved SELECT name,sid,createdate,updatedate FROM sys.syslogins WHERE
+    name IN(N'root',N'login_catalog_member',N'login_catalog_other'); SELECT l.name,CASE WHEN l.sid=s.sid AND l.createdate=s.created
+    AND l.updatedate=s.changed THEN 1 ELSE 0 END AS unchanged FROM sys.syslogins l INNER JOIN login_catalog_saved s ON l.name=s.name
+    ORDER BY l.name
+  expect:
+    rows: 3
+    data:
+    - name: login_catalog_member
+      unchanged: 1
+    - name: login_catalog_other
+      unchanged: 1
+    - name: root
+      unchanged: 1
+- name: An unchanged native account update does not fabricate a change instant
+  setup:
+  - scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s
+      nil 0 "UPDATE user SET admin=admin WHERE username='login_catalog_member'" (lambda (tx) (mysql_run_sql_statement tx "system"
+      "UPDATE user SET admin=admin WHERE username='login_catalog_member'" s (lambda (_row) true) (lambda args true)))))
+  sql: SELECT l.name,CASE WHEN l.sid=s.sid AND l.createdate=s.created AND l.updatedate=s.changed THEN 1 ELSE 0 END AS unchanged
+    FROM sys.syslogins l INNER JOIN login_catalog_saved s ON l.name=s.name ORDER BY l.name
+  expect:
+    rows: 3
+    data:
+    - name: login_catalog_member
+      unchanged: 1
+    - name: login_catalog_other
+      unchanged: 1
+    - name: root
+      unchanged: 1
+- name: Account metadata reload uses the same durable native row
+  action: restart
+- name: Reauthentication after restart retains catalog registration and change times
+  sql: SELECT l.name,CASE WHEN l.sid=s.sid AND l.createdate=s.created AND l.updatedate=s.changed THEN 1 ELSE 0 END AS unchanged
+    FROM sys.syslogins l INNER JOIN login_catalog_saved s ON l.name=s.name ORDER BY l.name
+  expect:
+    rows: 3
+    data:
+    - name: login_catalog_member
+      unchanged: 1
+    - name: login_catalog_other
+      unchanged: 1
+    - name: root
+      unchanged: 1
+- name: The actual native account mutation owns its modification timestamp
+  setup:
+  - scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s
+      nil 0 "UPDATE user SET password=PASSWORD('new-pw'),sql_login_updated_at='2000-01-01 00:00:00' WHERE username='login_catalog_other'"
+      (lambda (tx) (mysql_run_sql_statement tx "system" "UPDATE user SET password=PASSWORD('new-pw'),sql_login_updated_at='2000-01-01
+      00:00:00' WHERE username='login_catalog_other'" s (lambda (_row) true) (lambda args true)))))
+  sql: SELECT l.name,CASE WHEN l.createdate=s.created AND l.updatedate>CAST('2000-01-01 00:00:00' AS DATETIME) AND l.updatedate<=GETDATE()
+    THEN 1 ELSE 0 END AS owned_change FROM sys.syslogins l INNER JOIN login_catalog_saved s ON l.name=s.name WHERE l.name=N'login_catalog_other'
+  expect:
+    rows: 1
+    data:
+    - name: login_catalog_other
+      owned_change: 1
+- name: A new authentication observes the actual changed credential and same incarnation
+  username: login_catalog_other
+  password: new-pw
+  sql: SELECT l.name,CASE WHEN l.sid=s.sid AND l.createdate=s.created THEN 1 ELSE 0 END AS same_registration FROM sys.syslogins
+    l INNER JOIN login_catalog_saved s ON l.name=s.name
+  expect:
+    rows: 1
+    data:
+    - name: login_catalog_other
+      same_registration: 1
+- name: Native rollback restores account state and its timestamp together
+  sql: BEGIN TRANSACTION; UPDATE [system].[user] SET admin=1 WHERE username=N'login_catalog_member'; DECLARE @inside INT=(SELECT
+    sysadmin FROM sys.syslogins WHERE name=N'login_catalog_member'); ROLLBACK; SELECT @inside AS inside_role,l.sysadmin,CASE WHEN
+    l.createdate=s.created AND l.updatedate=s.changed THEN 1 ELSE 0 END AS restored_metadata FROM sys.syslogins l INNER JOIN login_catalog_saved
+    s ON l.name=s.name WHERE l.name=N'login_catalog_member'
+  expect:
+    rows: 1
+    data:
+    - inside_role: 1
+      sysadmin: 0
+      restored_metadata: 1
+- name: Dropping and recreating a native account creates a new login registration
+  setup:
+  - scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s
+      nil 0 "DROP USER login_catalog_other" (lambda (tx) (mysql_run_sql_statement tx "system" "DROP USER login_catalog_other" s
+      (lambda (_row) true) (lambda args true)))))
+  - scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s
+      nil 0 "CREATE USER login_catalog_other IDENTIFIED BY 'pw'" (lambda (tx) (mysql_run_sql_statement tx "system" "CREATE USER
+      login_catalog_other IDENTIFIED BY 'pw'" s (lambda (_row) true) (lambda args true)))))
+  - scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s
+      nil 0 "GRANT ALL ON `memcp-tests`.* TO login_catalog_other" (lambda (tx) (mysql_run_sql_statement tx "system" "GRANT ALL
+      ON `memcp-tests`.* TO login_catalog_other" s (lambda (_row) true) (lambda args true)))))
+  sql: SELECT l.name,CASE WHEN l.sid<>s.sid AND l.createdate IS NOT NULL AND l.updatedate IS NOT NULL AND l.accdate=l.createdate
+    THEN 1 ELSE 0 END AS new_registration FROM sys.syslogins l INNER JOIN login_catalog_saved s ON l.name=s.name WHERE l.name=N'login_catalog_other'
+  expect:
+    rows: 1
+    data:
+    - name: login_catalog_other
+      new_registration: 1
+- name: Catalog nonnullable exports survive a direct derived projection
+  tds:
+    statements:
+    - sql: SELECT d.name,d.loginname,d.createdate FROM (SELECT name,loginname,createdate FROM sys.syslogins) d WHERE 1=0
+      expect:
+        rows: 0
+        column_types:
+        - name: name
+          type: NVARCHAR
+          length: 128
+          nullable: false
+        - name: loginname
+          type: NVARCHAR
+          length: 128
+          nullable: false
+        - name: createdate
+          type: DATETIME
+          nullable: false
+- name: Null-extended catalog exports remain nullable
+  tds:
+    statements:
+    - sql: SELECT l.name,l.createdate FROM (VALUES(1)) p(id) LEFT JOIN sys.syslogins l ON 1=0 WHERE 1=0
+      expect:
+        rows: 0
+        column_types:
+        - name: name
+          type: NVARCHAR
+          length: 128
+          nullable: true
+        - name: createdate
+          type: DATETIME
+          nullable: true
+- name: Catalog contracts do not change the native username column declaration
+  scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests") (define field (car (tds_describe "memcp-tests"
+    "SELECT username FROM [system].[user] WHERE 1=0" "" s))) (equal? (mod (field "flags") 2) 1))
+  expect:
+    result: true
+- name: Rows without a valid native login identity are excluded from login metadata
+  setup:
+  - scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s
+      nil 0 "INSERT INTO user(username,password,admin) VALUES(NULL,PASSWORD('pw'),FALSE)" (lambda (tx) (mysql_run_sql_statement
+      tx "system" "INSERT INTO user(username,password,admin) VALUES(NULL,PASSWORD('pw'),FALSE)" s (lambda (_row) true) (lambda
+      args true)))))
+  - scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s
+      nil 0 "INSERT INTO user(username,password,admin,sql_principal_id) VALUES('login_catalog_incomplete',PASSWORD('pw'),FALSE,NULL)"
+      (lambda (tx) (mysql_run_sql_statement tx "system" "INSERT INTO user(username,password,admin,sql_principal_id) VALUES('login_catalog_incomplete',PASSWORD('pw'),FALSE,NULL)"
+      s (lambda (_row) true) (lambda args true)))))
+  cleanup:
+  - scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "system") (s "syntax" "mysql") (sql_with_statement s
+      nil 0 "DELETE FROM user WHERE username IS NULL OR username='login_catalog_incomplete'" (lambda (tx) (mysql_run_sql_statement
+      tx "system" "DELETE FROM user WHERE username IS NULL OR username='login_catalog_incomplete'" s (lambda (_row) true) (lambda
+      args true)))))
+  sql: SELECT COUNT(*) AS invalid_logins FROM sys.syslogins WHERE name IS NULL OR name=N'login_catalog_incomplete'
+  expect:
+    rows: 1
+    data:
+    - invalid_logins: 0
+- name: A catalog output contract does not confer native editability or source identity
+  scm: (begin (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests") (define field (car (tds_describe "memcp-tests"
+    "SELECT name FROM sys.syslogins WHERE 1=0" "" s))) (and (equal? (bit_and (field "flags") 4) 0) (nil? (field "source"))))
+  expect:
+    result: true

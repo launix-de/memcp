@@ -1,0 +1,76 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Dynamic cursors retain native keys and current rows across transaction publication
+
+test_cases:
+- name: Unordered composite anti join uses newly created transactional sources
+  sql: |
+    BEGIN TRANSACTION;
+    CREATE TABLE #declared(object_name VARCHAR(20) NOT NULL,permission_name VARCHAR(20) NOT NULL,PRIMARY KEY(object_name,permission_name));
+    CREATE TABLE #current(object_name VARCHAR(20) NOT NULL,permission_name VARCHAR(20) NOT NULL,PRIMARY KEY(object_name,permission_name));
+    CREATE TABLE #seen(object_name VARCHAR(20),permission_name VARCHAR(20));
+    INSERT #declared VALUES('alpha','SELECT'),('alpha','UPDATE'),('beta','SELECT');
+    INSERT #current VALUES('beta','SELECT');
+    DECLARE c CURSOR FOR SELECT d.object_name,d.permission_name FROM #declared d
+      LEFT OUTER JOIN #current r ON d.object_name COLLATE Latin1_General_CI_AS=r.object_name
+        AND d.permission_name COLLATE Latin1_General_CI_AS=r.permission_name
+      WHERE r.object_name IS NULL;
+    DECLARE @name VARCHAR(20),@permission VARCHAR(20);
+    OPEN c;
+    FETCH NEXT FROM c INTO @name,@permission;
+    WHILE @@FETCH_STATUS=0
+    BEGIN
+      INSERT #seen VALUES(@name,@permission);
+      FETCH NEXT FROM c INTO @name,@permission;
+    END;
+    CLOSE c;
+    DEALLOCATE c;
+    COMMIT;
+    SELECT object_name,permission_name FROM #seen ORDER BY object_name,permission_name;
+  expect:
+    rows: 2
+    data: [{object_name: alpha, permission_name: SELECT}, {object_name: alpha, permission_name: UPDATE}]
+- name: Transactional dynamic cursor observes newly inserted keys and updated values
+  sql: |
+    BEGIN TRANSACTION;
+    CREATE TABLE #rows(id INT PRIMARY KEY,value INT);
+    INSERT #rows VALUES(1,10),(3,30),(5,50);
+    DECLARE c CURSOR FOR SELECT id,value FROM #rows ORDER BY id;
+    DECLARE @first INT,@fv INT,@second INT,@sv INT,@last INT,@lv INT;
+    OPEN c;
+    FETCH NEXT FROM c INTO @first,@fv;
+    INSERT #rows VALUES(2,20);
+    DELETE #rows WHERE id=3;
+    UPDATE #rows SET value=500 WHERE id=5;
+    FETCH NEXT FROM c INTO @second,@sv;
+    FETCH NEXT FROM c INTO @last,@lv;
+    CLOSE c;
+    DEALLOCATE c;
+    COMMIT;
+    SELECT @first AS first_id,@fv AS first_value,@second AS second_id,@sv AS second_value,@last AS last_id,@lv AS last_value;
+  expect:
+    rows: 1
+    data: [{first_id: 1, first_value: 10, second_id: 2, second_value: 20, last_id: 5, last_value: 500}]
+- name: Publishing the same native generation preserves an open dynamic cursor
+  sql: |
+    BEGIN TRANSACTION;
+    CREATE TABLE #published(id INT PRIMARY KEY,value INT);
+    INSERT #published VALUES(1,10),(3,30);
+    DECLARE c CURSOR FOR SELECT id,value FROM #published ORDER BY id;
+    DECLARE @first INT,@fv INT,@second INT,@sv INT;
+    OPEN c;
+    FETCH NEXT FROM c INTO @first,@fv;
+    COMMIT;
+    UPDATE #published SET value=300 WHERE id=3;
+    FETCH NEXT FROM c INTO @second,@sv;
+    DECLARE @status INT=@@FETCH_STATUS,@rows INT=@@CURSOR_ROWS;
+    CLOSE c;
+    DEALLOCATE c;
+    SELECT @first AS first_id,@fv AS first_value,@second AS second_id,@sv AS second_value,@status AS status,@rows AS dynamic_rows;
+  expect:
+    rows: 1
+    data: [{first_id: 1, first_value: 10, second_id: 3, second_value: 300, status: 0, dynamic_rows: -1}]

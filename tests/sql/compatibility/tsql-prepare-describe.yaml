@@ -328,6 +328,68 @@ test_cases:
             suggested_max_length: 1
             suggested_tds_type_id: 104
             suggested_tds_length: 1
+  - name: Mixed numeric CAST declarations describe exact inputs without supplied values
+    sql: EXEC sp_describe_undeclared_parameters N'SELECT CAST(@Whole AS BIGINT),CAST(@amount AS NUMERIC(12,4)),CAST(@measure AS REAL)'
+    expect:
+      rows: 3
+      data:
+      - name: '@Whole'
+        parameter_ordinal: 1
+        suggested_system_type_name: bigint
+        suggested_max_length: 8
+        suggested_precision: 19
+        suggested_tds_type_id: 38
+        suggested_tds_length: 8
+      - name: '@amount'
+        parameter_ordinal: 2
+        suggested_system_type_name: numeric(12,4)
+        suggested_max_length: 9
+        suggested_precision: 12
+        suggested_scale: 4
+        suggested_tds_type_id: 108
+        suggested_tds_length: 9
+      - name: '@measure'
+        parameter_ordinal: 3
+        suggested_system_type_name: real
+        suggested_max_length: 4
+        suggested_precision: 24
+        suggested_tds_type_id: 109
+        suggested_tds_length: 4
+  - name: Parameter analysis reads cast contracts without invoking policy or value expressions
+    scm: |
+      (begin
+        (define parameter (list 'tsql_unbound_parameter "p" "p"))
+        (define conversion (list tsql_cast_integer parameter -2147483648 2147483647))
+        (define formula (list tsql_arithmetic_value
+          (list 'error "parameter analysis must not evaluate policy")
+          (list 'lambda (list) conversion)))
+        (equal? (tsql_parameter_candidates (list 'sql_type_expr formula "INT" nil) (list) (list))
+          (list (list (list "p" "p")) (list (list "p" "p" "INT" (list))))))
+    expect: {result: true}
+  - name: Parameter analysis does not treat other callables or symbols as a compiler boundary
+    scm: |
+      (begin
+        (define parameter (list 'tsql_unbound_parameter "p" "p"))
+        (define conversion (list tsql_cast_integer parameter -2147483648 2147483647))
+        (define expected (list (list (list "p" "p")) (list)))
+        (define unrelated (lambda (enabled compute) (compute)))
+        (and
+          (equal? (tsql_parameter_candidates
+            (list 'sql_type_expr (list unrelated true (list 'lambda (list) conversion)) "INT" nil)
+            (list) (list)) expected)
+          (equal? (tsql_parameter_candidates
+            (list 'sql_type_expr (list 'tsql_arithmetic_value true (list 'lambda (list) conversion)) "INT" nil)
+            (list) (list)) expected)))
+    expect: {result: true}
+  - name: Parameter analysis retains the zero-argument compiler thunk contract
+    scm: |
+      (begin
+        (define parameter (list 'tsql_unbound_parameter "p" "p"))
+        (define formula (list tsql_arithmetic_value true
+          (list 'lambda (list 'argument) (list tsql_cast_integer parameter -2147483648 2147483647))))
+        (equal? (tsql_parameter_candidates (list 'sql_type_expr formula "INT" nil) (list) (list))
+          (list (list (list "p" "p")) (list))))
+    expect: {result: true}
 cleanup:
   - sql: DROP TABLE prepare_describe_rows
   - sql: DROP TABLE prepare_describe_source

@@ -153,7 +153,7 @@ func TestHashPartitionMixedRangePruning(t *testing.T) {
 
 func TestRepartitionChoosesMethodPerColumn(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "thashchoice", 64)
-	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+	if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 		t.Fatal(result)
 	}
 	id, payload := tbl.Columns[0], tbl.Columns[1]
@@ -215,7 +215,7 @@ func TestHashRepartitionConcurrentDeleteSurvivesReload(t *testing.T) {
 	seen := make(map[int64]bool)
 	for bucket, shard := range reloaded.ActiveShards() {
 		access := shard.GetRead(nil, false)
-		reader := shard.getColumnStorageOrPanic("id", false, nil)
+		reader := shard.getColumnStorageInput("id", false, shard.initializedColumnInput(shard.t.bindColumnInput(nil)), nil)
 		for row := uint32(0); row < shard.main_count; row++ {
 			if shard.deletions.Get(uint(row)) {
 				continue

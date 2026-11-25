@@ -1,0 +1,240 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: LIST scan request boundaries preserve cancellation, callback ownership and transaction cleanup
+setup:
+- sql: CREATE TABLE list_cancel_values(id INT PRIMARY KEY,value INT)
+- sql: INSERT INTO list_cancel_values VALUES(1,7)
+cleanup:
+- sql: DROP TABLE IF EXISTS list_cancel_values
+test_cases:
+- name: Cancelled LIST scan rejects entry before any callback
+  session_id: list-entry-scan
+  scm: |-
+    (begin
+     (define session (req "__session"))
+     (with_query_request session (req "__session_state") (req "__query_seq") "cancel list scan" "acid"
+     (lambda (execute) (execute "cancel list scan" false (lambda (tx) (begin
+     (session "list_entry_calls" 0)
+     (define rows (list (list "value" 3) (list "value" nil) (list "value" 1)))
+     (define mark (lambda () (session "list_entry_calls" (+ 1 (session "list_entry_calls")))))
+     (if (kill_query (tx_connection_id tx))
+      (scan tx rows (list) (list) (list "value") (lambda (value) (begin (mark) true)) (list "value") (lambda (acc value) (begin (mark) (append acc value))) (lambda () (begin (mark) (list))) nil false)
+      (error "test query was not registered for cancellation"))))))))
+  expect:
+    error: true
+    contains: context canceled
+  headers:
+    X-Session-Id: list-entry-scan
+- name: The scan successor keeps zero cancelled callbacks and every ordinary value
+  session_id: list-entry-scan
+  scm: |-
+    (begin
+     (define session (req "__session"))
+     (with_query_request session (req "__session_state") (req "__query_seq") "next list scan" "acid"
+     (lambda (execute) (execute "next list scan" false (lambda (tx) (begin
+     (define rows (list (list "value" 3) (list "value" nil) (list "value" 1)))
+     (and (number? (session "list_entry_calls")) (equal? (session "list_entry_calls") 0) (equal? (scan tx rows (list) (list) (list) (lambda () true) (list "value") (lambda (acc value) (append acc value)) (lambda () (list)) nil false) (list 3 nil 1)))))))))
+  expect:
+    result: true
+  headers:
+    X-Session-Id: list-entry-scan
+- name: Cancelled LIST exists rejects entry before any callback
+  session_id: list-entry-exists
+  scm: |-
+    (begin
+     (define session (req "__session"))
+     (with_query_request session (req "__session_state") (req "__query_seq") "cancel list exists" "acid"
+     (lambda (execute) (execute "cancel list exists" false (lambda (tx) (begin
+     (session "list_entry_calls" 0)
+     (define rows (list (list "value" 3) (list "value" nil) (list "value" 1)))
+     (define mark (lambda () (session "list_entry_calls" (+ 1 (session "list_entry_calls")))))
+     (if (kill_query (tx_connection_id tx))
+      (scan_exists tx rows (list) (list) (list "value") (lambda (value) (begin (mark) true)))
+      (error "test query was not registered for cancellation"))))))))
+  expect:
+    error: true
+    contains: context canceled
+  headers:
+    X-Session-Id: list-entry-exists
+- name: The exists successor keeps zero cancelled callbacks and every ordinary value
+  session_id: list-entry-exists
+  scm: |-
+    (begin
+     (define session (req "__session"))
+     (with_query_request session (req "__session_state") (req "__query_seq") "next list exists" "acid"
+     (lambda (execute) (execute "next list exists" false (lambda (tx) (begin
+     (define rows (list (list "value" 3) (list "value" nil) (list "value" 1)))
+     (and (number? (session "list_entry_calls")) (equal? (session "list_entry_calls") 0) (equal? (scan_exists tx rows (list) (list) (list "value") (lambda (value) (equal? value 1))) true))))))))
+  expect:
+    result: true
+  headers:
+    X-Session-Id: list-entry-exists
+- name: Cancelled LIST batch rejects entry before any callback
+  session_id: list-entry-batch
+  scm: |-
+    (begin
+     (define session (req "__session"))
+     (with_query_request session (req "__session_state") (req "__query_seq") "cancel list batch" "acid"
+     (lambda (execute) (execute "cancel list batch" false (lambda (tx) (begin
+     (session "list_entry_calls" 0)
+     (define rows (list (list "value" 3) (list "value" nil) (list "value" 1)))
+     (define mark (lambda () (session "list_entry_calls" (+ 1 (session "list_entry_calls")))))
+     (if (kill_query (tx_connection_id tx))
+      (scan_batch tx rows (list) (list) (list "value") (lambda (value) (begin (mark) true)) (list "value") (lambda (acc value) (begin (mark) (append acc value))) 1 (list 5 9) (lambda () (begin (mark) (list))) nil false)
+      (error "test query was not registered for cancellation"))))))))
+  expect:
+    error: true
+    contains: context canceled
+  headers:
+    X-Session-Id: list-entry-batch
+- name: The batch successor keeps zero cancelled callbacks and every ordinary value
+  session_id: list-entry-batch
+  scm: |-
+    (begin
+     (define session (req "__session"))
+     (with_query_request session (req "__session_state") (req "__query_seq") "next list batch" "acid"
+     (lambda (execute) (execute "next list batch" false (lambda (tx) (begin
+     (define rows (list (list "value" 3) (list "value" nil) (list "value" 1)))
+     (and (number? (session "list_entry_calls")) (equal? (session "list_entry_calls") 0) (equal? (scan_batch tx rows (list) (list) (list) (lambda () true) (list "value") (lambda (acc value) (append acc value)) 1 (list 5 9) (lambda () (list)) nil false) (list 3 nil 1 3 nil 1)))))))))
+  expect:
+    result: true
+  headers:
+    X-Session-Id: list-entry-batch
+- name: Cancelled LIST order rejects entry before any callback
+  session_id: list-entry-order
+  scm: |-
+    (begin
+     (define session (req "__session"))
+     (with_query_request session (req "__session_state") (req "__query_seq") "cancel list order" "acid"
+     (lambda (execute) (execute "cancel list order" false (lambda (tx) (begin
+     (session "list_entry_calls" 0)
+     (define rows (list (list "value" 3) (list "value" nil) (list "value" 1)))
+     (define mark (lambda () (session "list_entry_calls" (+ 1 (session "list_entry_calls")))))
+     (if (kill_query (tx_connection_id tx))
+      (scan_order tx rows (list (compiled_scan_access_header 0 "scan_order" 0 -1)) (list) (list "value") (lambda (value) (begin (mark) true)) (list (lambda (value) (begin (mark) (coalesceNil value 0)))) (list <) 0 0 -1 (list "value") (lambda (acc value) (begin (mark) (append acc value))) (lambda () (begin (mark) (list))) false)
+      (error "test query was not registered for cancellation"))))))))
+  expect:
+    error: true
+    contains: context canceled
+  headers:
+    X-Session-Id: list-entry-order
+- name: The order successor keeps zero cancelled callbacks and every ordinary value
+  session_id: list-entry-order
+  scm: |-
+    (begin
+     (define session (req "__session"))
+     (with_query_request session (req "__session_state") (req "__query_seq") "next list order" "acid"
+     (lambda (execute) (execute "next list order" false (lambda (tx) (begin
+     (define rows (list (list "value" 3) (list "value" nil) (list "value" 1)))
+     (and (number? (session "list_entry_calls")) (equal? (session "list_entry_calls") 0) (equal? (scan_order tx rows (list (compiled_scan_access_header 0 "scan_order" 0 -1)) (list) (list) (lambda () true) (list (lambda (value) (coalesceNil value 0))) (list <) 0 0 -1 (list "value") (lambda (acc value) (append acc value)) (lambda () (list)) false) (list nil 1 3)))))))))
+  expect:
+    result: true
+  headers:
+    X-Session-Id: list-entry-order
+- name: Cancellation inside an outer callback is observed at the next LIST entry
+  session_id: list-entry-nested
+  scm: |-
+    (begin
+     (define session (req "__session"))
+     (with_query_request session (req "__session_state") (req "__query_seq") "nested list cancellation" "acid"
+     (lambda (execute) (execute "nested list cancellation" false (lambda (tx) (begin
+     (session "list_outer_calls" 0) (session "list_inner_calls" 0)
+     (scan tx (list (list "id" 1) (list "id" 2)) (list) (list) (list) (lambda () true) (list "id")
+      (lambda (acc id) (begin
+       (session "list_outer_calls" (+ 1 (session "list_outer_calls")))
+       (if (kill_query (tx_connection_id tx))
+        (scan tx (list (list "value" 7)) (list) (list) (list) (lambda () true) (list "value")
+         (lambda (inner value) (begin (session "list_inner_calls" (+ 1 (session "list_inner_calls"))) (+ inner value))) 0 nil false)
+        (error "nested query was not registered for cancellation")))) 0 nil false)))))))
+  expect:
+    error: true
+    contains: context canceled
+  headers:
+    X-Session-Id: list-entry-nested
+- name: The next request sees exactly the outer callback and no cancelled inner callback
+  session_id: list-entry-nested
+  scm: |-
+    (begin
+     (define session (req "__session"))
+     (list (session "list_outer_calls") (session "list_inner_calls")))
+  expect:
+    result:
+    - 1
+    - 0
+  headers:
+    X-Session-Id: list-entry-nested
+- name: A public writer opens its real transaction
+  session_id: list-entry-writer
+  sql: BEGIN TRANSACTION
+  expect:
+    affected_rows: 0
+- name: The old transaction owns a genuine pending public row
+  session_id: list-entry-writer
+  sql: UPDATE list_cancel_values SET value=11 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: Cancelled LIST entry unwinds that actual transaction owner
+  session_id: list-entry-writer
+  scm: |-
+    (begin
+     (define session (req "__session"))
+     (with_query_request (tsql_connection_session session) (req "__session_state") (req "__query_seq") "cancel writer list" "acid"
+     (lambda (execute) (execute "cancel writer list" false (lambda (tx)
+     (if (kill_query (tx_connection_id tx))
+      (scan tx (list (list "value" 1)) (list) (list) (list) (lambda () true) (list "value") (lambda (acc value) (+ acc value)) 0 nil false)
+      (error "writer query was not registered for cancellation")))))))
+  expect:
+    error: true
+    contains: context canceled
+  headers:
+    X-Session-Id: list-entry-writer
+- name: A separate connection observes the complete rollback value
+  session_id: list-entry-other
+  sql: SELECT id,value FROM list_cancel_values ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 7
+- name: Explicit rollback retires the old connection transaction before another writer
+  session_id: list-entry-writer
+  scm: |-
+    (begin
+     (define session (req "__session"))
+     (tx_rollback (tsql_connection_session session)))
+  expect:
+    result: true
+  headers:
+    X-Session-Id: list-entry-writer
+- name: A separate writer acquires the released public table endpoint
+  session_id: list-entry-other
+  sql: UPDATE list_cancel_values SET value=13 WHERE id=1
+  expect:
+    affected_rows: 1
+- name: The new writer publishes the complete row
+  session_id: list-entry-other
+  sql: SELECT id,value FROM list_cancel_values ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 13
+- name: The recovered connection reads the current public row
+  session_id: list-entry-writer
+  sql: SELECT id,value FROM list_cancel_values ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 13
+- name: A nil transaction still accepts the complete ordinary LIST result
+  scm: (begin (define rows (list (list "value" 3) (list "value" nil) (list "value" 1))) (scan nil rows (list) (list)
+    (list) (lambda () true) (list "value") (lambda (acc value) (append acc value)) (lambda () (list)) nil false))
+  expect:
+    result:
+    - 3
+    - null
+    - 1

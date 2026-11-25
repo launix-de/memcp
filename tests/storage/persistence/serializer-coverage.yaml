@@ -17,12 +17,15 @@ test_cases:
   - name: "Create table for roundtrip test"
     sql: "CREATE TABLE ser_test (id INT, data VARCHAR(200))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert JSON-encoded data into table"
     scm: |
       (begin
-        (insert (table "memcp-tests" false "ser_test" false) '("id" "data")
+        (insert (table "memcp-tests" false "ser_test" false nil) '("id" "data")
           (list
             (list 1 (json_encode '("a" "b" "c")))
             (list 2 (json_encode_assoc '("key" "value" "num" 42)))
@@ -39,7 +42,7 @@ test_cases:
   - name: "Decode JSON from table via scm"
     scm: |
       (begin
-        (set rows (scan (session "__memcp_tx") (table "memcp-tests" false "ser_test" false) (car (eval (compile_scan_access '("id") (scheme "(lambda (id) (equal? id 2))")))) (cadr (eval (compile_scan_access '("id") (scheme "(lambda (id) (equal? id 2))")))) '("id") (lambda (id) (equal? id 2)) '("data") (lambda (acc data) data) nil (lambda (a b) b)))
+        (set rows (scan (session "__memcp_tx") (table "memcp-tests" false "ser_test" false nil) (car (eval (compile_scan_access '("id") (scheme "(lambda (id) (equal? id 2))")))) (cadr (eval (compile_scan_access '("id") (scheme "(lambda (id) (equal? id 2))")))) '("id") (lambda (id) (equal? id 2)) '("data") (lambda (acc data) data) nil (lambda (a b) b)))
         (set decoded (json_decode rows))
         (get_assoc decoded "key"))
     expect:
@@ -86,9 +89,99 @@ test_cases:
         (if (not (equal? (get_assoc report "covered") 1)) (fail "generator node not covered by parse"))
         true)
 
+  - name: "Repeated source coordinates share coverage without sharing AST values"
+    scm: |
+      (begin
+        (define src (concat "coverage-shared-point-" (uuid) ".scm"))
+        (define first (source src 7 3 (list '+ 1 2)))
+        (define second (source src 7 3 (list '+ 2 3)))
+        (define before (source_coverage_report src))
+        (define second_result (eval second))
+        (define third (source src 7 3 (list '+ 30 40)))
+        (define after (source_coverage_report src))
+        (and (equal? (get_assoc before "total") 1)
+          (equal? (get_assoc before "covered") 0)
+          (equal? second_result 5)
+          (equal? (get_assoc after "total") 1)
+          (equal? (get_assoc after "covered") 1)
+          (equal? (eval first) 3)
+          (equal? (eval third) 70)))
+    expect:
+      result: true
+
+  - name: "Coverage preserves distinct columns and uncovered line aggregation"
+    scm: |
+      (begin
+        (define src (concat "coverage-point-lines-" (uuid) ".scm"))
+        (define first (source src 9 2 11))
+        (define second (source src 9 8 22))
+        (define third (source src 10 1 33))
+        (define before (source_coverage_report src))
+        (define second_result (eval second))
+        (define partial (source_coverage_report src))
+        (define partial_file (car (get_assoc partial "files")))
+        (define third_result (eval third))
+        (define after (source_coverage_report src))
+        (and (equal? (get_assoc before "total") 3)
+          (equal? (get_assoc before "covered") 0)
+          (equal? second_result 22)
+          (equal? (get_assoc partial "covered") 1)
+          (equal? (get_assoc partial_file "uncovered_lines") (list 10))
+          (equal? third_result 33)
+          (equal? (get_assoc after "total") 3)
+          (equal? (get_assoc after "covered") 2)
+          (equal? (get_assoc (car (get_assoc after "files")) "uncovered_lines") (list))))
+    expect:
+      result: true
+
+  - name: "Optimizer copies share source coverage without marking execution"
+    scm: |
+      (begin
+        (define src (concat "coverage-point-clone-" (uuid) ".scm"))
+        (define ast (source src 1 1 (list '+ 4 5)))
+        (define cloned (clone_optimizer_expression ast))
+        (optimize ast)
+        (define before (source_coverage_report src))
+        (define result (eval cloned))
+        (define after (source_coverage_report src))
+        (and (equal? (get_assoc before "total") 1)
+          (equal? (get_assoc before "covered") 0)
+          (equal? result 9)
+          (equal? (get_assoc after "total") 1)
+          (equal? (get_assoc after "covered") 1)))
+    expect:
+      result: true
+
+  - name: "JSON AST roundtrip does not invent source execution"
+    scm: |
+      (begin
+        (define src (concat "coverage-point-json-" (uuid) ".scm"))
+        (define ast (source src 1 1 (list '+ 3 4)))
+        (define decoded (json_decode_scmer (json_encode ast)))
+        (define decoded_result (eval decoded))
+        (define before (source_coverage_report src))
+        (define original_result (eval ast))
+        (define after (source_coverage_report src))
+        (and (equal? decoded_result 7)
+          (equal? (get_assoc before "total") 1)
+          (equal? (get_assoc before "covered") 0)
+          (equal? original_result 7)
+          (equal? (get_assoc after "total") 1)
+          (equal? (get_assoc after "covered") 1)))
+    expect:
+      result: true
+
   - name: "Drop roundtrip table"
     sql: "DROP TABLE IF EXISTS ser_test"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
+
+  - name: "MySQL declaration state after completion: Drop roundtrip table"
+    syntax: mysql
+    sql: "SHOW CREATE TABLE ser_test"
+    expect: {error: true}
 
 cleanup: []

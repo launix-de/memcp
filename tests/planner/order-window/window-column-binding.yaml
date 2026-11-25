@@ -1,0 +1,187 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/queries/select-over-clause-transact-sql
+# https://www.postgresql.org/docs/current/sql-syntax-lexical.html
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Window input names retain frontend binding rules before physical key selection
+  requires_tds: true
+setup:
+- sql: DROP TABLE IF EXISTS window_case_entries
+- sql: CREATE TABLE window_case_entries(MDNr INT, ANNr INT, BeginValue INT)
+- sql: INSERT window_case_entries VALUES(1,7,10),(1,7,20),(2,8,30)
+cleanup:
+- sql: DROP TABLE IF EXISTS window_case_entries
+test_cases:
+- name: A case-insensitive partition binds the actual native column
+  tds:
+    statements:
+    - sql: SELECT mdnr AS account_id,Annr AS person_id,BeginValue AS stamp,ROW_NUMBER() OVER(PARTITION BY Mdnr,Annr ORDER BY BeginValue DESC) AS rn
+        FROM window_case_entries ORDER BY account_id,person_id,rn
+      expect:
+        rows: 3
+        data:
+        - account_id: 1
+          person_id: 7
+          stamp: 20
+          rn: 1
+        - account_id: 1
+          person_id: 7
+          stamp: 10
+          rn: 2
+        - account_id: 2
+          person_id: 8
+          stamp: 30
+          rn: 1
+- name: A derived window retains partition bindings through filtered exports
+  sql: SELECT MDNr AS account_id,ANNr AS person_id,BeginValue AS stamp FROM (SELECT mdnr,Annr,BeginValue,ROW_NUMBER() OVER(PARTITION BY Mdnr,Annr ORDER
+    BY BeginValue DESC) AS Row FROM window_case_entries) AS window_case_entries WHERE Row=1 ORDER BY account_id,person_id
+  expect:
+    rows: 2
+    data:
+    - account_id: 1
+      person_id: 7
+      stamp: 20
+    - account_id: 2
+      person_id: 8
+      stamp: 30
+- name: LAG binds case-insensitive window inputs to actual declarations
+  sql: SELECT mdnr AS account_id,Annr AS person_id,BeginValue AS stamp,LAG(beginvalue) OVER(PARTITION BY Mdnr,Annr ORDER BY BeginValue DESC) AS actual
+    FROM window_case_entries ORDER BY account_id,person_id,stamp DESC
+  expect:
+    rows: 3
+    data:
+    - account_id: 1
+      person_id: 7
+      stamp: 20
+      actual: null
+    - account_id: 1
+      person_id: 7
+      stamp: 10
+      actual: 20
+    - account_id: 2
+      person_id: 8
+      stamp: 30
+      actual: null
+- name: LEAD binds case-insensitive window inputs to actual declarations
+  sql: SELECT mdnr AS account_id,Annr AS person_id,BeginValue AS stamp,LEAD(beginvalue) OVER(PARTITION BY Mdnr,Annr ORDER BY BeginValue DESC) AS actual
+    FROM window_case_entries ORDER BY account_id,person_id,stamp DESC
+  expect:
+    rows: 3
+    data:
+    - account_id: 1
+      person_id: 7
+      stamp: 20
+      actual: 10
+    - account_id: 1
+      person_id: 7
+      stamp: 10
+      actual: null
+    - account_id: 2
+      person_id: 8
+      stamp: 30
+      actual: null
+- name: RANK binds case-insensitive window inputs to actual declarations
+  sql: SELECT mdnr AS account_id,Annr AS person_id,BeginValue AS stamp,RANK() OVER(PARTITION BY Mdnr,Annr ORDER BY BeginValue DESC) AS actual FROM
+    window_case_entries ORDER BY account_id,person_id,stamp DESC
+  expect:
+    rows: 3
+    data:
+    - account_id: 1
+      person_id: 7
+      stamp: 20
+      actual: 1
+    - account_id: 1
+      person_id: 7
+      stamp: 10
+      actual: 2
+    - account_id: 2
+      person_id: 8
+      stamp: 30
+      actual: 1
+- name: DENSE_RANK binds case-insensitive window inputs to actual declarations
+  sql: SELECT mdnr AS account_id,Annr AS person_id,BeginValue AS stamp,DENSE_RANK() OVER(PARTITION BY Mdnr,Annr ORDER BY BeginValue DESC) AS actual
+    FROM window_case_entries ORDER BY account_id,person_id,stamp DESC
+  expect:
+    rows: 3
+    data:
+    - account_id: 1
+      person_id: 7
+      stamp: 20
+      actual: 1
+    - account_id: 1
+      person_id: 7
+      stamp: 10
+      actual: 2
+    - account_id: 2
+      person_id: 8
+      stamp: 30
+      actual: 1
+- name: Ordered SUM retains its required running frame across bound partitions
+  sql: SELECT mdnr AS account_id,Annr AS person_id,BeginValue AS stamp,SUM(beginvalue) OVER(PARTITION BY Mdnr,Annr ORDER BY BeginValue DESC) AS actual
+    FROM window_case_entries ORDER BY account_id,person_id,stamp DESC
+  expect:
+    rows: 3
+    data:
+    - account_id: 1
+      person_id: 7
+      stamp: 20
+      actual: 20
+    - account_id: 1
+      person_id: 7
+      stamp: 10
+      actual: 30
+    - account_id: 2
+      person_id: 8
+      stamp: 30
+      actual: 30
+  noncritical: true
+- name: MySQL window coordinates use its case-insensitive column contract
+  syntax: mysql
+  sql: SELECT mdnr AS account_id,Annr AS person_id,BeginValue AS stamp,ROW_NUMBER() OVER(PARTITION BY Mdnr,Annr ORDER BY BeginValue DESC) AS rn FROM
+    window_case_entries ORDER BY account_id,person_id,rn
+  expect:
+    rows: 3
+    data:
+    - account_id: 1
+      person_id: 7
+      stamp: 20
+      rn: 1
+    - account_id: 1
+      person_id: 7
+      stamp: 10
+      rn: 2
+    - account_id: 2
+      person_id: 8
+      stamp: 30
+      rn: 1
+- name: PostgreSQL quoted window coordinates retain their exact spelling
+  syntax: psql
+  sql: SELECT "MDNr" AS account_id,"ANNr" AS person_id,"BeginValue" AS stamp,ROW_NUMBER() OVER(PARTITION BY "MDNr","ANNr" ORDER BY "BeginValue" DESC)
+    AS rn FROM window_case_entries ORDER BY account_id,person_id,rn
+  expect:
+    rows: 3
+    data:
+    - account_id: 1
+      person_id: 7
+      stamp: 20
+      rn: 1
+    - account_id: 1
+      person_id: 7
+      stamp: 10
+      rn: 2
+    - account_id: 2
+      person_id: 8
+      stamp: 30
+      rn: 1
+- name: PostgreSQL does not resolve a different quoted partition name
+  syntax: psql
+  sql: SELECT "MDNr" AS account_id,"ANNr" AS person_id,"BeginValue" AS stamp,ROW_NUMBER() OVER(PARTITION BY "Mdnr","ANNr" ORDER BY "BeginValue" DESC)
+    AS rn FROM window_case_entries ORDER BY account_id,person_id,rn
+  expect:
+    error: true
+- name: Window binding refuses an actually absent SQL column
+  sql: SELECT ROW_NUMBER() OVER(PARTITION BY missing_field ORDER BY BeginValue) FROM window_case_entries
+  expect:
+    error: true

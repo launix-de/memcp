@@ -348,23 +348,31 @@ func TestStorageStringPreparedFilterReaderIsConsumed(t *testing.T) {
 	// The ordered scalar/bulk paths must use the same prepared representation.
 	callback := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[1] })
 	result := tbl.scan_order(tx, access, nil, []string{"label"}, condition, nil, nil, 0, 0, 1,
-		[]string{"id"}, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+		[]string{"id"}, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), nil)
 	if result.IsNil() {
 		t.Fatal("ordered filter bypassed prepared reader")
 	}
 	// Early-exit scans reuse an already admitted cache without decoding a cold one.
 	shard := tbl.ActiveShards()[0]
-	if _, found := shard.scanFirstRecord(scanAccess{}, []string{"label"}, condition, tx, nil, nil); !found {
+	_, columnInput1, finishColumnInput1 := shard.t.readDataContext(tx)
+	defer finishColumnInput1.release()
+	columnAccess1 := scanAccess{}
+	columnAccess1.columnInput = columnInput1
+	if _, found := shard.scanFirstRecord(columnAccess1, []string{"label"}, condition, tx, nil, nil); !found {
 		t.Fatal("first-record filter bypassed warm reader")
 	}
 	deltaCondition := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
 		return scm.NewBool(args[0].IsString() && args[0].String() == "delta label")
 	})
-	if id, found := shard.scanFirstRecord(scanAccess{}, []string{"label"}, deltaCondition, tx, nil, nil); !found || id != 2048 {
+	_, columnInput2, finishColumnInput2 := shard.t.readDataContext(tx)
+	defer finishColumnInput2.release()
+	columnAccess2 := scanAccess{}
+	columnAccess2.columnInput = columnInput2
+	if id, found := shard.scanFirstRecord(columnAccess2, []string{"label"}, deltaCondition, tx, nil, nil); !found || id != 2048 {
 		t.Fatal("first-record prepared reader lost physical delta")
 	}
 	delta := tbl.scan_order(tx, access, nil, []string{"label"}, deltaCondition, nil, nil, 0, 0, 1,
-		[]string{"id"}, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+		[]string{"id"}, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), nil)
 	if delta.IsNil() || delta.Int() != 2048 {
 		t.Fatal("ordered prepared reader lost physical delta")
 	}
@@ -405,7 +413,7 @@ func TestMaterializedComputedReaderPreparesOutputOnly(t *testing.T) {
 		{scm.NewInt(1), scm.NewString("input alpha")},
 		{scm.NewInt(2), scm.NewString("input beta")},
 	}, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	input := buildStorageString([]scm.Scmer{scm.NewString(strings.Repeat("input alpha ", 10000)), scm.NewString(strings.Repeat("input beta ", 10000))})
 	input.CompressDictionary()
@@ -417,7 +425,7 @@ func TestMaterializedComputedReaderPreparesOutputOnly(t *testing.T) {
 	proxy := &StorageComputeProxy{shard: shard, main: main, count: 2, compressed: true,
 		inputCols: []string{"label"}, delta: make(map[uint32]scm.Scmer),
 		computor: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })}
-	reader := newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned)
+	reader := newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned, nil, proxy.shard.t.bindColumnInput(nil))
 	if input.ReadCount() != 0 {
 		t.Fatal("materialized output prepared an unused input instead of its actual main")
 	}
@@ -466,7 +474,7 @@ func TestComputedReaderSetupFailureReleasesEarlierChildren(t *testing.T) {
 	tbl.CreateColumn("first", "TEXT", nil, nil)
 	tbl.CreateColumn("second", "TEXT", nil, nil)
 	tbl.Insert([]string{"id", "first", "second"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("first"), scm.NewString("second")}}, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	first := buildStorageString([]scm.Scmer{scm.NewString("first")})
 	first.CompressDictionary()
@@ -480,11 +488,13 @@ func TestComputedReaderSetupFailureReleasesEarlierChildren(t *testing.T) {
 	index := &StorageIndex{t: shard, Cols: []string{".mapped"}, ColMapCols: [][]string{{"first", "second"}},
 		ColMapFn: []scm.Scmer{scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })}}
 	for _, prepare := range []func(){
-		func() { newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned) },
+		func() {
+			newCachedColumnReaderTx(proxy, nil, false, ReadDecoded|readOperatorOwned, nil, proxy.shard.t.bindColumnInput(nil))
+		},
 		func() {
 			shard.mu.RLock()
 			defer shard.mu.RUnlock()
-			index.buildGetters(nil, nil)
+			index.buildGetters(nil, nil, index.t.t.bindColumnInput(nil))
 		},
 	} {
 		warm := first.GetCachedReader(ReadDecoded)
@@ -507,7 +517,7 @@ func TestMaterializedReaderRepairPreservesExistingShardRead(t *testing.T) {
 	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString("first")}, {scm.NewInt(2), scm.NewString("second")},
 	}, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	main := buildStorageString([]scm.Scmer{scm.NewString("cached first"), scm.NewString("cached second")})
 	main.CompressDictionary()
@@ -522,7 +532,7 @@ func TestMaterializedReaderRepairPreservesExistingShardRead(t *testing.T) {
 	tx.querySeq.Store(19)
 	tx.queryActive.Store(true)
 	shard.mu.RLock()
-	reader := newCachedColumnReaderTx(proxy, tx, true, ReadDecoded|readOperatorOwned)
+	reader := newCachedColumnReaderTx(proxy, tx, true, ReadDecoded|readOperatorOwned, nil, proxy.shard.t.bindColumnInput(tx))
 	writerDone := make(chan struct{})
 	go func() {
 		shard.mu.Lock()
@@ -570,7 +580,7 @@ type jitCapabilityTextStorage struct {
 	calls  int
 }
 
-func (s *jitCapabilityTextStorage) GetCachedReaderTx(_ *TxContext, locked bool, hints ColumnReadHints) ColumnReader {
+func (s *jitCapabilityTextStorage) GetCachedReaderTx(_ *TxContext, locked bool, hints ColumnReadHints, _ nativeTableInput) ColumnReader {
 	s.locked, s.hints = locked, hints
 	s.calls++
 	return s.StorageString.GetCachedReader(hints)
@@ -580,7 +590,7 @@ func TestComputedScalarJITPreservesDefaultReadCapabilities(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tcomputedjitcapability")
 	tbl.CreateColumn("label", "TEXT", nil, nil)
 	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("native value")}}, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	source := &jitCapabilityTextStorage{StorageString: buildStorageString([]scm.Scmer{scm.NewString("native value")})}
 	shard.mu.Lock()
@@ -614,9 +624,9 @@ func TestRecSetResidualPreparesVisibleTextBatch(t *testing.T) {
 		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), label}
 	}
 	tbl.Insert([]string{"id", "label"}, rows, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
-	stored := shard.getColumnStorageOrPanic("label", false, nil)
+	stored := shard.getColumnStorageInput("label", false, shard.initializedColumnInput(shard.t.bindColumnInput(nil)), nil)
 	if overlay, ok := stored.(*OverlayBlob); ok {
 		stored = overlay.Base
 	}

@@ -1,0 +1,65 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: Aggregate operand contracts retain SQL types without a duplicated type witness
+setup:
+- sql: CREATE TABLE aggregate_operand_contracts(id INT PRIMARY KEY,value SMALLINT,label NVARCHAR(16))
+- sql: INSERT aggregate_operand_contracts VALUES(1,1,N'b'),(2,2,N'a'),(3,NULL,NULL)
+test_cases:
+- name: Numeric aggregate results retain their declared wire contracts
+  tds:
+    statements:
+    - sql: SELECT SUM(value) AS total,MIN(value) AS minimum,MAX(value) AS maximum,AVG(value) AS average FROM aggregate_operand_contracts
+      expect:
+        rows: 1
+        data: [{total: 3,minimum: 1,maximum: 2,average: 1}]
+        column_types: [{name: total,type: INT},{name: minimum,type: SMALLINT},{name: maximum,type: SMALLINT},{name: average,type: INT}]
+- name: Character extrema retain text values and their national wire contract
+  tds:
+    statements:
+    - sql: SELECT MIN(label) AS minimum,MAX(label) AS maximum FROM aggregate_operand_contracts
+      expect:
+        rows: 1
+        data: [{minimum: a,maximum: b}]
+        column_types: [{name: minimum,type: NVARCHAR},{name: maximum,type: NVARCHAR}]
+- name: Empty input preserves NULL aggregate results
+  sql: SELECT SUM(value) AS total,MIN(value) AS minimum,MAX(value) AS maximum,AVG(value) AS average FROM aggregate_operand_contracts WHERE id<0
+  expect: {rows: 1,data: [{total: null,minimum: null,maximum: null,average: null}]}
+- name: CASE operands preserve nullable numeric and character aggregate contracts
+  sql: SELECT SUM(CASE WHEN id<3 THEN value ELSE NULL END) AS total,MIN(CASE WHEN id=1 THEN label ELSE NULL END) AS first_label,AVG(CAST(value AS FLOAT)) AS average FROM aggregate_operand_contracts
+  expect: {rows: 1,data: [{total: 3,first_label: b,average: 1.5}]}
+- name: SUM still rejects a character input contract
+  sql: SELECT SUM(label) AS value FROM aggregate_operand_contracts
+  expect: {error: true}
+- name: A custom registered reducer retains its explicit operand type witness
+  scm: |
+    (begin
+      (define original (sql_aggregates "SUM"))
+      (define outcome (try (lambda () (begin
+        (sql_aggregates "SUM" (list (lambda (left right)
+          (+ (coalesceNil left 0) (coalesceNil right 0))) nil false))
+        (define session (newsession)) (session "schema" "memcp-tests") (session "username" "root")
+        (define output (newsession))
+        (define text "SELECT SUM(value) AS custom_total FROM aggregate_operand_contracts")
+        (with_autocommit session nil nil text (lambda (tx)
+          (sql_execute_formula session tx
+            (sql_queryplan_compile_formula tx (parse_tsql "memcp-tests" text
+              (tsql_policy (tsql_session_actor session)) session tx))
+            (lambda (row) (output "value" (row "custom_total"))) (lambda args true))))
+        (list true (output "value")))) (lambda (failure) (list false failure))))
+      (sql_aggregates "SUM" original)
+      (if (car outcome) (cadr outcome) (error (cadr outcome))))
+  expect: {result: 3}
+- name: Previously stored two-input aggregate contracts remain readable
+  scm: |
+    (begin
+      (define value (list 'sql_type_expr 1 "SMALLINT" nil))
+      (sql_info_type (sql_expr_info '()
+        (list 'sql_compile_expr (list 'tsql_aggregate_compiler "SUM")
+          (list 'aggregate value 'sql_sum_reduce nil) value))))
+  expect: {result: INT}
+cleanup:
+- sql: DROP TABLE IF EXISTS aggregate_operand_contracts

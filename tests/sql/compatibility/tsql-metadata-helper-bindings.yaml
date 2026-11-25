@@ -1,0 +1,348 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Metadata runtime source helpers retain explicit callable values and permission gates through both
+    procedure codecs
+# Restore under hostile lexical helpers so receiver globals cannot hide a missing capture.
+# scheme adds source locations; rebuilding only list nodes matches the ordinary
+# annotation-free AST shape used by the wire decoder. This exercises source/value
+# behavior, not strict-wire admission or an actual delegated worker.
+setup:
+- sql: CREATE TABLE metadata_capture_anchor(id INT CONSTRAINT metadata_capture_pk PRIMARY KEY,label NVARCHAR(8)
+    CONSTRAINT metadata_capture_default DEFAULT(N'row'))
+- sql: CREATE TABLE metadata_capture_parent(id INT PRIMARY KEY)
+- sql: ALTER TABLE metadata_capture_anchor ADD CONSTRAINT metadata_capture_fk FOREIGN KEY(id) REFERENCES metadata_capture_parent(id)
+- sql: ALTER TABLE metadata_capture_anchor ADD CONSTRAINT metadata_capture_check CHECK(id>0)
+- sql: CREATE TRIGGER metadata_capture_trigger ON metadata_capture_anchor AFTER INSERT AS BEGIN PRINT N'unreached'; END
+- sql: CREATE PROCEDURE metadata_capture_proc AS SELECT 1/0 AS hidden_value
+- scm: |-
+    (begin
+      (define restore_metadata_rows (lambda (codec producer)
+        (begin
+          (define names (list 'info_schema_selected_databases 'info_schema_name_matches 'literal_false? 'info_schema_selected_tables
+            'information_schema_rows 'info_schema_table_rows 'info_schema_columns_for_table 'info_schema_column_default
+            'info_schema_column_character_length 'info_schema_column_collation 'info_schema_table_row 'info_schema_trigger_rows
+            'info_schema_constraint_rows 'info_schema_referential_constraints_for_table 'info_schema_key_column_usage_rows 'info_schema_key_column_usage_for_table 'info_schema_fk_unique_name
+            'info_schema_unique_column_rows 'info_schema_fk_column_rows 'sql_key_constraint_name 'sql_metadata_identity
+            'sql_stored_view_catalog_rows 'tsql_catalog_rows_for_database 'tsql_catalog_object_tuples 'tsql_catalog_column_tuples
+            'tsql_catalog_default_tuples 'tsql_catalog_trigger_tuples 'tsql_catalog_key_tuples 'tsql_catalog_lookup_object_tuples
+            'tsql_catalog_metadata_rows 'tsql_catalog_public_native_row? 'tsql_catalog_object_name_matches? 'tsql_catalog_kind_selected?
+            'tsql_catalog_default_tuple 'tsql_catalog_default_definition 'tsql_catalog_default_comment 'tsql_catalog_default_field
+            'tsql_metadata_visible? 'internal_column_name? 'empty_list? 'NULL))
+          (define source_lists (lambda (node)
+            (match node '() '() (cons head tail) (cons (source_lists head) (source_lists tail)) _ node)))
+          (define code (list 'lambda names (close_procedure producer)))
+          (define decoded (if (equal? codec "json") (json_decode_scmer (json_encode code))
+            (apply (eval (optimize (list 'lambda '() (source_lists (scheme (serialize code)))))) '())))
+          (apply decoded (map names (lambda (_name) (lambda args (error (concat "unbound metadata helper: " _name)))))))))
+      (globalvars "__restore_metadata_rows" (close_procedure restore_metadata_rows))
+      true)
+cleanup:
+- scm: (globalvars "__restore_metadata_rows" nil)
+- sql: DROP TRIGGER metadata_capture_trigger
+- sql: DROP PROCEDURE metadata_capture_proc
+- sql: DROP TABLE metadata_capture_anchor
+- sql: DROP TABLE metadata_capture_parent
+test_cases:
+- name: json metadata producer retains nil database and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_runtime_rows))
+      (define rows (restored nil "objects" (tsql_session_actor session) nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_anchor") "kinds" (list "U"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect:
+    result:
+    - - metadata_capture_anchor
+      - U
+      - true
+- name: json metadata producer retains database selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_runtime_rows))
+      (define rows (restored "memcp-tests" "objects" (tsql_session_actor session) nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_anchor") "kinds" (list "U"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect:
+    result:
+    - - metadata_capture_anchor
+      - U
+      - true
+- name: json metadata producer retains false selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_runtime_rows))
+      (define rows (restored nil "objects" (tsql_session_actor session) nil false))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect:
+    result: []
+- name: json metadata producer retains denied selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_runtime_rows))
+      (define rows (restored "memcp-tests" "objects" (list "root" "stale-account-incarnation") nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_anchor") "kinds" (list "U"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect:
+    result: []
+- name: json metadata producer retains columns selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_runtime_rows))
+      (define rows (restored "memcp-tests" "syscolumns" (tsql_session_actor session) nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_anchor") "kinds" (list "U"))))
+      (map rows (lambda (row) (list (car row) (nth row 2)))))
+  expect:
+    result:
+    - - id
+      - 1
+    - - label
+      - 2
+- name: json metadata producer retains module selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_runtime_rows))
+      (define rows (restored "memcp-tests" "objects" (tsql_session_actor session) nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_proc") "kinds" (list "P"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect:
+    result:
+    - - metadata_capture_proc
+      - P
+      - true
+- name: source metadata producer retains nil database and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_runtime_rows))
+      (define rows (restored nil "objects" (tsql_session_actor session) nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_anchor") "kinds" (list "U"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect:
+    result:
+    - - metadata_capture_anchor
+      - U
+      - true
+- name: source metadata producer retains database selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_runtime_rows))
+      (define rows (restored "memcp-tests" "objects" (tsql_session_actor session) nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_anchor") "kinds" (list "U"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect:
+    result:
+    - - metadata_capture_anchor
+      - U
+      - true
+- name: source metadata producer retains false selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_runtime_rows))
+      (define rows (restored nil "objects" (tsql_session_actor session) nil false))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect:
+    result: []
+- name: source metadata producer retains denied selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_runtime_rows))
+      (define rows (restored "memcp-tests" "objects" (list "root" "stale-account-incarnation") nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_anchor") "kinds" (list "U"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect:
+    result: []
+- name: source metadata producer retains columns selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_runtime_rows))
+      (define rows (restored "memcp-tests" "syscolumns" (tsql_session_actor session) nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_anchor") "kinds" (list "U"))))
+      (map rows (lambda (row) (list (car row) (nth row 2)))))
+  expect:
+    result:
+    - - id
+      - 1
+    - - label
+      - 2
+- name: source metadata producer retains module selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_runtime_rows))
+      (define rows (restored "memcp-tests" "objects" (tsql_session_actor session) nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_proc") "kinds" (list "P"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect:
+    result:
+    - - metadata_capture_proc
+      - P
+      - true
+- name: json metadata selector keeps NULL distinct from FALSE and absent databases
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" info_schema_selected_databases))
+      (list (has? (restored nil) "memcp-tests") (restored false)
+        (restored (list "schema" (list "exact" "metadata_capture_absent_database"))))))
+  expect: {result: [true, [], []]}
+- name: json metadata key columns retain recursive callable ownership
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" information_schema_rows))
+      (define rows (restored "information_schema" "key_column_usage" nil nil))
+      (map (filter rows (lambda (row)
+        (and (equal? (row "table_schema") "memcp-tests") (equal? (row "table_name") "metadata_capture_anchor"))))
+        (lambda (row) (list (row "constraint_name") (row "column_name") (row "ordinal_position")))))
+  expect: {result: [[metadata_capture_pk, id, 1], [metadata_capture_fk, id, 1]]}
+- name: source metadata selector keeps NULL distinct from FALSE and absent databases
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" info_schema_selected_databases))
+      (list (has? (restored nil) "memcp-tests") (restored false)
+        (restored (list "schema" (list "exact" "metadata_capture_absent_database"))))))
+  expect: {result: [true, [], []]}
+- name: source metadata key columns retain recursive callable ownership
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" information_schema_rows))
+      (define rows (restored "information_schema" "key_column_usage" nil nil))
+      (map (filter rows (lambda (row)
+        (and (equal? (row "table_schema") "memcp-tests") (equal? (row "table_name") "metadata_capture_anchor"))))
+        (lambda (row) (list (row "constraint_name") (row "column_name") (row "ordinal_position")))))
+  expect: {result: [[metadata_capture_pk, id, 1], [metadata_capture_fk, id, 1]]}
+- name: json declaration producer retains nil database and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_declaration_runtime_rows))
+      (define rows (restored nil "objects" (tsql_session_actor session) nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_anchor") "kinds" (list "U"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect: {result: [[metadata_capture_anchor, U, true]]}
+- name: json declaration producer retains database selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_declaration_runtime_rows))
+      (define rows (restored "memcp-tests" "objects" (tsql_session_actor session) nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_anchor") "kinds" (list "U"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect: {result: [[metadata_capture_anchor, U, true]]}
+- name: json declaration producer retains false selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_declaration_runtime_rows))
+      (define rows (restored nil "objects" (tsql_session_actor session) nil false))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect: {result: []}
+- name: json declaration producer retains denied selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_declaration_runtime_rows))
+      (define rows (restored "memcp-tests" "objects" (list "root" "stale-account-incarnation") nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_anchor") "kinds" (list "U"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect: {result: []}
+- name: json declaration producer retains module selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_declaration_runtime_rows))
+      (define rows (restored "memcp-tests" "objects" (tsql_session_actor session) nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_proc") "kinds" (list "P"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect: {result: [[metadata_capture_proc, P, true]]}
+- name: source declaration producer retains nil database and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_declaration_runtime_rows))
+      (define rows (restored nil "objects" (tsql_session_actor session) nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_anchor") "kinds" (list "U"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect: {result: [[metadata_capture_anchor, U, true]]}
+- name: source declaration producer retains database selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_declaration_runtime_rows))
+      (define rows (restored "memcp-tests" "objects" (tsql_session_actor session) nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_anchor") "kinds" (list "U"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect: {result: [[metadata_capture_anchor, U, true]]}
+- name: source declaration producer retains false selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_declaration_runtime_rows))
+      (define rows (restored nil "objects" (tsql_session_actor session) nil false))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect: {result: []}
+- name: source declaration producer retains denied selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_declaration_runtime_rows))
+      (define rows (restored "memcp-tests" "objects" (list "root" "stale-account-incarnation") nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_anchor") "kinds" (list "U"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect: {result: []}
+- name: source declaration producer retains module selection and actual declaration values
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_declaration_runtime_rows))
+      (define rows (restored "memcp-tests" "objects" (tsql_session_actor session) nil (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor") "object" (list "exact" "metadata_capture_proc") "kinds" (list "P"))))
+      (map rows (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect: {result: [[metadata_capture_proc, P, true]]}
+- name: json declaration producer retains actual F constraint metadata
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_declaration_runtime_rows))
+      (map (restored "memcp-tests" "objects" (tsql_session_actor session) nil
+        (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor")
+          "object" (list "exact" "metadata_capture_fk") "kinds" (list "F")))
+        (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect: {result: [[metadata_capture_fk, F, true]]}
+- name: json declaration producer retains actual C constraint metadata
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_declaration_runtime_rows))
+      (map (restored "memcp-tests" "objects" (tsql_session_actor session) nil
+        (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor")
+          "object" (list "exact" "metadata_capture_check") "kinds" (list "C")))
+        (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect: {result: [[metadata_capture_check, C, true]]}
+- name: json declaration producer keeps DEFAULT text and syscomments projections
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_declaration_runtime_rows))
+      (define selection (list "table" (list "exact" "metadata_capture_anchor")
+        "object" (list "exact" "metadata_capture_default") "kinds" (list "D")))
+      (list
+        (map (restored "memcp-tests" "defaults" (tsql_session_actor session) nil selection)
+          (lambda (row) (list (car row) (nth row 7))))
+        (map (restored "memcp-tests" "syscomments" (tsql_session_actor session) nil selection)
+          (lambda (row) (nth row 1)))))
+  expect: {result: [[[metadata_capture_default, "N'row'"]], ["N'row'"]]}
+- name: json declaration producer retains enabled native user triggers
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "json" tsql_catalog_declaration_runtime_rows))
+      (map (restored "memcp-tests" "triggers" (tsql_session_actor session) nil
+        (list "table" (list "exact" "metadata_capture_anchor") "kinds" (list "TR")))
+        (lambda (row) (list (car row) (nth row 5) (nth row 8) (nth row 9)))))
+  expect: {result: [[metadata_capture_trigger, TR, false, false]]}
+- name: source declaration producer retains actual F constraint metadata
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_declaration_runtime_rows))
+      (map (restored "memcp-tests" "objects" (tsql_session_actor session) nil
+        (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor")
+          "object" (list "exact" "metadata_capture_fk") "kinds" (list "F")))
+        (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect: {result: [[metadata_capture_fk, F, true]]}
+- name: source declaration producer retains actual C constraint metadata
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_declaration_runtime_rows))
+      (map (restored "memcp-tests" "objects" (tsql_session_actor session) nil
+        (list "schema" (list "exact" "memcp-tests") "table" (list "exact" "metadata_capture_anchor")
+          "object" (list "exact" "metadata_capture_check") "kinds" (list "C")))
+        (lambda (row) (list (car row) (nth row 1) (> (nth row 3) 0)))))
+  expect: {result: [[metadata_capture_check, C, true]]}
+- name: source declaration producer keeps DEFAULT text and syscomments projections
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_declaration_runtime_rows))
+      (define selection (list "table" (list "exact" "metadata_capture_anchor")
+        "object" (list "exact" "metadata_capture_default") "kinds" (list "D")))
+      (list
+        (map (restored "memcp-tests" "defaults" (tsql_session_actor session) nil selection)
+          (lambda (row) (list (car row) (nth row 7))))
+        (map (restored "memcp-tests" "syscomments" (tsql_session_actor session) nil selection)
+          (lambda (row) (nth row 1)))))
+  expect: {result: [[[metadata_capture_default, "N'row'"]], ["N'row'"]]}
+- name: source declaration producer retains enabled native user triggers
+  scm: |-
+    (begin
+      (define restored ((globalvars "__restore_metadata_rows") "source" tsql_catalog_declaration_runtime_rows))
+      (map (restored "memcp-tests" "triggers" (tsql_session_actor session) nil
+        (list "table" (list "exact" "metadata_capture_anchor") "kinds" (list "TR")))
+        (lambda (row) (list (car row) (nth row 5) (nth row 8) (nth row 9)))))
+  expect: {result: [[metadata_capture_trigger, TR, false, false]]}

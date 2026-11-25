@@ -29,22 +29,22 @@ setup:
   - sql: "CREATE TABLE imc_override (domain_id INT, actor_id INT, allowed INT)"
   - scm: |
       (begin
-        (insert (table "memcp-tests" false "imc_file" false) '("id" "filename" "search")
+        (insert (table "memcp-tests" false "imc_file" false nil) '("id" "filename" "search")
           (map (produceN 640) (lambda (i)
             (list i
               (concat "file-" (string i))
               (if (equal? (mod i 256) 0)
                 (concat "prefix-klaus-suffix-" (string i))
                 (string_repeat "kl--la--au--us--" 128))))))
-        (insert (table "memcp-tests" false "imc_document" false) '("id" "file_id" "sort_key")
+        (insert (table "memcp-tests" false "imc_document" false nil) '("id" "file_id" "sort_key")
           (map (produceN 1250) (lambda (i) (list i (mod i 640) i))))
-        (insert (table "memcp-tests" false "imc_acl" false) '("document_id" "allowed")
+        (insert (table "memcp-tests" false "imc_acl" false nil) '("document_id" "allowed")
           (map (produceN 1250) (lambda (i) (list i 1))))
-        (insert (table "memcp-tests" false "imc_domain" false) '("id" "direct_flag")
+        (insert (table "memcp-tests" false "imc_domain" false nil) '("id" "direct_flag")
           (map (produceN 640) (lambda (i) (list i (if (equal? (mod i 11) 0) 1 0)))))
-        (insert (table "memcp-tests" false "imc_assignment" false) '("domain_id" "actor_id" "allowed")
+        (insert (table "memcp-tests" false "imc_assignment" false nil) '("domain_id" "actor_id" "allowed")
           (map (produceN 320) (lambda (i) (list (* i 2) 7 1))))
-        (insert (table "memcp-tests" false "imc_override" false) '("domain_id" "actor_id" "allowed")
+        (insert (table "memcp-tests" false "imc_override" false nil) '("domain_id" "actor_id" "allowed")
           (map (produceN 214) (lambda (i) (list (* i 3) 7 1))))
         (rebuild))
   # Two scans cross the normal adaptive-index savings threshold. The EXPLAIN
@@ -67,14 +67,14 @@ test_cases:
   - name: "Both membership projection directions preserve every invocation key and duplicate target row"
     scm: |
       (begin
-        (define target '("d" "memcp-tests" "imc_projection_key" false nil))
-        (define rhs '("r" "memcp-tests" "imc_projection_value" false nil))
+        (define target '("d" "memcp-tests" "imc_projection_key" false nil (sql_relation_declarations "memcp-tests" "imc_projection_key" nil)))
+        (define rhs '("r" "memcp-tests" "imc_projection_value" false nil (sql_relation_declarations "memcp-tests" "imc_projection_value" nil)))
         (define col (lambda (a c) (list 'get_column a false c false)))
         (define stage (make_group_stage "projection-direction-domain" rhs '()
           (list (col "r" "k") (col "r" "epoch") (col "r" "actor"))
           (list (list 1 '+ 0)) nil '() '() nil nil
           (list (list 'lookup-keys (list (col "d" "k") (list 'session "epoch") (list 'session "actor"))))))
-        (define batch (scan_recset nil (table "memcp-tests" false "imc_projection_key" false)
+        (define batch (scan_recset nil (table "memcp-tests" false "imc_projection_key" false nil)
           '() '() '("enabled") (lambda (enabled) (equal? enabled 1))))
         (define run (lambda (direction epoch actor) (begin
           (define invocation (newsession))
@@ -94,8 +94,8 @@ test_cases:
   - name: "Membership projection rejects computed driver correlations rather than dropping them"
     scm: |
       (begin
-        (define target '("d" "memcp-tests" "imc_projection_key" false nil))
-        (define rhs '("r" "memcp-tests" "imc_projection_value" false nil))
+        (define target '("d" "memcp-tests" "imc_projection_key" false nil (sql_relation_declarations "memcp-tests" "imc_projection_key" nil)))
+        (define rhs '("r" "memcp-tests" "imc_projection_value" false nil (sql_relation_declarations "memcp-tests" "imc_projection_value" nil)))
         (define col (lambda (a c) (list 'get_column a false c false)))
         (define stage (make_group_stage "projection-computed-domain" rhs '()
           (list (col "r" "k") (col "r" "epoch"))
@@ -135,34 +135,14 @@ test_cases:
     expect:
       data: [{e: 0, id: 1}, {e: 0, id: 2}, {e: 1, id: 5}]
   - name: "Unique partition dominance needs no per-request selectivity scan"
-    scm: |
-      (begin
-        (define planning (sql_queryplan_compile_session (newsession) nil))
-        (with_session planning (lambda ()
-          (parse_sql "memcp-tests"
-            "SELECT SQL_CALC_FOUND_ROWS d.id FROM imc_domain d WHERE d.direct_flag = 0 AND NOT EXISTS (SELECT 1 FROM imc_assignment a WHERE a.actor_id = 99 AND a.domain_id = d.id) ORDER BY d.id DESC LIMIT 10"
-            (lambda args true) planning nil)))
-        /* Zero-budget calls only read published feedback. Reject actual
-        sampling budgets, not the metadata operator's name. Positive-budget
-        sentinels ensure the assertion cannot silently become permissive. */
-        (define metadata_only (lambda (expr)
-          (match expr
-            ((symbol quote) value) true
-            ((symbol scan_selectivity_estimate) tx tbl access values columns filter budget)
-              (equal? budget 0)
-            (cons head tail) (reduce expr (lambda (ok part) (and ok (metadata_only part))) true)
-            _ true)))
-        (and (metadata_only (sql_queryplan_guard_from_session planning))
-          (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil 0))
-          (not (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil 1)))
-          (not (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil -1))))))
+    scm: "(begin\n  (define planning (sql_queryplan_compile_session (newsession) nil nil nil))\n  (with_session planning (lambda ()\n    (parse_sql \"memcp-tests\"\n      \"SELECT SQL_CALC_FOUND_ROWS d.id FROM imc_domain d WHERE d.direct_flag = 0 AND NOT EXISTS (SELECT 1 FROM imc_assignment a WHERE a.actor_id = 99 AND a.domain_id = d.id) ORDER BY d.id DESC LIMIT 10\"\n      (lambda args true) planning nil)))\n  /* Zero-budget calls only read published feedback. Reject actual\n  sampling budgets, not the metadata operator's name. Positive-budget\n  sentinels ensure the assertion cannot silently become permissive. */\n  (define metadata_only (lambda (expr)\n    (match expr\n      ((symbol quote) value) true\n      ((symbol scan_selectivity_estimate) tx tbl access values columns filter budget)\n        (equal? budget 0)\n      (cons head tail) (reduce expr (lambda (ok part) (and ok (metadata_only part))) true)\n      _ true)))\n  (and (metadata_only (sql_queryplan_guard_from_session planning))\n    (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil 0))\n    (not (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil 1)))\n    (not (metadata_only (list 'scan_selectivity_estimate nil nil nil nil nil nil -1))))))\n"
     expect:
       data: [true]
 
   - name: "Partition dominance requires every non-null unique key component"
     scm: |
       (begin
-        (define src '("d" "memcp-tests" "imc_domain" false nil))
+        (define src '("d" "memcp-tests" "imc_domain" false nil (sql_relation_declarations "memcp-tests" "imc_domain" nil)))
         (and (aggregate_pushdown_identity_partition? src '("id" "direct_flag"))
           (not (aggregate_pushdown_identity_partition? src '("direct_flag")))))
     expect:
@@ -300,7 +280,7 @@ test_cases:
     scm: |
       (begin
         (define mixed_plan (list
-          (list 'recset_key_index 'tx 'acl_rows '("id"))
+          (list 'recset_key_index 'tx 'acl_rows '("id") "join")
           (list 'recset_project_join 'tx 'search_rows '("id") 'documents '("file_id"))))
         (define decision (list
           (list "decision" "membership_carrier")

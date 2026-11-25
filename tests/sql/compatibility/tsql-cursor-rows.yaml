@@ -1,0 +1,178 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server 2022 reference: https://dbfiddle.uk/hg8lUTTu
+# Implicit static transition membership: https://dbfiddle.uk/gIb3T_8P
+# Converted count, status and absolute FETCH: https://dbfiddle.uk/kC9h33Ki
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Connection last-opened cursor cardinality and reference lifetime
+setup:
+- sql: CREATE TABLE cursor_row_input(id INT PRIMARY KEY,text_value VARCHAR(10))
+- sql: INSERT cursor_row_input VALUES(1,'first'),(2,'second'),(3,'third')
+- sql: CREATE TABLE cursor_row_commands(id INT PRIMARY KEY)
+- sql: CREATE TABLE cursor_row_audit(total INT,status SMALLINT,selected INT,fetched INT)
+cleanup:
+- sql: DROP TRIGGER IF EXISTS cursor_row_transition
+- sql: DROP TABLE IF EXISTS cursor_row_commands
+- sql: DROP TABLE IF EXISTS cursor_row_audit
+- sql: DROP PROCEDURE IF EXISTS cursor_rows_child
+- sql: DROP TABLE IF EXISTS cursor_row_input
+test_cases:
+- name: A connection without an opened cursor reports zero
+  sql: SELECT @@CURSOR_ROWS AS total
+  expect: {rows: 1,data: [{total: 0}]}
+- name: Retiring a never opened cursor leaves the initial cardinality intact
+  sql: |
+    DECLARE pending CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input;
+    DEALLOCATE pending;
+    SELECT @@CURSOR_ROWS AS total,CURSOR_STATUS('local','pending') AS retired_status;
+  expect: {rows: 1,data: [{total: 0,retired_status: -3}]}
+- name: Declaring another cursor does not replace the last opened cardinality
+  sql: |
+    DECLARE opened CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input;
+    OPEN opened;
+    DECLARE pending CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input WHERE id=1;
+    SELECT @@CURSOR_ROWS AS total;
+    DEALLOCATE pending; CLOSE opened; DEALLOCATE opened;
+  expect: {rows: 1,data: [{total: 3}]}
+- name: Closing and deallocating an older cursor leaves the newest count intact
+  sql: |
+    DECLARE older CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input;
+    DECLARE latest CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input WHERE id=1;
+    OPEN older; DECLARE @older INT=@@CURSOR_ROWS;
+    OPEN latest; DECLARE @latest INT=@@CURSOR_ROWS;
+    CLOSE older; DECLARE @closed INT=@@CURSOR_ROWS;
+    DEALLOCATE older; DECLARE @retired INT=@@CURSOR_ROWS;
+    CLOSE latest; DECLARE @finished INT=@@CURSOR_ROWS; DEALLOCATE latest;
+    SELECT @older AS older_total,@latest AS latest_total,@closed AS after_old_close,
+      @retired AS after_old_retirement,@finished AS after_latest_close;
+  expect: {rows: 1,data: [{older_total: 3,latest_total: 1,after_old_close: 1,after_old_retirement: 1,after_latest_close: 0}]}
+- name: Fetching an older cursor changes fetch status rather than last opened cardinality
+  sql: |
+    DECLARE older CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input ORDER BY id;
+    DECLARE latest CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input WHERE id=1;
+    DECLARE @id INT;
+    OPEN older; OPEN latest; FETCH NEXT FROM older INTO @id;
+    SELECT @id AS first_id,@@CURSOR_ROWS AS total,@@FETCH_STATUS AS fetched;
+    DEALLOCATE older; DEALLOCATE latest;
+  expect: {rows: 1,data: [{first_id: 1,total: 1,fetched: 0}]}
+- name: Closing the latest cursor does not fall back to an older open cursor
+  sql: |
+    DECLARE older CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input;
+    DECLARE latest CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input WHERE id=1;
+    OPEN older; OPEN latest; CLOSE latest;
+    SELECT @@CURSOR_ROWS AS total;
+    DEALLOCATE latest; DEALLOCATE older;
+  expect: {rows: 1,data: [{total: 0}]}
+- name: Reopening a static cursor publishes its new result cardinality
+  sql: |
+    DECLARE reopened CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input;
+    OPEN reopened; DECLARE @first INT=@@CURSOR_ROWS;
+    DELETE cursor_row_input WHERE id=3;
+    DECLARE @snapshot INT=@@CURSOR_ROWS;
+    CLOSE reopened; OPEN reopened; DECLARE @second INT=@@CURSOR_ROWS;
+    INSERT cursor_row_input VALUES(3,'third');
+    CLOSE reopened; DEALLOCATE reopened;
+    SELECT @first AS first_total,@snapshot AS snapshot_total,@second AS reopened_total,@@CURSOR_ROWS AS retired_total;
+  expect: {rows: 1,data: [{first_total: 3,snapshot_total: 3,reopened_total: 2,retired_total: 0}]}
+- name: Opening an empty static cursor replaces a nonempty last opened count
+  sql: |
+    DECLARE older CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input;
+    DECLARE empty_rows CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input WHERE id<0;
+    OPEN older; OPEN empty_rows;
+    SELECT @@CURSOR_ROWS AS total;
+    DEALLOCATE empty_rows; DEALLOCATE older;
+  expect: {rows: 1,data: [{total: 0}]}
+- name: Deallocating a name preserves a shared open cursor and alias close and reopen update status
+  sql: |
+    DECLARE shared_rows CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input;
+    DECLARE @reference CURSOR;
+    SET @reference=shared_rows; OPEN shared_rows; DEALLOCATE shared_rows;
+    DECLARE @shared INT=@@CURSOR_ROWS;
+    CLOSE @reference; DECLARE @closed INT=@@CURSOR_ROWS;
+    OPEN @reference; DECLARE @reopened INT=@@CURSOR_ROWS;
+    DEALLOCATE @reference;
+    SELECT @shared AS shared_total,@closed AS closed_total,@reopened AS reopened_total,@@CURSOR_ROWS AS retired_total;
+  expect: {rows: 1,data: [{shared_total: 3,closed_total: 0,reopened_total: 3,retired_total: 0}]}
+- name: Removing a variable reference does not retire the still named cursor
+  sql: |
+    DECLARE kept_rows CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input;
+    DECLARE @reference CURSOR;
+    SET @reference=kept_rows; OPEN @reference; DEALLOCATE @reference;
+    DECLARE @kept INT=@@CURSOR_ROWS;
+    DEALLOCATE kept_rows;
+    SELECT @kept AS kept_total,@@CURSOR_ROWS AS retired_total;
+  expect: {rows: 1,data: [{kept_total: 3,retired_total: 0}]}
+- name: A failed OPEN preserves the preceding successful cursor status
+  sql: |
+    DECLARE older CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input;
+    DECLARE invalid_rows CURSOR LOCAL STATIC FOR SELECT CONVERT(INT,text_value) FROM cursor_row_input;
+    DECLARE @after INT;
+    OPEN older;
+    BEGIN TRY OPEN invalid_rows; END TRY
+    BEGIN CATCH SET @after=@@CURSOR_ROWS; END CATCH;
+    DEALLOCATE invalid_rows;
+    SELECT @after AS after_failed_open,@@CURSOR_ROWS AS after_failed_retirement;
+    CLOSE older; DEALLOCATE older;
+  expect: {rows: 1,data: [{after_failed_open: 3,after_failed_retirement: 3}]}
+- name: A child procedure closes its own last opened cursor at lexical exit
+  sql: |
+    CREATE PROCEDURE cursor_rows_child AS BEGIN
+      DECLARE child_rows CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input WHERE id=1;
+      OPEN child_rows;
+      SELECT @@CURSOR_ROWS AS child_total;
+    END
+- name: Child cursor retirement leaves zero rather than restoring the caller cursor count
+  sql: |
+    DECLARE caller_rows CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input;
+    OPEN caller_rows;
+    EXEC cursor_rows_child;
+    SELECT @@CURSOR_ROWS AS caller_total;
+    DEALLOCATE caller_rows;
+  expect: {rows: 2,data: [{child_total: 1},{caller_total: 0}]}
+- name: TDS publishes declared INT cardinality and isolates connection status
+  tds:
+    statements:
+    - connection: first
+      sql: DECLARE shared_rows CURSOR GLOBAL STATIC FOR SELECT id FROM cursor_row_input; OPEN shared_rows
+    - connection: first
+      sql: SELECT @@CURSOR_ROWS AS total
+      expect: {rows: 1,data: [{total: 3}],column_types: [{name: total,type: INT}]}
+    - connection: second
+      sql: SELECT @@CURSOR_ROWS AS total
+      expect: {rows: 1,data: [{total: 0}],column_types: [{name: total,type: INT}]}
+    - connection: first
+      sql: DEALLOCATE shared_rows; SELECT @@CURSOR_ROWS AS total
+      expect: {rows: 1,data: [{total: 0}],column_types: [{name: total,type: INT}]}
+- name: Batch local retirement resets the same connection scalar on the next request
+  tds:
+    statements:
+    - sql: DECLARE local_rows CURSOR LOCAL STATIC FOR SELECT id FROM cursor_row_input; OPEN local_rows; SELECT @@CURSOR_ROWS AS total
+      expect: {rows: 1,data: [{total: 3}]}
+    - sql: SELECT @@CURSOR_ROWS AS total
+      expect: {rows: 1,data: [{total: 0}]}
+- name: Transition cursors bind an effective static membership contract
+  sql: |
+    CREATE TRIGGER cursor_row_transition ON cursor_row_commands AFTER INSERT AS BEGIN
+      DECLARE converted_rows CURSOR LOCAL SCROLL DYNAMIC FOR SELECT id FROM inserted ORDER BY id;
+      DECLARE @selected INT;
+      OPEN converted_rows;
+      FETCH ABSOLUTE 2 FROM converted_rows INTO @selected;
+      INSERT cursor_row_audit(total,status,selected,fetched)
+        VALUES(@@CURSOR_ROWS,CURSOR_STATUS('local','converted_rows'),@selected,@@FETCH_STATUS);
+      CLOSE converted_rows; DEALLOCATE converted_rows;
+    END
+- name: Converted transition cursor preserves scrolling to an absolute row
+  sql: INSERT cursor_row_commands VALUES(2),(1)
+  expect: {rows: 1,data: [{affected_rows: 2}]}
+- name: Converted static count status and absolute movement agree
+  sql: SELECT total,status,selected,fetched FROM cursor_row_audit
+  expect: {rows: 1,data: [{total: 2,status: 1,selected: 2,fetched: 0}]}
+- name: An empty transition still opens and executes its statement trigger
+  sql: INSERT cursor_row_commands SELECT 3 WHERE 1=0
+  expect: {rows: 1,data: [{affected_rows: 0}]}
+- name: Empty converted cursor reports static zero cardinality and empty status
+  sql: SELECT total,status,selected,fetched FROM cursor_row_audit ORDER BY total
+  expect: {rows: 2,data: [{total: 0,status: 0,selected: null,fetched: -1},{total: 2,status: 1,selected: 2,fetched: 0}]}

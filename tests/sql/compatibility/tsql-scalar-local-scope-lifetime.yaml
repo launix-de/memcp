@@ -1,0 +1,87 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Scalar lexical relations retire without deciding their caller transaction
+setup:
+- sql: DROP FUNCTION IF EXISTS dbo.scope_pair
+- sql: DROP FUNCTION IF EXISTS dbo.scope_steps
+- sql: DROP FUNCTION IF EXISTS dbo.scope_text
+- sql: DROP TABLE IF EXISTS scope_public
+- sql: DROP TABLE IF EXISTS scope_callers
+- sql: CREATE TABLE scope_callers(id INT PRIMARY KEY,n INT)
+- sql: INSERT scope_callers VALUES(1,3),(2,0),(3,2),(4,3)
+- sql: CREATE TABLE scope_public(id INT PRIMARY KEY,amount INT)
+- sql: |
+    CREATE FUNCTION dbo.scope_pair() RETURNS INT AS BEGIN
+      DECLARE @t TABLE(a INT,b INT,PRIMARY KEY(a,b));
+      INSERT @t SELECT 1,2;
+      INSERT @t SELECT 1,3;
+      DECLARE @sum INT;
+      SELECT @sum=SUM(b) FROM @t;
+      RETURN @sum;
+    END
+- sql: |
+    CREATE FUNCTION dbo.scope_steps(@n INT) RETURNS INT AS BEGIN
+      DECLARE @t TABLE(amount INT);
+      DECLARE @i INT=0;
+      DECLARE @count INT;
+      DECLARE @total INT=0;
+      WHILE @i<@n BEGIN
+        INSERT @t SELECT 1;
+        SELECT @count=COUNT(*) FROM @t;
+        SET @total=@total+@count;
+        SET @i=@i+1;
+      END
+      RETURN @total;
+    END
+- sql: |
+    CREATE FUNCTION dbo.scope_text(@value NVARCHAR(MAX)) RETURNS NVARCHAR(MAX) AS BEGIN
+      DECLARE @t TABLE(value NVARCHAR(MAX));
+      INSERT @t SELECT @value;
+      DECLARE @result NVARCHAR(MAX);
+      SELECT @result=value FROM @t;
+      RETURN @result;
+    END
+cleanup:
+- sql: DROP FUNCTION IF EXISTS dbo.scope_pair
+- sql: DROP FUNCTION IF EXISTS dbo.scope_steps
+- sql: DROP FUNCTION IF EXISTS dbo.scope_text
+- sql: DROP TABLE IF EXISTS scope_public
+- sql: DROP TABLE IF EXISTS scope_callers
+test_cases:
+- name: A completed keyed local relation returns its aggregate before caller decision
+  sql: SELECT dbo.scope_pair() AS total
+  expect: {rows: 1, data: [{total: 5}]}
+- name: Each repeated aggregate observes the latest own insertion
+  sql: SELECT dbo.scope_steps(3) AS total,dbo.scope_steps(0) AS empty_total
+  expect: {rows: 1, data: [{total: 6, empty_total: 0}]}
+- name: Duplicate input bindings retain independent local row bags
+  sql: SELECT id,dbo.scope_steps(n) AS total FROM scope_callers ORDER BY id
+  expect:
+    rows: 4
+    data: [{id: 1,total: 6},{id: 2,total: 0},{id: 3,total: 3},{id: 4,total: 6}]
+- name: Outer INSERT retains its original statement owner through local calls
+  sql: INSERT scope_public SELECT id,dbo.scope_steps(n) FROM scope_callers
+- name: Outer inserted rows retain all local function results
+  sql: SELECT id,amount FROM scope_public ORDER BY id
+  expect:
+    rows: 4
+    data: [{id: 1,amount: 6},{id: 2,amount: 0},{id: 3,amount: 3},{id: 4,amount: 6}]
+- name: Local retirement leaves caller savepoint and rollback semantics intact
+  sql: |
+    BEGIN TRAN;
+    INSERT scope_public SELECT 99,dbo.scope_pair();
+    SAVE TRAN kept;
+    UPDATE scope_public SET amount=6 WHERE id=99;
+    ROLLBACK TRAN kept;
+    SELECT amount,@@TRANCOUNT AS depth FROM scope_public WHERE id=99;
+    ROLLBACK TRAN;
+  expect: {rows: 1,data: [{amount: 5,depth: 1}]}
+- name: Caller rollback removes its public insert after local scopes were retired
+  sql: SELECT COUNT(*) AS remaining FROM scope_public WHERE id=99
+  expect: {rows: 1,data: [{remaining: 0}]}
+- name: Returned strings retain their complete value after local source retirement
+  sql: SELECT CASE WHEN dbo.scope_text(REPLICATE(CAST(N'abc' AS NVARCHAR(MAX)),5000))=REPLICATE(CAST(N'abc' AS NVARCHAR(MAX)),5000) THEN 1 ELSE 0 END AS same_value
+  expect: {rows: 1,data: [{same_value: 1}]}

@@ -1,0 +1,266 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Typed V32 indexes compose with existing original owned replacements and disjoint nullable prefix append; raw
+    key authority stays bounded
+setup:
+- sql: DROP TABLE IF EXISTS mixed_ix_owner
+- sql: DROP TABLE IF EXISTS mixed_ix_raw_support
+- sql: DROP TABLE IF EXISTS mixed_ix_new_a
+- sql: DROP TABLE IF EXISTS mixed_ix_new_b
+- sql: DROP TABLE IF EXISTS mixed_ix_old_a
+- sql: DROP TABLE IF EXISTS mixed_ix_old_b
+- sql: DROP TABLE IF EXISTS mixed_ix_public
+- sql: DROP TABLE IF EXISTS mixed_ix_marker
+- sql: CREATE TABLE mixed_ix_old_a(id INT PRIMARY KEY,value INT)
+- sql: INSERT mixed_ix_old_a VALUES(1,11)
+- sql: CREATE TABLE mixed_ix_old_b(id INT PRIMARY KEY,value INT)
+- sql: INSERT mixed_ix_old_b VALUES(2,22)
+- sql: CREATE TABLE mixed_ix_public(id INT PRIMARY KEY,value INT)
+- sql: INSERT mixed_ix_public VALUES(1,10),(2,20)
+- sql: CREATE TABLE mixed_ix_marker(id INT PRIMARY KEY,value INT)
+- sql: INSERT mixed_ix_marker VALUES(1,0)
+- scm: "(begin\n\t(globalvars \"__mixed_ix_caller\" (lambda () (begin\n\t\t(define caller (newsession)) (caller \"username\"\
+    \ \"root\")\n\t\t(caller \"__tsql_principal_id\" (tsql_account_id \"root\"))\n\t\t(caller \"schema\" \"memcp-tests\")\
+    \ (caller \"__tsql_scope\" (newsession)) caller)))\n\t(globalvars \"__mixed_ix_run\" (lambda (caller text) (begin\n\t\t\
+    (define result (newsession)) (result \"rows\" (list))\n\t\t(tsql_execute_request \"memcp-tests\" text caller nil 0\n\t\
+    \t\t(lambda (row) (result \"rows\" (append (result \"rows\") row))) (lambda fields true))\n\t\t(result \"rows\"))))\n\t\
+    (globalvars \"__mixed_ix_refused\" (lambda (body fragment)\n\t\t(try (lambda () (body) false) (lambda (cause)\n\t\t\t\
+    (if (strlike (string (failure_value cause)) (concat \"%\" fragment \"%\")) true (error cause))))))\n\ttrue)\n"
+test_cases:
+- name: A foreign original constructor cannot grant typed index authority
+  scm: "(begin\n\t(define a ((globalvars \"__mixed_ix_caller\"))) (define c ((globalvars \"__mixed_ix_caller\")))\n\t(define\
+    \ run (globalvars \"__mixed_ix_run\"))\n\t(run a \"BEGIN TRANSACTION\") (run a \"CREATE TABLE mixed_ix_owner(id INT,value\
+    \ INT)\")\n\t(run c \"BEGIN TRANSACTION\")\n\t(define atx (a \"__memcp_tx\")) (define ctx (c \"__memcp_tx\"))\n\t(define\
+    \ target (table \"memcp-tests\" false \"mixed_ix_owner\" false atx))\n\t(define denied ((globalvars \"__mixed_ix_refused\"\
+    )\n\t\t(lambda () (create_index target \"IX_wrong_owner\" (list \"value\") false ctx)) \"original native endpoint owner\"\
+    ))\n\t(define untouched (equal? (count (show target \"logical_indexes\" atx)) 0))\n\t(define active (and (equal? (tx_state\
+    \ atx) \"active\") (equal? (tx_state ctx) \"active\")))\n\t(run c \"ROLLBACK TRANSACTION\") (run a \"ROLLBACK TRANSACTION\"\
+    )\n\t(list denied untouched active))\n"
+  expect:
+    result:
+    - true
+    - true
+    - true
+- name: A retained handle to a pending dropped endpoint cannot add an index
+  scm: "(begin\n\t(define a ((globalvars \"__mixed_ix_caller\"))) (define run (globalvars \"__mixed_ix_run\"))\n\t(run a \"\
+    BEGIN TRANSACTION\") (define tx (a \"__memcp_tx\"))\n\t(define target (table \"memcp-tests\" false \"mixed_ix_public\"\
+    \ false tx))\n\t(run a \"DROP TABLE mixed_ix_public\")\n\t(define denied ((globalvars \"__mixed_ix_refused\")\n\t\t(lambda\
+    \ () (create_index target \"IX_retired_target\" (list \"value\") false tx)) \"pending table retirement\"))\n\t(define\
+    \ active (equal? (tx_state tx) \"active\"))\n\t(run a \"ROLLBACK TRANSACTION\")\n\t(define rows (run a \"SELECT id,value\
+    \ FROM mixed_ix_public ORDER BY id\"))\n\t(list denied active (map rows (lambda (row) (list (row \"id\") (row \"value\"\
+    ))))))\n"
+  expect:
+    result:
+    - true
+    - true
+    - - - 1
+        - 10
+      - - 2
+        - 20
+- name: A cursor transaction with earlier rows keeps its original declaration refusal
+  scm: "(begin\n\t(define a ((globalvars \"__mixed_ix_caller\"))) (define run (globalvars \"__mixed_ix_run\"))\n\t(tx_begin\
+    \ a) (define tx (a \"__memcp_tx\"))\n\t(run a \"UPDATE mixed_ix_marker SET value=9 WHERE id=1\")\n\t(define target (table\
+    \ \"memcp-tests\" false \"mixed_ix_public\" false tx))\n\t(define denied ((globalvars \"__mixed_ix_refused\")\n\t\t(lambda\
+    \ () (create_index target \"IX_cursor_after_rows\" (list \"value\") false tx)) \"catalog declarations must precede native\
+    \ row access\"))\n\t(tx_rollback a)\n\t(list denied (map (run a \"SELECT value FROM mixed_ix_marker ORDER BY id\") (lambda\
+    \ (row) (row \"value\")))\n\t\t(count (show (table \"memcp-tests\" false \"mixed_ix_public\" false nil) \"logical_indexes\"\
+    \ nil))))\n"
+  expect:
+    result:
+    - true
+    - - 0
+    - 0
+- name: Raw public key joins its original ACID constructor and rolls back complete state
+  scm: "(begin\n\t(define a ((globalvars \"__mixed_ix_caller\"))) (define run (globalvars \"__mixed_ix_run\"))\n\
+    \t(run a \"BEGIN TRANSACTION\")\n\t(run a \"CREATE TABLE mixed_ix_raw_support(id INT PRIMARY KEY)\")\n\t(run\
+    \ a \"INSERT mixed_ix_raw_support VALUES(3)\")\n\t(define tx (a \"__memcp_tx\"))\n\t(define target (table \"\
+    memcp-tests\" false \"mixed_ix_public\" false tx))\n\t(define created (createkey target \"UQ_mixed_raw\" true\
+    \ (list \"value\") tx))\n\t(define active (equal? (tx_state tx) \"active\"))\n\t(define own (equal? (count (filter\
+    \ ((show target \"constraints\" tx) \"Unique\")\n\t\t(lambda (key) (equal? (key \"Id\") \"UQ_mixed_raw\"))))\
+    \ 1))\n\t(define hidden (equal? (count (filter ((show target \"constraints\") \"Unique\")\n\t\t(lambda (key)\
+    \ (equal? (key \"Id\") \"UQ_mixed_raw\")))) 0))\n\t(define ownrows (map (run a \"SELECT id FROM mixed_ix_raw_support\
+    \ ORDER BY id\") (lambda (row) (row \"id\"))))\n\t(run a \"UPDATE mixed_ix_public SET value=11 WHERE id=1\"\
+    )\n\t(define changed (map (run a \"SELECT id,value FROM mixed_ix_public ORDER BY id\")\n\t\t(lambda (row) (list\
+    \ (row \"id\") (row \"value\")))))\n\t(run a \"ROLLBACK TRANSACTION\")\n\t(define absent (equal? (count (filter\
+    \ ((show target \"constraints\") \"Unique\")\n\t\t(lambda (key) (equal? (key \"Id\") \"UQ_mixed_raw\")))) 0))\n\
+    \t(list created active own hidden ownrows changed absent\n\t\t(map (run a \"SELECT id,value FROM mixed_ix_public\
+    \ ORDER BY id\") (lambda (row) (list (row \"id\") (row \"value\"))))\n\t\t(map (run a \"SELECT OBJECT_ID('mixed_ix_raw_support','U')\
+    \ AS oid\") (lambda (row) (row \"oid\")))))\n"
+  expect:
+    result:
+    - true
+    - true
+    - true
+    - true
+    - - 3
+    - - - 1
+        - 11
+      - - 2
+        - 20
+    - true
+    - - - 1
+        - 10
+      - - 2
+        - 20
+    - - null
+- name: Two replacement copies nullable public append and typed indexes share the original decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE mixed_ix_marker SET value=1 WHERE id=1
+    - connection: owner
+      sql: CREATE TABLE mixed_ix_new_a(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT mixed_ix_new_a SELECT id,value FROM mixed_ix_old_a
+    - connection: owner
+      sql: UPDATE mixed_ix_new_a SET value=111
+    - connection: owner
+      sql: DROP TABLE mixed_ix_old_a
+    - connection: owner
+      sql: EXEC sp_rename N'mixed_ix_new_a',N'mixed_ix_old_a',N'OBJECT'
+    - connection: owner
+      sql: CREATE TABLE mixed_ix_new_b(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT mixed_ix_new_b SELECT id,value FROM mixed_ix_old_b
+    - connection: owner
+      sql: UPDATE mixed_ix_new_b SET value=222
+    - connection: owner
+      sql: DROP TABLE mixed_ix_old_b
+    - connection: owner
+      sql: EXEC sp_rename N'mixed_ix_new_b',N'mixed_ix_old_b',N'OBJECT'
+    - connection: owner
+      sql: ALTER TABLE mixed_ix_public ADD token INT NULL
+    - connection: owner
+      sql: CREATE INDEX IX_mixed_public_token ON mixed_ix_public(token) INCLUDE(value)
+    - connection: owner
+      sql: CREATE UNIQUE INDEX UX_mixed_owned_value ON mixed_ix_old_a(value)
+    - connection: owner
+      sql: UPDATE mixed_ix_public SET token=value+1
+    - connection: owner
+      sql: INSERT mixed_ix_public VALUES(3,30,31)
+    - connection: owner
+      sql: INSERT mixed_ix_old_a VALUES(3,333)
+    - connection: owner
+      sql: SELECT id,value,token,@@TRANCOUNT AS depth FROM mixed_ix_public ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          value: 10
+          token: 11
+          depth: 1
+        - id: 2
+          value: 20
+          token: 21
+          depth: 1
+        - id: 3
+          value: 30
+          token: 31
+          depth: 1
+    - connection: owner
+      sql: SELECT id,value FROM mixed_ix_old_a ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 111
+        - id: 3
+          value: 333
+    - connection: owner
+      sql: SELECT name FROM sys.indexes WHERE name IN(N'IX_mixed_public_token',N'UX_mixed_owned_value') ORDER BY name
+      expect:
+        rows: 2
+        data:
+        - name: IX_mixed_public_token
+        - name: UX_mixed_owned_value
+    - connection: observer
+      sql: SELECT id,value FROM mixed_ix_old_a ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'mixed_ix_public',N'token') AS absent
+      expect:
+        rows: 1
+        data:
+        - absent: null
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: Crash after the single accepted mixed V32 decision
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Replay the original accepted replacement and typed index program
+  action: restart
+- name: Both replacement generations and all public appended values recover
+  sql: SELECT id,value,token FROM mixed_ix_public ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      value: 10
+      token: 11
+    - id: 2
+      value: 20
+      token: 21
+    - id: 3
+      value: 30
+      token: 31
+- name: Constructor unique index and copied rows recover together
+  sql: SELECT id,value FROM mixed_ix_old_a ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 111
+    - id: 3
+      value: 333
+- name: Second replacement and original row marker share recovery
+  sql: SELECT a.id,a.value,m.value AS marker FROM mixed_ix_old_b a CROSS JOIN mixed_ix_marker m
+  expect:
+    rows: 1
+    data:
+    - id: 2
+      value: 222
+      marker: 1
+- name: Both typed declarations retain their original native endpoints after replay
+  sql: SELECT name FROM sys.indexes WHERE name IN(N'IX_mixed_public_token',N'UX_mixed_owned_value') ORDER BY name
+  expect:
+    rows: 2
+    data:
+    - name: IX_mixed_public_token
+    - name: UX_mixed_owned_value
+- name: Recovered constructor standalone index still rejects its actual duplicate value
+  sql: BEGIN TRY INSERT mixed_ix_old_a VALUES(4,111); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS number,CASE WHEN ERROR_MESSAGE()
+    LIKE N'%UX_mixed_owned_value%' THEN 1 ELSE 0 END AS declared_index; END CATCH
+  expect:
+    rows: 1
+    data:
+    - number: 1062
+      declared_index: 1
+- name: Rejected recovery write leaves every constructor row unchanged
+  sql: SELECT id,value FROM mixed_ix_old_a ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 111
+    - id: 3
+      value: 333
+cleanup:
+- sql: DROP TABLE IF EXISTS mixed_ix_owner
+- sql: DROP TABLE IF EXISTS mixed_ix_raw_support
+- sql: DROP TABLE IF EXISTS mixed_ix_new_a
+- sql: DROP TABLE IF EXISTS mixed_ix_new_b
+- sql: DROP TABLE IF EXISTS mixed_ix_old_a
+- sql: DROP TABLE IF EXISTS mixed_ix_old_b
+- sql: DROP TABLE IF EXISTS mixed_ix_public
+- sql: DROP TABLE IF EXISTS mixed_ix_marker

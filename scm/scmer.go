@@ -122,6 +122,15 @@ type CustomJSONCodec struct {
 
 var CustomJSONCodecs [256]CustomJSONCodec
 
+// Stable semantic kinds within the existing JSON runtime-value envelope. These
+// wire identities are independent of Scmer's in-memory iota tags. Version 1
+// distinguishes quoted callable values from inert lambda source arrays.
+const (
+	jsonRuntimeNativeKind    = 8
+	jsonRuntimeProcedureKind = 10
+	jsonRuntimeValueVersion  = 1
+)
+
 // NewCString creates a lazy compressed-string Scmer.
 // ptr points into the StorageString dictionary (must stay alive as long as the Scmer).
 // format: storage.StringFormat value (5 bits); nibbleOff: 0 or 1; charLen: original char count.
@@ -399,7 +408,7 @@ func NewNthLocalVar(idx NthLocalVar) Scmer {
 func NewSourceInfo(si SourceInfo) Scmer {
 	ptr := new(SourceInfo)
 	*ptr = si
-	registerSourceCoverageInfo(ptr)
+	ptr.coverage = sourceCoveragePointFor(si.source, si.line, si.col)
 	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagSourceInfo, 0)}
 }
 
@@ -828,7 +837,7 @@ func (s Scmer) Float() float64 {
 	case tagBSON:
 		return bsonFloat(s)
 	case tagDate:
-		return float64(TagDateDecodeUnix(auxVal(s.aux)))
+		return float64(TagDateDecodeUnix(auxVal(s.aux))) + float64(s.DateNanosecond())/1000000000
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return 1.0
@@ -1216,13 +1225,34 @@ func ToFloat(v Scmer) float64 { return v.Float() }
 // types first (nil, bool, float64/int64, string, []any, map-like assoc
 // list), ensuring stable and portable JSON output for persistence and APIs.
 func (s Scmer) MarshalJSON() ([]byte, error) {
+	return s.marshalJSON(false)
+}
+
+// MarshalPersistentJSON preserves native calendar identity in storage codecs.
+// Public JSON keeps its existing date-text representation.
+func MarshalPersistentJSON(s Scmer) ([]byte, error) { return s.marshalJSON(true) }
+
+func (s Scmer) marshalJSON(persistent bool) ([]byte, error) {
 	if s.IsBSON() {
+		if persistent {
+			return json.Marshal(persistentBSONValue(s))
+		}
 		return appendBSONText(nil, s, false, "")
 	}
 	// Custom, stable encoding for persistence of SCM values.
-	var toJSONable func(Scmer) any
+	// Reuse the existing JSON walk for procedure syntax as well as data.
+	// Only an actual procedure body introduces executable code; ordinary lists
+	// and quoted values must never be interpreted as optimized calls.
+	type codeContext struct {
+		bound   map[Symbol]struct{}
+		origin  *Env
+		pattern bool
+		literal bool // quoted data; actual callable values retain their identity
+	}
+	var encodeErr error
+	var toJSONable func(Scmer, *codeContext) any
 	// helper: find name of native func in Globalenv
-	toJSONable = func(v Scmer) any {
+	toJSONable = func(v Scmer, code *codeContext) any {
 		switch v.GetTag() {
 		case tagNil:
 			return nil
@@ -1233,6 +1263,9 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 		case tagFloat:
 			return v.Float()
 		case tagDate:
+			if persistent {
+				return map[string]any{"scmer_date_v1": []int64{v.Int(), int64(v.DateNanosecond()), int64(v.DateZone())}}
+			}
 			return DateToDisplay(v, time.UTC)
 		case tagString, tagConcat:
 			s := v.String()
@@ -1245,8 +1278,103 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 		case tagSlice:
 			list := lambdaSyntaxOperands(v.Slice())
 			out := make([]any, len(list))
+			if code != nil && !code.literal && len(list) > 0 {
+				callee := v.Slice()[0].WithoutSourceInfo()
+				portableCall := !callee.IsSymbol()
+				if callee.IsSymbol() && !code.pattern {
+					if _, local := code.bound[callee.Symbol()]; !local && code.origin != nil {
+						if binding := code.origin.FindRead(callee.Symbol()); binding != nil {
+							symbol := callee.Symbol()
+							callee = binding.Vars[symbol]
+							// Only the declared global identity is stable source.
+							// An arbitrary lexical alias remains invocation-owned.
+							if declaration := DeclarationForValue(callee); binding == &Globalenv && declaration != nil {
+								portableCall = declaration.Name == string(symbol)
+							}
+						}
+					}
+				}
+				head := ""
+				if code.pattern {
+					head, _ = symbolName(list[0])
+				} else if callee.GetTag() == tagSpecialForm {
+					head = callee.SpecialFormName()
+				}
+				if head == "quote" {
+					for i, item := range list {
+						var child *codeContext
+						if i > 0 {
+							child = &codeContext{literal: true}
+						}
+						out[i] = toJSONable(item, child)
+					}
+					return out
+				}
+				if code.pattern {
+					for i, item := range list {
+						// Like the ordinary procedure printer, the pattern owns
+						// its compiled regex slot and restores the source string.
+						if head == "regex" && i == 1 && item.WithoutSourceInfo().IsRegex() {
+							item = NewString(item.WithoutSourceInfo().Regex().String())
+						}
+						child := code
+						if i == 0 || head == "regex" && i == 1 {
+							child = nil
+						}
+						if head == "eval" && i == 1 {
+							child = &codeContext{bound: code.bound, origin: code.origin}
+						}
+						out[i] = toJSONable(item, child)
+					}
+					return out
+				}
+				if head == "lambda" && (len(list) == 3 || len(list) == 4) {
+					for i, item := range list {
+						var child *codeContext
+						if i == 2 {
+							child = &codeContext{bound: procedureWireBindings(list[1], item, code.bound), origin: code.origin}
+						}
+						out[i] = toJSONable(item, child)
+					}
+					return out
+				}
+				if (head == "match" || head == "match_mut") && len(list) >= 2 {
+					out[0], out[1] = toJSONable(list[0], nil), toJSONable(list[1], code)
+					i := 2
+					for ; i+1 < len(list); i += 2 {
+						out[i] = toJSONable(list[i], &codeContext{bound: code.bound, origin: code.origin, pattern: true})
+						// The enclosing body scan already owns declarations
+						// outside nested lambdas. Clone it; do not rescan each arm.
+						bound := procedureWireBindings(NewSlice(nil), NewNil(), code.bound)
+						procedurePatternBindings(list[i], bound)
+						out[i+1] = toJSONable(list[i+1], &codeContext{bound: bound, origin: code.origin})
+					}
+					if i < len(list) {
+						out[i] = toJSONable(list[i], code)
+					}
+					return out
+				}
+				if portableCall && callee.IsNativeFunc() {
+					if declaration := DeclarationForValue(callee); declaration != nil && declaration.SerializeCall != nil {
+						source, err := declaration.SerializeCall(list[1:])
+						if err != nil {
+							encodeErr = err
+							return nil
+						}
+						// The declaration's portable source must not resolve to a
+						// different callable through the receiving local frame.
+						if items, ok := scmerAsSlice(source); ok && len(items) > 0 && items[0].IsSymbol() {
+							if _, local := code.bound[items[0].Symbol()]; local {
+								encodeErr = fmt.Errorf("optimized call source is shadowed by local %s", items[0].Symbol())
+								return nil
+							}
+						}
+						return toJSONable(source, code)
+					}
+				}
+			}
 			for i, it := range list {
-				out[i] = toJSONable(it)
+				out[i] = toJSONable(it, code)
 			}
 			return out
 		case tagFastDict:
@@ -1257,7 +1385,11 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 			pairs := fd.ToList()
 			out := make([]any, len(pairs))
 			for i, it := range pairs {
-				out[i] = toJSONable(it)
+				var child *codeContext
+				if code != nil && code.literal {
+					child = code
+				}
+				out[i] = toJSONable(it, child)
 			}
 			return out
 		case tagParser:
@@ -1265,9 +1397,25 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 		case tagVector:
 			return v.Vector()
 		case tagFunc:
-			// Try to encode as the symbolic name if known; otherwise as "?"
+			if code != nil && code.literal {
+				if proc := JITProcForFunction(v.Func()); proc != nil {
+					closed := CloseProcedure(Scmer{(*byte)(unsafe.Pointer(proc)), makeAux(tagProc, 0)})
+					return toJSONable(closed, code)
+				}
+			}
+			// Unknown native functions retain their historical symbolic fallback.
 			decl := DeclarationForValue(v)
 			if decl != nil {
+				if code != nil && code.literal {
+					canonical, exists := Globalenv.Vars[Symbol(decl.Name)]
+					if declarations[decl.Name] != decl || decl.Fn == nil || !exists || !canonical.IsNativeFunc() ||
+						FunctionIdentity(canonical.Func()) != FunctionIdentity(v.Func()) {
+						encodeErr = fmt.Errorf("quoted native callable %q has no canonical global declaration", decl.Name)
+						return nil
+					}
+					return map[string]any{"scmer_custom": jsonRuntimeNativeKind,
+						"value": []any{jsonRuntimeValueVersion, decl.Name}}
+				}
 				return map[string]any{"symbol": decl.Name}
 			}
 			return map[string]any{"symbol": "?"}
@@ -1278,32 +1426,58 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 		case tagNthLocalVar:
 			return map[string]any{"var": int(v.NthLocalVar())}
 		case tagProc:
+			if code != nil && code.literal {
+				v = CloseProcedure(v)
+			}
 			p := v.Proc()
 			arr := make([]any, 0, 4)
 			arr = append(arr, map[string]any{"symbol": "lambda"})
-			arr = append(arr, toJSONable(p.Params))
-			arr = append(arr, toJSONable(p.Body))
+			arr = append(arr, toJSONable(p.Params, nil))
+			arr = append(arr, toJSONable(p.Body, &codeContext{bound: procedureWireBindings(p.Params, p.Body, nil), origin: p.En}))
 			if p.NumVars > 0 {
 				arr = append(arr, p.NumVars)
 			}
+			if code != nil && code.literal {
+				return map[string]any{"scmer_custom": jsonRuntimeProcedureKind,
+					"value": []any{jsonRuntimeValueVersion, arr}}
+			}
 			return arr
 		case tagSourceInfo:
-			return toJSONable(v.SourceInfo().value)
+			return toJSONable(v.SourceInfo().value, code)
 		case tagBSON:
+			if persistent {
+				return persistentBSONValue(v)
+			}
 			return json.RawMessage(bsonText(v))
 		case tagJIT:
 			jep := v.JIT()
 			p := jep.Proc
+			if code != nil && code.literal {
+				return toJSONable(NewProcStruct(p), code)
+			}
 			arr := make([]any, 0, 4)
 			arr = append(arr, map[string]any{"symbol": "lambda"})
-			arr = append(arr, toJSONable(p.Params))
-			arr = append(arr, toJSONable(p.Body))
+			arr = append(arr, toJSONable(p.Params, nil))
+			arr = append(arr, toJSONable(p.Body, &codeContext{bound: procedureWireBindings(p.Params, p.Body, nil), origin: p.En}))
 			if p.NumVars > 0 {
 				arr = append(arr, p.NumVars)
 			}
 			return arr
 		default:
 			tag := v.GetTag()
+			if tag == tagAny {
+				// Opaque embedding values can reject serialization through Go's
+				// existing JSON contract instead of losing their runtime identity
+				// in the diagnostic string fallback below.
+				if marshaler, ok := v.Any().(json.Marshaler); ok {
+					encoded, err := json.Marshal(marshaler)
+					if err != nil {
+						encodeErr = err
+						return nil
+					}
+					return json.RawMessage(encoded)
+				}
+			}
 			if codec := CustomJSONCodecs[tag]; codec.Encode != nil {
 				return map[string]any{"scmer_custom": int(tag), "value": codec.Encode(unsafe.Pointer(v.ptr))}
 			}
@@ -1311,7 +1485,11 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 			return v.String()
 		}
 	}
-	return json.Marshal(toJSONable(s))
+	encoded := toJSONable(s, nil)
+	if encodeErr != nil {
+		return nil, encodeErr
+	}
+	return json.Marshal(encoded)
 }
 
 func (s *Scmer) Write(w io.Writer) {
@@ -1391,7 +1569,18 @@ func (s *Scmer) Write(w io.Writer) {
 
 // UnmarshalJSON decodes JSON into a Scmer by first decoding into
 // interface{} and then transforming to Scmer using TransformFromJSON.
-func (s *Scmer) UnmarshalJSON(data []byte) error {
+func (s *Scmer) UnmarshalJSON(data []byte) error { return s.unmarshalJSON(data, false) }
+
+// UnmarshalPersistentJSON is selected by a versioned storage frame. Public and
+// historical JSON never interpret these native scalar envelopes.
+func UnmarshalPersistentJSON(data []byte, s *Scmer) error { return s.unmarshalJSON(data, true) }
+
+func persistentBSONValue(value Scmer) any {
+	kind, payload := value.BSONRaw()
+	return map[string]any{"scmer_bson_v1": []any{kind, base64.StdEncoding.EncodeToString(payload)}}
+}
+
+func (s *Scmer) unmarshalJSON(data []byte, persistent bool) error {
 	// Use decoder with UseNumber to preserve ints
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
@@ -1444,6 +1633,48 @@ func (s *Scmer) UnmarshalJSON(data []byte) error {
 		case string:
 			return NewString(t)
 		case map[string]any:
+			if raw, ok := t["scmer_bson_v1"]; persistent && ok && len(t) == 1 {
+				parts, ok := raw.([]any)
+				if !ok || len(parts) != 2 {
+					panic("invalid persistent BSON envelope")
+				}
+				kind, ok := parts[0].(json.Number)
+				if !ok {
+					panic("invalid persistent BSON type")
+				}
+				code, err := kind.Int64()
+				if err != nil || code < 0 || code > 255 {
+					panic("invalid persistent BSON type")
+				}
+				text, ok := parts[1].(string)
+				if !ok {
+					panic("invalid persistent BSON payload")
+				}
+				payload, err := base64.StdEncoding.DecodeString(text)
+				if err != nil {
+					panic("invalid persistent BSON payload")
+				}
+				return NewBSONRaw(byte(code), payload)
+			}
+			if raw, ok := t["scmer_date_v1"]; persistent && ok && len(t) == 1 {
+				parts, ok := raw.([]any)
+				if !ok || len(parts) != 3 {
+					panic("invalid persistent date parts")
+				}
+				var values [3]int64
+				for index, part := range parts {
+					number, ok := part.(json.Number)
+					if !ok {
+						panic("invalid persistent date part")
+					}
+					value, err := number.Int64()
+					if err != nil {
+						panic("invalid persistent date integer")
+					}
+					values[index] = value
+				}
+				return NewDateNanoWithZone(values[0], int(values[1]), int(values[2]))
+			}
 			if encodedTag, ok := t["scmer_custom"]; ok && len(t) == 2 {
 				var tag int64 = -1
 				switch value := encodedTag.(type) {
@@ -1451,6 +1682,42 @@ func (s *Scmer) UnmarshalJSON(data []byte) error {
 					tag, _ = value.Int64()
 				case float64:
 					tag = int64(value)
+				}
+				if tag == jsonRuntimeNativeKind || tag == jsonRuntimeProcedureKind {
+					parts, ok := t["value"].([]any)
+					if !ok || len(parts) != 2 {
+						panic("invalid JSON runtime callable payload")
+					}
+					version, ok := parts[0].(json.Number)
+					if !ok || version != json.Number("1") {
+						panic("unsupported JSON runtime callable version")
+					}
+					if tag == jsonRuntimeNativeKind {
+						name, ok := parts[1].(string)
+						declaration := declarations[name]
+						if !ok || declaration == nil || declaration.Name != name || declaration.Fn == nil {
+							panic("JSON runtime callable requires an existing native declaration")
+						}
+						return NewFunc(declaration.Fn)
+					}
+					// Reuse the historical procedure reader. Body arrays stay syntax;
+					// typed runtime values nested in quoted data restore independently.
+					encoded, ok := parts[1].([]any)
+					if !ok || len(encoded) < 3 || len(encoded) > 4 {
+						panic("invalid JSON runtime procedure payload")
+					}
+					if len(encoded) == 4 {
+						number, valid := encoded[3].(json.Number)
+						slots, err := strconv.Atoi(number.String())
+						if !valid || err != nil || slots < 0 {
+							panic("invalid JSON runtime procedure local count")
+						}
+					}
+					procedure := from(encoded)
+					if !procedure.IsProc() {
+						panic("invalid JSON runtime procedure payload")
+					}
+					return procedure
 				}
 				if tag >= 0 && tag < int64(len(CustomJSONCodecs)) {
 					codec := CustomJSONCodecs[tag]
@@ -1499,7 +1766,7 @@ func (s *Scmer) UnmarshalJSON(data []byte) error {
 				if head, ok := t[0].(map[string]any); ok {
 					if sym, ok2 := head["symbol"]; ok2 {
 						if name, ok3 := sym.(string); ok3 && name == "lambda" {
-							params := from(t[1])
+							params := fromBody(t[1])
 							body := fromBody(t[2])
 							proc := Proc{Params: params, Body: body, En: &Globalenv}
 							if len(t) > 3 {

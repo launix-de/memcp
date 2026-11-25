@@ -138,7 +138,7 @@ test_cases:
       (define expression (list value))
       (define fields (list "a" expression "b" expression))
 
-      (define plan (lower_zero_source_result_expr fields))
+      (define plan (lower_zero_source_result_expr '() fields))
       (define output (newsession))
       ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
        (lambda (row) (output "row" row)))
@@ -154,7 +154,7 @@ test_cases:
       (define second (list (factory 2)))
       (define fields (list "a" first "b" second "a2" first "b2" second))
 
-      (define plan (lower_zero_source_result_expr fields))
+      (define plan (lower_zero_source_result_expr '() fields))
       (define output (newsession))
       ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
        (lambda (row) (output "row" row)))
@@ -168,7 +168,7 @@ test_cases:
       (begin
       (define fields (list "missing" nil "zero" 0 "text" "1" "number" 1))
 
-      (define plan (lower_zero_source_result_expr fields))
+      (define plan (lower_zero_source_result_expr '() fields))
       (define output (newsession))
       ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
        (lambda (row) (output "row" row)))
@@ -185,7 +185,7 @@ test_cases:
       (define expression (list value))
       (define fields (list "a" expression "b" (source "projection-test" 2 3 expression)))
 
-      (define plan (lower_zero_source_result_expr fields))
+      (define plan (lower_zero_source_result_expr '() fields))
       (define output (newsession))
       ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
        (lambda (row) (output "row" row)))
@@ -205,7 +205,7 @@ test_cases:
        (merge fields (list (concat "a" index) (nth expressions index)
         (concat "b" index) (nth expressions index)))) (list)))
 
-      (define plan (lower_zero_source_result_expr fields))
+      (define plan (lower_zero_source_result_expr '() fields))
       (define output (newsession))
       ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
        (lambda (row) (output "row" row)))
@@ -222,7 +222,7 @@ test_cases:
       (define factory (lambda (captured) (lambda () captured)))
       (define first (list (factory 1)))
       (define second (list (factory 2)))
-      (define plan (lower_zero_source_result_expr (list "a" first "b" second "a2" first "b2" second)))
+      (define plan (lower_zero_source_result_expr '() (list "a" first "b" second "a2" first "b2" second)))
       (match plan
        (cons (symbol !begin) tail)
        (and (equal? (count tail) 3)
@@ -238,7 +238,7 @@ test_cases:
       (begin
         (define expression (list (quote uuid)))
         (expression_equal?
-          (lower_zero_source_result_expr (list "first" expression "second" expression))
+          (lower_zero_source_result_expr '() (list "first" expression "second" expression))
           (list (quote resultrow) (list (quote list) "first" expression "second" expression))))
     expect:
       result: true
@@ -248,7 +248,7 @@ test_cases:
       (begin
         (define expression (list (quote concat) "token:" (list (quote uuid))))
         (expression_equal?
-          (lower_zero_source_result_expr (list "first" expression "second" expression))
+          (lower_zero_source_result_expr '() (list "first" expression "second" expression))
           (list (quote resultrow) (list (quote list) "first" expression "second" expression))))
     expect:
       result: true
@@ -258,7 +258,7 @@ test_cases:
       (reduce (list (list (quote sql_rand)) (list (quote randomBytes) 8))
         (lambda (valid expression)
           (and valid (expression_equal?
-            (lower_zero_source_result_expr (list "first" expression "second" expression))
+            (lower_zero_source_result_expr '() (list "first" expression "second" expression))
             (list (quote resultrow) (list (quote list) "first" expression "second" expression))))) true)
     expect:
       result: true
@@ -267,7 +267,7 @@ test_cases:
     scm: |
       (begin
         (define expression (list (quote uuid)))
-        (define plan (lower_zero_source_result_expr (list "first" expression "second" expression)))
+        (define plan (lower_zero_source_result_expr '() (list "first" expression "second" expression)))
         (define output (newsession))
         ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
           (lambda (row) (output "row" row)))
@@ -282,7 +282,7 @@ test_cases:
     scm: |
       (begin
         (define expression (list (quote uuid)))
-        (define plan (lower_zero_source_result_expr (list "first" expression "second" expression)))
+        (define plan (lower_zero_source_result_expr '() (list "first" expression "second" expression)))
         (define compiled (jit (close_procedure
           (eval (optimize (list (quote lambda) (list (quote resultrow)) plan))))))
         (define first (newsession))
@@ -301,7 +301,7 @@ test_cases:
         (define calls (newsession))
         (define value (lambda () (begin (calls "count" (+ 1 (coalesceNil (calls "count") 0))) 7)))
         (define expression (list value))
-        (define plan (lower_zero_source_result_expr (list "first" expression "second" expression)))
+        (define plan (lower_zero_source_result_expr '() (list "first" expression "second" expression)))
         (define output (newsession))
         ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
           (lambda (row) (output "row" row)))
@@ -317,7 +317,7 @@ test_cases:
         (define value (lambda () (begin (calls "count" (+ 1 (coalesceNil (calls "count") 0))) 7)))
         (define stable (list value))
         (define volatile (list (quote uuid)))
-        (define plan (lower_zero_source_result_expr
+        (define plan (lower_zero_source_result_expr '()
           (list "first" stable "second" stable "first_id" volatile "second_id" volatile)))
         (define output (newsession))
         ((jit (close_procedure (eval (optimize (list (quote lambda) (list (quote resultrow)) plan)))))
@@ -337,7 +337,7 @@ test_cases:
         (define volatile (list (quote uuid)))
         (define fields (merge (map (produceN 64) (lambda (ordinal)
           (list (concat "value_" ordinal) stable (concat "token_" ordinal) volatile)))))
-        (define plan (lower_zero_source_result_expr fields))
+        (define plan (lower_zero_source_result_expr '() fields))
         (match plan
           ((symbol !begin) ((symbol define) shared lowered) ((symbol resultrow) values))
           (and (expression_equal? lowered stable)

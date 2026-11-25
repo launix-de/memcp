@@ -1,0 +1,43 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Native error values retain identity through Scheme throw and recovery
+setup: []
+cleanup: []
+test_cases:
+- name: Native diagnostic throw and try preserve an opaque error
+  scm: |
+    (begin
+      (define failure (tds_diagnostic_error (list "number" 71 "state" 3 "severity" 11
+        "text" "opaque transport failure" "server" "node" "procedure" "routine" "line" 70001)))
+      (define caught (try (lambda () (error failure)) (lambda (value) value)))
+      (and (not (string? caught)) (strlike (string caught) "%opaque transport failure%")))
+  expect: {result: true}
+- name: Source-wrapped native failures remain opaque through repeated recovery
+  scm: |
+    (begin
+      (define failure (tds_diagnostic_error (list "number" 72 "state" 4 "severity" 0
+        "text" "opaque source failure" "server" "node" "procedure" "routine" "line" 70002)))
+      (define code (source "native-error-propagation" 7 11
+        (list (quote error) (list (quote quote) failure))))
+      (define caught (try (lambda () (eval code)) (lambda (value) value)))
+      (define rethrown (try (lambda () (error caught)) (lambda (value) value)))
+      (and (not (string? caught)) (not (string? rethrown))
+        (strlike (string rethrown) "%opaque source failure%")))
+  expect: {result: true}
+- name: Ordinary Scheme datum errors retain their structural payload
+  scm: |
+    (begin
+      (define datum (list (quote neutral-error) 7))
+      (define caught (try (lambda () (error datum)) (lambda (value) value)))
+      (expression_equal? datum caught))
+  expect: {result: true}
+- name: Variadic Scheme error text remains unchanged
+  scm: (equal? (try (lambda () (error "left" 7)) (lambda (value) value)) "left7")
+  expect: {result: true}
+- name: Diagnostic state refuses values beyond the transport byte width
+  scm: (tds_diagnostic_error (list "number" 73 "state" 256 "severity" 11 "text" "invalid state" "server" "node" "procedure" "routine" "line" 1))
+  expect: {error: true, contains: "invalid TDS message integer: state"}
+- name: Diagnostic number refuses negative transport values
+  scm: (tds_diagnostic_error (list "number" -1 "state" 1 "severity" 11 "text" "invalid number" "server" "node" "procedure" "routine" "line" 1))
+  expect: {error: true, contains: "invalid TDS message integer: number"}

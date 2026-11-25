@@ -1,0 +1,399 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Native scalar execution and bounded list scan contracts through the YAML SQL runner
+test_cases:
+- name: Exact large integer power
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (base exponent) (number_power base exponent))"))
+      (define direct (eval (scheme "(lambda (base exponent) (number_power base exponent))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct 3 39) 4052555153018976267) (int? (direct 3 39)))
+          (and (equal? (optimized 3 39) 4052555153018976267) (int? (optimized 3 39)))
+          (and (equal? (compiled 3 39) 4052555153018976267) (int? (compiled 3 39)))))
+  expect:
+    result: true
+- name: Signed minimum integer power
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (base exponent) (number_power base exponent))"))
+      (define direct (eval (scheme "(lambda (base exponent) (number_power base exponent))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct -2 63) -9223372036854775808) (int? (direct -2 63)))
+          (and (equal? (optimized -2 63) -9223372036854775808) (int? (optimized -2 63)))
+          (and (equal? (compiled -2 63) -9223372036854775808) (int? (compiled -2 63)))))
+  expect:
+    result: true
+- name: Positive overflow changes native numeric carrier
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (base exponent) (number_power base exponent))"))
+      (define direct (eval (scheme "(lambda (base exponent) (number_power base exponent))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct 2 63) 9223372036854775808.0))
+          (and (equal? (optimized 2 63) 9223372036854775808.0))
+          (and (equal? (compiled 2 63) 9223372036854775808.0))))
+  expect:
+    result: true
+- name: Zero exponent power
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (base exponent) (number_power base exponent))"))
+      (define direct (eval (scheme "(lambda (base exponent) (number_power base exponent))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct 0 0) 1) (int? (direct 0 0)))
+          (and (equal? (optimized 0 0) 1) (int? (optimized 0 0)))
+          (and (equal? (compiled 0 0) 1) (int? (compiled 0 0)))))
+  expect:
+    result: true
+- name: Fractional real power
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (base exponent) (number_power base exponent))"))
+      (define direct (eval (scheme "(lambda (base exponent) (number_power base exponent))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct 9.0 0.5) 3.0))
+          (and (equal? (optimized 9.0 0.5) 3.0))
+          (and (equal? (compiled 9.0 0.5) 3.0))))
+  expect:
+    result: true
+- name: Negative exponent power
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (base exponent) (number_power base exponent))"))
+      (define direct (eval (scheme "(lambda (base exponent) (number_power base exponent))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct 2 -3) 0.125))
+          (and (equal? (optimized 2 -3) 0.125))
+          (and (equal? (compiled 2 -3) 0.125))))
+  expect:
+    result: true
+- name: NULL native power
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (base exponent) (number_power base exponent))"))
+      (define direct (eval (scheme "(lambda (base exponent) (number_power base exponent))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct nil 2) nil))
+          (and (equal? (optimized nil 2) nil))
+          (and (equal? (compiled nil 2) nil))))
+  expect:
+    result: true
+- name: Real-domain failure remains a native NaN
+  scm: (equal? (concat (number_power -2 0.5)) "NaN")
+  expect:
+    result: true
+- name: Fixed formatting preserves 12.50
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (value precision) (format_fixed value precision))"))
+      (define direct (eval (scheme "(lambda (value precision) (format_fixed value precision))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct 12.5 2) "12.50"))
+          (and (equal? (optimized 12.5 2) "12.50"))
+          (and (equal? (compiled 12.5 2) "12.50"))))
+  expect:
+    result: true
+- name: Fixed formatting preserves 100000000000000000000
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (value precision) (format_fixed value precision))"))
+      (define direct (eval (scheme "(lambda (value precision) (format_fixed value precision))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct 1e20 0) "100000000000000000000"))
+          (and (equal? (optimized 1e20 0) "100000000000000000000"))
+          (and (equal? (compiled 1e20 0) "100000000000000000000"))))
+  expect:
+    result: true
+- name: Fixed formatting preserves -1.25
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (value precision) (format_fixed value precision))"))
+      (define direct (eval (scheme "(lambda (value precision) (format_fixed value precision))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct -1.25 2) "-1.25"))
+          (and (equal? (optimized -1.25 2) "-1.25"))
+          (and (equal? (compiled -1.25 2) "-1.25"))))
+  expect:
+    result: true
+- name: Fixed formatting preserves 1.5000000000000000
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (value precision) (format_fixed value precision))"))
+      (define direct (eval (scheme "(lambda (value precision) (format_fixed value precision))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct 1.5 16) "1.5000000000000000"))
+          (and (equal? (optimized 1.5 16) "1.5000000000000000"))
+          (and (equal? (compiled 1.5 16) "1.5000000000000000"))))
+  expect:
+    result: true
+- name: Fixed formatting preserves 0.0000
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (value precision) (format_fixed value precision))"))
+      (define direct (eval (scheme "(lambda (value precision) (format_fixed value precision))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct 0 4) "0.0000"))
+          (and (equal? (optimized 0 4) "0.0000"))
+          (and (equal? (compiled 0 4) "0.0000"))))
+  expect:
+    result: true
+- name: Native fixed formatting rejects negative precision
+  scm: (format_fixed 1 -1)
+  expect:
+    error: true
+    contains: precision must be nonnegative
+- name: UTF16 search counts supplementary code units
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (s) (string_find s \"x\" 0 false \"utf16\"))"))
+      (define direct (eval (scheme "(lambda (s) (string_find s \"x\" 0 false \"utf16\"))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct "雪😀x") 3) (int? (direct "雪😀x")))
+          (and (equal? (optimized "雪😀x") 3) (int? (optimized "雪😀x")))
+          (and (equal? (compiled "雪😀x") 3) (int? (compiled "雪😀x")))))
+  expect:
+    result: true
+- name: Rune search counts supplementary code points
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (s) (string_find s \"x\" 0 false \"rune\"))"))
+      (define direct (eval (scheme "(lambda (s) (string_find s \"x\" 0 false \"rune\"))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct "雪😀x") 2) (int? (direct "雪😀x")))
+          (and (equal? (optimized "雪😀x") 2) (int? (optimized "雪😀x")))
+          (and (equal? (compiled "雪😀x") 2) (int? (compiled "雪😀x")))))
+  expect:
+    result: true
+- name: Folded search preserves rune positions
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (s) (string_find s \"x\" 0 true \"rune\"))"))
+      (define direct (eval (scheme "(lambda (s) (string_find s \"x\" 0 true \"rune\"))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct "KX") 1) (int? (direct "KX")))
+          (and (equal? (optimized "KX") 1) (int? (optimized "KX")))
+          (and (equal? (compiled "KX") 1) (int? (compiled "KX")))))
+  expect:
+    result: true
+- name: Missing search stays negative
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (s) (string_find s \"x\" 0 false \"rune\"))"))
+      (define direct (eval (scheme "(lambda (s) (string_find s \"x\" 0 false \"rune\"))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct "no") -1) (int? (direct "no")))
+          (and (equal? (optimized "no") -1) (int? (optimized "no")))
+          (and (equal? (compiled "no") -1) (int? (compiled "no")))))
+  expect:
+    result: true
+- name: UTF16 search honors a nonzero start
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (s) (string_find s \"x\" 1 false \"utf16\"))"))
+      (define direct (eval (scheme "(lambda (s) (string_find s \"x\" 1 false \"utf16\"))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct "😀x") 2) (int? (direct "😀x")))
+          (and (equal? (optimized "😀x") 2) (int? (optimized "😀x")))
+          (and (equal? (compiled "😀x") 2) (int? (compiled "😀x")))))
+  expect:
+    result: true
+- name: UTF16 regex position preserves code units
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (s) (regexp_find s \".x$\" false \"utf16\"))"))
+      (define direct (eval (scheme "(lambda (s) (regexp_find s \".x$\" false \"utf16\"))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct "😀x") 1) (int? (direct "😀x")))
+          (and (equal? (optimized "😀x") 1) (int? (optimized "😀x")))
+          (and (equal? (compiled "😀x") 1) (int? (compiled "😀x")))))
+  expect:
+    result: true
+- name: Rune regex position preserves code points
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (s) (regexp_find s \".x$\" false \"rune\"))"))
+      (define direct (eval (scheme "(lambda (s) (regexp_find s \".x$\" false \"rune\"))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct "😀x") 0) (int? (direct "😀x")))
+          (and (equal? (optimized "😀x") 0) (int? (optimized "😀x")))
+          (and (equal? (compiled "😀x") 0) (int? (compiled "😀x")))))
+  expect:
+    result: true
+- name: Regex search reports the first numeric position
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (s) (regexp_find s \"[0-9].*$\" false \"rune\"))"))
+      (define direct (eval (scheme "(lambda (s) (regexp_find s \"[0-9].*$\" false \"rune\"))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct "abc42") 3) (int? (direct "abc42")))
+          (and (equal? (optimized "abc42") 3) (int? (optimized "abc42")))
+          (and (equal? (compiled "abc42") 3) (int? (compiled "abc42")))))
+  expect:
+    result: true
+- name: Folded regex escapes retain their meaning
+  scm: |-
+    (begin
+      (define expression (scheme "(lambda (s) (regexp_find s \"A\\\\D\" true \"rune\"))"))
+      (define direct (eval (scheme "(lambda (s) (regexp_find s \"A\\\\D\" true \"rune\"))")))
+      (define optimized (eval (optimize expression)))
+      (define compiled (jit optimized))
+      (and
+          (and (equal? (direct "aa") 0) (int? (direct "aa")))
+          (and (equal? (optimized "aa") 0) (int? (optimized "aa")))
+          (and (equal? (compiled "aa") 0) (int? (compiled "aa")))))
+  expect:
+    result: true
+- name: List scan Equality boundary
+  scm: |-
+    (begin
+      (define access (list (compiled_scan_access_header 1 "exists" 0 -1) (scan_boundary "equal" "id" 0 0 true true "" false)))
+      (equal? (map (list 1 2 nil) (lambda (value)
+        (scan_exists nil (list (list "id" value)) access (list 2) (list) (lambda () true)))) (list false true false)))
+  expect:
+    result: true
+- name: List scan Open lower range
+  scm: |-
+    (begin
+      (define access (list (compiled_scan_access_header 1 "exists" 0 -1) (scan_boundary "range" "id" 0 -1 false false "" false)))
+      (equal? (map (list 1 2 3) (lambda (value)
+        (scan_exists nil (list (list "id" value)) access (list 2) (list) (lambda () true)))) (list false false true)))
+  expect:
+    result: true
+- name: List scan Inclusive upper range
+  scm: |-
+    (begin
+      (define access (list (compiled_scan_access_header 1 "exists" 0 -1) (scan_boundary "range" "id" -1 0 false true "" false)))
+      (equal? (map (list 1 2 3) (lambda (value)
+        (scan_exists nil (list (list "id" value)) access (list 2) (list) (lambda () true)))) (list true true false)))
+  expect:
+    result: true
+- name: List scan Collated equality
+  scm: |-
+    (begin
+      (define access (list (compiled_scan_access_header 1 "exists" 0 -1) (scan_boundary "equal" "id" 0 0 true true "utf8mb4_general_ci" false)))
+      (equal? (map (list "Alpha" "beta") (lambda (value)
+        (scan_exists nil (list (list "id" value)) access (list "alpha") (list) (lambda () true)))) (list true false)))
+  expect:
+    result: true
+- name: List scan NULL comparison rejects both values
+  scm: |-
+    (begin
+      (define access (list (compiled_scan_access_header 1 "exists" 0 -1) (scan_boundary "equal" "id" 0 0 true true "" false)))
+      (equal? (map (list 0 nil) (lambda (value)
+        (scan_exists nil (list (list "id" value)) access (list nil) (list) (lambda () true)))) (list false false)))
+  expect:
+    result: true
+- name: List scan NULL-safe equality matches only NULL
+  scm: |-
+    (begin
+      (define access (list (compiled_scan_access_header 1 "exists" 0 -1) (scan_boundary "equal" "id" 0 0 true true "" true)))
+      (equal? (map (list 0 nil) (lambda (value)
+        (scan_exists nil (list (list "id" value)) access (list nil) (list) (lambda () true)))) (list false true)))
+  expect:
+    result: true
+- name: List scan IS NULL requires no dynamic probe
+  scm: |-
+    (begin
+      (define access (list (compiled_scan_access_header 1 "exists" 0 -1) (scan_boundary "equal" "id" -1 -1 true true "" false)))
+      (equal? (map (list 0 nil) (lambda (value)
+        (scan_exists nil (list (list "id" value)) access (list) (list) (lambda () true)))) (list false true)))
+  expect:
+    result: true
+- name: Unordered list scan applies access before mapping and limits
+  scm: |-
+    (begin
+      (define rows (list (list "id" 1) (list "id" 2) (list "id" 3)))
+      (scan nil rows
+        (list (compiled_scan_access_header 1 "scan" 0 -1) (scan_boundary "equal" "id" 0 0 true true "" false))
+        (list 2) (list) (lambda () true)
+        (list "id") (lambda (acc id) (+ acc id)) 0 + false))
+  expect:
+    result: 2
+- name: Ordered list scan applies access before mapping and limits
+  scm: |-
+    (begin
+      (define rows (list (list "id" 1) (list "id" 2) (list "id" 3)))
+      (scan_order nil rows
+        (list (compiled_scan_access_header 1 "scan_order" 0 -1) (scan_boundary "equal" "id" 0 0 true true "" false))
+        (list 2) (list) (lambda () true)
+        (list "id") (list <) 0 0 1
+        (list "id") (lambda (acc id) (+ acc id)) 0 + false))
+  expect:
+    result: 2
+- name: List scan enforces computed boundary maps
+  scm: |-
+    (begin
+      (define mapper (lambda (x) (+ x 1)))
+      (define access (list (compiled_scan_access_header 1 "exists" 0 -1)
+        (scan_boundary "equal" ".expression" 0 0 true true "" false 1 (list "id"))))
+      (equal? (map (list 1 2 3) (lambda (id)
+        (scan_exists nil (list (list "id" id)) access
+          (list 3 (list ".expression" mapper)) (list) (lambda () true))))
+        (list false true false)))
+  expect:
+    result: true
+- name: General numeric formatting uses significant digits and preserves exponent carry
+  scm: |
+    (expression_equal?
+      (list (format_general 20240101 6) (format_general 999999.5 6)
+        (format_general 0.00001 6) (format_general -12.5 6) (format_general 0 6))
+      (list "2.02401e+07" "1e+06" "1e-05" "-12.5" "0"))
+  expect: {result: true}
+- name: General numeric formatting has the same direct optimized and JIT call contract
+  scm: |
+    (begin
+      (define direct (eval (scheme "(lambda (value precision) (format_general value precision))")))
+      (define optimized (eval (optimize (scheme "(lambda (value precision) (format_general value precision))"))))
+      (define compiled (jit optimized))
+      (and (equal? (direct 1.234567 4) "1.235")
+        (equal? (optimized 1.234567 4) "1.235") (equal? (compiled 1.234567 4) "1.235")
+        (equal? (direct 999999.5 6) "1e+06")
+        (equal? (optimized 999999.5 6) "1e+06") (equal? (compiled 999999.5 6) "1e+06")
+        (equal? (direct 1.234567 -1) "1.234567")
+        (equal? (optimized 1.234567 -1) "1.234567") (equal? (compiled 1.234567 -1) "1.234567")))
+  expect: {result: true}
+- name: General numeric formatting rejects invalid significant precision
+  scm: (format_general 1 -2)
+  expect: {error: true, contains: precision must be positive or -1}

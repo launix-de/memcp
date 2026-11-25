@@ -59,7 +59,11 @@ func TestNullSafePointIndexDoesNotScanNonNullRows(t *testing.T) {
 	defer release.Release()
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
-	shard.iterateIndexForce(nil, access, len(shard.deltaRows()), buf[:], false, func(batch []uint32) bool {
+	_, columnInput101, finishColumnInput101 := shard.t.readDataContext(nil)
+	defer finishColumnInput101.release()
+	columnAccess101 := access
+	columnAccess101.columnInput = columnInput101
+	shard.iterateIndexForce(nil, columnAccess101, len(shard.deltaRows()), buf[:], false, func(batch []uint32) bool {
 		candidates = append(candidates, batch...)
 		return true
 	})
@@ -306,7 +310,7 @@ func TestScanLookupMapReturnsComputedValueAfterCardinalityCheck(t *testing.T) {
 	if !scm.Equal(got, scm.NewInt(30)) || calls != 1 {
 		t.Fatalf("scanLookupMap = %s with %d mapper calls, want 30 with one call", scm.String(got), calls)
 	}
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	got = tbl.scanLookupMap(tx,
 		testLookupAccess([]string{"tenant", "key"}, []scm.Scmer{scm.NewInt(1), scm.NewInt(7)}),
 		[]string{"left_value", "right_value"},

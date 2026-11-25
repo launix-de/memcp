@@ -33,12 +33,12 @@ test_cases:
   - name: "Create the first canonical lookup cache"
     scm: |
       (createcolumn
-        (table "memcp-tests" false "lookup_cache_file" false)
+        (table "memcp-tests" false "lookup_cache_file" false nil)
         ".lookup:folder_stamp" "INT" '() '("temp" true)
         '("folder_id")
         (lambda (folder_id)
           (scan nil
-            (table "memcp-tests" false "lookup_cache_folder" false)
+            (table "memcp-tests" false "lookup_cache_folder" false nil)
             (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list folder_id)
             '("id") (lambda (id) (equal? id (outer 1 folder_id)))
             '("stamp") (lambda (acc stamp) stamp)
@@ -47,12 +47,12 @@ test_cases:
   - name: "Create a fused lookup cache reading multiple source columns"
     scm: |
       (createcolumn
-        (table "memcp-tests" false "lookup_cache_file" false)
+        (table "memcp-tests" false "lookup_cache_file" false nil)
         ".lookup:folder_pair" "INT" '() '("temp" true)
         '("folder_id")
         (lambda (folder_id)
           (scan nil
-            (table "memcp-tests" false "lookup_cache_folder" false)
+            (table "memcp-tests" false "lookup_cache_folder" false nil)
             (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list folder_id)
             '("id") (lambda (id) (equal? id (outer 1 folder_id)))
             '("stamp" "label_code") (lambda (acc stamp label_code) (+ stamp label_code))
@@ -61,12 +61,12 @@ test_cases:
   - name: "Create a lookup cache depending on another lookup cache"
     scm: |
       (createcolumn
-        (table "memcp-tests" false "lookup_cache_document" false)
+        (table "memcp-tests" false "lookup_cache_document" false nil)
         ".lookup:file_folder_stamp" "INT" '() '("temp" true)
         '("file_id")
         (lambda (file_id)
           (scan nil
-            (table "memcp-tests" false "lookup_cache_file" false)
+            (table "memcp-tests" false "lookup_cache_file" false nil)
             (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list file_id)
             '("id") (lambda (id) (equal? id (outer 1 file_id)))
             '(".lookup:folder_stamp") (lambda (acc folder_stamp) folder_stamp)
@@ -75,12 +75,12 @@ test_cases:
   - name: "Create a nested cache from the fused lookup output"
     scm: |
       (createcolumn
-        (table "memcp-tests" false "lookup_cache_document" false)
+        (table "memcp-tests" false "lookup_cache_document" false nil)
         ".lookup:file_folder_pair" "INT" '() '("temp" true)
         '("file_id")
         (lambda (file_id)
           (scan nil
-            (table "memcp-tests" false "lookup_cache_file" false)
+            (table "memcp-tests" false "lookup_cache_file" false nil)
             (list 369436175368192 (scan_boundary "equal" "id" 0 0 true true "" false)) (list file_id)
             '("id") (lambda (id) (equal? id (outer 1 file_id)))
             '(".lookup:folder_pair") (lambda (acc folder_pair) folder_pair)
@@ -255,7 +255,7 @@ test_cases:
       - sql: "CREATE TABLE filtered_prepare_values(id INT PRIMARY KEY, value INT)"
       - sql: "INSERT INTO filtered_prepare_values VALUES(1,10),(2,NULL),(3,30)"
     scm: |
-      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false)
+      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false nil)
         "prepared_value" "INT" '()
         (list "temp" true "filtercols" '("id") "filter" (lambda (id) (>= id 2)))
         '("value") (lambda (value) (* value 2)))
@@ -268,7 +268,7 @@ test_cases:
 
   - name: "Another preparation filter addresses the same complete column"
     scm: |
-      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false)
+      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false nil)
         "prepared_value" "INT" '()
         (list "temp" true "filtercols" '("id") "filter" (lambda (id) (equal? id 1)))
         '("value") (lambda (value) (* value 2)))
@@ -281,12 +281,93 @@ test_cases:
 
   - name: "Filtered preparation still rejects implicit request state"
     scm: |
-      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false)
+      (createcolumn (table "memcp-tests" false "filtered_prepare_values" false nil)
         "invalid_prepared_value" "INT" '() '("temp" true)
         '("value") (lambda (value) (session "request-only")))
     expect: {error: true}
 
+  - name: "Register caches whose native value contract distinguishes NULL and zero"
+    setup:
+      - sql: "DROP TABLE IF EXISTS value_guard_target"
+      - sql: "DROP TABLE IF EXISTS value_guard_source"
+      - sql: "CREATE TABLE value_guard_source(id INT PRIMARY KEY, value INT, independent INT)"
+      - sql: "CREATE TABLE value_guard_target(id INT PRIMARY KEY, note INT)"
+      - sql: "INSERT INTO value_guard_source VALUES(1,NULL,101),(2,0,202)"
+      - sql: "INSERT INTO value_guard_target VALUES(10,700)"
+    scm: |
+      (begin
+        (createcolumn (table "memcp-tests" false "value_guard_target" false nil)
+          "null_rows" "INT" (list) (list "temp" true) (list)
+          (lambda ()
+            (scan nil (table "memcp-tests" false "value_guard_source" false nil)
+              (scan_access_schema (list) (list) nil false (list "value")) (list)
+              (list "value") (lambda (value) (nil? value))
+              (list) (lambda (acc) (+ acc 1)) 0 + false)))
+        (createcolumn (table "memcp-tests" false "value_guard_target" false nil)
+          "value_marker" "INT" (list) (list "temp" true) (list)
+          (lambda ()
+            (scan nil (table "memcp-tests" false "value_guard_source" false nil)
+              (scan_access_schema (list (scan_boundary "equal" "id" 0 0 true true "bin" false))
+                (list) nil false (list "id")) (list 1)
+              (list "id") (lambda (id) (equal? id 1))
+              (list "value") (lambda (acc value) (if (nil? value) 11 22))
+              nil (lambda (left right) (coalesceNil left right)) false)))
+        true)
+    expect: {result: true}
+
+  - name: "Warm complete native aggregate and value caches before a NULL update"
+    sql: "SELECT id,note,null_rows,value_marker FROM value_guard_target"
+    expect: {rows: 1, data: [{id: 10, note: 700, null_rows: 1, value_marker: 11}]}
+
+  - name: "A stored NULL becomes zero on its original source row"
+    sql: "UPDATE value_guard_source SET value=0 WHERE id=1"
+    expect: {affected_rows: 1}
+
+  - name: "The actual source retains all independent values after NULL to zero"
+    sql: "SELECT id,value,independent FROM value_guard_source ORDER BY id"
+    expect: {rows: 2, data: [{id: 1, value: 0, independent: 101}, {id: 2, value: 0, independent: 202}]}
+
+  - name: "NULL to zero refreshes both warmed native dependency results"
+    sql: "SELECT id,note,null_rows,value_marker FROM value_guard_target"
+    expect: {rows: 1, data: [{id: 10, note: 700, null_rows: 0, value_marker: 22}]}
+
+  - name: "Assigning the same non-NULL value remains a valid update"
+    sql: "UPDATE value_guard_source SET value=0 WHERE id=1"
+
+  - name: "An independent source column can change without altering the cached value contract"
+    sql: "UPDATE value_guard_source SET independent=111 WHERE id=1"
+    expect: {affected_rows: 1}
+
+  - name: "No-op value updates preserve both sources and their unrelated columns"
+    sql: "SELECT id,value,independent FROM value_guard_source ORDER BY id"
+    expect: {rows: 2, data: [{id: 1, value: 0, independent: 111}, {id: 2, value: 0, independent: 202}]}
+
+  - name: "Unchanged dependency values retain complete aggregate and marker results"
+    sql: "SELECT id,note,null_rows,value_marker FROM value_guard_target"
+    expect: {rows: 1, data: [{id: 10, note: 700, null_rows: 0, value_marker: 22}]}
+
+  - name: "A stored zero becomes NULL on the same source row"
+    sql: "UPDATE value_guard_source SET value=NULL WHERE id=1"
+    expect: {affected_rows: 1}
+
+  - name: "The actual source retains its independent values after zero to NULL"
+    sql: "SELECT id,value,independent FROM value_guard_source ORDER BY id"
+    expect: {rows: 2, data: [{id: 1, value: null, independent: 111}, {id: 2, value: 0, independent: 202}]}
+
+  - name: "Zero to NULL refreshes the aggregate and native value projection"
+    sql: "SELECT id,note,null_rows,value_marker FROM value_guard_target"
+    expect: {rows: 1, data: [{id: 10, note: 700, null_rows: 1, value_marker: 11}]}
+
+  - name: "Assigning the same NULL value remains a valid update"
+    sql: "UPDATE value_guard_source SET value=NULL WHERE id=1"
+
+  - name: "An unchanged NULL retains the warmed results and independent target value"
+    sql: "SELECT id,note,null_rows,value_marker FROM value_guard_target"
+    expect: {rows: 1, data: [{id: 10, note: 700, null_rows: 1, value_marker: 11}]}
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS value_guard_target"
+  - sql: "DROP TABLE IF EXISTS value_guard_source"
   - sql: "DROP TABLE IF EXISTS filtered_prepare_values"
   - sql: "DROP TABLE IF EXISTS lookup_cache_document"
   - sql: "DROP TABLE IF EXISTS lookup_cache_file"

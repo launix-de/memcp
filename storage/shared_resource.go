@@ -48,6 +48,7 @@ type shardReadOptions struct {
 type ReadAccess struct {
 	mutation *WriteAccess // existing M admission, only for a mutating cluster scan
 	shard    *storageShard
+	relation *relationScope // optional native result-reader borrow at this access boundary
 }
 
 type WriteAccess struct {
@@ -62,6 +63,9 @@ func (access WriteAccess) Release() {
 }
 
 func (access ReadAccess) Release() {
+	if access.relation != nil {
+		defer access.relation.endUse()
+	}
 	if access.mutation != nil {
 		access.mutation.Release()
 		return
@@ -102,7 +106,7 @@ func getShardWrites(shards []*storageShard, tx *TxContext) []WriteAccess {
 	for {
 		retry := false
 		for i, shard := range shards {
-			access, ready := shard.getWrite(tx, false)
+			access, ready := shard.getWrite(tx, false, nil)
 			if !ready {
 				release()
 				// Independent peers may otherwise recall the same M set in

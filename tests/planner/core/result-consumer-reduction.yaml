@@ -1,0 +1,414 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Complete SQL and PostgreSQL producer roots retain final-result reductions, callback effects and native
+    accumulator ownership after regular view expansion
+  isolated: true
+setup:
+- sql: CREATE TABLE consumer_input(id INT PRIMARY KEY,grp INT,amount INT) ENGINE=memory
+- sql: INSERT INTO consumer_input VALUES(1,1,10),(2,1,NULL),(3,2,20),(4,NULL,30)
+- sql: CREATE TABLE consumer_match(id INT PRIMARY KEY,input_id INT) ENGINE=memory
+- sql: INSERT INTO consumer_match VALUES(11,1),(12,1),(13,3)
+- sql: CREATE VIEW consumer_plain AS SELECT id,grp,amount FROM consumer_input
+- sql: CREATE VIEW consumer_empty AS SELECT id FROM consumer_input WHERE id<0
+- sql: CREATE VIEW consumer_zero AS SELECT 42 AS value
+- sql: CREATE VIEW consumer_zero_empty AS SELECT 42 AS value WHERE FALSE
+- sql: CREATE VIEW consumer_joined AS SELECT a.id,b.id AS matched_id FROM consumer_input a LEFT JOIN consumer_match
+    b ON b.input_id=a.id
+- sql: CREATE VIEW consumer_joined_window AS SELECT a.id,b.id AS matched_id FROM consumer_input a LEFT JOIN consumer_match
+    b ON b.input_id=a.id ORDER BY b.id DESC,a.id ASC LIMIT 3
+- sql: CREATE VIEW consumer_groups AS SELECT grp,COUNT(*) AS n,SUM(amount) AS total FROM consumer_input GROUP BY
+    grp
+- sql: CREATE VIEW consumer_global_empty AS SELECT COUNT(*) AS n,MAX(amount) AS maximum FROM consumer_input WHERE
+    id<0
+- sql: CREATE VIEW consumer_having_empty AS SELECT COUNT(*) AS n FROM consumer_input WHERE id<0 HAVING COUNT(*)>0
+- sql: CREATE VIEW consumer_distinct AS SELECT DISTINCT grp FROM consumer_input
+- sql: CREATE VIEW consumer_all AS SELECT id FROM consumer_input WHERE id<=2 UNION ALL SELECT id FROM consumer_input
+    WHERE id<=2
+- sql: CREATE VIEW consumer_union AS SELECT grp FROM consumer_input UNION SELECT grp FROM consumer_input
+- sql: CREATE VIEW consumer_ordered_union AS SELECT id FROM consumer_input WHERE id<=3 UNION ALL SELECT id+10 AS
+    id FROM consumer_input WHERE id>=3 ORDER BY id DESC LIMIT 3 OFFSET 1
+- sql: CREATE VIEW consumer_branch_top AS SELECT id FROM (SELECT id FROM consumer_input ORDER BY id DESC LIMIT 2) high_rows UNION ALL SELECT
+    id FROM (SELECT id FROM consumer_input ORDER BY id ASC LIMIT 2) low_rows ORDER BY id ASC LIMIT 3 OFFSET 1
+- sql: CREATE VIEW consumer_ordered AS SELECT id FROM consumer_input ORDER BY id DESC LIMIT 2 OFFSET 1
+- sql: CREATE VIEW consumer_lag_lead AS SELECT id,LAG(id) OVER (ORDER BY id) AS previous_id,LEAD(id) OVER (ORDER
+    BY id) AS next_id FROM consumer_input ORDER BY id
+- sql: CREATE VIEW consumer_row_number AS SELECT id,ROW_NUMBER() OVER (ORDER BY id) AS ordinal FROM consumer_input
+- sql: CREATE VIEW consumer_row_number_top AS SELECT q.id,q.ordinal FROM (SELECT id,ROW_NUMBER() OVER (ORDER BY
+    id) AS ordinal FROM consumer_input) q WHERE q.ordinal<=2
+- sql: CREATE VIEW consumer_limit_empty AS SELECT id FROM consumer_input ORDER BY id LIMIT 0
+- scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests") (s "syntax" "postgresql")
+      (define text "CREATE VIEW consumer_pg_table AS SELECT value FROM json_array_elements_text('[\"first\",\"second\",\"third\"]')")
+      (sql_with_statement s nil 0 text (lambda (tx)
+        (mysql_run_sql_statement tx "memcp-tests" text s (lambda (_row) true) (lambda (_fields) true))))
+      (tx_rollback s) true)
+- scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests") (s "syntax" "postgresql")
+      (define text "CREATE VIEW consumer_pg_groups AS SELECT grp,COUNT(*) AS n FROM consumer_input GROUP BY grp")
+      (sql_with_statement s nil 0 text (lambda (tx)
+        (mysql_run_sql_statement tx "memcp-tests" text s (lambda (_row) true) (lambda (_fields) true))))
+      (tx_rollback s) true)
+- scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests") (s "syntax" "postgresql")
+      (define text "CREATE VIEW consumer_pg_all AS SELECT id FROM consumer_input WHERE id<=2 UNION ALL SELECT id FROM consumer_input WHERE id<=2")
+      (sql_with_statement s nil 0 text (lambda (tx)
+        (mysql_run_sql_statement tx "memcp-tests" text s (lambda (_row) true) (lambda (_fields) true))))
+      (tx_rollback s) true)
+- sql: INSERT INTO consumer_match VALUES(14,99),(15,NULL)
+- scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+      (tsql_execute_request "memcp-tests" "CREATE VIEW consumer_full AS SELECT a.id,b.id AS matched_id FROM consumer_input a FULL OUTER JOIN consumer_match b ON b.input_id=a.id"
+        s nil 0 (lambda (_row) true) (lambda args true))
+      (tx_rollback s) true)
+- sql: CREATE VIEW consumer_anti AS SELECT a.id FROM consumer_input a WHERE a.id<4 AND NOT EXISTS(SELECT 1 FROM
+    consumer_match b WHERE b.input_id=a.id)
+test_cases:
+- name: Ordinary SQL output retains grouped NULL and duplicate row semantics
+  sql: SELECT * FROM consumer_joined ORDER BY id,matched_id
+  expect:
+    rows: 5
+    data:
+    - id: 1
+      matched_id: 11
+    - id: 1
+      matched_id: 12
+    - id: 2
+      matched_id: null
+    - id: 3
+      matched_id: 13
+    - id: 4
+      matched_id: null
+- name: Ordinary PostgreSQL output retains the shared grouped contract
+  syntax: postgresql
+  sql: SELECT * FROM consumer_pg_groups ORDER BY COALESCE(grp,0)
+  expect:
+    rows: 3
+    data:
+    - grp: null
+      n: 1
+    - grp: 1
+      n: 2
+    - grp: 2
+      n: 1
+- name: Ordinary PostgreSQL table function output remains unchanged
+  syntax: postgresql
+  sql: SELECT value FROM consumer_pg_table
+  expect:
+    rows: 3
+    data:
+    - value: first
+    - value: second
+    - value: third
+- name: A TSQL FULL joined result retains matching multiplicity and unmatched NULL extensions
+  syntax: tsql
+  sql: SELECT id,matched_id FROM consumer_full ORDER BY id,matched_id
+  expect:
+    rows: 7
+    data:
+    - id: null
+      matched_id: 14
+    - id: null
+      matched_id: 15
+    - id: 1
+      matched_id: 11
+    - id: 1
+      matched_id: 12
+    - id: 2
+      matched_id: null
+    - id: 3
+      matched_id: 13
+    - id: 4
+      matched_id: null
+- name: Native final consumers reduce exactly the accepted SQL and PostgreSQL rows across all result shapes
+  scm: |-
+    (begin
+    (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+    (define run (lambda (view consumer sink)
+      (sql_with_statement s nil 0 view (lambda (tx) (begin
+        (define query (make_query_block "memcp-tests"
+          (list (list "r" "memcp-tests" view false nil nil))
+          (list "*" (list 'get_column "r" false "*" false))
+          true (list) nil (list) nil nil (list) (list) (list)))
+        (define expanded (sql_expand_views query (sql_policy "root") s tx))
+        (define producer (source_relation (car (qb_sources expanded))))
+        (define root (if (or (query_block? producer) (union_block? producer)) producer expanded))
+        (define code (build_reducing_queryplan_term root consumer s tx nil))
+        (sql_execute_formula s tx (sql_queryplan_compile_formula tx code) sink (lambda (_fields) true)))))))
+    (define consumer (make_result_reduction + 0 +))
+    (define result (map '("consumer_plain" "consumer_empty" "consumer_zero" "consumer_zero_empty" "consumer_joined" "consumer_joined_window" "consumer_groups" "consumer_global_empty" "consumer_having_empty" "consumer_distinct" "consumer_all" "consumer_union" "consumer_ordered_union" "consumer_branch_top" "consumer_ordered" "consumer_row_number" "consumer_row_number_top" "consumer_limit_empty" "consumer_pg_table" "consumer_pg_groups" "consumer_pg_all" "consumer_full" "consumer_anti") (lambda (view) (run view consumer (lambda (_row) 1)))))
+    (tx_rollback s)
+    result
+    )
+  expect:
+    data:
+    - - 4
+      - 0
+      - 1
+      - 0
+      - 5
+      - 3
+      - 3
+      - 1
+      - 0
+      - 3
+      - 4
+      - 3
+      - 3
+      - 3
+      - 2
+      - 4
+      - 2
+      - 0
+      - 3
+      - 3
+      - 4
+      - 7
+      - 1
+- name: LAG and LEAD emit complete rows before the final reduction
+  scm: |-
+    (begin
+    (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+    (define run (lambda (view consumer sink)
+      (sql_with_statement s nil 0 view (lambda (tx) (begin
+        (define query (make_query_block "memcp-tests"
+          (list (list "r" "memcp-tests" view false nil nil))
+          (list "*" (list 'get_column "r" false "*" false))
+          true (list) nil (list) nil nil (list) (list) (list)))
+        (define expanded (sql_expand_views query (sql_policy "root") s tx))
+        (define producer (source_relation (car (qb_sources expanded))))
+        (define root (if (or (query_block? producer) (union_block? producer)) producer expanded))
+        (define code (build_reducing_queryplan_term root consumer s tx nil))
+        (sql_execute_formula s tx (sql_queryplan_compile_formula tx code) sink (lambda (_fields) true)))))))
+    (define result (run "consumer_lag_lead" (make_result_reduction + 0 +) (lambda (row) (begin
+      (define id (get_assoc row "id"))
+      (if (and (equal? (get_assoc row "previous_id") (if (equal? id 1) nil (- id 1)))
+               (equal? (get_assoc row "next_id") (if (equal? id 4) nil (+ id 1))))
+        1 (error "window values changed before consumer reduction"))))))
+    (tx_rollback s)
+    (list result)
+    )
+  expect:
+    data:
+    - - 4
+- name: Actual lexical reducer captures survive generated scan parameter bindings
+  scm: |-
+    (begin
+    (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+    (define run (lambda (view consumer sink)
+      (sql_with_statement s nil 0 view (lambda (tx) (begin
+        (define query (make_query_block "memcp-tests"
+          (list (list "r" "memcp-tests" view false nil nil))
+          (list "*" (list 'get_column "r" false "*" false))
+          true (list) nil (list) nil nil (list) (list) (list)))
+        (define expanded (sql_expand_views query (sql_policy "root") s tx))
+        (define producer (source_relation (car (qb_sources expanded))))
+        (define root (if (or (query_block? producer) (union_block? producer)) producer expanded))
+        (define code (build_reducing_queryplan_term root consumer s tx nil))
+        (sql_execute_formula s tx (sql_queryplan_compile_formula tx code) sink (lambda (_fields) true)))))))
+    (define weight 7)
+    (define reducer (close_procedure (lambda (acc value) (+ acc (* weight value)))))
+    (define result (run "consumer_plain" (make_result_reduction reducer 0 +)
+      (lambda (row) (get_assoc row "id"))))
+    (tx_rollback s)
+    (list result)
+    )
+  expect:
+    data:
+    - - 70
+- name: A user accumulator equal to the internal join skip symbol remains a real value
+  scm: |-
+    (begin
+    (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+    (define run (lambda (view consumer sink)
+      (sql_with_statement s nil 0 view (lambda (tx) (begin
+        (define query (make_query_block "memcp-tests"
+          (list (list "r" "memcp-tests" view false nil nil))
+          (list "*" (list 'get_column "r" false "*" false))
+          true (list) nil (list) nil nil (list) (list) (list)))
+        (define expanded (sql_expand_views query (sql_policy "root") s tx))
+        (define producer (source_relation (car (qb_sources expanded))))
+        (define root (if (or (query_block? producer) (union_block? producer)) producer expanded))
+        (define code (build_reducing_queryplan_term root consumer s tx nil))
+        (sql_execute_formula s tx (sql_queryplan_compile_formula tx code) sink (lambda (_fields) true)))))))
+    (define skip (symbol "__join_scan_reduce_skip"))
+    (define retain (close_procedure (lambda (_acc value) value)))
+    (define result (run "consumer_joined" (make_result_reduction retain skip retain) (lambda (_row) skip)))
+    (tx_rollback s)
+    (list (expression_equal? result skip))
+    )
+  expect:
+    data:
+    - - true
+- name: A caller supplied initializer keeps repeated ordered and joined reductions in independent bounded state
+  scm: |-
+    (begin
+    (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+    (define run (lambda (view consumer sink)
+      (sql_with_statement s nil 0 view (lambda (tx) (begin
+        (define query (make_query_block "memcp-tests"
+          (list (list "r" "memcp-tests" view false nil nil))
+          (list "*" (list 'get_column "r" false "*" false))
+          true (list) nil (list) nil nil (list) (list) (list)))
+        (define expanded (sql_expand_views query (sql_policy "root") s tx))
+        (define producer (source_relation (car (qb_sources expanded))))
+        (define root (if (or (query_block? producer) (union_block? producer)) producer expanded))
+        (define code (build_reducing_queryplan_term root consumer s tx nil))
+        (sql_execute_formula s tx (sql_queryplan_compile_formula tx code) sink (lambda (_fields) true)))))))
+    (define reducer (close_procedure (lambda (acc value) (list (+ (car acc) value) (+ (cadr acc) 1)))))
+    (define combine (close_procedure (lambda (left right) (list (+ (car left) (car right)) (+ (cadr left) (cadr right))))))
+    (define consumer (make_result_reduction reducer (lambda () (list 0 0)) combine))
+    (define first (run "consumer_ordered" consumer (lambda (row) (get_assoc row "id"))))
+    (define second (run "consumer_ordered" consumer (lambda (row) (get_assoc row "id"))))
+    (define joined (run "consumer_joined" consumer (lambda (row) (get_assoc row "id"))))
+    (tx_rollback s)
+    (list first second joined)
+    )
+  expect:
+    data:
+    - - - 5
+        - 2
+      - - 5
+        - 2
+      - - 11
+        - 5
+- name: A final row callback failure is propagated and the next ordered reduction remains usable
+  scm: |-
+    (begin
+    (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+    (define run (lambda (view consumer sink)
+      (sql_with_statement s nil 0 view (lambda (tx) (begin
+        (define query (make_query_block "memcp-tests"
+          (list (list "r" "memcp-tests" view false nil nil))
+          (list "*" (list 'get_column "r" false "*" false))
+          true (list) nil (list) nil nil (list) (list) (list)))
+        (define expanded (sql_expand_views query (sql_policy "root") s tx))
+        (define producer (source_relation (car (qb_sources expanded))))
+        (define root (if (or (query_block? producer) (union_block? producer)) producer expanded))
+        (define code (build_reducing_queryplan_term root consumer s tx nil))
+        (sql_execute_formula s tx (sql_queryplan_compile_formula tx code) sink (lambda (_fields) true)))))))
+    (define consumer (make_result_reduction + 0 +))
+    (define failure (try (lambda () (begin
+      (run "consumer_ordered_union" consumer (lambda (_row) (error "completed-row sink failure")))
+      false)) (lambda (cause) (equal? (failure_value cause) "completed-row sink failure"))))
+    (define retained (run "consumer_ordered_union" consumer (lambda (_row) 1)))
+    (tx_rollback s)
+    (list failure retained)
+    )
+  expect:
+    data:
+    - - true
+      - 3
+- name: A window final reducer failure is propagated without skipping its cleanup boundary
+  scm: |-
+    (begin
+    (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+    (define run (lambda (view consumer sink)
+      (sql_with_statement s nil 0 view (lambda (tx) (begin
+        (define query (make_query_block "memcp-tests"
+          (list (list "r" "memcp-tests" view false nil nil))
+          (list "*" (list 'get_column "r" false "*" false))
+          true (list) nil (list) nil nil (list) (list) (list)))
+        (define expanded (sql_expand_views query (sql_policy "root") s tx))
+        (define producer (source_relation (car (qb_sources expanded))))
+        (define root (if (or (query_block? producer) (union_block? producer)) producer expanded))
+        (define code (build_reducing_queryplan_term root consumer s tx nil))
+        (sql_execute_formula s tx (sql_queryplan_compile_formula tx code) sink (lambda (_fields) true)))))))
+    (define consumer (make_result_reduction (lambda (_acc _value) (error "completed-row reducer failure")) 0 +))
+    (define failure (try (lambda () (begin
+      (run "consumer_lag_lead" consumer (lambda (_row) 1)) false))
+      (lambda (cause) (equal? (failure_value cause) "completed-row reducer failure"))))
+    (define retained (run "consumer_lag_lead" (make_result_reduction + 0 +) (lambda (_row) 1)))
+    (tx_rollback s)
+    (list failure retained)
+    )
+  expect:
+    data:
+    - - true
+      - 4
+- name: A final reducer observes completed rows even when the effect callback returns NULL
+  scm: |-
+    (begin
+    (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+    (define run (lambda (view consumer sink)
+      (sql_with_statement s nil 0 view (lambda (tx) (begin
+        (define query (make_query_block "memcp-tests"
+          (list (list "r" "memcp-tests" view false nil nil))
+          (list "*" (list 'get_column "r" false "*" false))
+          true (list) nil (list) nil nil (list) (list) (list)))
+        (define expanded (sql_expand_views query (sql_policy "root") s tx))
+        (define producer (source_relation (car (qb_sources expanded))))
+        (define root (if (or (query_block? producer) (union_block? producer)) producer expanded))
+        (define code (build_reducing_queryplan_term root consumer s tx nil))
+        (sql_execute_formula s tx (sql_queryplan_compile_formula tx code) sink (lambda (_fields) true)))))))
+    (define consumer (make_result_reduction (lambda (acc _value) (+ acc 1)) 0 +))
+    (define result (map '("consumer_plain" "consumer_zero" "consumer_joined" "consumer_ordered_union" "consumer_lag_lead")
+      (lambda (view) (run view consumer (lambda (_row) nil)))))
+    (tx_rollback s)
+    result
+    )
+  expect:
+    data:
+    - - 4
+      - 1
+      - 5
+      - 3
+      - 4
+- name: Empty scans, constant selection, HAVING and LIMIT retain the actual nonzero neutral
+  scm: |-
+    (begin
+    (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests")
+    (define run (lambda (view consumer sink)
+      (sql_with_statement s nil 0 view (lambda (tx) (begin
+        (define query (make_query_block "memcp-tests"
+          (list (list "r" "memcp-tests" view false nil nil))
+          (list "*" (list 'get_column "r" false "*" false))
+          true (list) nil (list) nil nil (list) (list) (list)))
+        (define expanded (sql_expand_views query (sql_policy "root") s tx))
+        (define producer (source_relation (car (qb_sources expanded))))
+        (define root (if (or (query_block? producer) (union_block? producer)) producer expanded))
+        (define code (build_reducing_queryplan_term root consumer s tx nil))
+        (sql_execute_formula s tx (sql_queryplan_compile_formula tx code) sink (lambda (_fields) true)))))))
+    (define consumer (make_result_reduction max 17 max))
+    (define result (map '("consumer_empty" "consumer_zero_empty" "consumer_having_empty" "consumer_limit_empty")
+      (lambda (view) (run view consumer (lambda (_row) 1)))))
+    (tx_rollback s)
+    result
+    )
+  expect:
+    data:
+    - - 17
+      - 17
+      - 17
+      - 17
+cleanup:
+- sql: DROP VIEW consumer_anti
+- sql: DROP VIEW consumer_full
+- sql: DROP VIEW consumer_pg_all
+- sql: DROP VIEW consumer_pg_groups
+- sql: DROP VIEW consumer_pg_table
+- sql: DROP VIEW consumer_limit_empty
+- sql: DROP VIEW consumer_row_number_top
+- sql: DROP VIEW consumer_row_number
+- sql: DROP VIEW consumer_lag_lead
+- sql: DROP VIEW consumer_ordered
+- sql: DROP VIEW consumer_branch_top
+- sql: DROP VIEW consumer_ordered_union
+- sql: DROP VIEW consumer_union
+- sql: DROP VIEW consumer_all
+- sql: DROP VIEW consumer_distinct
+- sql: DROP VIEW consumer_having_empty
+- sql: DROP VIEW consumer_global_empty
+- sql: DROP VIEW consumer_groups
+- sql: DROP VIEW consumer_joined_window
+- sql: DROP VIEW consumer_joined
+- sql: DROP VIEW consumer_zero_empty
+- sql: DROP VIEW consumer_zero
+- sql: DROP VIEW consumer_empty
+- sql: DROP VIEW consumer_plain
+- sql: DROP TABLE consumer_match
+- sql: DROP TABLE consumer_input

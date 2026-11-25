@@ -291,10 +291,12 @@ func (r *replicationManager) validateForwards(source string, packet mosiPacket) 
 	// trusted peer routing may legitimately arrive from a newer owner than our
 	// URI hint. Replica clients instead need the current directory's proof.
 	if r.cluster == nil && r.master {
+		pendingStep := false
 		if value, expected := r.steps.Load(packet.ID); expected {
 			if !value.(*replicaStep).matches(source, packet) {
 				return fmt.Errorf("unexpected forwarding source")
 			}
+			pendingStep = true
 		} else if r.cluster == nil {
 			if err := r.authorizePacket(packet); err != nil {
 				return err
@@ -305,7 +307,8 @@ func (r *replicationManager) validateForwards(source string, packet mosiPacket) 
 		// A receiver can know the current UUID without retaining every older
 		// alias. The current resource's owner/epoch is the same authority proof
 		// used for an ordinary transfer; historical routes are an alternative.
-		current := r.directory.Records[r.resourceKey(packet.Resource)]
+		currentKey := r.resourceKey(packet.Resource)
+		current := r.directory.Records[currentKey]
 		allowed := current.Owner == source && current.Epoch == packet.Epoch
 		for _, route := range packet.Forwards {
 			record := r.directory.Records[r.resourceKey(route.From)]
@@ -313,8 +316,18 @@ func (r *replicationManager) validateForwards(source string, packet mosiPacket) 
 				allowed = true
 			}
 		}
+		var successor replicaRecord
+		var successorKey string
+		if !allowed {
+			successorKey = r.resourceKey(packet.Forwards[0].To)
+			successor = r.directory.Records[successorKey]
+		}
 		r.mu.Unlock()
 		if !allowed {
+			// Diagnose only on the server, outside directory ownership. Keep the
+			// peer/client error unchanged and never log payloads or access proofs.
+			fmt.Printf("replication forwarding rejected: node=%q wire_resource=%q current_key=%q successor_key=%q source=%q packet_epoch=%d current_owner=%q current_epoch=%d current_state=%q successor_owner=%q successor_epoch=%d pending_step=%t\n",
+				r.id, packet.Resource.key(), currentKey, successorKey, source, packet.Epoch, current.Owner, current.Epoch, current.State, successor.Owner, successor.Epoch, pendingStep)
 			return fmt.Errorf("forwarding from non-owner")
 		}
 	} else if r.cluster == nil && source != "" {

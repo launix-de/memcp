@@ -1,0 +1,503 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Table addresses follow their original native transaction decision through commit rollback savepoint
+    and recovery
+test_cases:
+- name: A table name and earlier rows share the original commit
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_table_after
+  - sql: DROP TABLE IF EXISTS rename_table_before
+  - sql: CREATE TABLE rename_table_before(id INT NOT NULL,value INT)
+  - sql: INSERT rename_table_before VALUES(1,17)
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE rename_table_before SET value=19 WHERE id=1
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_table_before',N'rename_table_after'
+    - connection: owner
+      sql: INSERT rename_table_after VALUES(2,23)
+    - connection: owner
+      sql: SELECT id,value FROM rename_table_after ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 19
+        - id: 2
+          value: 23
+    - connection: observer
+      sql: SELECT id,value FROM rename_table_before
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 17
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'rename_table_after',N'U') AS absent_id
+      expect:
+        rows: 1
+        data:
+        - absent_id: null
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM rename_table_after ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 19
+        - id: 2
+          value: 23
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'rename_table_before',N'U') AS absent_id
+      expect:
+        rows: 1
+        data:
+        - absent_id: null
+- name: Rollback restores the original table address and data
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_table_rollback_after
+  - sql: DROP TABLE IF EXISTS rename_table_rollback_before
+  - sql: CREATE TABLE rename_table_rollback_before(id INT NOT NULL,value INT)
+  - sql: INSERT rename_table_rollback_before VALUES(1,17)
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE rename_table_rollback_before SET value=19 WHERE id=1
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_table_rollback_before',N'rename_table_rollback_after',N'OBJECT'
+    - connection: owner
+      sql: INSERT rename_table_rollback_after VALUES(2,23)
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM rename_table_rollback_before
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 17
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'rename_table_rollback_after',N'U') AS absent_id
+      expect:
+        rows: 1
+        data:
+        - absent_id: null
+- name: Owned replacement takes only the exact address retired in its transaction
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_swap_child
+  - sql: DROP TABLE IF EXISTS rename_swap_replacement
+  - sql: DROP TABLE IF EXISTS rename_swap_source
+  - sql: CREATE TABLE rename_swap_source(id INT NOT NULL,value INT)
+  - sql: CREATE TABLE rename_swap_child(id INT NOT NULL,parent_id INT)
+  - sql: INSERT rename_swap_source VALUES(1,17),(2,23)
+  - sql: INSERT rename_swap_child VALUES(7,1)
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE TABLE rename_swap_replacement(id INT NOT NULL,value INT,extra INT DEFAULT 5)
+    - connection: owner
+      sql: INSERT rename_swap_replacement(id,value) SELECT id,value FROM rename_swap_source
+    - connection: owner
+      sql: DROP TABLE rename_swap_source
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_swap_replacement',N'rename_swap_source',N'OBJECT'
+    - connection: owner
+      sql: ALTER TABLE rename_swap_source ADD CONSTRAINT rename_swap_primary PRIMARY KEY(id)
+    - connection: owner
+      sql: ALTER TABLE rename_swap_child ADD CONSTRAINT rename_swap_foreign FOREIGN KEY(parent_id) REFERENCES rename_swap_source(id)
+        ON UPDATE CASCADE
+    - connection: owner
+      sql: SELECT id,value,extra FROM rename_swap_source ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+          extra: 5
+        - id: 2
+          value: 23
+          extra: 5
+    - connection: observer
+      sql: SELECT id,value FROM rename_swap_source ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+        - id: 2
+          value: 23
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'rename_swap_source',N'extra') AS absent_length
+      expect:
+        rows: 1
+        data:
+        - absent_length: null
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: owner
+      sql: UPDATE rename_swap_source SET id=3 WHERE id=1
+    - connection: owner
+      sql: SELECT id,parent_id FROM rename_swap_child
+      expect:
+        rows: 1
+        data:
+        - id: 7
+          parent_id: 3
+    - connection: observer
+      sql: SELECT id,value,extra FROM rename_swap_source ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 2
+          value: 23
+          extra: 5
+        - id: 3
+          value: 17
+          extra: 5
+- name: Savepoint restores a retired generation after a replacement rename
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_rewind_replacement
+  - sql: DROP TABLE IF EXISTS rename_rewind_source
+  - sql: CREATE TABLE rename_rewind_source(id INT NOT NULL,value INT)
+  - sql: INSERT rename_rewind_source VALUES(1,17)
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE rename_rewind_source SET value=19 WHERE id=1
+    - connection: owner
+      sql: SAVE TRANSACTION kept_prefix
+    - connection: owner
+      sql: CREATE TABLE rename_rewind_replacement(id INT NOT NULL,value INT,extra INT)
+    - connection: owner
+      sql: INSERT rename_rewind_replacement VALUES(2,23,29)
+    - connection: owner
+      sql: DROP TABLE rename_rewind_source
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_rewind_replacement',N'rename_rewind_source',N'OBJECT'
+    - connection: owner
+      sql: SELECT id,value,extra FROM rename_rewind_source
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          value: 23
+          extra: 29
+    - connection: owner
+      sql: ROLLBACK TRANSACTION kept_prefix
+    - connection: owner
+      sql: SELECT id,value FROM rename_rewind_source
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 19
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'rename_rewind_replacement',N'U') AS absent_id,COL_LENGTH(N'rename_rewind_source',N'extra')
+        AS absent_length
+      expect:
+        rows: 1
+        data:
+        - absent_id: null
+          absent_length: null
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM rename_rewind_source
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 19
+- name: Occupied target rejection never removes or aliases another table
+  setup:
+  - sql: DROP TABLE IF EXISTS rename_occupied_source
+  - sql: DROP TABLE IF EXISTS rename_occupied_target
+  - sql: CREATE TABLE rename_occupied_source(id INT)
+  - sql: CREATE TABLE rename_occupied_target(id INT)
+  - sql: INSERT rename_occupied_source VALUES(17)
+  - sql: INSERT rename_occupied_target VALUES(23)
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_occupied_source',N'rename_occupied_target',N'OBJECT'
+      expect:
+        error: true
+    - connection: owner
+      sql: SELECT id FROM rename_occupied_source
+      expect:
+        rows: 1
+        data:
+        - id: 17
+    - connection: owner
+      sql: SELECT id FROM rename_occupied_target
+      expect:
+        rows: 1
+        data:
+        - id: 23
+- name: Accepted original decisions survive abrupt process loss
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Reload accepted table bindings
+  action: restart
+- name: Reload preserves the renamed table and committed rows
+  sql: SELECT id,value FROM rename_table_after ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 19
+    - id: 2
+      value: 23
+- name: Reload preserves replacement rows and the new column
+  sql: SELECT id,value,extra FROM rename_swap_source ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 2
+      value: 23
+      extra: 5
+    - id: 3
+      value: 17
+      extra: 5
+- name: Reload preserves rollback and savepoint survivors
+  sql: SELECT id,value FROM rename_rewind_source
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      value: 19
+- name: An unaccepted rename and its data remain on the original owner
+  session_id: rename-abandoned
+  sql: BEGIN TRANSACTION; UPDATE rename_table_after SET value=101 WHERE id=1; EXEC sp_rename N'dbo.rename_table_after',N'rename_table_abandoned',N'OBJECT'
+- name: Loss before the accepted decision abandons the rename
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Reload retains the last accepted address
+  action: restart
+- name: Unaccepted rows did not escape
+  sql: SELECT id,value FROM rename_table_after ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 19
+    - id: 2
+      value: 23
+- name: Unaccepted address did not escape
+  sql: SELECT OBJECT_ID(N'rename_table_abandoned',N'U') AS absent_id
+  expect:
+    rows: 1
+    data:
+    - absent_id: null
+- name: A fresh table key validates under the same owner after an earlier rename
+  setup:
+  - sql: CREATE TABLE rename_key_before(id INT)
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_key_before',N'rename_key_after',N'OBJECT'
+    - connection: owner
+      sql: CREATE TABLE rename_later_key(id INT NOT NULL,value INT)
+    - connection: owner
+      sql: ALTER TABLE rename_later_key ADD CONSTRAINT rename_later_primary PRIMARY KEY(id)
+    - connection: owner
+      sql: INSERT rename_later_key VALUES(1,17)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM rename_later_key
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 17
+    - connection: observer
+      sql: INSERT rename_later_key VALUES(1,23)
+      expect:
+        error: true
+    - connection: observer
+      sql: SELECT id,value FROM rename_later_key
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 17
+- name: A statement trigger binds the selected renamed table within its original transaction
+  setup:
+  - sql: CREATE TABLE rename_program_before(id INT NOT NULL,value INT)
+  - sql: CREATE TABLE rename_program_audit(id INT,value INT)
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.rename_program_before',N'rename_program_after',N'OBJECT'
+    - connection: owner
+      sql: CREATE TRIGGER rename_program_insert ON rename_program_after AFTER INSERT AS INSERT rename_program_audit(id,value) SELECT id,value FROM inserted
+    - connection: owner
+      sql: INSERT rename_program_after VALUES(1,17)
+    - connection: owner
+      sql: SELECT id,value FROM rename_program_audit
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 17
+    - connection: observer
+      sql: SELECT id,value FROM rename_program_audit
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: owner
+      sql: INSERT rename_program_after VALUES(2,23)
+    - connection: observer
+      sql: SELECT id,value FROM rename_program_audit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 17
+        - id: 2
+          value: 23
+- name: Reload a renamed table and its statement trigger
+  action: restart
+- name: Recovered statement trigger consumes the same renamed native table
+  steps:
+  - sql: INSERT rename_program_after VALUES(3,29)
+  - sql: SELECT id,value FROM rename_program_audit ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        value: 17
+      - id: 2
+        value: 23
+      - id: 3
+        value: 29
+- name: Published constraint columns name the current SQL addresses
+  syntax: mysql
+  sql: SELECT table_name,column_name,referenced_table_name,referenced_column_name FROM information_schema.key_column_usage WHERE table_schema='memcp-tests'
+    AND table_name='cold_alias_child' AND constraint_name='cold_alias_foreign' ORDER BY ordinal_position
+  expect: &cold_alias_names
+    rows: 1
+    data:
+    - table_name: cold_alias_child
+      column_name: parent_id
+      referenced_table_name: cold_alias_after
+      referenced_column_name: new_id
+  setup:
+  - syntax: tsql
+    sql: DROP TABLE IF EXISTS cold_alias_new_child
+  - syntax: tsql
+    sql: DROP TABLE IF EXISTS cold_alias_child
+  - syntax: tsql
+    sql: DROP TABLE IF EXISTS cold_alias_after
+  - syntax: tsql
+    sql: DROP TABLE IF EXISTS cold_alias_before
+  - syntax: tsql
+    sql: CREATE TABLE cold_alias_before(old_id INT NOT NULL CONSTRAINT cold_alias_primary PRIMARY KEY,value INT)
+  - syntax: tsql
+    sql: CREATE TABLE cold_alias_child(id INT NOT NULL PRIMARY KEY,old_parent INT,value INT,CONSTRAINT cold_alias_foreign FOREIGN KEY(old_parent) REFERENCES
+      cold_alias_before(old_id) ON UPDATE CASCADE)
+  - syntax: tsql
+    sql: INSERT cold_alias_before VALUES(7,11)
+  - syntax: tsql
+    sql: INSERT cold_alias_child VALUES(1,7,17)
+  - syntax: tsql
+    sql: EXEC sp_rename N'dbo.cold_alias_before.old_id',N'new_id',N'COLUMN'
+  - syntax: tsql
+    sql: EXEC sp_rename N'dbo.cold_alias_before',N'cold_alias_after',N'OBJECT'
+  - syntax: tsql
+    sql: EXEC sp_rename N'dbo.cold_alias_child.old_parent',N'parent_id',N'COLUMN'
+- name: Later public key publication retains the renamed foreign endpoints
+  syntax: mysql
+  steps:
+  - sql: CREATE UNIQUE INDEX cold_alias_value ON cold_alias_child(value)
+  - sql: SELECT table_name,column_name,referenced_table_name,referenced_column_name FROM information_schema.key_column_usage WHERE table_schema='memcp-tests'
+      AND table_name='cold_alias_child' AND constraint_name='cold_alias_foreign' ORDER BY ordinal_position
+    expect: *cold_alias_names
+- name: Cold load both endpoint declarations
+  action: restart
+- name: Recovered constraint columns name the same SQL addresses
+  syntax: mysql
+  sql: SELECT table_name,column_name,referenced_table_name,referenced_column_name FROM information_schema.key_column_usage WHERE table_schema='memcp-tests'
+    AND table_name='cold_alias_child' AND constraint_name='cold_alias_foreign' ORDER BY ordinal_position
+  expect: *cold_alias_names
+- name: A newly registered foreign key uses the selected renamed parent
+  steps:
+  - sql: CREATE TABLE cold_alias_new_child(id INT NOT NULL PRIMARY KEY,parent_id INT,CONSTRAINT cold_alias_new_foreign FOREIGN KEY(parent_id) REFERENCES
+      cold_alias_after(new_id) ON UPDATE CASCADE)
+  - sql: INSERT cold_alias_new_child VALUES(2,7)
+- name: A newly registered foreign endpoint exposes current SQL names
+  syntax: mysql
+  sql: SELECT table_name,column_name,referenced_table_name,referenced_column_name FROM information_schema.key_column_usage WHERE table_schema='memcp-tests'
+    AND table_name='cold_alias_new_child' AND constraint_name='cold_alias_new_foreign' ORDER BY ordinal_position
+  expect:
+    rows: 1
+    data:
+    - table_name: cold_alias_new_child
+      column_name: parent_id
+      referenced_table_name: cold_alias_after
+      referenced_column_name: new_id
+- name: Recovered physical foreign enforcement updates the correct child
+  steps:
+  - sql: UPDATE cold_alias_after SET new_id=9 WHERE new_id=7
+  - sql: SELECT id,parent_id,value FROM cold_alias_child
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        parent_id: 9
+        value: 17
+- name: The newly registered foreign key enforces the same recovered native parent
+  sql: SELECT id,parent_id FROM cold_alias_new_child
+  expect:
+    rows: 1
+    data:
+    - id: 2
+      parent_id: 9
+
+cleanup:
+- sql: DROP TABLE IF EXISTS cold_alias_new_child
+- sql: DROP TABLE IF EXISTS cold_alias_child
+- sql: DROP TABLE IF EXISTS cold_alias_after
+- sql: DROP TABLE IF EXISTS cold_alias_before
+- sql: DROP TABLE IF EXISTS rename_swap_child
+- sql: DROP TABLE IF EXISTS rename_swap_source
+- sql: DROP TABLE IF EXISTS rename_swap_replacement
+- sql: DROP TABLE IF EXISTS rename_table_after
+- sql: DROP TABLE IF EXISTS rename_table_before
+- sql: DROP TABLE IF EXISTS rename_table_rollback_before
+- sql: DROP TABLE IF EXISTS rename_table_rollback_after
+- sql: DROP TABLE IF EXISTS rename_rewind_source
+- sql: DROP TABLE IF EXISTS rename_rewind_replacement
+- sql: DROP TABLE IF EXISTS rename_occupied_source
+- sql: DROP TABLE IF EXISTS rename_occupied_target
+- sql: DROP TABLE IF EXISTS rename_table_abandoned
+- sql: DROP TABLE IF EXISTS rename_program_after
+- sql: DROP TABLE IF EXISTS rename_program_before
+- sql: DROP TABLE IF EXISTS rename_program_audit
+- sql: DROP TABLE IF EXISTS rename_key_before
+- sql: DROP TABLE IF EXISTS rename_key_after
+- sql: DROP TABLE IF EXISTS rename_later_key

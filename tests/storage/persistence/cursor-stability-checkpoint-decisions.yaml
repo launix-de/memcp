@@ -1,0 +1,231 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Native cursor-stability checkpoint decisions survive repeated rebuilds,
+    rollback, savepoint undo, and crashes
+setup:
+- scm: |-
+    (begin
+      (map '("cs_checkpoint_commit" "cs_checkpoint_abort" "cs_checkpoint_savepoint"
+        "cs_rebuild_live_commit" "cs_rebuild_live_abort") (lambda (name) (begin
+        (createtable "memcp-tests" name
+          (list (list "column" "id" "INT" (list) (list "null" false))
+            (list "column" "value" "INT" (list) (list))
+            (list "unique" "PRIMARY" (list "id")))
+          (list "engine" "safe") false nil)
+        (define target (table "memcp-tests" false name false nil))
+        (insert target '("id" "value") (list (list 1 10) (list 2 20)))
+        (rebuild target true false))))
+      true)
+cleanup:
+- sql: DROP TABLE IF EXISTS cs_checkpoint_commit
+- sql: DROP TABLE IF EXISTS cs_checkpoint_abort
+- sql: DROP TABLE IF EXISTS cs_checkpoint_savepoint
+- sql: DROP TABLE IF EXISTS cs_rebuild_live_commit
+- sql: DROP TABLE IF EXISTS cs_rebuild_live_abort
+test_cases:
+- name: Commit keeps native journal ownership across two rebuild generations
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (define tx (owner "__memcp_tx"))
+        (define target (table "memcp-tests" false "cs_checkpoint_commit" false tx))
+        (scan tx target '() '() '("id") (lambda (id) (<= id 2)) '("id" "$update")
+          (lambda (acc id update) (begin
+            (if (equal? id 1) (update '("value" 11)) (update)) (+ acc 1))) 0 +)
+        (insert target '("id" "value") (list (list 3 30)) '() nil false nil tx)
+        (insert target '("id" "value") (list (list 4 40)) '() nil false nil tx)
+        (scan tx target '() '() '("id") (lambda (id) (equal? id 4)) '("$update")
+          (lambda (acc update) (begin (update) (+ acc 1))) 0 +)
+        (rebuild target true false)
+        (rebuild target true false)
+        (tx_commit owner)
+        (nil? (owner "transaction"))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: Commit exposes exact rows before a crash
+  sql: SELECT id,value FROM cs_checkpoint_commit ORDER BY id
+  expect:
+    rows: 2
+    data: &id001
+    - id: 1
+      value: 11
+    - id: 3
+      value: 30
+- name: Crash after commit without another checkpoint
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart the commit decision fixture
+  action: restart
+- name: Recovery preserves the exact commit decision and discards deleted inserted
+    versions
+  sql: SELECT id,value FROM cs_checkpoint_commit ORDER BY id
+  expect:
+    rows: 2
+    data: *id001
+- name: Rollback keeps native journal ownership across two rebuild generations
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (define tx (owner "__memcp_tx"))
+        (define target (table "memcp-tests" false "cs_checkpoint_abort" false tx))
+        (scan tx target '() '() '("id") (lambda (id) (<= id 2)) '("id" "$update")
+          (lambda (acc id update) (begin
+            (if (equal? id 1) (update '("value" 11)) (update)) (+ acc 1))) 0 +)
+        (insert target '("id" "value") (list (list 3 30)) '() nil false nil tx)
+        (insert target '("id" "value") (list (list 4 40)) '() nil false nil tx)
+        (scan tx target '() '() '("id") (lambda (id) (equal? id 4)) '("$update")
+          (lambda (acc update) (begin (update) (+ acc 1))) 0 +)
+        (rebuild target true false)
+        (rebuild target true false)
+        (insert target '("id" "value") (list (list 5 50)) '() nil false nil tx)
+        (tx_rollback owner)
+        (nil? (owner "transaction"))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: Rollback exposes exact rows before a crash
+  sql: SELECT id,value FROM cs_checkpoint_abort ORDER BY id
+  expect:
+    rows: 2
+    data: &id002
+    - id: 1
+      value: 10
+    - id: 2
+      value: 20
+- name: Crash after rollback without another checkpoint
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart the rollback decision fixture
+  action: restart
+- name: Recovery preserves the exact rollback decision and discards deleted inserted
+    versions
+  sql: SELECT id,value FROM cs_checkpoint_abort ORDER BY id
+  expect:
+    rows: 2
+    data: *id002
+- name: Savepoint keeps native journal ownership across two rebuild generations
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (define tx (owner "__memcp_tx"))
+        (define target (table "memcp-tests" false "cs_checkpoint_savepoint" false tx))
+        (insert target '("id" "value") (list (list 3 30)) '() nil false nil tx)
+        (define sp (tx_savepoint tx))
+        (scan tx target '() '() '("id") (lambda (id) (<= id 2)) '("id" "$update")
+          (lambda (acc id update) (begin
+            (if (equal? id 1) (update '("value" 11)) (update)) (+ acc 1))) 0 +)
+        (insert target '("id" "value") (list (list 4 40)) '() nil false nil tx)
+        (scan tx target '() '() '("id") (lambda (id) (equal? id 4)) '("$update")
+          (lambda (acc update) (begin (update) (+ acc 1))) 0 +)
+        (rebuild target true false)
+        (rebuild target true false)
+        (insert target '("id" "value") (list (list 5 50)) '() nil false nil tx)
+        (tx_rollback_to_savepoint tx sp)
+        (tx_commit owner)
+        (nil? (owner "transaction"))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: true
+- name: Savepoint exposes exact rows before a crash
+  sql: SELECT id,value FROM cs_checkpoint_savepoint ORDER BY id
+  expect:
+    rows: 3
+    data: &id003
+    - id: 1
+      value: 10
+    - id: 2
+      value: 20
+    - id: 3
+      value: 30
+- name: Crash after savepoint without another checkpoint
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart the savepoint decision fixture
+  action: restart
+- name: Recovery preserves the exact savepoint decision and discards deleted inserted
+    versions
+  sql: SELECT id,value FROM cs_checkpoint_savepoint ORDER BY id
+  expect:
+    rows: 3
+    data: *id003
+- name: Commit remains valid while ordinary rebuilds forward every mutation kind
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (define tx (owner "__memcp_tx"))
+        (define target (table "memcp-tests" false "cs_rebuild_live_commit" false tx))
+        (parallel
+          (reduce (produceN 8) (lambda (_done index) (begin (rebuild target true false) true)) true)
+          (begin
+            (scan tx target '() '() '("id") (lambda (id) (equal? id 2)) '("$update")
+              (lambda (acc update) (begin (update) (+ acc 1))) 0 +)
+            (reduce (produceN 8) (lambda (_done index) (begin
+              (scan tx target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+                (lambda (acc update) (begin (update (list "value" (+ 11 index))) (+ acc 1))) 0 +)
+              (insert target '("id" "value") (list (list (+ index 3) (* (+ index 3) 10))) '() nil false nil tx)
+              (if (equal? (mod index 2) 1)
+                (scan tx target '() '() '("id") (lambda (id) (equal? id (+ index 3))) '("$update")
+                  (lambda (acc update) (begin (update) (+ acc 1))) 0 +))
+              true)) true)
+            (tx_commit owner)))
+        (nil? (owner "transaction"))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: Concurrent rebuild and commit expose each final row exactly once
+  sql: SELECT id,value FROM cs_rebuild_live_commit ORDER BY id
+  expect:
+    rows: 5
+    data: &live_commit_rows
+    - {id: 1,value: 18}
+    - {id: 3,value: 30}
+    - {id: 5,value: 50}
+    - {id: 7,value: 70}
+    - {id: 9,value: 90}
+- name: Rollback remains valid while ordinary rebuilds forward every mutation kind
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (try (lambda () (begin
+        (define tx (owner "__memcp_tx"))
+        (define target (table "memcp-tests" false "cs_rebuild_live_abort" false tx))
+        (parallel
+          (reduce (produceN 8) (lambda (_done index) (begin (rebuild target true false) true)) true)
+          (begin
+            (scan tx target '() '() '("id") (lambda (id) (equal? id 2)) '("$update")
+              (lambda (acc update) (begin (update) (+ acc 1))) 0 +)
+            (reduce (produceN 8) (lambda (_done index) (begin
+              (scan tx target '() '() '("id") (lambda (id) (equal? id 1)) '("$update")
+                (lambda (acc update) (begin (update (list "value" (+ 11 index))) (+ acc 1))) 0 +)
+              (insert target '("id" "value") (list (list (+ index 3) (* (+ index 3) 10))) '() nil false nil tx)
+              (if (equal? (mod index 2) 1)
+                (scan tx target '() '() '("id") (lambda (id) (equal? id (+ index 3))) '("$update")
+                  (lambda (acc update) (begin (update) (+ acc 1))) 0 +))
+              true)) true)
+            (tx_rollback owner)))
+        (nil? (owner "transaction"))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: Concurrent rebuild and rollback restore both original rows
+  sql: SELECT id,value FROM cs_rebuild_live_abort ORDER BY id
+  expect: {rows: 2,data: &live_abort_rows [{id: 1,value: 10},{id: 2,value: 20}]}
+- name: Crash after concurrent rebuild decisions without another checkpoint
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart the concurrently decided rebuild generations
+  action: restart
+- name: Concurrent committed mutations survive restart exactly
+  sql: SELECT id,value FROM cs_rebuild_live_commit ORDER BY id
+  expect: {rows: 5,data: *live_commit_rows}
+- name: Concurrent rollback survives restart without resurrecting intermediate versions
+  sql: SELECT id,value FROM cs_rebuild_live_abort ORDER BY id
+  expect: {rows: 2,data: *live_abort_rows}

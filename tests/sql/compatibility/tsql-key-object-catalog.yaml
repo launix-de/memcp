@@ -1,0 +1,88 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/relational-databases/system-catalog-views/sys-objects-transact-sql
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: Native key declarations own PK and UQ object identities and typed catalog selection
+setup:
+- sql: CREATE TABLE key_object_parent(id INT NOT NULL,code INT,CONSTRAINT PK_key_object_parent PRIMARY KEY(id),CONSTRAINT UQ_key_object_code UNIQUE(code))
+- sql: CREATE TABLE key_object_other(id INT NOT NULL,CONSTRAINT PK_key_object_other PRIMARY KEY(id))
+- sql: CREATE VIEW key_object_view AS SELECT id FROM key_object_parent
+cleanup:
+- sql: DROP VIEW IF EXISTS key_object_view
+- sql: DROP TABLE IF EXISTS key_object_parent
+- sql: DROP TABLE IF EXISTS key_object_other
+- sql: DROP TABLE IF EXISTS key_object_staged
+- sql: DROP TABLE IF EXISTS key_object_rolled_back
+test_cases:
+- name: sys.objects projects the actual primary and unique constraint identities
+  sql: SELECT name,RTRIM(type) AS kind,type_desc,CASE WHEN object_id=OBJECT_ID(N'dbo.'+name,type) THEN 1 ELSE 0 END AS same_id FROM sys.objects WHERE name IN(N'PK_key_object_parent',N'UQ_key_object_code') ORDER BY name
+  expect:
+    rows: 2
+    data:
+    - {name: PK_key_object_parent,kind: PK,type_desc: PRIMARY_KEY_CONSTRAINT,same_id: 1}
+    - {name: UQ_key_object_code,kind: UQ,type_desc: UNIQUE_CONSTRAINT,same_id: 1}
+- name: Typed key OBJECT_ID rejects missing and incorrect kinds
+  sql: SELECT OBJECT_ID(N'PK_key_object_parent',N'UQ') AS wrong_unique,OBJECT_ID(N'UQ_key_object_code',N'PK') AS wrong_primary,OBJECT_ID(N'missing_key',N'PK') AS missing_key,OBJECT_ID(N'key_object_parent',N'PK') AS table_is_not_key
+  expect: {rows: 1,data: [{wrong_unique: null,wrong_primary: null,missing_key: null,table_is_not_key: null}]}
+- name: The public key catalog exposes only real primary and unique declarations
+  sql: SELECT name,RTRIM(type) AS kind,type_desc,CASE WHEN object_id=OBJECT_ID(N'dbo.'+name,type) AND parent_object_id=OBJECT_ID(N'dbo.key_object_parent',N'U') THEN 1 ELSE 0 END AS same_owner FROM sys.key_constraints WHERE parent_object_id=OBJECT_ID(N'dbo.key_object_parent',N'U') ORDER BY name
+  expect:
+    rows: 2
+    data:
+    - {name: PK_key_object_parent,kind: PK,type_desc: PRIMARY_KEY_CONSTRAINT,same_owner: 1}
+    - {name: UQ_key_object_code,kind: UQ,type_desc: UNIQUE_CONSTRAINT,same_owner: 1}
+- name: Untyped key OBJECT_ID agrees with its explicit kind
+  sql: SELECT CASE WHEN OBJECT_ID(N'PK_key_object_parent')=OBJECT_ID(N'PK_key_object_parent',N'PK') THEN 1 ELSE 0 END AS primary_id,CASE WHEN OBJECT_ID(N'UQ_key_object_code')=OBJECT_ID(N'UQ_key_object_code',N'UQ') THEN 1 ELSE 0 END AS unique_id
+  expect: {rows: 1,data: [{primary_id: 1,unique_id: 1}]}
+- name: A literal key address retains runtime kind and database qualification
+  sql: DECLARE @kind NVARCHAR(2)=N'PK'; SELECT CASE WHEN OBJECT_ID(N'memcp-tests.dbo.PK_key_object_parent',@kind)=OBJECT_ID(N'PK_key_object_parent',N'PK') THEN 1 ELSE 0 END AS same_id,OBJECT_ID(N'other_owner.PK_key_object_parent',@kind) AS wrong_owner
+  expect: {rows: 1,data: [{same_id: 1,wrong_owner: null}]}
+- name: A nullable runtime kind preserves untyped key lookup
+  sql: DECLARE @kind NVARCHAR(2)=NULL; SELECT CASE WHEN OBJECT_ID(N'dbo.UQ_key_object_code',@kind)=OBJECT_ID(N'UQ_key_object_code',N'UQ') THEN 1 ELSE 0 END AS same_id
+  expect: {rows: 1,data: [{same_id: 1}]}
+- name: The primary constraint points to its actual containing table
+  sql: SELECT name,RTRIM(type) AS kind FROM sys.objects WHERE object_id=OBJECT_ID(N'PK_key_object_parent',N'PK') AND parent_object_id=OBJECT_ID(N'key_object_parent',N'U')
+  expect: {rows: 1,data: [{name: PK_key_object_parent,kind: PK}]}
+- name: Parent-object equality does not imply that the child is a user table
+  sql: SELECT name,RTRIM(type) AS kind FROM sys.objects WHERE parent_object_id=OBJECT_ID(N'key_object_parent',N'U') AND type IN(N'PK',N'UQ') ORDER BY name
+  expect: {rows: 2,data: [{name: PK_key_object_parent,kind: PK},{name: UQ_key_object_code,kind: UQ}]}
+- name: A disjunction keeps the view branch outside its typed key equality
+  sql: SELECT name,RTRIM(type) AS kind FROM sys.objects WHERE object_id=OBJECT_ID(N'PK_key_object_parent',N'PK') OR name=N'key_object_view' ORDER BY name
+  expect: {rows: 2,data: [{name: key_object_view,kind: V},{name: PK_key_object_parent,kind: PK}]}
+- name: Reversed object equality retains the primary identity
+  sql: SELECT name FROM sys.objects WHERE OBJECT_ID(N'PK_key_object_parent',N'PK')=object_id
+  expect: {rows: 1,data: [{name: PK_key_object_parent}]}
+- name: A foreign alias kind cannot restrict a separate source
+  sql: SELECT a.name AS primary_name,b.name AS view_name FROM sys.objects a INNER JOIN sys.objects b ON b.name=N'key_object_view' WHERE a.object_id=OBJECT_ID(N'PK_key_object_parent',N'PK')
+  expect: {rows: 1,data: [{primary_name: PK_key_object_parent,view_name: key_object_view}]}
+- name: Serializable CREATE and metadata key existence checks remain declaration-only until INSERT
+  tds:
+    statements:
+    - {connection: owner,sql: 'SET XACT_ABORT ON; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION; CREATE TABLE key_object_staged(id INT NOT NULL)'}
+    - connection: owner
+      sql: IF NOT EXISTS(SELECT 1 FROM sys.objects WHERE object_id=OBJECT_ID(N'PK_key_object_staged',N'PK') AND parent_object_id=OBJECT_ID(N'key_object_staged',N'U')) ALTER TABLE key_object_staged ADD CONSTRAINT PK_key_object_staged PRIMARY KEY(id)
+    - connection: owner
+      sql: SELECT name,RTRIM(type) AS kind FROM sys.objects WHERE object_id=OBJECT_ID(N'PK_key_object_staged',N'PK') AND parent_object_id=OBJECT_ID(N'key_object_staged',N'U')
+      expect: {rows: 1,data: [{name: PK_key_object_staged,kind: PK}]}
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'PK_key_object_staged',N'PK') AS hidden
+      expect: {rows: 1,data: [{hidden: null}]}
+    - {connection: owner,sql: 'INSERT key_object_staged VALUES(7); COMMIT TRANSACTION'}
+    - connection: observer
+      sql: SELECT id FROM key_object_staged
+      expect: {rows: 1,data: [{id: 7}]}
+- name: A rolled-back declaration retires its typed key identity
+  tds:
+    statements:
+    - {connection: owner,sql: 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION; CREATE TABLE key_object_rolled_back(id INT NOT NULL)'}
+    - {connection: owner,sql: 'IF NOT EXISTS(SELECT 1 FROM sys.objects WHERE object_id=OBJECT_ID(N''PK_key_object_rolled_back'',N''PK'') AND parent_object_id=OBJECT_ID(N''key_object_rolled_back'',N''U'')) ALTER TABLE key_object_rolled_back ADD CONSTRAINT PK_key_object_rolled_back PRIMARY KEY(id)'}
+    - connection: owner
+      sql: SELECT CASE WHEN OBJECT_ID(N'PK_key_object_rolled_back',N'PK')>0 THEN 1 ELSE 0 END AS own_key
+      expect: {rows: 1,data: [{own_key: 1}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'PK_key_object_rolled_back',N'PK') AS missing_key
+      expect: {rows: 1,data: [{missing_key: null}]}

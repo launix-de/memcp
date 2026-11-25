@@ -25,7 +25,10 @@ test_cases:
   - name: "Create main table"
     sql: "CREATE TABLE ud_main (id INT, name VARCHAR(50), score INT, active INT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert test data"
     sql: |
@@ -112,7 +115,10 @@ test_cases:
   - name: "Create type table"
     sql: "CREATE TABLE ud_types (id INT, val VARCHAR(50))"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert string data"
     sql: "INSERT INTO ud_types VALUES (1, 'hello'), (2, 'world'), (3, NULL)"
@@ -148,7 +154,10 @@ test_cases:
   - name: "Create single-row table"
     sql: "CREATE TABLE ud_single (id INT, val INT)"
     expect:
-      rows: 0
+      affected_rows: 0
+      rows: 1
+      data: [{affected_rows: 0}]
+      result_contains: '"affected_rows"'
 
   - name: "Insert one row"
     sql: "INSERT INTO ud_single VALUES (1, 42)"
@@ -317,9 +326,9 @@ test_cases:
   - name: bulk-update-rollback-history-fill
     scm: |
       (begin
-        (insert (table "memcp-tests" false "ud_rollback_history" false) '("id" "val")
+        (insert (table "memcp-tests" false "ud_rollback_history" false nil) '("id" "val")
           (map (produceN 60000) (lambda (i) (list i i))))
-        (rebuild (table "memcp-tests" false "ud_rollback_history" false) true false)
+        (rebuild (table "memcp-tests" false "ud_rollback_history" false nil) true false)
         true)
   - name: bulk-update-rollback-history-begin
     session_id: ud-rollback-history
@@ -349,7 +358,7 @@ test_cases:
         (define query "UPDATE ud_rollback_history SET val=-val-1 WHERE id<1000")
         (with_autocommit session nil 0 query (lambda (tx)
           (sql_execute_formula session tx
-            (cached_parse sql_queryplan_cache (list parse_sql) "memcp-tests" query
+            (cached_parse sql_queryplan_cache "sql" (list parse_sql) "memcp-tests" query
               (lambda (_schema _table _write) true) "root" session true tx)
             (lambda (_row) true) (lambda (_fields) true)))))
     threshold_ms: 1000

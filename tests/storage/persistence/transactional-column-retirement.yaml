@@ -1,0 +1,538 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Stored column retirement shares original rows private catalog declarations ordered defaults and recovery
+setup:
+- sql: DROP TABLE IF EXISTS retire_lifecycle
+- sql: DROP TABLE IF EXISTS retire_child
+- sql: DROP TABLE IF EXISTS retire_parent
+- sql: DROP TABLE IF EXISTS retire_private
+- sql: DROP TABLE IF EXISTS retire_key
+- sql: DROP TABLE IF EXISTS retire_raw
+- sql: DROP TABLE IF EXISTS retire_guard
+- sql: DROP TABLE IF EXISTS retire_commit
+- sql: DROP TABLE IF EXISTS retire_rollback
+- sql: DROP TABLE IF EXISTS retire_save
+- sql: DROP TABLE IF EXISTS retire_crash
+- sql: DROP TABLE IF EXISTS retire_marker
+- sql: DROP TABLE IF EXISTS retire_lookup
+- sql: CREATE TABLE retire_marker(id INT PRIMARY KEY,value INT)
+- sql: INSERT retire_marker VALUES(1,0)
+- sql: CREATE TABLE retire_lookup(id INT PRIMARY KEY)
+- sql: INSERT retire_lookup VALUES(1),(2)
+- sql: CREATE TABLE retire_commit(id INT PRIMARY KEY,retired SMALLINT NOT NULL CONSTRAINT DF_retire_commit_actual
+    DEFAULT(0),payload VARCHAR(27) NULL)
+- sql: INSERT retire_commit VALUES(1,7,'original')
+- sql: ALTER TABLE retire_commit ADD CONSTRAINT FK_retire_surviving FOREIGN KEY(id) REFERENCES retire_lookup(id)
+- sql: CREATE TABLE retire_rollback(id INT PRIMARY KEY,retired SMALLINT NOT NULL CONSTRAINT DF_retire_rollback_actual
+    DEFAULT(0),payload VARCHAR(27) NULL)
+- sql: INSERT retire_rollback VALUES(1,7,'original')
+- sql: CREATE TABLE retire_save(id INT PRIMARY KEY,retired SMALLINT NOT NULL CONSTRAINT DF_retire_save_actual DEFAULT(0),payload
+    VARCHAR(27) NULL)
+- sql: INSERT retire_save VALUES(1,7,'original')
+- sql: CREATE TABLE retire_crash(id INT PRIMARY KEY,retired SMALLINT NOT NULL CONSTRAINT DF_retire_crash_actual
+    DEFAULT(0),payload VARCHAR(27) NULL)
+- sql: INSERT retire_crash VALUES(1,7,'original')
+- sql: CREATE TABLE retire_key(id INT PRIMARY KEY,retired INT NULL,CONSTRAINT UQ_retire_key UNIQUE(retired))
+- sql: INSERT retire_key VALUES(1,17)
+- sql: CREATE TABLE retire_parent(id INT PRIMARY KEY,retired INT NULL,CONSTRAINT UQ_retire_parent UNIQUE(retired))
+- sql: CREATE TABLE retire_child(id INT PRIMARY KEY,retired INT NULL,CONSTRAINT FK_retire_child FOREIGN KEY(retired)
+    REFERENCES retire_parent(retired))
+- sql: INSERT retire_parent VALUES(1,19)
+- sql: INSERT retire_child VALUES(1,19)
+- sql: CREATE TABLE retire_guard(id INT PRIMARY KEY,retired INT CONSTRAINT DF_retire_guard DEFAULT(3))
+- sql: INSERT retire_guard(id) VALUES(1)
+- sql: CREATE TABLE retire_raw(id INT PRIMARY KEY,retired INT NULL)
+- sql: INSERT retire_raw VALUES(1,29)
+- sql: CREATE TABLE retire_lifecycle(id INT PRIMARY KEY,retired INT NULL)
+- sql: INSERT retire_lifecycle VALUES(1,31)
+test_cases:
+- name: Dynamic actual DEFAULT removal widening private CREATE and DROP share the original decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE retire_marker SET value=1 WHERE id=1
+    - connection: owner
+      sql: CREATE TABLE retire_private(id INT PRIMARY KEY,value INT)
+    - connection: owner
+      sql: INSERT retire_private VALUES(11,101)
+    - connection: owner
+      sql: SELECT o.name FROM sys.columns c INNER JOIN sys.objects o ON c.default_object_id=o.object_id WHERE c.object_id=OBJECT_ID(N'retire_commit')
+        AND c.name=N'retired'
+      expect:
+        rows: 1
+        data:
+        - name: DF_retire_commit_actual
+    - connection: owner
+      sql: 'IF OBJECT_ID(N''DF_retire_known'',N''D'') IS NOT NULL ALTER TABLE retire_commit DROP CONSTRAINT DF_retire_known;
+
+        DECLARE @actual NVARCHAR(128);
+
+        SELECT @actual=o.name FROM sys.columns c INNER JOIN sys.objects o ON c.default_object_id=o.object_id
+
+        WHERE c.object_id=OBJECT_ID(N''retire_commit'') AND c.name=N''retired'';
+
+        IF @actual IS NOT NULL EXEC(N''ALTER TABLE retire_commit DROP CONSTRAINT [''+@actual+N'']'');'
+    - connection: owner
+      sql: SELECT default_object_id FROM sys.columns WHERE object_id=OBJECT_ID(N'retire_commit') AND name=N'retired'
+      expect:
+        rows: 1
+        data:
+        - default_object_id: 0
+    - connection: owner
+      sql: ALTER TABLE retire_commit ALTER COLUMN payload VARCHAR(70) NULL
+    - connection: owner
+      sql: ALTER TABLE retire_commit DROP COLUMN retired
+    - connection: owner
+      sql: SELECT COL_LENGTH(N'retire_commit',N'retired') AS absent,COL_LENGTH(N'retire_commit',N'payload') AS width,@@TRANCOUNT
+        AS depth
+      expect:
+        rows: 1
+        data:
+        - absent: null
+          width: 70
+          depth: 1
+    - connection: owner
+      sql: SELECT COUNT(*) AS remaining FROM sys.columns WHERE object_id=OBJECT_ID(N'retire_commit') AND name=N'retired'
+      expect:
+        rows: 1
+        data:
+        - remaining: 0
+    - connection: observer
+      sql: SELECT id,retired,payload FROM retire_commit
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          retired: 7
+          payload: original
+    - connection: observer
+      sql: SELECT COL_LENGTH(N'retire_commit',N'payload') AS width,OBJECT_ID(N'retire_private',N'U') AS private_table
+      expect:
+        rows: 1
+        data:
+        - width: 27
+          private_table: null
+    - connection: owner
+      sql: INSERT retire_commit(id,payload) VALUES(2,'next')
+    - connection: owner
+      sql: UPDATE retire_commit SET payload='changed' WHERE id=1
+    - connection: owner
+      sql: DELETE FROM retire_commit WHERE id=2
+    - connection: owner
+      sql: SELECT id,payload FROM retire_commit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: changed
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,payload,COL_LENGTH(N'retire_commit',N'retired') AS absent,COL_LENGTH(N'retire_commit',N'payload')
+        AS width FROM retire_commit
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: changed
+          absent: null
+          width: 70
+    - connection: observer
+      sql: SELECT id,value FROM retire_private
+      expect:
+        rows: 1
+        data:
+        - id: 11
+          value: 101
+    - connection: observer
+      sql: SELECT id,value FROM retire_marker
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 1
+- name: Rollback restores packed values default and all original data effects
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE retire_marker SET value=2 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE retire_rollback DROP CONSTRAINT DF_retire_rollback_actual
+    - connection: owner
+      sql: ALTER TABLE retire_rollback DROP COLUMN retired
+    - connection: owner
+      sql: INSERT retire_rollback(id,payload) VALUES(2,'private')
+    - connection: owner
+      sql: UPDATE retire_rollback SET payload='private' WHERE id=1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,retired,payload FROM retire_rollback
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          retired: 7
+          payload: original
+    - connection: owner
+      sql: INSERT retire_rollback(id,payload) VALUES(2,'restored')
+    - connection: owner
+      sql: SELECT id,retired,payload FROM retire_rollback ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          retired: 7
+          payload: original
+        - id: 2
+          retired: 0
+          payload: restored
+    - connection: owner
+      sql: SELECT value FROM retire_marker
+      expect:
+        rows: 1
+        data:
+        - value: 1
+- name: Savepoint rewind restores the column and preserves earlier default removal and widening
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE retire_save DROP CONSTRAINT DF_retire_save_actual
+    - connection: owner
+      sql: ALTER TABLE retire_save ALTER COLUMN payload VARCHAR(70) NULL
+    - connection: owner
+      sql: SAVE TRANSACTION before_drop
+    - connection: owner
+      sql: ALTER TABLE retire_save DROP COLUMN retired
+    - connection: owner
+      sql: INSERT retire_save(id,payload) VALUES(2,'rewound')
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_drop
+    - connection: owner
+      sql: SELECT id,retired,payload FROM retire_save
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          retired: 7
+          payload: original
+    - connection: owner
+      sql: SELECT default_object_id,COL_LENGTH(N'retire_save',N'payload') AS width,@@TRANCOUNT AS depth FROM sys.columns
+        WHERE object_id=OBJECT_ID(N'retire_save') AND name=N'retired'
+      expect:
+        rows: 1
+        data:
+        - default_object_id: 0
+          width: 70
+          depth: 1
+    - connection: owner
+      sql: ALTER TABLE retire_save DROP COLUMN retired
+    - connection: owner
+      sql: INSERT retire_save(id,payload) VALUES(3,'survives')
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: owner
+      sql: SELECT id,payload FROM retire_save ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          payload: original
+        - id: 3
+          payload: survives
+- name: An earlier native UNIQUE retirement frees its stored input
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE retire_key DROP CONSTRAINT UQ_retire_key
+    - connection: owner
+      sql: ALTER TABLE retire_key DROP COLUMN retired
+    - connection: owner
+      sql: INSERT retire_key(id) VALUES(2)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: owner
+      sql: SELECT id FROM retire_key ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+        - id: 2
+- name: Ordered foreign and key retirement free both endpoints under one decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE retire_child DROP CONSTRAINT FK_retire_child
+    - connection: owner
+      sql: ALTER TABLE retire_parent DROP CONSTRAINT UQ_retire_parent
+    - connection: owner
+      sql: ALTER TABLE retire_child DROP COLUMN retired
+    - connection: owner
+      sql: ALTER TABLE retire_parent DROP COLUMN retired
+    - connection: owner
+      sql: INSERT retire_parent(id) VALUES(2)
+    - connection: owner
+      sql: INSERT retire_child(id) VALUES(3)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: owner
+      sql: SELECT id FROM retire_parent ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+        - id: 2
+    - connection: owner
+      sql: SELECT id FROM retire_child ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+        - id: 3
+- name: A missing IF EXISTS column leaves the selected header untouched
+  sql: ALTER TABLE retire_raw DROP COLUMN IF EXISTS missing; SELECT id,retired FROM retire_raw
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      retired: 29
+- name: mysql DROP COLUMN retains the executing rollback owner
+  syntax: mysql
+  steps:
+  - sql: START ACID TRANSACTION
+    session_id: retire_cross_mysql
+    syntax: mysql
+  - sql: ALTER TABLE retire_raw DROP COLUMN retired
+    session_id: retire_cross_mysql
+    syntax: mysql
+  - sql: ROLLBACK
+    session_id: retire_cross_mysql
+    syntax: mysql
+  - sql: SELECT id,retired FROM retire_raw
+    session_id: retire_cross_mysql
+    syntax: mysql
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        retired: 29
+- name: psql DROP COLUMN retains the executing rollback owner
+  syntax: psql
+  steps:
+  - sql: START ACID TRANSACTION
+    session_id: retire_cross_psql
+    syntax: psql
+  - sql: ALTER TABLE retire_raw DROP COLUMN retired
+    session_id: retire_cross_psql
+    syntax: psql
+  - sql: ROLLBACK
+    session_id: retire_cross_psql
+    syntax: psql
+  - sql: SELECT id,retired FROM retire_raw
+    session_id: retire_cross_psql
+    syntax: psql
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        retired: 29
+- name: Native intrinsic retirement clears its owned default only inside the same rollback decision
+  scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner\
+    \ \"__memcp_tx\"))\n (define target (table \"memcp-tests\" false \"retire_guard\" false tx))\n (define removed\
+    \ (altertable target \"drop\" \"retired\" tx))\n (define same (identical? tx (owner \"__memcp_tx\")))\n (define\
+    \ hidden (nil? (show target \"column\" \"retired\" false tx)))\n (define public_default (get_assoc (show target\
+    \ \"column\" \"retired\" false nil) \"Default\"))\n (tx_rollback owner)\n (list removed same hidden public_default\n\
+    \   (scan nil target '() '() '() (lambda () true) '(\"retired\") + 0 +)\n   (get_assoc (show target \"column\"\
+    \ \"retired\" false nil) \"Default\")))"
+  expect:
+    result:
+    - true
+    - true
+    - true
+    - 3
+    - 3
+    - 3
+- name: TSQL bound-default refusal preserves its original transaction and complete values
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE retire_guard DROP COLUMN retired
+      expect:
+        error: true
+    - connection: owner
+      sql: SELECT id,retired,@@TRANCOUNT AS depth FROM retire_guard ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          retired: 3
+          depth: 1
+    - connection: owner
+      sql: SELECT o.name FROM sys.columns c JOIN sys.objects o ON c.default_object_id=o.object_id WHERE c.object_id=OBJECT_ID(N'retire_guard')
+        AND c.name=N'retired'
+      expect:
+        rows: 1
+        data:
+        - name: DF_retire_guard
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+- name: A stale absent-default input cannot retire a foreign default or prior original work
+  scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner\
+    \ \"__memcp_tx\"))\n (define marker (table \"memcp-tests\" false \"retire_marker\" false tx))\n (define target\
+    \ (table \"memcp-tests\" false \"retire_raw\" false tx))\n (define expected (list (get_assoc (show target \"\
+    column\" \"retired\" false tx) \"Default\") \"\" \"\" false))\n (insert marker '(\"id\" \"value\") (list (list\
+    \ 99 9)) '() nil false nil tx)\n (altercolumn target \"retired\" \"default\" 7 nil)\n (define rejected (try\
+    \ (lambda () (begin (altertable target \"drop\" \"retired\" tx expected) false)) (lambda (cause) (if (strlike\
+    \ (string (failure_value cause)) \"%column declaration lost its expected input recipe%\") true (error cause)))))\n\
+    \ (define own (scan tx marker '() '() '() (lambda () true) '(\"value\") + 0 +))\n (define outside (scan nil\
+    \ marker '() '() '() (lambda () true) '(\"value\") + 0 +))\n (define present (not (nil? (show target \"column\"\
+    \ \"retired\" false nil))))\n (define foreign_default (get_assoc (show target \"column\" \"retired\" false nil)\
+    \ \"Default\"))\n (tx_rollback owner)\n (altercolumn target \"retired\" \"default\" nil nil)\n (list rejected\
+    \ own outside present foreign_default\n   (scan nil marker '() '() '() (lambda () true) '(\"value\") + 0 +)))"
+  expect:
+    result:
+    - true
+    - 10
+    - 1
+    - true
+    - 7
+    - 1
+- name: An escaped native update callback prevents retiring its stored input
+  scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner\
+    \ \"__memcp_tx\"))\n(define target (table \"memcp-tests\" false \"retire_raw\" false tx)) (define held (newsession))\n\
+    \ (scan tx target '() '() '() (lambda () true) '(\"$update\") (lambda (acc update) (begin (held \"callback\"\
+    \ update) acc)) nil nil false)\n (define rejected (try (lambda () (begin (altertable target \"drop\" \"retired\"\
+    \ tx) false)) (lambda (_failure) true)))\n (define present (not (nil? (show target \"column\" \"retired\" false\
+    \ tx))))\n (tx_rollback owner) (list rejected present (scan nil target '() '() '() (lambda () true) '(\"retired\"\
+    ) + 0 +)))"
+  expect:
+    result:
+    - true
+    - true
+    - 29
+- name: Same-owner reappend cannot bind a retired historical slot
+  scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner\
+    \ \"__memcp_tx\"))\n(define target (table \"memcp-tests\" false \"retire_raw\" false tx))\n (altertable target\
+    \ \"drop\" \"retired\" tx)\n (define rejected (try (lambda () (begin (createcolumn target \"retired\" \"INT\"\
+    \ '() '(\"null\" true) nil nil tx) false)) (lambda (_failure) true)))\n (define hidden (nil? (show target \"\
+    column\" \"retired\" false tx)))\n (tx_rollback owner) (list rejected hidden (scan nil target '() '() '() (lambda\
+    \ () true) '(\"retired\") + 0 +)))"
+  expect:
+    result:
+    - true
+    - true
+    - 29
+- name: A lifecycle consumer rejects retirement before effects and cannot be silently skipped
+  scm: "(begin\n (define target (table \"memcp-tests\" false \"retire_lifecycle\" false nil))\n (createtrigger target\
+    \ \"retire_lifecycle_consumer\" \"after_drop_column\" \"\" \"\" (lambda (OLD NEW session tx) nil) true)\n (define\
+    \ owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner \"__memcp_tx\"\
+    ))\n (define rejected (try (lambda () (begin (altertable target \"drop\" \"retired\" tx) false)) (lambda (_failure)\
+    \ true)))\n (define present (not (nil? (show target \"column\" \"retired\" false tx))))\n (define own (scan\
+    \ tx target '() '() '() (lambda () true) '(\"retired\") + 0 +))\n (tx_rollback owner) (list rejected present\
+    \ own))"
+  expect:
+    result:
+    - true
+    - true
+    - 31
+- name: Native intrinsic default retirement accepts its ordered program with original rows
+  scm: "(begin\n (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n (define tx (owner\
+    \ \"__memcp_tx\"))\n (define target (table \"memcp-tests\" false \"retire_guard\" false tx))\n (altertable target\
+    \ \"drop\" \"retired\" tx)\n (tx_commit owner)\n (list (scan nil target '() '() '() (lambda () true) '(\"id\"\
+    ) + 0 +)\n   (nil? (show target \"column\" \"retired\" false nil))))"
+  expect:
+    result:
+    - 1
+    - true
+- name: Crash before acceptance retains the predecessor schema and packed values
+  steps:
+  - sql: BEGIN TRANSACTION
+    session_id: retire_crash
+  - sql: ALTER TABLE retire_crash DROP CONSTRAINT DF_retire_crash_actual
+    session_id: retire_crash
+  - sql: ALTER TABLE retire_crash DROP COLUMN retired
+    session_id: retire_crash
+  - sql: UPDATE retire_crash SET payload='unaccepted' WHERE id=1
+    session_id: retire_crash
+  - scm: (crash)
+    expect:
+      interrupted_ok: true
+- name: Restart and replay accepted V28 decisions
+  action: restart
+- name: Accepted intrinsic clear and DROP replay together without a default declaration
+  sql: SELECT id,COL_LENGTH(N'retire_guard',N'retired') AS retired_length,OBJECT_ID(N'DF_retire_guard',N'D') AS
+    default_object FROM retire_guard ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      retired_length: null
+      default_object: null
+- name: Accepted retirement and original data effects recover together
+  sql: SELECT id,payload,COL_LENGTH(N'retire_commit',N'retired') AS absent,COL_LENGTH(N'retire_commit',N'payload')
+    AS width FROM retire_commit
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      payload: changed
+      absent: null
+      width: 70
+- name: Recovery excludes unaccepted removal and preserves its stored value and named default
+  sql: SELECT t.id,t.retired,t.payload,o.name FROM retire_crash t JOIN sys.columns c ON c.object_id=OBJECT_ID(N'retire_crash')
+    AND c.name=N'retired' JOIN sys.objects o ON c.default_object_id=o.object_id
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      retired: 7
+      payload: original
+      name: DF_retire_crash_actual
+- name: A committed reappend receives a fresh physical slot without resurrecting old values
+  sql: ALTER TABLE retire_commit ADD retired INT NULL; SELECT id,retired,payload FROM retire_commit
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      retired: null
+      payload: changed
+- name: Reopen the accepted tombstone and successor slot
+  action: restart
+- name: The successor slot still excludes its historical predecessor after reopen
+  sql: SELECT id,retired,payload FROM retire_commit
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      retired: null
+      payload: changed
+cleanup:
+- sql: DROP TABLE IF EXISTS retire_lifecycle
+- sql: DROP TABLE IF EXISTS retire_child
+- sql: DROP TABLE IF EXISTS retire_parent
+- sql: DROP TABLE IF EXISTS retire_private
+- sql: DROP TABLE IF EXISTS retire_key
+- sql: DROP TABLE IF EXISTS retire_raw
+- sql: DROP TABLE IF EXISTS retire_guard
+- sql: DROP TABLE IF EXISTS retire_commit
+- sql: DROP TABLE IF EXISTS retire_rollback
+- sql: DROP TABLE IF EXISTS retire_save
+- sql: DROP TABLE IF EXISTS retire_crash
+- sql: DROP TABLE IF EXISTS retire_marker
+- sql: DROP TABLE IF EXISTS retire_lookup

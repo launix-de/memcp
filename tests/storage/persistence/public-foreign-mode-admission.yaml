@@ -1,0 +1,139 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Existing local declaration resources exclude native mode activation and database retirement before effects
+setup:
+- sql: CREATE TABLE mode_fk_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE mode_fk_child(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE mode_fk_orphan(id INT PRIMARY KEY,parent_id INT)
+- sql: INSERT INTO mode_fk_parent VALUES(1)
+- sql: INSERT INTO mode_fk_child VALUES(10,1)
+- sql: INSERT INTO mode_fk_orphan VALUES(20,999)
+- scm: |
+    (begin
+      (createtable "memcp-tests" ".mode_fixture_state"
+        (list (list "column" "holder" "ANY" '() '())) (list "engine" "memory") false nil)
+      (insert (table "memcp-tests" false ".mode_fixture_state" false nil) '("holder") (list (list (newsession)))) true)
+cleanup:
+- scm: |
+    (begin
+      (define holder (table "memcp-tests" false ".mode_fixture_state" false nil))
+      (if (nil? holder) true (begin
+        (define h (scan nil holder '() '() '() (lambda () true) '("holder") (lambda (_ value) value) nil (lambda (_ value) value)))
+        (if (nil? h) true (if (nil? (h "owner")) true
+          (try (lambda () (tx_rollback (h "owner"))) (lambda (failure) true)))))))
+- sql: DROP TABLE IF EXISTS mode_fk_child
+- sql: DROP TABLE IF EXISTS mode_fk_orphan
+- sql: DROP TABLE IF EXISTS mode_fk_parent
+- scm: (droptable "memcp-tests" ".mode_fixture_state" true)
+test_cases:
+- name: A native public FK resource retains its original database identity before the decision
+  scm: |
+    (begin
+      (define h (scan nil (table "memcp-tests" false ".mode_fixture_state" false nil) '() '() '()
+        (lambda () true) '("holder") (lambda (_ holder) holder) nil (lambda (_ holder) holder)))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "mode_fk_child" false nil))
+      (define parent (table "memcp-tests" false "mode_fk_parent" false nil))
+      (h "owner" owner) (h "zero" (tx_savepoint tx))
+      (h "child_identity" (show child "identity" nil))
+      (h "blobs_present" (not (nil? (table "memcp-tests" false ".blobs" false nil))))
+      (createforeignkey child "FK_mode_admission" '("parent_id") parent '("id") "cascade" "cascade" tx)
+      (and (equal? (count ((show child "constraints" tx) "ForeignKeys")) 1)
+        (empty_list? ((show child "constraints") "ForeignKeys"))))
+  expect: {result: true}
+
+- name: Mode activation and native database removal reject before disturbing a pending declaration
+  scm: |
+    (begin
+      (define h (scan nil (table "memcp-tests" false ".mode_fixture_state" false nil) '() '() '()
+        (lambda () true) '("holder") (lambda (_ holder) holder) nil (lambda (_ holder) holder)))
+      (define blocked (try (lambda () (begin (replication_start "listen" (lambda () true)) false))
+        (lambda (failure) (strlike (concat failure) "%native mode activation conflicts%"))))
+      (define blocked_again (try (lambda () (begin (replication_start "listen" (lambda () true)) false))
+        (lambda (failure) (strlike (concat failure) "%native mode activation conflicts%"))))
+      (define removal (try (lambda () (begin (dropdatabase "memcp-tests" false) false))
+        (lambda (failure) (strlike (concat failure) "%pending declarations%"))))
+      (define child (table "memcp-tests" false "mode_fk_child" false nil))
+      (and blocked blocked_again removal (equal? (show child "identity" nil) (h "child_identity"))
+        (equal? (scan nil child '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +) 10)))
+  expect: {result: true}
+
+- name: Backend configuration admission rejects before destination or blob-catalog effects
+  sql: ALTER DATABASE `memcp-tests` SET STORAGE backend='filesystem'
+  expect: {error: true, contains: pending declarations}
+
+- name: Rejected backend admission preserves the actual native catalog and original child data
+  scm: |
+    (begin
+      (define h (scan nil (table "memcp-tests" false ".mode_fixture_state" false nil) '() '() '()
+        (lambda () true) '("holder") (lambda (_ holder) holder) nil (lambda (_ holder) holder)))
+      (and (equal? (not (nil? (table "memcp-tests" false ".blobs" false nil))) (h "blobs_present"))
+        (equal? (show (table "memcp-tests" false "mode_fk_child" false nil) "identity" nil) (h "child_identity"))))
+  expect: {result: true}
+
+- name: Savepoint zero retains mode admission until the same resource really commits
+  scm: |
+    (begin
+      (define h (scan nil (table "memcp-tests" false ".mode_fixture_state" false nil) '() '() '()
+        (lambda () true) '("holder") (lambda (_ holder) holder) nil (lambda (_ holder) holder)))
+      (define owner (h "owner")) (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "mode_fk_child" false nil))
+      (define parent (table "memcp-tests" false "mode_fk_parent" false nil))
+      (tx_rollback_to_savepoint tx (h "zero"))
+      (define empty (empty_list? ((show child "constraints" tx) "ForeignKeys")))
+      (define blocked (try (lambda () (begin (replication_start "listen" (lambda () true)) false))
+        (lambda (failure) (strlike (concat failure) "%native mode activation conflicts%"))))
+      (createforeignkey child "FK_mode_admission" '("parent_id") parent '("id") "cascade" "cascade" tx)
+      (tx_commit owner)
+      (and empty blocked (equal? (count ((show child "constraints") "ForeignKeys")) 1)))
+  expect: {result: true}
+
+- name: Committed native FK enforcement survives the rejected activation attempts
+  sql: INSERT INTO mode_fk_child VALUES(11,998)
+  expect: {error: true, contains: foreign key constraint}
+
+- name: A failed first constructor releases its transient native mode pin
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define orphan (table "memcp-tests" false "mode_fk_orphan" false nil))
+      (define parent (table "memcp-tests" false "mode_fk_parent" false nil))
+      (define rejected (try (lambda () (begin
+        (createforeignkey orphan "FK_mode_rejected" '("parent_id") parent '("id") "restrict" "restrict" tx) false))
+        (lambda (failure) (strlike (concat failure) "%existing child row has no parent%"))))
+      (tx_rollback owner)
+      (and rejected (empty_list? ((show orphan "constraints") "ForeignKeys"))))
+  expect: {result: true}
+
+- name: Finished native resources allow the existing unchanged backend operation
+  sql: ALTER DATABASE `memcp-tests` SET STORAGE backend='filesystem'
+
+# The positive start uses a successfully checkpointed committed schema. It does
+# not claim to export newer durable catalog decisions after a failed checkpoint.
+- name: Finished local resources permit native replication startup and duplicate startup is explicit
+  scm: |
+    (begin
+      (define started (replication_start "listen" (lambda () true)))
+      (define duplicate (try (lambda () (begin (replication_start "listen" (lambda () true)) false))
+        (lambda (failure) (strlike (concat failure) "%already initialized%"))))
+      (and started duplicate))
+  expect: {result: true}
+
+- name: Restart the cleanly checkpointed fixture after the finite native startup proof
+  # CI connects to its supervisor: waiting for readiness alone leaves the
+  # explicitly started replication manager alive for the following suites.
+  sql: SHUTDOWN
+
+- name: Restart preserves the real declaration rows and orphan enforcement
+  scm: |
+    (begin
+      (define child (table "memcp-tests" false "mode_fk_child" false nil))
+      (define rejected (try (lambda () (begin (insert child '("id" "parent_id") (list (list 12 997))) false))
+        (lambda (failure) (strlike (concat failure) "%foreign key constraint%"))))
+      (and rejected (equal? (count ((show child "constraints") "ForeignKeys")) 1)
+        (equal? (scan nil child '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +) 10)))
+  expect: {result: true}

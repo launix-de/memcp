@@ -1,0 +1,66 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Freeze both input sizes and three repetitions before the A/B run.
+metadata:
+  isolated: true
+  perf_ci: true
+  max_regression_pct: 20
+  description: Lexical source mapping scales with module length while preserving quoting, comments and Unicode offsets
+setup:
+- scm: |-
+    (begin
+      (define prefix "CREATE PROCEDURE lexical_scale AS\nBEGIN\n")
+      (define line "INSERT INTO @items SELECT 7,\"a]b\",N'Grüße'; /* outer /* inner */ end */\n")
+      (define cooked "INSERT INTO @items SELECT 7,[a]]b],N'Grüße'; /* outer    inner    end */\n")
+      (define suffix "END;")
+      (globalvars "__lexical_scale_fixture" (lambda (size)
+        (list (concat prefix (apply concat (map (produceN size) (lambda (_i) line))) suffix)
+          (concat prefix (apply concat (map (produceN size) (lambda (_i) cooked))) suffix))))
+      true)
+test_cases:
+- name: Lexical context preserves every source span in a 128 statement module
+  scm: |-
+    (begin
+      (define fixture ((globalvars "__lexical_scale_fixture") 128))
+      (define original (car fixture))
+      (define parsed (tsql_parse_context original true true))
+      (define spans (parsed "spans"))
+      (define last (nth spans (- (count spans) 1)))
+      (and (equal? (parsed "text") (cadr fixture))
+        (equal? (parsed "source") original)
+        (identical? (parsed "module_quoted_identifier") true)
+        (equal? (parsed "module_kind") "PROCEDURE")
+        (equal? (parsed "module_source") (strtrim (substr original 34)))
+        (equal? (tsql_context_source_offset parsed (strlen (parsed "text"))) (strlen original))
+        (equal? (+ (cadr last) (nth last 3)) (strlen original))))
+  expect:
+    result: true
+  threshold_ms: 5000
+  timeout: 20
+  warmup: 0
+  timing_samples: 3
+  timing_aggregation: total
+  performance_rows: 128
+- name: Lexical context preserves every source span in a 512 statement module
+  scm: |-
+    (begin
+      (define fixture ((globalvars "__lexical_scale_fixture") 512))
+      (define original (car fixture))
+      (define parsed (tsql_parse_context original true true))
+      (define spans (parsed "spans"))
+      (define last (nth spans (- (count spans) 1)))
+      (and (equal? (parsed "text") (cadr fixture))
+        (equal? (parsed "source") original)
+        (identical? (parsed "module_quoted_identifier") true)
+        (equal? (parsed "module_kind") "PROCEDURE")
+        (equal? (parsed "module_source") (strtrim (substr original 34)))
+        (equal? (tsql_context_source_offset parsed (strlen (parsed "text"))) (strlen original))
+        (equal? (+ (cadr last) (nth last 3)) (strlen original))))
+  expect:
+    result: true
+  threshold_ms: 5000
+  timeout: 20
+  warmup: 0
+  timing_samples: 3
+  timing_aggregation: total
+  performance_rows: 512

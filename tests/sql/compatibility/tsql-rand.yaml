@@ -1,0 +1,81 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: T-SQL RAND has one fresh FLOAT value per occurrence and statement
+setup:
+  - sql: CREATE TABLE random_rows(id INT PRIMARY KEY,value FLOAT)
+  - sql: INSERT random_rows VALUES(1,NULL),(2,NULL),(3,NULL)
+  - sql: CREATE TABLE random_saved(value FLOAT)
+cleanup:
+  - sql: DROP TABLE IF EXISTS random_rows
+  - sql: DROP TABLE IF EXISTS random_saved
+test_cases:
+  - name: Unseeded scalar values stay inside the documented unit interval
+    sql: SELECT CASE WHEN value>=0 AND value<1 THEN 1 ELSE 0 END AS valid FROM(SELECT RAND() AS value) sample
+    expect: {data: [{valid: 1}]}
+  - name: Distinct syntactic occurrences produce independent samples
+    sql: SELECT CASE WHEN RAND()<>RAND() THEN 1 ELSE 0 END AS independent
+    expect: {data: [{independent: 1}]}
+  - name: One occurrence produces one value across all selected rows
+    sql: SELECT COUNT(DISTINCT value) AS distinct_values FROM(SELECT RAND() AS value FROM random_rows) samples
+    expect: {data: [{distinct_values: 1}]}
+  - name: Distinct occurrences remain separate while each stays constant over rows
+    sql: SELECT COUNT(DISTINCT first_value) AS first_count,COUNT(DISTINCT second_value) AS second_count,MAX(CASE WHEN first_value<>second_value THEN 1 ELSE 0 END) AS independent FROM(SELECT RAND() AS first_value,RAND() AS second_value FROM random_rows) samples
+    expect: {data: [{first_count: 1,second_count: 1,independent: 1}]}
+  - name: Insert select shares a sample across its affected rows
+    setup:
+      - sql: INSERT random_saved SELECT RAND() FROM random_rows
+    sql: SELECT COUNT(*) AS rows_seen,COUNT(DISTINCT value) AS distinct_values FROM random_saved
+    expect: {data: [{rows_seen: 3,distinct_values: 1}]}
+  - name: Update shares a sample across its affected rows
+    setup:
+      - sql: UPDATE random_rows SET value=RAND()
+    sql: SELECT COUNT(*) AS rows_seen,COUNT(DISTINCT value) AS distinct_values FROM random_rows
+    expect: {data: [{rows_seen: 3,distinct_values: 1}]}
+  - repeat: 3
+    tests:
+      - name: A cached INSERT statement samples again on its next invocation
+        sql: INSERT random_saved SELECT RAND()
+  - name: Reusing cached syntax does not freeze its prior random sample
+    sql: SELECT CASE WHEN COUNT(DISTINCT value)>1 THEN 1 ELSE 0 END AS fresh FROM random_saved
+    expect: {data: [{fresh: 1}]}
+  - name: Batch scalar assignments evaluate fresh calls
+    tds:
+      statements:
+        - sql: DECLARE @first FLOAT,@second FLOAT; SET @first=RAND(); SET @second=RAND(); SELECT CASE WHEN @first>=0 AND @first<1 AND @second>=0 AND @second<1 AND @first<>@second THEN 1 ELSE 0 END AS valid
+          expect: {data: [{valid: 1}]}
+        - sql: SELECT RAND() AS value
+          expect: {rows: 1,column_types: [{name: value,type: FLOAT}]}
+  - name: NULL seed returns NULL without inventing a generator sequence
+    sql: SELECT RAND(NULL) AS untyped_null,RAND(CAST(NULL AS INT)) AS typed_null
+    expect: {data: [{untyped_null: null,typed_null: null}]}
+  - name: Seed conversion retains SQL integer overflow validation
+    sql: SELECT RAND(CAST(2147483648 AS BIGINT))
+    expect: {error: true}
+  - name: RAND accepts at most one seed argument
+    sql: SELECT RAND(1,2)
+    expect: {error: true}
+  - name: Scalar functions cannot invoke the side effecting RAND operator
+    sql: CREATE FUNCTION random_scalar() RETURNS FLOAT AS BEGIN RETURN RAND(); END
+    expect: {error: true}
+  - name: Seeded RAND retains the real SQL Server value as its implementation target
+    # SQL Server 2022: https://dbfiddle.uk/inz585N_ . The seeded generator and
+    # subsequent connection sequence are not implemented; no substitute stream.
+    noncritical: true
+    sql: SELECT RAND(100) AS value
+    expect: {data: [{value: 0.715436657367485}]}
+  - name: Deferred RAND defaults retain their statement constant implementation target
+    # Stored scalar defaults currently use the direct scalar recipe. Their
+    # shared statement lifetime needs its own lowering through the default owner.
+    # SQL Server 2022: https://dbfiddle.uk/NIUolyVO
+    noncritical: true
+    setup:
+      - sql: CREATE TABLE random_defaults(id INT,value FLOAT DEFAULT RAND())
+      - sql: INSERT random_defaults(id) SELECT id FROM random_rows
+    cleanup:
+      - sql: DROP TABLE IF EXISTS random_defaults
+    sql: SELECT COUNT(DISTINCT value) AS distinct_values FROM random_defaults
+    expect: {data: [{distinct_values: 1}]}

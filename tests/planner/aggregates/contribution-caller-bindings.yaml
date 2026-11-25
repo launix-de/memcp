@@ -1,0 +1,604 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Contribution predicates retain real selections while preserving complete nullable caller labels
+setup:
+- sql: CREATE TABLE caller_binding_entities(id INT PRIMARY KEY,category INT)
+- sql: CREATE TABLE caller_binding_history(id INT PRIMARY KEY,entity_id INT,coordinate INT,quantity INT,end_value
+    INT,UNIQUE KEY caller_binding_order(entity_id,coordinate))
+- sql: INSERT INTO caller_binding_entities VALUES(1,0),(2,1),(3,0)
+- sql: INSERT INTO caller_binding_history VALUES(1,1,0,2,NULL),(2,1,5,7,8),(3,2,0,3,NULL),(4,3,0,11,NULL),(5,3,6,13,10)
+- sql: CREATE TABLE caller_binding_coordinates(ord INT PRIMARY KEY,x INT)
+- sql: INSERT INTO caller_binding_coordinates VALUES(1,NULL),(2,0),(3,4),(4,5),(5,5),(6,6),(7,8),(8,9),(9,10),(10,11)
+- sql: CREATE TABLE caller_binding_categories(category INT)
+- sql: INSERT INTO caller_binding_categories VALUES(NULL),(0),(1),(2)
+- scm: |
+    (globalvars "__test_contribution_predicate" (lambda (mode x y label)
+      (begin
+        (define column (lambda (alias field) (list 'get_column alias false field false)))
+        (define input_alias (if (equal? mode "local") "d" "h"))
+        (define key (if (equal? mode "real-key") (column "h" "coordinate") (column "d" "x")))
+        (define lookup (if (equal? mode "different-coordinate") (column "d" "y") (column "d" "x")))
+        (define keys (list (column "h" "entity_id") key))
+        (define lookups (if (equal? mode "misaligned") (list (column "e" "id"))
+          (list (column "e" "id") lookup)))
+        (define stage (make_group_stage "caller_predicate"
+          (list input_alias "unused" "unused" false nil nil)
+          (if (equal? mode "domain-mismatch") (list (column "e" "id") (column "d" "y")) lookups) keys (list '(1 + 0)) true (list) (list) nil nil
+          (list (list 'null_semantics (if (equal? mode "non-scalar") 'aggregate 'scalar))
+            (list 'result_max_rows_per_partition 1)
+            (list 'preserve_empty_domain (not (equal? mode "not-preserved")))
+            (list 'lookup-keys lookups))))
+        (define identity (make_exists_stage_join_condition "p" (list "k1") (list lookup) true))
+        (define parent (make_exists_stage_join_condition "p" (list "k0") (list (column "e" "id")) false))
+        (define actual_selection (list '<= (column "d" "x") 5))
+        (define predicate (if (equal? mode "real") (combine_where identity actual_selection)
+          (equal? mode "or") (list 'or (list 'not identity) actual_selection)
+          (equal? mode "nullable") (list 'or (list 'nil? (column "d" "x")) actual_selection)
+          identity))
+        (define source (list "p" "unused" (make_stage_output_relation "caller_predicate")
+          (not (equal? mode "inner")) (combine_where parent predicate) nil))
+        (define residual (contribution_source_join_predicate (list stage) source))
+        (define getter (lambda (alias _alias_ci field _field_ci)
+          (if (equal? alias "p") (if (equal? field "k0") 1 label)
+            (equal? alias "e") 1 (equal? field "x") x y)))
+        (eval (list (list 'lambda (list 'get_column) residual) getter)))))
+cleanup:
+- scm: (globalvars "__test_contribution_predicate" nil)
+- sql: DROP TABLE caller_binding_history
+- sql: DROP TABLE caller_binding_entities
+- sql: DROP TABLE caller_binding_categories
+- sql: DROP TABLE caller_binding_coordinates
+test_cases:
+- name: A NULL caller label remains a complete nullable binding
+  scm: ((globalvars "__test_contribution_predicate") "label" nil 2 nil)
+  expect:
+    result: true
+- name: A zero caller label remains independent of NULL
+  scm: ((globalvars "__test_contribution_predicate") "label" 0 2 0)
+  expect:
+    result: true
+- name: A textual caller label retains its own value
+  scm: ((globalvars "__test_contribution_predicate") "label" "0" 2 "0")
+  expect:
+    result: true
+- name: A real axis predicate still rejects a row beyond its boundary
+  scm: ((globalvars "__test_contribution_predicate") "real" 7 2 7)
+  expect:
+    result: false
+- name: A real axis predicate still admits its inclusive endpoint
+  scm: ((globalvars "__test_contribution_predicate") "real" 5 2 5)
+  expect:
+    result: true
+- name: An OR containing the label is preserved as a whole predicate
+  scm: ((globalvars "__test_contribution_predicate") "or" 7 2 7)
+  expect:
+    result: false
+- name: A nullable user predicate still rejects a nonmatching nonnull axis
+  scm: ((globalvars "__test_contribution_predicate") "nullable" 7 2 7)
+  expect:
+    result: false
+- name: A nullable user predicate still accepts its explicit NULL branch
+  scm: ((globalvars "__test_contribution_predicate") "nullable" nil 2 nil)
+  expect:
+    result: true
+- name: An independent caller coordinate remains a real join binding
+  scm: ((globalvars "__test_contribution_predicate") "different-coordinate" 1 2 1)
+  expect:
+    result: false
+- name: Equal spelling inside a producer does not prove a caller identity
+  scm: ((globalvars "__test_contribution_predicate") "local" 1 2 0)
+  expect:
+    result: false
+- name: An inner source retains its row-selection predicate
+  scm: ((globalvars "__test_contribution_predicate") "inner" 1 2 0)
+  expect:
+    result: false
+- name: A producer without empty-domain preservation retains its join predicate
+  scm: ((globalvars "__test_contribution_predicate") "not-preserved" 1 2 0)
+  expect:
+    result: false
+- name: A grouped producer is not treated as a scalar caller label
+  scm: ((globalvars "__test_contribution_predicate") "non-scalar" 1 2 0)
+  expect:
+    result: false
+- name: A real inner key remains a nullable user selection
+  scm: ((globalvars "__test_contribution_predicate") "real-key" 1 2 0)
+  expect:
+    result: false
+- name: Misaligned producer keys cannot prove a caller identity
+  scm: ((globalvars "__test_contribution_predicate") "misaligned" 1 2 0)
+  expect:
+    result: false
+- name: An independently published caller domain is not an identity label
+  scm: ((globalvars "__test_contribution_predicate") "domain-mismatch" 1 2 0)
+  expect:
+    result: false
+- name: Complete nullable and duplicate caller coordinates retain every category and endpoint
+  sql: |-
+    SELECT d.x,p.category,
+      COALESCE((SELECT SUM((SELECT h.quantity FROM caller_binding_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))
+        FROM caller_binding_entities e WHERE (p.category IS NULL OR e.category=p.category)
+          AND COALESCE((SELECT h.end_value FROM caller_binding_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+    FROM caller_binding_coordinates d
+    CROSS JOIN caller_binding_categories p
+    ORDER BY d.x,p.category
+  expect:
+    rows: 40
+    data:
+    - x: null
+      category: null
+      total: 0
+    - x: null
+      category: 0
+      total: 0
+    - x: null
+      category: 1
+      total: 0
+    - x: null
+      category: 2
+      total: 0
+    - x: 0
+      category: null
+      total: 16
+    - x: 0
+      category: 0
+      total: 13
+    - x: 0
+      category: 1
+      total: 3
+    - x: 0
+      category: 2
+      total: 0
+    - x: 4
+      category: null
+      total: 16
+    - x: 4
+      category: 0
+      total: 13
+    - x: 4
+      category: 1
+      total: 3
+    - x: 4
+      category: 2
+      total: 0
+    - x: 5
+      category: null
+      total: 21
+    - x: 5
+      category: null
+      total: 21
+    - x: 5
+      category: 0
+      total: 18
+    - x: 5
+      category: 0
+      total: 18
+    - x: 5
+      category: 1
+      total: 3
+    - x: 5
+      category: 1
+      total: 3
+    - x: 5
+      category: 2
+      total: 0
+    - x: 5
+      category: 2
+      total: 0
+    - x: 6
+      category: null
+      total: 23
+    - x: 6
+      category: 0
+      total: 20
+    - x: 6
+      category: 1
+      total: 3
+    - x: 6
+      category: 2
+      total: 0
+    - x: 8
+      category: null
+      total: 23
+    - x: 8
+      category: 0
+      total: 20
+    - x: 8
+      category: 1
+      total: 3
+    - x: 8
+      category: 2
+      total: 0
+    - x: 9
+      category: null
+      total: 16
+    - x: 9
+      category: 0
+      total: 13
+    - x: 9
+      category: 1
+      total: 3
+    - x: 9
+      category: 2
+      total: 0
+    - x: 10
+      category: null
+      total: 16
+    - x: 10
+      category: 0
+      total: 13
+    - x: 10
+      category: 1
+      total: 3
+    - x: 10
+      category: 2
+      total: 0
+    - x: 11
+      category: null
+      total: 3
+    - x: 11
+      category: 0
+      total: 0
+    - x: 11
+      category: 1
+      total: 3
+    - x: 11
+      category: 2
+      total: 0
+- name: Complete nullable and duplicate caller coordinates retain shifted selection boundaries
+  sql: |-
+    SELECT d.x,p.category,
+      COALESCE((SELECT SUM((SELECT h.quantity FROM caller_binding_history h
+        WHERE h.entity_id=e.id AND h.coordinate<=(d.x-1) ORDER BY h.coordinate DESC LIMIT 1))
+        FROM caller_binding_entities e WHERE (p.category IS NULL OR e.category=p.category)
+          AND COALESCE((SELECT h.end_value FROM caller_binding_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total
+    FROM caller_binding_coordinates d
+    CROSS JOIN caller_binding_categories p
+    ORDER BY d.x,p.category
+  expect:
+    rows: 40
+    data:
+    - x: null
+      category: null
+      total: 0
+    - x: null
+      category: 0
+      total: 0
+    - x: null
+      category: 1
+      total: 0
+    - x: null
+      category: 2
+      total: 0
+    - x: 0
+      category: null
+      total: 0
+    - x: 0
+      category: 0
+      total: 0
+    - x: 0
+      category: 1
+      total: 0
+    - x: 0
+      category: 2
+      total: 0
+    - x: 4
+      category: null
+      total: 16
+    - x: 4
+      category: 0
+      total: 13
+    - x: 4
+      category: 1
+      total: 3
+    - x: 4
+      category: 2
+      total: 0
+    - x: 5
+      category: null
+      total: 16
+    - x: 5
+      category: null
+      total: 16
+    - x: 5
+      category: 0
+      total: 13
+    - x: 5
+      category: 0
+      total: 13
+    - x: 5
+      category: 1
+      total: 3
+    - x: 5
+      category: 1
+      total: 3
+    - x: 5
+      category: 2
+      total: 0
+    - x: 5
+      category: 2
+      total: 0
+    - x: 6
+      category: null
+      total: 21
+    - x: 6
+      category: 0
+      total: 18
+    - x: 6
+      category: 1
+      total: 3
+    - x: 6
+      category: 2
+      total: 0
+    - x: 8
+      category: null
+      total: 23
+    - x: 8
+      category: 0
+      total: 20
+    - x: 8
+      category: 1
+      total: 3
+    - x: 8
+      category: 2
+      total: 0
+    - x: 9
+      category: null
+      total: 16
+    - x: 9
+      category: 0
+      total: 13
+    - x: 9
+      category: 1
+      total: 3
+    - x: 9
+      category: 2
+      total: 0
+    - x: 10
+      category: null
+      total: 16
+    - x: 10
+      category: 0
+      total: 13
+    - x: 10
+      category: 1
+      total: 3
+    - x: 10
+      category: 2
+      total: 0
+    - x: 11
+      category: null
+      total: 3
+    - x: 11
+      category: 0
+      total: 0
+    - x: 11
+      category: 1
+      total: 3
+    - x: 11
+      category: 2
+      total: 0
+- name: Explicit caller grouping retains empty-set cardinality separately from scalar aggregate defaults
+  sql: |-
+    SELECT d.ord,d.x,p.category,
+      (SELECT COALESCE(SUM((SELECT h.quantity FROM caller_binding_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)),7)
+        FROM caller_binding_entities e WHERE (p.category IS NULL OR e.category=p.category)
+          AND COALESCE((SELECT h.end_value FROM caller_binding_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x
+        GROUP BY d.x) AS grouped_value,
+      (SELECT COALESCE(SUM((SELECT h.quantity FROM caller_binding_history h
+          WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1)),7)
+        FROM caller_binding_entities e WHERE (p.category IS NULL OR e.category=p.category)
+          AND COALESCE((SELECT h.end_value FROM caller_binding_history h
+            WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x) AS scalar_value
+    FROM caller_binding_coordinates d CROSS JOIN caller_binding_categories p
+    ORDER BY d.ord,p.category
+  expect:
+    rows: 40
+    data:
+    - ord: 1
+      x: null
+      category: null
+      grouped_value: null
+      scalar_value: 7
+    - ord: 1
+      x: null
+      category: 0
+      grouped_value: null
+      scalar_value: 7
+    - ord: 1
+      x: null
+      category: 1
+      grouped_value: null
+      scalar_value: 7
+    - ord: 1
+      x: null
+      category: 2
+      grouped_value: null
+      scalar_value: 7
+    - ord: 2
+      x: 0
+      category: null
+      grouped_value: 16
+      scalar_value: 16
+    - ord: 2
+      x: 0
+      category: 0
+      grouped_value: 13
+      scalar_value: 13
+    - ord: 2
+      x: 0
+      category: 1
+      grouped_value: 3
+      scalar_value: 3
+    - ord: 2
+      x: 0
+      category: 2
+      grouped_value: null
+      scalar_value: 7
+    - ord: 3
+      x: 4
+      category: null
+      grouped_value: 16
+      scalar_value: 16
+    - ord: 3
+      x: 4
+      category: 0
+      grouped_value: 13
+      scalar_value: 13
+    - ord: 3
+      x: 4
+      category: 1
+      grouped_value: 3
+      scalar_value: 3
+    - ord: 3
+      x: 4
+      category: 2
+      grouped_value: null
+      scalar_value: 7
+    - ord: 4
+      x: 5
+      category: null
+      grouped_value: 21
+      scalar_value: 21
+    - ord: 4
+      x: 5
+      category: 0
+      grouped_value: 18
+      scalar_value: 18
+    - ord: 4
+      x: 5
+      category: 1
+      grouped_value: 3
+      scalar_value: 3
+    - ord: 4
+      x: 5
+      category: 2
+      grouped_value: null
+      scalar_value: 7
+    - ord: 5
+      x: 5
+      category: null
+      grouped_value: 21
+      scalar_value: 21
+    - ord: 5
+      x: 5
+      category: 0
+      grouped_value: 18
+      scalar_value: 18
+    - ord: 5
+      x: 5
+      category: 1
+      grouped_value: 3
+      scalar_value: 3
+    - ord: 5
+      x: 5
+      category: 2
+      grouped_value: null
+      scalar_value: 7
+    - ord: 6
+      x: 6
+      category: null
+      grouped_value: 23
+      scalar_value: 23
+    - ord: 6
+      x: 6
+      category: 0
+      grouped_value: 20
+      scalar_value: 20
+    - ord: 6
+      x: 6
+      category: 1
+      grouped_value: 3
+      scalar_value: 3
+    - ord: 6
+      x: 6
+      category: 2
+      grouped_value: null
+      scalar_value: 7
+    - ord: 7
+      x: 8
+      category: null
+      grouped_value: 23
+      scalar_value: 23
+    - ord: 7
+      x: 8
+      category: 0
+      grouped_value: 20
+      scalar_value: 20
+    - ord: 7
+      x: 8
+      category: 1
+      grouped_value: 3
+      scalar_value: 3
+    - ord: 7
+      x: 8
+      category: 2
+      grouped_value: null
+      scalar_value: 7
+    - ord: 8
+      x: 9
+      category: null
+      grouped_value: 16
+      scalar_value: 16
+    - ord: 8
+      x: 9
+      category: 0
+      grouped_value: 13
+      scalar_value: 13
+    - ord: 8
+      x: 9
+      category: 1
+      grouped_value: 3
+      scalar_value: 3
+    - ord: 8
+      x: 9
+      category: 2
+      grouped_value: null
+      scalar_value: 7
+    - ord: 9
+      x: 10
+      category: null
+      grouped_value: 16
+      scalar_value: 16
+    - ord: 9
+      x: 10
+      category: 0
+      grouped_value: 13
+      scalar_value: 13
+    - ord: 9
+      x: 10
+      category: 1
+      grouped_value: 3
+      scalar_value: 3
+    - ord: 9
+      x: 10
+      category: 2
+      grouped_value: null
+      scalar_value: 7
+    - ord: 10
+      x: 11
+      category: null
+      grouped_value: 3
+      scalar_value: 3
+    - ord: 10
+      x: 11
+      category: 0
+      grouped_value: null
+      scalar_value: 7
+    - ord: 10
+      x: 11
+      category: 1
+      grouped_value: 3
+      scalar_value: 3
+    - ord: 10
+      x: 11
+      category: 2
+      grouped_value: null
+      scalar_value: 7

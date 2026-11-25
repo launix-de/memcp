@@ -67,14 +67,14 @@ func projectionColumnReadHints(col ColumnStorage, rows int, tx *TxContext) Colum
 // Do not strip runtime overlays here: generic scan/read paths must still see
 // user-visible values (for example OverlayBlob must dereference its hash marker
 // back to the persisted blob payload after restart).
-func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked bool, hints ColumnReadHints) ColumnReader {
+func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked bool, hints ColumnReadHints, source *table, columnInput nativeTableInput) ColumnReader {
 	operatorOwned := hints&readOperatorOwned != 0
 	hints &^= readOperatorOwned
 	if provider, ok := col.(TxColumnReaderProvider); ok {
 		if operatorOwned {
 			hints |= readOperatorOwned
 		}
-		return provider.GetCachedReaderTx(tx, alreadyLocked, hints)
+		return provider.GetCachedReaderTx(tx, alreadyLocked, hints, columnInput)
 	}
 	// Without a statement owner, automatic reads retain no shared decoded
 	// dictionary. Explicit ReadDecoded consumers own and release their reader.
@@ -86,7 +86,7 @@ func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked boo
 	// encodings may own an immutable private workspace; GC carries its values,
 	// so a row-bound point caller must not append a statement release per probe.
 	if leased, ok := reader.(interface{ release() }); ok && !operatorOwned && hints != ReadCompressed && tx != nil && tx.queryActive.Load() {
-		if !tx.retainQueryReader(leased.release) {
+		if !tx.retainQueryReader(leased.release, source) {
 			leased.release()
 			return col.GetCachedReader(ReadCompressed)
 		}
@@ -95,6 +95,7 @@ func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext, alreadyLocked boo
 }
 
 func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, dependencies []string) {
+	t.requireCatalogDataVisibility(tx)
 	requireStatelessComputedCallback("computed-column function", computor)
 	requireStatelessComputedCallback("computed-column preparation filter", filter)
 	// Ordinary computed-column DDL installs one complete logical column.
@@ -116,6 +117,9 @@ func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []s
 			t.ddlMu.Lock()
 		}
 	}()
+	if dependency := t.checkColumnDependency(name); dependency != nil {
+		panic("column declaration is required by check constraint " + dependency.Id + ": " + name)
+	}
 	for i, c := range t.Columns {
 		if c.Name == name {
 			// Software contract:
@@ -319,12 +323,17 @@ func (s *storageShard) ComputeColumn(tx *TxContext, name string, inputCols []str
 // mapReduceFn: (lambda (acc $set mapCols...) ...) — calls ($set newVal), returns new acc
 // reduceInit: initial accumulator value
 func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, sortDirs []bool, partCount int, filterCols []string, filterFn scm.Scmer, mapCols []string, mapReduceFn scm.Scmer, reduceInit scm.Scmer) {
+	t.requireCatalogDataVisibility(nil)
 	requireStatelessComputedCallback("ordered computed-column filter", filterFn)
 	requireStatelessComputedCallback("ordered computed-column reducer", mapReduceFn)
 	found := false
 	paramsChanged := false
 	isTemp := false
 	t.schema.schemalock.Lock()
+	if dependency := t.checkColumnDependency(name); dependency != nil {
+		t.schema.schemalock.Unlock()
+		panic("column declaration is required by check constraint " + dependency.Id + ": " + name)
+	}
 	for i, c := range t.Columns {
 		if c.Name == name {
 			// Detect parameter changes (different OVER clause on same column).
@@ -423,12 +432,12 @@ func (t *table) initORCShard(s *storageShard, name string) {
 // The invalidation scan (run by triggers) has already set validMask bits to 0
 // for affected rows. This function finds the earliest invalid row's sort key,
 // predicts the accumulator from the last valid predecessor, and scans forward.
-func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard, requestIdx uint32) {
+func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard, requestIdx uint32, currentTx *TxContext, columnInput nativeTableInput) {
 	recomputeStart := time.Now()
 	defer func() {
 		// Record recompute cost for invalidation telemetry
 		recomputeNs := time.Since(recomputeStart).Nanoseconds()
-		for _, s := range t.maintenanceShards() {
+		for _, s := range columnInput.topology.shards {
 			s.mu.RLock()
 			if proxy, ok := s.columns[name].(*StorageComputeProxy); ok {
 				proxy.ResetInvalidationTelemetry(recomputeNs)
@@ -441,9 +450,9 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	defer atomic.AddInt32(&t.orcRecomputing, -1)
 
 	var col *column
-	for i := range t.Columns {
-		if t.Columns[i].Name == name {
-			col = t.Columns[i]
+	for _, declared := range columnInput.names.declarations {
+		if declared.Name == name {
+			col = declared
 			break
 		}
 	}
@@ -451,20 +460,17 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		panic("incrementalRecomputeORC: column '" + name + "' is not an ORC column on table " + t.Name)
 	}
 
-	// Build sort infrastructure.
+	// Bind each declared physical column's total order once. The same
+	// relation owns NULL placement, collation and partition equivalence.
 	sortcolsScmer := make([]scm.Scmer, len(col.OrcSortCols))
+	sortLess := make([]func(scm.Scmer, scm.Scmer) bool, len(col.OrcSortCols))
+	sortdirsFns := make([]func(...scm.Scmer) scm.Scmer, len(col.OrcSortCols))
 	for i, sc := range col.OrcSortCols {
 		sortcolsScmer[i] = scm.NewString(sc)
-	}
-	ltFn := scm.Globalenv.Vars[scm.Symbol("<")].Func()
-	gtFn := scm.Globalenv.Vars[scm.Symbol(">")].Func()
-	sortdirsFns := make([]func(...scm.Scmer) scm.Scmer, len(col.OrcSortDirs))
-	for i, desc := range col.OrcSortDirs {
-		if desc {
-			sortdirsFns[i] = gtFn
-		} else {
-			sortdirsFns[i] = ltFn
-		}
+		desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
+		order, _ := canonicalColumnOrder(t, sc, desc)
+		sortdirsFns[i] = order
+		sortLess[i] = scm.OrderRelationLess(order)
 	}
 
 	// Determine if the reducer has the identity property (stored value == accumulator).
@@ -486,6 +492,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		// Read partition key of the requested row
 		partCols = col.OrcSortCols[:partCount]
 		partKeys = make([]scm.Scmer, partCount)
+		initializedColumns := requestShard.initializedColumnInput(columnInput)
 		for i, pc := range partCols {
 			// Retain the existing column-directory ownership for both main and
 			// delta evaluation; only the delta row directory is published atomically.
@@ -494,7 +501,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 			if cs != nil && requestIdx < requestShard.main_count {
 				partKeys[i] = cs.GetValue(requestIdx)
 			} else if requestIdx >= requestShard.main_count {
-				partKeys[i] = requestShard.getDelta(int(requestIdx-requestShard.main_count), pc)
+				partKeys[i] = requestShard.getDeltaInput(int(requestIdx-requestShard.main_count), pc, initializedColumns)
 			}
 			requestShard.mu.RUnlock()
 		}
@@ -505,7 +512,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	filterFn := scm.PrepareSerialProc(col.OrcFilterFn)
 	condFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		for i := 0; i < partCount; i++ {
-			if scm.Less(a[i], partKeys[i]) || scm.Less(partKeys[i], a[i]) {
+			if sortLess[i](a[i], partKeys[i]) || sortLess[i](partKeys[i], a[i]) {
 				return scm.NewBool(false)
 			}
 		}
@@ -526,7 +533,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 			limit uint32
 		}
 		proxies := make([]filteredProxy, 0)
-		for _, s := range t.maintenanceShards() {
+		for _, s := range columnInput.topology.shards {
 			s.mu.RLock()
 			proxy, ok := s.columns[name].(*StorageComputeProxy)
 			limit := s.main_count + uint32(len(s.deltaRows()))
@@ -553,20 +560,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		scanCallbackCols := make([]string, 0, 1+len(col.OrcMapCols))
 		scanCallbackCols = append(scanCallbackCols, "$set:"+name)
 		scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
-		t.scan_order(
-			nil,
-			newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
-			col.OrcFilterCols, domainCondFn,
-			sortcolsScmer, sortdirsFns,
-			0, 0, -1,
-			scanCallbackCols,
-			col.OrcMapReduceFn,
-			col.OrcReduceInit,
-			false,
-			col.OrcReduceInit,
-			nil,
-			scm.NewNil(),
-		)
+		scanOrderMulti(currentTx, []scanOrderTableSpec{{table: t, dataTx: currentTx, dataBound: true, columnInput: columnInput, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1), accessValues: nil, conditionCols: col.OrcFilterCols, condition: domainCondFn, sortcols: sortcolsScmer, callbackCols: scanCallbackCols, callback: col.OrcMapReduceFn, perTableOffset: -1, perTableLimit: -1}}, sortdirsFns, 0, 0, -1, col.OrcReduceInit, false, col.OrcReduceInit)
 		// Speculative callback-column prefetch may read rows rejected by the
 		// predicate. Publish those holes as valid nils after every accepted row
 		// has been written, so it never starts a second domain rebuild.
@@ -624,20 +618,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		return newAcc
 	})
 
-	t.scan_order(
-		nil,
-		newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil,
-		condCols, condFn,
-		sortcolsScmer, sortdirsFns,
-		0, 0, -1,
-		scanCallbackCols,
-		scanMapReduceFn,
-		col.OrcReduceInit,
-		false,
-		col.OrcReduceInit,
-		nil,
-		scm.NewNil(),
-	)
+	scanOrderMulti(currentTx, []scanOrderTableSpec{{table: t, dataTx: currentTx, dataBound: true, columnInput: columnInput, accessSchema: newScanAccessSchema(scanAccessConsumerScan, nil, -1), accessValues: nil, conditionCols: condCols, condition: condFn, sortcols: sortcolsScmer, callbackCols: scanCallbackCols, callback: scanMapReduceFn, perTableOffset: -1, perTableLimit: -1}}, sortdirsFns, 0, 0, -1, col.OrcReduceInit, false, col.OrcReduceInit)
 }
 
 // invalidateORCFromSortKey clears validMask bits for rows affected by a mutation.
@@ -689,18 +670,30 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	}
 	partCount := analyzeOrcPartition(col)
 
+	// Invalidation must use the same declared orders as recomputation,
+	// including collation-equivalent partition keys and NULL coordinates.
+	sortLess := make([]func(scm.Scmer, scm.Scmer) bool, nCols)
+	for i := range sortLess {
+		order, _ := canonicalColumnOrder(t, col.OrcSortCols[i], false)
+		sortLess[i] = scm.OrderRelationLess(order)
+	}
+
 	// Build analyzer results for index-accelerated lookup.
 	// Partition columns → equality points; order columns → range from mutation key.
 	var bounds analyzedBoundaries
 	for i := 0; i < partCount && i < nCols; i++ {
 		bounds = append(bounds, analyzedBoundary{
-			col: col.OrcSortCols[i], matcher: EqualMatcher, lower: sortKeys[i], lowerInclusive: true,
+			col: col.OrcSortCols[i], matcher: EqualMatcher, nullSafe: true, lower: sortKeys[i], lowerInclusive: true,
 			upper: sortKeys[i], upperInclusive: true,
 		})
 	}
-	// Order columns: range from mutation key onwards.
-	// For ASC: [sortKey, ∞); for DESC: (∞, sortKey].
-	for i := partCount; i < nCols; i++ {
+	// A range on the first order coordinate is a superset of the
+	// lexicographic suffix. Later-coordinate ranges cannot be intersected:
+	// an earlier greater coordinate already admits every later value.
+	// For ASC: [sortKey, ∞); for DESC: (∞, sortKey]. NULL sentinels may
+	// widen this candidate set; the exact callback below still owns admission.
+	if partCount < nCols {
+		i := partCount
 		desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
 		if desc {
 			bounds = append(bounds, analyzedBoundary{
@@ -718,20 +711,20 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	// Build condition function for post-index filtering (index may return superset).
 	condFn := func(rowVals []scm.Scmer) bool {
 		for i := 0; i < partCount && i < len(rowVals); i++ {
-			if scm.Less(rowVals[i], sortKeys[i]) || scm.Less(sortKeys[i], rowVals[i]) {
+			if sortLess[i](rowVals[i], sortKeys[i]) || sortLess[i](sortKeys[i], rowVals[i]) {
 				return false
 			}
 		}
 		cmp := 0
 		for i := partCount; i < nCols && i < len(rowVals) && cmp == 0; i++ {
 			desc := i < len(col.OrcSortDirs) && col.OrcSortDirs[i]
-			if scm.Less(rowVals[i], sortKeys[i]) {
+			if sortLess[i](rowVals[i], sortKeys[i]) {
 				if desc {
 					cmp = 1
 				} else {
 					cmp = -1
 				}
-			} else if scm.Less(sortKeys[i], rowVals[i]) {
+			} else if sortLess[i](sortKeys[i], rowVals[i]) {
 				if desc {
 					cmp = -1
 				} else {
@@ -743,6 +736,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	}
 
 	// Parallel invalidation across shards using index-accelerated iteration.
+	columnInput := t.bindColumnInput(nil)
 	shards := t.maintenanceShards()
 	var wg sync.WaitGroup
 	wg.Add(len(shards))
@@ -762,12 +756,15 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			}
 			s.ensureLoaded()
 			s.ensureMainCount(false, nil)
+			initializedColumns := s.initializedColumnInput(columnInput)
 			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
 			// Retain index and column-directory ownership during invalidation.
 			// Delta rows and deletion bits have independent atomic publication.
 			s.mu.RLock()
-			s.iterateIndex(nil, runtimeScanAccess(bounds), len(s.deltaRows()), buf[:], 1, nil, func(batch []uint32) bool {
+			access := runtimeScanAccess(bounds)
+			access.columnInput = columnInput
+			s.iterateIndex(nil, access, len(s.deltaRows()), buf[:], 1, nil, func(batch []uint32) bool {
 				for _, idx := range batch {
 					if s.deletions.Get(uint(idx)) {
 						continue
@@ -777,7 +774,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 						if sortCSs[i] != nil && idx < s.main_count {
 							rowVals[i] = sortCSs[i].GetValue(idx)
 						} else if idx >= s.main_count {
-							rowVals[i] = s.getDelta(int(idx-s.main_count), col.OrcSortCols[i])
+							rowVals[i] = s.getDeltaInput(int(idx-s.main_count), col.OrcSortCols[i], initializedColumns)
 						}
 					}
 					if condFn(rowVals) {
@@ -836,6 +833,38 @@ func (t *table) registerORCTriggers(name string) {
 			break
 		}
 	}
+
+	for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
+		triggerName := ".orc:" + t.Name + ":" + name + "|" + timing.String()
+		exists := false
+		for _, tr := range t.Triggers {
+			if tr.Name == triggerName {
+				exists = true
+				break
+			}
+		}
+		if exists {
+			continue
+		}
+
+		t.AddTrigger(TriggerDescription{
+			Name:     triggerName,
+			Timing:   timing,
+			IsSystem: true,
+			Priority: 100,
+			Func:     buildFKProc(t.orcInvalidationTriggerBody(name, col, timing)),
+		})
+	}
+	if col != nil {
+		refs := extractScanJoinInfo(col.OrcMapReduceFn)
+		t.registerORCDependencyTriggers(name, col, refs)
+	}
+}
+
+// orcInvalidationTriggerBody derives only the native self-maintenance recipe
+// from the current column declaration. Both registration and unpublished reload
+// use this producer; persisted executable code is not declaration authority.
+func (t *table) orcInvalidationTriggerBody(name string, col *column, timing TriggerTiming) scm.Scmer {
 	hasSortKey := col != nil && len(col.OrcSortCols) > 0
 	relevantCols := []string(nil)
 	if col != nil {
@@ -856,86 +885,99 @@ func (t *table) registerORCTriggers(name string) {
 		return scm.NewSlice(parts)
 	}
 
-	for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
-		triggerName := ".orc:" + t.Name + ":" + name + "|" + timing.String()
-		exists := false
-		for _, tr := range t.Triggers {
-			if tr.Name == triggerName {
-				exists = true
-				break
-			}
-		}
-		if exists {
-			continue
-		}
-
-		var body scm.Scmer
-		if hasSortKey {
-			// Invalidate from composite sort key onwards via validMask scan
-			switch timing {
-			case AfterInsert:
-				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
-				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("NEW")})
-			case AfterDelete:
-				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
-				body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("OLD")})
-			case AfterUpdate:
-				// For UPDATE: invalidate from both OLD and NEW positions
-				tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
-				body = scm.NewSlice([]scm.Scmer{
-					scm.NewSymbol("begin"),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("OLD")}),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("NEW")}),
-				})
-			}
-		} else {
-			// No sort key: full column invalidation
-			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
+	var body scm.Scmer
+	if hasSortKey {
+		// Invalidate from composite sort key onwards via validMask scan
+		switch timing {
+		case AfterInsert:
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), t.nativeAddressExpression(), scm.NewBool(false), scm.NewSymbol("tx")})
+			body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("NEW")})
+		case AfterDelete:
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), t.nativeAddressExpression(), scm.NewBool(false), scm.NewSymbol("tx")})
+			body = scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("OLD")})
+		case AfterUpdate:
+			// For UPDATE: invalidate from both OLD and NEW positions
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), t.nativeAddressExpression(), scm.NewBool(false), scm.NewSymbol("tx")})
 			body = scm.NewSlice([]scm.Scmer{
-				scm.NewSymbol("invalidatecolumn"),
-				tblExpr,
-				scm.NewString(name),
+				scm.NewSymbol("begin"),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("OLD")}),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(name), buildSortKeyExpr("NEW")}),
 			})
 		}
-		if timing == AfterUpdate {
-			body = wrapUpdateBodyWithRelevantChangeGuard(body, relevantCols)
-		}
-		t.AddTrigger(TriggerDescription{
-			Name:     triggerName,
-			Timing:   timing,
-			IsSystem: true,
-			Priority: 100,
-			Func:     buildFKProc(body),
+	} else {
+		// No sort key: full column invalidation
+		tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(t.schema.Name), scm.NewBool(false), t.nativeAddressExpression(), scm.NewBool(false), scm.NewSymbol("tx")})
+		body = scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("invalidatecolumn"),
+			tblExpr,
+			scm.NewString(name),
+			scm.NewSymbol("tx"),
 		})
 	}
-	if col != nil {
-		refs := extractScanJoinInfo(col.OrcMapReduceFn)
-		t.registerORCDependencyTriggers(name, col, refs)
+	if timing == AfterUpdate {
+		body = wrapUpdateBodyWithRelevantChangeGuard(body, relevantCols)
 	}
+	return body
 }
 
-type tableRef struct{ schema, table string }
+// Restore only this owner's exact self-header slot from the actual ORC
+// declaration. Dependency registration belongs to later cache preparation and
+// must not recurse into database acquisition while loading this database.
+func (t *table) regenerateORCTriggerAfterLoad(trigger *TriggerDescription) bool {
+	if !trigger.IsSystem || trigger.Source != "" || trigger.Language != "" {
+		return false
+	}
+	switch trigger.Timing {
+	case AfterInsert, AfterUpdate, AfterDelete:
+	default:
+		return false
+	}
+	for _, col := range t.Columns {
+		if col.OrcMapReduceFn.IsNil() || trigger.Name != ".orc:"+t.Name+":"+col.Name+"|"+trigger.Timing.String() {
+			continue
+		}
+		trigger.Func = buildFKProc(t.orcInvalidationTriggerBody(col.Name, col, trigger.Timing))
+		trigger.FuncPlan, trigger.VectorFunc = scm.NewNil(), scm.NewNil()
+		finalizeTriggerCompilation(trigger)
+		return true
+	}
+	return false
+}
+
+type tableRef struct {
+	schema, table         string
+	incarnation, identity string
+}
 
 func scanTableReference(expr scm.Scmer) (tableRef, bool) {
 	expr = stripSourceInfo(expr)
 	if expr.IsCustom(TagTable) {
 		t := TableFromScmer(expr)
-		return tableRef{schema: t.schema.Name, table: t.Name}, true
+		return tableRef{schema: t.schema.Name, table: t.Name, incarnation: t.schema.incarnationID(), identity: t.RuntimeIdentity}, true
 	}
 	if expr.IsSlice() {
 		items := expr.Slice()
-		if len(items) == 5 && callHeadIs(items[0], "table") {
-			schema, name := scm.String(items[1]), scm.String(items[3])
+		if len(items) == 6 && callHeadIs(items[0], "table") {
+			schema := scm.String(items[1])
+			if address, ok := staticNativeTableAddress(items[3]); ok {
+				f := address.Slice()
+				return tableRef{schema: schema, table: f[3].String(), incarnation: f[1].String(), identity: f[2].String()}, true
+			}
+			name := scm.String(items[3])
 			if items[2].Bool() || items[4].Bool() {
 				db := GetDatabase(schema, items[2].Bool())
 				if db == nil {
 					return tableRef{}, false
 				}
-				t := db.GetTable(name, items[4].Bool())
-				if t == nil || t.publishedName.Load() == nil {
+				// This is static dependency discovery, not expression
+				// execution. A concrete capability can resolve a private
+				// native source; dynamic transaction expressions stay opaque.
+				tx := scmerToTxContext(items[5])
+				t := db.GetTableForTx(name, items[4].Bool(), tx)
+				if t == nil {
 					return tableRef{}, false
 				}
-				return tableRef{schema: db.Name, table: *t.publishedName.Load()}, true
+				return tableRef{schema: db.Name, table: t.Name, incarnation: db.incarnationID(), identity: t.RuntimeIdentity}, true
 			}
 			return tableRef{schema: schema, table: name}, true
 		}
@@ -955,13 +997,14 @@ func scanTableReference(expr scm.Scmer) (tableRef, bool) {
 // scanJoinInfo describes a source table scanned by a computor and the equality
 // join conditions connecting source columns to computor input columns.
 type scanJoinInfo struct {
-	schema       string
-	table        string
-	srcCols      []string // source table columns in equality filter
-	inputCols    []string // corresponding computor input column names
-	condCols     []string // complete filter readset supplied by the plan producer
-	unknownReads bool     // preparation-local: no complete filter dependency metadata available
-	mapCols      []string // source table columns read by the scan mapper
+	incarnation, identity string
+	schema                string
+	table                 string
+	srcCols               []string // source table columns in equality filter
+	inputCols             []string // corresponding computor input column names
+	condCols              []string // complete filter readset supplied by the plan producer
+	unknownReads          bool     // preparation-local: no complete filter dependency metadata available
+	mapCols               []string // source table columns read by the scan mapper
 }
 
 // resolveComputeInputCols maps planner lambda parameter names to physical
@@ -970,6 +1013,12 @@ type scanJoinInfo struct {
 func (t *table) resolveComputeInputCols(inputCols []string) ([]string, bool) {
 	resolved := make([]string, len(inputCols))
 	for i, name := range inputCols {
+		if names := t.columnNamesSnapshot.Load(); names != nil {
+			if entry, ok := names.exact[name]; ok {
+				resolved[i] = entry.name
+				continue
+			}
+		}
 		if col, ok := t.ResolveColumnName(name, false); ok {
 			resolved[i] = col
 			continue
@@ -978,7 +1027,14 @@ func (t *table) resolveComputeInputCols(inputCols []string) ([]string, bool) {
 		if dot < 0 {
 			return nil, false
 		}
-		col, ok := t.ResolveColumnName(name[dot+1:], false)
+		suffix := name[dot+1:]
+		if names := t.columnNamesSnapshot.Load(); names != nil {
+			if entry, ok := names.exact[suffix]; ok {
+				resolved[i] = entry.name
+				continue
+			}
+		}
+		col, ok := t.ResolveColumnName(suffix, false)
 		if !ok {
 			return nil, false
 		}
@@ -1055,7 +1111,7 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 			}
 		}
 		if ref, ok := scanTableReference(tableExpr); ok {
-			info.schema, info.table = ref.schema, ref.table
+			info.schema, info.table, info.incarnation, info.identity = ref.schema, ref.table, ref.incarnation, ref.identity
 		}
 		condCols := extractStringListFromAST(items[condColsIdx])
 		info.condCols = condCols
@@ -1077,12 +1133,24 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 		} else {
 			info.unknownReads = true
 		}
+		if callHeadIs(items[0], "scan_order", "scan_order_keys", "scalar_scan_order") {
+			// Ordered scans project operand 12; operand 7 supplies sort inputs.
+			// Both readsets can change the selected value, independently of the
+			// filter and of each other. A computed sort stays conservative.
+			info.mapCols = nil
+			if len(items) > 12 {
+				sortCols, knownSort := scanStaticColumns(items[7])
+				info.condCols = append(info.condCols, scmerSliceToStrings(sortCols)...)
+				info.unknownReads = info.unknownReads || !knownSort
+				mapCols, knownMap := scanStaticColumns(items[12])
+				info.mapCols = scmerSliceToStrings(mapCols)
+				info.unknownReads = info.unknownReads || !knownMap
+			} else {
+				info.unknownReads = true
+			}
+		}
 		if callHeadIs(items[0], "scan_order_keys") {
 			info.condCols = append(info.condCols, prefixCols...)
-			info.condCols = append(info.condCols, extractStringListFromAST(items[7])...)
-			if len(items) > 12 {
-				info.mapCols = extractStringListFromAST(items[12])
-			}
 			if len(prefixCols) == 0 {
 				info.unknownReads = true
 			}
@@ -1389,10 +1457,10 @@ func computorInputColumn(name string, computorParams []scm.Scmer) (string, bool)
 
 // findScanNode walks a computor expression and returns the scan AST node
 // (as a []Scmer slice) for the given source schema+table. Returns nil if not found.
-func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
+func findScanNode(expr scm.Scmer, target tableRef) []scm.Scmer {
 	expr = stripSourceInfo(expr)
 	if expr.IsProc() {
-		return findScanNode(expr.Proc().Body, schema, table)
+		return findScanNode(expr.Proc().Body, target)
 	}
 	if !expr.IsSlice() {
 		return nil
@@ -1408,13 +1476,13 @@ func findScanNode(expr scm.Scmer, schema, table string) []scm.Scmer {
 				}
 			}
 			ref, ok := scanTableReference(tableExpr)
-			if ok && ref.schema == schema && ref.table == table {
+			if ok && ref.sameSource(target) {
 				return items
 			}
 		}
 	}
 	for _, item := range items {
-		if found := findScanNode(item, schema, table); found != nil {
+		if found := findScanNode(item, target); found != nil {
 			return found
 		}
 	}
@@ -1653,6 +1721,8 @@ func buildKeytableScanFilter(targetTable string, srcCols, inputCols []string, di
 // buildIncrementScan builds a scan expression that walks the keytable, matches rows
 // by join key values from a trigger dict (OLD or NEW), and calls the $increment:
 // closure to update the proxy's cached value in-place. No shard rebuild needed.
+// All generated maintenance bodies run in buildFKProc's four-argument frame;
+// resolve and scan their targets with the actual native tx, never the session.
 func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inputCols []string, dictSym string, deltaExpr scm.Scmer, negate bool) scm.Scmer {
 	filterColElems, filterParams, filterBody := buildKeytableScanFilter(targetTable, srcCols, inputCols, dictSym)
 	filterCols := scm.NewSlice(filterColElems)
@@ -1678,10 +1748,10 @@ func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inpu
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("$incr"), valueExpr})}),
 	})
 
-	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)})
+	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false), scm.NewSymbol("tx")})
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
-		scm.NewSymbol("session"),
+		scm.NewSymbol("tx"),
 		tableExpr,
 		accessSchema,
 		accessValues,
@@ -1754,12 +1824,19 @@ func buildColsChangedExpr(cols []string) scm.Scmer {
 	}
 	checks := make([]scm.Scmer, len(cols))
 	for i, col := range cols {
+		// Match sameUpdateValue: NULL has its own stored presence, while
+		// non-NULL inputs retain Scheme's existing coercing/content equality.
+		// This is a value-change guard, not the computor's filter equality.
 		checks[i] = scm.NewSlice([]scm.Scmer{
-			scm.NewSymbol("not"),
-			scm.NewSlice([]scm.Scmer{
-				scm.NewSymbol("equal?"),
-				fkGetAssocExpr("OLD", col),
-				fkGetAssocExpr("NEW", col),
+			scm.NewSymbol("or"),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("not"),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("nil?"), fkGetAssocExpr("OLD", col)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("nil?"), fkGetAssocExpr("NEW", col)}),
+				}),
+			}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("not"),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal?"), fkGetAssocExpr("OLD", col), fkGetAssocExpr("NEW", col)}),
 			}),
 		})
 	}
@@ -1807,8 +1884,9 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 		})
 		invalidateBody := scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false), scm.NewSymbol("tx")}),
 			scm.NewString(colName),
+			scm.NewSymbol("tx"),
 		})
 		// Build (and (equal? (get_assoc "OLD" "srcCol1") (get_assoc "NEW" "srcCol1")) ...)
 		keyEqualChecks := make([]scm.Scmer, len(srcCols))
@@ -1845,8 +1923,9 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 		// Fallback: full invalidation.
 		return scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false), scm.NewSymbol("tx")}),
 			scm.NewString(colName),
+			scm.NewSymbol("tx"),
 		})
 	}
 }
@@ -1892,10 +1971,10 @@ func buildInvalidateScan(targetSchema, targetTable, colName string, srcCols, inp
 	// Build result col list: '("$invalidate:colName")
 	invColName := "$invalidate:" + colName
 
-	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)})
+	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false), scm.NewSymbol("tx")})
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
-		scm.NewSymbol("session"),
+		scm.NewSymbol("tx"),
 		tableExpr,
 		accessSchema,
 		accessValues,
@@ -1928,8 +2007,9 @@ func buildSelectiveInvalidationBody(targetSchema, targetTable, colName string, s
 		// Fallback: full invalidation
 		return scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false), scm.NewSymbol("tx")}),
 			scm.NewString(colName),
+			scm.NewSymbol("tx"),
 		})
 	}
 }
@@ -1955,7 +2035,7 @@ func buildInvalidateORCScan(targetSchema, targetTable, colName string, sortCols,
 		copy(parts[1:], mapParams)
 		sortKeyExpr = scm.NewSlice(parts)
 	}
-	tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)})
+	tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false), scm.NewSymbol("tx")})
 	mapReduceParams := append([]scm.Scmer{scm.NewSymbol("acc")}, mapParams...)
 	mapReduceBody := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("begin"),
@@ -1964,7 +2044,7 @@ func buildInvalidateORCScan(targetSchema, targetTable, colName string, sortCols,
 	})
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
-		scm.NewSymbol("session"),
+		scm.NewSymbol("tx"),
 		tblExpr,
 		accessSchema,
 		accessValues,
@@ -1991,14 +2071,61 @@ func buildSelectiveORCInvalidationBody(targetSchema, targetTable, colName string
 	default:
 		return scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("invalidatecolumn"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(targetTable), scm.NewBool(false), scm.NewSymbol("tx")}),
 			scm.NewString(colName),
+			scm.NewSymbol("tx"),
 		})
 	}
 }
 
+func dependencyTriggerName(prefix string, target *table, column string, refIndex int, source *table, timing TriggerTiming) string {
+	name := prefix + target.Name + ":" + column
+	if refIndex >= 0 {
+		name += "|scan" + strconv.Itoa(refIndex)
+	}
+	return name + "|" + source.Name + "|" + timing.String()
+}
+
+// The current native computation definition owns cleanup code. In particular,
+// restored generated procedures must not retain an obsolete public DROP ABI.
+// This compiler only resolves metadata names; it does not scan user rows or
+// inspect/rewrite the previous executable or quoted payloads.
+func (t *table) dependencyCleanupProgram(name string, refs []scanJoinInfo, ordered bool) scm.Scmer {
+	prefix := ".cache:"
+	if ordered {
+		prefix = ".orcdep:"
+	}
+	var removals []systemTriggerRemoval
+	seen := make(map[string]bool)
+	appendRemoval := func(schema, name string) {
+		key := schema + "\x00" + name
+		if !seen[key] {
+			seen[key] = true
+			removals = append(removals, systemTriggerRemoval{schema, name})
+		}
+	}
+	for index, ref := range refs {
+		db := GetDatabase(ref.schema)
+		if db == nil {
+			continue
+		}
+		source := ref.sourceRef().resolve(nil)
+		if source == nil || source == t {
+			continue
+		}
+		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
+			appendRemoval(ref.schema, dependencyTriggerName(prefix, t, name, index, source, timing))
+		}
+		appendRemoval(ref.schema, dependencyTriggerName(prefix, t, name, -1, source, AfterInvalidate))
+		if !ordered && strings.HasPrefix(t.Name, ".") {
+			appendRemoval(ref.schema, dependencyTriggerName(prefix, t, name, -1, source, AfterDropTable))
+		}
+	}
+	return compileSystemTriggerRemovals(removals)
+}
+
 func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable *table, colName string, acquire func(*TxContext) bool, release func()) string {
-	triggerName := prefix + targetTable.Name + ":" + colName + "|" + srcTable.Name + "|" + AfterInvalidate.String()
+	triggerName := dependencyTriggerName(prefix, targetTable, colName, -1, srcTable, AfterInvalidate)
 	targetKey := targetTable.schema.Name + "\x00" + targetTable.Name + "\x00" + colName
 	propagationAcquire := func(tx *TxContext) bool {
 		if tx != nil {
@@ -2011,18 +2138,15 @@ func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable
 		}
 		return acquire(tx)
 	}
-	for _, tr := range srcTable.Triggers {
-		if tr.Name == triggerName {
-			srcTable.SetTriggerTarget(triggerName, targetTable, propagationAcquire, release)
-			return triggerName
-		}
+	if srcTable.reuseComputeDependencyTrigger(triggerName, targetTable, propagationAcquire, release) {
+		return triggerName
 	}
 	tblExpr := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("table"),
 		scm.NewString(targetTable.schema.Name), scm.NewBool(false),
-		scm.NewString(targetTable.Name), scm.NewBool(false),
-	})
-	srcTable.AddTrigger(TriggerDescription{
+		targetTable.nativeAddressExpression(), scm.NewBool(false),
+		scm.NewSymbol("tx")})
+	srcTable.installComputeDependencyTrigger(TriggerDescription{
 		Name:     triggerName,
 		Timing:   AfterInvalidate,
 		IsSystem: true,
@@ -2031,6 +2155,7 @@ func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable
 			scm.NewSymbol("invalidatecolumn"),
 			tblExpr,
 			scm.NewString(colName),
+			scm.NewSymbol("tx"),
 		})),
 		cacheTarget: targetTable,
 		Acquire:     propagationAcquire,
@@ -2049,6 +2174,9 @@ func (t *table) reuseComputeDependencyTrigger(name string, target *table, acquir
 	for i := range t.Triggers {
 		trigger := &t.Triggers[i]
 		if trigger.Name == name {
+			if !trigger.IsSystem {
+				panic("dependency trigger name collides with a user definition")
+			}
 			if trigger.needsRegeneration {
 				return false
 			}
@@ -2068,16 +2196,22 @@ func (t *table) installComputeDependencyTrigger(trigger TriggerDescription) {
 	finalizeTriggerCompilation(&trigger)
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	release := t.admitTriggerMutationLocked(trigger.Name, trigger.IsSystem, trigger.Timing)
+	defer release()
 	for i := range t.Triggers {
 		if t.Triggers[i].Name == trigger.Name {
+			if !t.Triggers[i].IsSystem {
+				panic("dependency trigger name collides with a user definition")
+			}
 			// Generated dependency triggers keep their fixed priority and original
 			// slot; concurrent readers see either complete immutable description.
 			trigger.cacheTarget.rememberCacheTriggerSource(t)
 			t.Triggers[i] = trigger
+			t.refreshTriggerMemoryLocked()
 			return
 		}
 	}
-	t.addTriggerLocked(trigger)
+	t.insertTriggerLocked(trigger)
 }
 
 // registerComputeTriggers installs AfterInsert/AfterUpdate/AfterDelete triggers
@@ -2111,7 +2245,7 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 		if srcDB == nil {
 			continue
 		}
-		srcTable := srcDB.GetTable(ref.table)
+		srcTable := ref.sourceRef().resolve(nil)
 		if srcTable == nil {
 			continue
 		}
@@ -2141,26 +2275,27 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 		var scanNode []scm.Scmer
 		incremental := false
 		if selective {
-			scanNode = findScanNode(computor, ref.schema, ref.table)
+			scanNode = findScanNode(computor, ref.sourceRef())
 			if scanNode != nil && isAdditiveAggregate(scanNode) {
 				incremental = true
 			}
 		}
 
 		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
-			triggerName := ".cache:" + t.Name + ":" + name + "|scan" + strconv.Itoa(refIdx) + "|" + srcTable.Name + "|" + timing.String()
+			triggerName := dependencyTriggerName(".cache:", t, name, refIdx, srcTable, timing)
 			if !srcTable.reuseComputeDependencyTrigger(triggerName, t, acquireTarget, releaseTarget) {
 				var body scm.Scmer
 				if incremental && timing != AfterInvalidate {
 					// scan layout: [fn, tx, table, accessSchema, accessValues,
 					// filterCols, filter, mapCols, mapreduce, ...]
 					mapColsIdx, mapReduceIdx := 7, 8
-					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
+					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), t.nativeAddressExpression(), scm.NewBool(false), scm.NewSymbol("tx")})
 					if isConstantOneAggregate(scanNode[mapReduceIdx]) {
 						body = scm.NewSlice([]scm.Scmer{
 							scm.NewSymbol("invalidatecolumn"),
 							tblExpr,
 							scm.NewString(name),
+							scm.NewSymbol("tx"),
 						})
 					} else {
 						body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[mapColsIdx], scanNode[mapReduceIdx], timing)
@@ -2174,11 +2309,12 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 				} else {
 					// Opaque scans have no proven reverse mapping. They must retain the
 					// complete invalidation fallback for correctness.
-					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
+					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), t.nativeAddressExpression(), scm.NewBool(false), scm.NewSymbol("tx")})
 					body = scm.NewSlice([]scm.Scmer{
 						scm.NewSymbol("invalidatecolumn"),
 						tblExpr,
 						scm.NewString(name),
+						scm.NewSymbol("tx"),
 					})
 				}
 				if timing == AfterUpdate {
@@ -2206,7 +2342,7 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 		// AfterDropTable: when source table is dropped, drop the target table too
 		// Only for internal temp tables (dot-prefixed) — never drop user base tables
 		if strings.HasPrefix(t.Name, ".") {
-			dropTriggerName := ".cache:" + t.Name + ":" + name + "|" + srcTable.Name + "|" + AfterDropTable.String()
+			dropTriggerName := dependencyTriggerName(".cache:", t, name, -1, srcTable, AfterDropTable)
 			dropExists := false
 			for _, tr := range srcTable.Triggers {
 				if tr.Name == dropTriggerName {
@@ -2248,21 +2384,12 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 			}
 		}
 		if !exists {
-			calls := []scm.Scmer{scm.NewSymbol("begin")}
-			for _, rn := range registeredNames {
-				calls = append(calls, scm.NewSlice([]scm.Scmer{
-					scm.NewSymbol("droptrigger"),
-					scm.NewString(rn.schema),
-					scm.NewString(rn.name),
-					scm.NewBool(true),
-				}))
-			}
 			t.AddTrigger(TriggerDescription{
 				Name:     selfCleanupName,
 				Timing:   AfterDropTable,
 				IsSystem: true,
 				Priority: 50,
-				Func:     buildFKProc(scm.NewSlice(calls)),
+				Func:     t.dependencyCleanupProgram(name, refs, false),
 			})
 		}
 	}
@@ -2283,7 +2410,7 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 		if srcDB == nil {
 			continue
 		}
-		srcTable := srcDB.GetTable(ref.table)
+		srcTable := ref.sourceRef().resolve(nil)
 		if srcTable == nil {
 			continue
 		}
@@ -2301,15 +2428,16 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 		selective := validInputCols && validSourceCols && len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
 		relevantCols := scanRelevantSourceCols(ref, srcTable)
 		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
-			triggerName := ".orcdep:" + t.Name + ":" + name + "|scan" + strconv.Itoa(refIdx) + "|" + srcTable.Name + "|" + timing.String()
+			triggerName := dependencyTriggerName(".orcdep:", t, name, refIdx, srcTable, timing)
 			if srcTable.reuseComputeDependencyTrigger(triggerName, t, acquireTarget, releaseTarget) {
 				continue
 			}
-			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), scm.NewString(t.Name), scm.NewBool(false)})
+			tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewBool(false), t.nativeAddressExpression(), scm.NewBool(false), scm.NewSymbol("tx")})
 			body := scm.NewSlice([]scm.Scmer{
 				scm.NewSymbol("invalidatecolumn"),
 				tblExpr,
 				scm.NewString(name),
+				scm.NewSymbol("tx"),
 			})
 			if selective {
 				body = buildSelectiveORCInvalidationBody(targetSchema, t.Name, name, col.OrcSortCols, ref.srcCols, ref.inputCols, timing)
@@ -2352,21 +2480,12 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 	if exists {
 		return
 	}
-	calls := []scm.Scmer{scm.NewSymbol("begin")}
-	for _, rn := range registeredNames {
-		calls = append(calls, scm.NewSlice([]scm.Scmer{
-			scm.NewSymbol("droptrigger"),
-			scm.NewString(rn.schema),
-			scm.NewString(rn.name),
-			scm.NewBool(true),
-		}))
-	}
 	t.AddTrigger(TriggerDescription{
 		Name:     selfCleanupName,
 		Timing:   AfterDropTable,
 		IsSystem: true,
 		Priority: 50,
-		Func:     buildFKProc(scm.NewSlice(calls)),
+		Func:     t.dependencyCleanupProgram(name, refs, true),
 	})
 }
 
@@ -2376,7 +2495,7 @@ func (t *table) removeORCDependencyTriggers(name string) {
 		changed := false
 		newTriggers := make([]TriggerDescription, 0, len(srcTable.Triggers))
 		for _, tr := range srcTable.Triggers {
-			if strings.HasPrefix(tr.Name, prefix) {
+			if tr.IsSystem && strings.HasPrefix(tr.Name, prefix) {
 				changed = true
 				continue
 			}
@@ -2384,13 +2503,14 @@ func (t *table) removeORCDependencyTriggers(name string) {
 		}
 		if changed {
 			srcTable.Triggers = newTriggers
+			srcTable.refreshTriggerMemoryLocked()
 		}
 	}
 	cleanupName := ".orcdep_cleanup:" + t.Name + ":" + name
 	changed := false
 	newTriggers := make([]TriggerDescription, 0, len(t.Triggers))
 	for _, tr := range t.Triggers {
-		if tr.Name == cleanupName {
+		if tr.IsSystem && tr.Name == cleanupName {
 			changed = true
 			continue
 		}
@@ -2398,6 +2518,7 @@ func (t *table) removeORCDependencyTriggers(name string) {
 	}
 	if changed {
 		t.Triggers = newTriggers
+		t.refreshTriggerMemoryLocked()
 	}
 }
 
@@ -2409,7 +2530,7 @@ func (t *table) removeComputeTriggers(name string) {
 		changed := false
 		newTriggers := make([]TriggerDescription, 0, len(srcTable.Triggers))
 		for _, tr := range srcTable.Triggers {
-			if strings.HasPrefix(tr.Name, prefix) {
+			if tr.IsSystem && strings.HasPrefix(tr.Name, prefix) {
 				changed = true
 				continue
 			}
@@ -2418,6 +2539,7 @@ func (t *table) removeComputeTriggers(name string) {
 		if changed {
 			srcTable.mu.Lock()
 			srcTable.Triggers = newTriggers
+			srcTable.refreshTriggerMemoryLocked()
 			srcTable.mu.Unlock()
 		}
 	}

@@ -1,0 +1,97 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Expression equality preserves exact scalar tags, IEEE values and immutable syntax
+  isolated: true
+test_cases:
+- name: Interpreter optimized and native comparisons retain strict scalar tags
+  scm: |
+    (begin
+      (define direct (eval (scheme "(lambda (a b) (expression_equal? a b))")))
+      (define optimized (eval (optimize (scheme "(lambda (a b) (expression_equal? a b))"))))
+      (define compiled (jit (eval (optimize (scheme "(lambda (a b) (expression_equal? a b))")))))
+      (define cases (list
+        (list nil nil true) (list true true true) (list false false true) (list true false false)
+        (list nil false false) (list nil 0 false) (list nil "" false) (list false 0 false)
+        (list 1 1.0 false) (list 1 "1" false) (list 'value "value" false)
+        (list 7 7 true) (list 7 8 false) (list 2.5 2.5 true) (list 2.5 2.6 false)))
+      (reduce (list direct optimized compiled) (lambda (valid compare)
+        (and valid (reduce cases (lambda (same values)
+          (and same (identical? (compare (car values) (cadr values)) (nth values 2)))) true))) true))
+  expect: {result: true}
+- name: Exact integer comparisons retain all 64 bits
+  scm: |
+    (begin
+      (define compare (jit (eval (optimize (scheme "(lambda (a b) (expression_equal? a b))")))))
+      (and (compare 9223372036854775807 9223372036854775807)
+        (compare -9223372036854775808 -9223372036854775808)
+        (not (compare 9223372036854775807 -9223372036854775808))
+        (not (compare 9007199254740992 9007199254740993))
+        (not (compare -9007199254740992 -9007199254740993))))
+  expect: {result: true}
+- name: IEEE equality keeps NaN unequal even to the same native value
+  scm: |
+    (begin
+      (define compare (jit (eval (optimize (scheme "(lambda (a b) (expression_equal? a b))")))))
+      (define nan (number_power -2 0.5))
+      (define infinity (number_power 0.0 -1.0))
+      (and (not (compare nan nan)) (not (compare (list nan) (list nan)))
+        (not (compare nan (number_power -2 0.5)))
+        (compare -0.0 0.0) (compare infinity infinity)
+        (not (compare infinity (- 0.0 infinity)))))
+  expect: {result: true}
+- name: Plain strings compare complete byte content without coercion or case folding
+  scm: |
+    (begin
+      (define compare (jit (eval (optimize (scheme "(lambda (a b) (expression_equal? a b))")))))
+      (and (compare "" "") (compare (concat "na" "ïve") (concat "naï" "ve"))
+        (not (compare "Ä" "ä")) (not (compare "value" "value "))
+        (not (compare "a\nb" "anb")) (not (compare "01" "1"))
+        (not (compare "abc" "ab"))))
+  expect: {result: true}
+- name: Source locations remain transparent on both sides and within nested data
+  scm: |
+    (begin
+      (define compare (jit (eval (optimize (scheme "(lambda (a b) (expression_equal? a b))")))))
+      (and (compare (source "left" 1 2 42) 42)
+        (compare "text" (source "right" 8 9 "text"))
+        (compare (source "outer" 1 1 (list nil (source "inner" 2 3 false) 4.5))
+          (source "other" 9 8 (list nil false 4.5)))
+        (not (compare (source "left" 1 1 nil) (source "right" 1 1 false)))))
+  expect: {result: true}
+- name: Symbols dates and procedures retain their existing fallback contracts
+  scm: |
+    (begin
+      (define compare (jit (eval (optimize (scheme "(lambda (a b) (expression_equal? a b))")))))
+      (define procedure (lambda (value) value))
+      (and (compare 'name 'name) (not (compare 'name 'other))
+        (compare (parse_date "2001-02-03") (parse_date "2001-02-03"))
+        (not (compare (parse_date "2001-02-03") (parse_date "2001-02-04")))
+        (not (compare (parse_date "2001-02-03") "2001-02-03"))
+        (compare procedure procedure) (not (compare procedure (lambda (value) value)))))
+  expect: {result: true}
+- name: Complete nested comparisons find a late typed mismatch without altering either input
+  scm: |
+    (begin
+      (define build (lambda (last) (list (list nil false true 7 8.5 "label")
+        (list "nested" (list 9223372036854775807 last)))))
+      (define left (build nil)) (define right (build nil)) (define changed (build false))
+      (define before (serialize (list left right changed)))
+      (and (not (identical? left right)) (expression_equal? left right)
+        (not (expression_equal? left changed))
+        (equal? before (serialize (list left right changed)))))
+  expect: {result: true}
+- name: Existing strict expression catalogs keep false nil and numeric syntax distinct
+  scm: |
+    (begin
+      (define catalog (make_structural_catalog 'ast))
+      (catalog (list 'literal nil) "null")
+      (catalog (list 'literal false) "boolean")
+      (catalog (list 'literal 1) "integer")
+      (catalog (list 'literal 1.0) "floating")
+      (catalog (list 'literal "1") "text")
+      (expression_equal? (list
+        (catalog (list 'literal nil)) (catalog (list 'literal false))
+        (catalog (list 'literal 1)) (catalog (list 'literal 1.0)) (catalog (list 'literal "1")))
+        (list "null" "boolean" "integer" "floating" "text")))
+  expect: {result: true}

@@ -1,0 +1,167 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Unrelated native key retirement composes with a default-backed column update in the original transaction
+setup:
+- sql: CREATE TABLE schema_separate_parent(id INT NOT NULL PRIMARY KEY)
+- sql: INSERT schema_separate_parent VALUES(1)
+- sql: CREATE TABLE schema_separate_keys(id INT NOT NULL,parent_id INT,CONSTRAINT PK_schema_separate PRIMARY KEY(id),CONSTRAINT FK_schema_separate FOREIGN
+    KEY(parent_id) REFERENCES schema_separate_parent(id))
+- sql: INSERT schema_separate_keys VALUES(1,1)
+- sql: CREATE TABLE schema_separate_values(id INT NOT NULL PRIMARY KEY,amount FLOAT NULL)
+- sql: INSERT schema_separate_values VALUES(1,NULL),(2,NULL)
+- sql: CREATE TABLE schema_separate_progress(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: INSERT schema_separate_progress VALUES(1,10)
+cleanup:
+- sql: DROP TABLE IF EXISTS schema_separate_keys
+- sql: DROP TABLE IF EXISTS schema_separate_values
+- sql: DROP TABLE IF EXISTS schema_separate_progress
+- sql: DROP TABLE IF EXISTS schema_separate_parent
+test_cases:
+- name: Rollback restores separate-endpoint key and column declarations with the prior row prefix
+  tds:
+    statements:
+    - &id001
+      connection: owner
+      sql: SET XACT_ABORT OFF; SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRANSACTION
+    - &id002
+      connection: owner
+      sql: UPDATE schema_separate_progress SET value=11 WHERE id=1
+    - &id003
+      connection: owner
+      sql: ALTER TABLE schema_separate_keys DROP CONSTRAINT FK_schema_separate
+    - &id004
+      connection: owner
+      sql: ALTER TABLE schema_separate_keys DROP CONSTRAINT PK_schema_separate
+    - &id005
+      connection: owner
+      sql: ALTER TABLE schema_separate_values ADD CONSTRAINT DF_schema_separate DEFAULT(0) FOR amount
+    - &id006
+      connection: owner
+      sql: ALTER TABLE schema_separate_values ALTER COLUMN amount FLOAT NULL
+    - &id007
+      connection: owner
+      sql: UPDATE schema_separate_values SET amount=DEFAULT WHERE amount IS NULL
+      expect:
+        affected_rows: 2
+    - &id008
+      connection: owner
+      sql: ALTER TABLE schema_separate_values ALTER COLUMN amount FLOAT NOT NULL
+    - &id009
+      connection: owner
+      sql: SELECT id,amount FROM schema_separate_values ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          amount: 0
+        - id: 2
+          amount: 0
+    - &id010
+      connection: observer
+      sql: SELECT id,amount FROM schema_separate_values ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          amount: null
+        - id: 2
+          amount: null
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,amount FROM schema_separate_values ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          amount: null
+        - id: 2
+          amount: null
+    - connection: observer
+      sql: SELECT id,value FROM schema_separate_progress
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+    - connection: observer
+      sql: INSERT schema_separate_keys VALUES(1,1)
+      expect:
+        error: true
+    - connection: observer
+      sql: INSERT schema_separate_keys VALUES(2,99)
+      expect:
+        error: true
+- name: One original transaction commits unrelated key retirement and default-backed column update
+  tds:
+    statements:
+    - *id001
+    - *id002
+    - *id003
+    - *id004
+    - *id005
+    - *id006
+    - *id007
+    - *id008
+    - *id009
+    - *id010
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,amount FROM schema_separate_values ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          amount: 0
+        - id: 2
+          amount: 0
+    - connection: observer
+      sql: SELECT id,value FROM schema_separate_progress
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+- name: Restart the combined original decision
+  action: restart
+- name: Recovery retains the actual default-filled rows
+  sql: SELECT id,amount FROM schema_separate_values ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      amount: 0
+    - id: 2
+      amount: 0
+- name: Recovery retains the retired rules on the other relation
+  sql: INSERT schema_separate_keys VALUES(1,99)
+  expect:
+    affected_rows: 1
+- name: The amended relation still enforces its original primary key
+  sql: INSERT schema_separate_values VALUES(1,1)
+  expect:
+    error: true
+- name: Recovery retains the new native not-null declaration
+  sql: INSERT schema_separate_values VALUES(3,NULL)
+  expect:
+    error: true
+- name: Future inserts consume the same committed default
+  sql: INSERT schema_separate_values(id) VALUES(3)
+  expect:
+    affected_rows: 1
+- name: The complete relation preserves old and new default-filled values
+  sql: SELECT id,amount FROM schema_separate_values ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      amount: 0
+    - id: 2
+      amount: 0
+    - id: 3
+      amount: 0

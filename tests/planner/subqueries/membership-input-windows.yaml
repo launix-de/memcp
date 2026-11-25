@@ -1,0 +1,491 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The RHS page is selected before membership; selected NULLs yield UNKNOWN.
+# https://learn.microsoft.com/sql/t-sql/queries/top-transact-sql
+# https://learn.microsoft.com/sql/t-sql/language-elements/in-transact-sql
+metadata:
+  description: Membership and scalar row producers preserve windows and independent
+    logical identities
+  version: '1.0'
+setup:
+- sql: DROP TABLE IF EXISTS membership_window_outer
+- sql: DROP TABLE IF EXISTS membership_window_rhs
+- sql: CREATE TABLE membership_window_outer (id INT)
+- sql: CREATE TABLE membership_window_rhs (row_id INT PRIMARY KEY,id INT,score INT)
+- sql: INSERT INTO membership_window_outer VALUES (1),(2),(3),(99),(NULL)
+- sql: INSERT INTO membership_window_rhs VALUES (1,1,100),(2,2,300),(3,3,200),(4,NULL,0)
+- sql: DROP TABLE IF EXISTS membership_key_rhs
+- sql: CREATE TABLE membership_key_rhs (row_id INT PRIMARY KEY,payload INT,lhs INT,rhs
+    INT)
+- sql: INSERT INTO membership_key_rhs VALUES (1,5,1,2),(2,NULL,2,1)
+test_cases:
+- name: sql IN sees the global top row
+  syntax: sql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id IN
+    (SELECT i.id FROM membership_window_rhs i ORDER BY i.score DESC LIMIT 1) ORDER
+    BY COALESCE(o.id,-1)
+  expect:
+    rows: 1
+    data:
+    - id: 2
+- name: sql NOT IN excludes only the global top row and not each caller
+  syntax: sql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id NOT
+    IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score DESC LIMIT 1) ORDER
+    BY COALESCE(o.id,-1)
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 3
+    - id: 99
+- name: sql OFFSET applies before the membership probe
+  syntax: sql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id NOT
+    IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score DESC LIMIT 1 OFFSET
+    1) ORDER BY COALESCE(o.id,-1)
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 99
+- name: sql A selected NULL retains UNKNOWN for every nonempty probe
+  syntax: sql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id NOT
+    IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score ASC LIMIT 1) ORDER
+    BY COALESCE(o.id,-1)
+  expect:
+    rows: 0
+    data: []
+- name: sql An empty limited RHS accepts even a NULL NOT IN probe
+  syntax: sql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id NOT
+    IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score DESC LIMIT 0) ORDER
+    BY COALESCE(o.id,-1)
+  expect:
+    rows: 5
+    data:
+    - id: -1
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 99
+- name: sql Projected membership retains global page and UNKNOWN
+  syntax: sql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN o.id NOT IN (SELECT i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC LIMIT 1) THEN 1 WHEN o.id IN (SELECT i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC LIMIT 1) THEN 0 ELSE -1 END AS state FROM membership_window_outer
+    o ORDER BY COALESCE(o.id,-1)
+  expect:
+    data:
+    - id: -1
+      state: -1
+    - id: 1
+      state: 1
+    - id: 2
+      state: 0
+    - id: 3
+      state: 1
+    - id: 99
+      state: 1
+- name: psql IN sees the global top row
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id IN
+    (SELECT i.id FROM membership_window_rhs i ORDER BY i.score DESC LIMIT 1) ORDER
+    BY COALESCE(o.id,-1)
+  expect:
+    rows: 1
+    data:
+    - id: 2
+- name: psql NOT IN excludes only the global top row and not each caller
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id NOT
+    IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score DESC LIMIT 1) ORDER
+    BY COALESCE(o.id,-1)
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 3
+    - id: 99
+- name: psql OFFSET applies before the membership probe
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id NOT
+    IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score DESC LIMIT 1 OFFSET
+    1) ORDER BY COALESCE(o.id,-1)
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 99
+- name: psql A selected NULL retains UNKNOWN for every nonempty probe
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id NOT
+    IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score ASC LIMIT 1) ORDER
+    BY COALESCE(o.id,-1)
+  expect:
+    rows: 0
+    data: []
+- name: psql An empty limited RHS accepts even a NULL NOT IN probe
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id NOT
+    IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score DESC LIMIT 0) ORDER
+    BY COALESCE(o.id,-1)
+  expect:
+    rows: 5
+    data:
+    - id: -1
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 99
+- name: psql Projected membership retains global page and UNKNOWN
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN o.id NOT IN (SELECT i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC LIMIT 1) THEN 1 WHEN o.id IN (SELECT i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC LIMIT 1) THEN 0 ELSE -1 END AS state FROM membership_window_outer
+    o ORDER BY COALESCE(o.id,-1)
+  expect:
+    data:
+    - id: -1
+      state: -1
+    - id: 1
+      state: 1
+    - id: 2
+      state: 0
+    - id: 3
+      state: 1
+    - id: 99
+      state: 1
+- name: tsql IN sees the global top row
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id IN
+    (SELECT TOP(1) i.id FROM membership_window_rhs i ORDER BY i.score DESC) ORDER
+    BY COALESCE(o.id,-1)
+  expect:
+    rows: 1
+    data:
+    - id: 2
+- name: tsql NOT IN excludes only the global top row and not each caller
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id NOT
+    IN (SELECT TOP(1) i.id FROM membership_window_rhs i ORDER BY i.score DESC) ORDER
+    BY COALESCE(o.id,-1)
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 3
+    - id: 99
+- name: tsql OFFSET applies before the membership probe
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id NOT
+    IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score DESC OFFSET 1 ROWS
+    FETCH NEXT 1 ROWS ONLY) ORDER BY COALESCE(o.id,-1)
+  expect:
+    rows: 3
+    data:
+    - id: 1
+    - id: 2
+    - id: 99
+- name: tsql A selected NULL retains UNKNOWN for every nonempty probe
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id NOT
+    IN (SELECT TOP(1) i.id FROM membership_window_rhs i ORDER BY i.score ASC) ORDER
+    BY COALESCE(o.id,-1)
+  expect:
+    rows: 0
+    data: []
+- name: tsql An empty limited RHS accepts even a NULL NOT IN probe
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id FROM membership_window_outer o WHERE o.id NOT
+    IN (SELECT TOP(0) i.id FROM membership_window_rhs i ORDER BY i.score DESC) ORDER
+    BY COALESCE(o.id,-1)
+  expect:
+    rows: 5
+    data:
+    - id: -1
+    - id: 1
+    - id: 2
+    - id: 3
+    - id: 99
+- name: tsql Projected membership retains global page and UNKNOWN
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN o.id NOT IN (SELECT TOP(1) i.id FROM
+    membership_window_rhs i ORDER BY i.score DESC) THEN 1 WHEN o.id IN (SELECT TOP(1)
+    i.id FROM membership_window_rhs i ORDER BY i.score DESC) THEN 0 ELSE -1 END AS
+    state FROM membership_window_outer o ORDER BY COALESCE(o.id,-1)
+  expect:
+    data:
+    - id: -1
+      state: -1
+    - id: 1
+      state: 1
+    - id: 2
+      state: 0
+    - id: 3
+      state: 1
+    - id: 99
+      state: 1
+- name: sql Different caps retain separate row producers
+  syntax: sql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN o.id IN (SELECT i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC LIMIT 1) THEN 1 WHEN o.id NOT IN (SELECT i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC LIMIT 1) THEN 0 ELSE -1 END AS first_state,CASE WHEN o.id
+    IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score DESC LIMIT 2) THEN
+    1 WHEN o.id NOT IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score
+    DESC LIMIT 2) THEN 0 ELSE -1 END AS second_state FROM membership_window_outer
+    o ORDER BY COALESCE(o.id,-1)
+  expect:
+    data:
+    - id: -1
+      first_state: -1
+      second_state: -1
+    - id: 1
+      first_state: 0
+      second_state: 0
+    - id: 2
+      first_state: 1
+      second_state: 1
+    - id: 3
+      first_state: 0
+      second_state: 1
+    - id: 99
+      first_state: 0
+      second_state: 0
+- name: sql Different order retains separate NULL state
+  syntax: sql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN o.id IN (SELECT i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC LIMIT 1) THEN 1 WHEN o.id NOT IN (SELECT i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC LIMIT 1) THEN 0 ELSE -1 END AS first_state,CASE WHEN o.id
+    IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score ASC LIMIT 1) THEN
+    1 WHEN o.id NOT IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score
+    ASC LIMIT 1) THEN 0 ELSE -1 END AS second_state FROM membership_window_outer o
+    ORDER BY COALESCE(o.id,-1)
+  expect:
+    data:
+    - id: -1
+      first_state: -1
+      second_state: -1
+    - id: 1
+      first_state: 0
+      second_state: -1
+    - id: 2
+      first_state: 1
+      second_state: -1
+    - id: 3
+      first_state: 0
+      second_state: -1
+    - id: 99
+      first_state: 0
+      second_state: -1
+- name: sql Different correlated keys retain separate RHS NULL state
+  syntax: sql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN 5 IN (SELECT g.payload FROM membership_key_rhs
+    g WHERE g.lhs=o.id) THEN 1 WHEN 5 NOT IN (SELECT g.payload FROM membership_key_rhs
+    g WHERE g.lhs=o.id) THEN 0 ELSE -1 END AS first_state,CASE WHEN 5 IN (SELECT g.payload
+    FROM membership_key_rhs g WHERE g.rhs=o.id) THEN 1 WHEN 5 NOT IN (SELECT g.payload
+    FROM membership_key_rhs g WHERE g.rhs=o.id) THEN 0 ELSE -1 END AS second_state
+    FROM membership_window_outer o ORDER BY COALESCE(o.id,-1)
+  expect:
+    data:
+    - id: -1
+      first_state: 0
+      second_state: 0
+    - id: 1
+      first_state: 1
+      second_state: -1
+    - id: 2
+      first_state: -1
+      second_state: 1
+    - id: 3
+      first_state: 0
+      second_state: 0
+    - id: 99
+      first_state: 0
+      second_state: 0
+- name: psql Different caps retain separate row producers
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN o.id IN (SELECT i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC LIMIT 1) THEN 1 WHEN o.id NOT IN (SELECT i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC LIMIT 1) THEN 0 ELSE -1 END AS first_state,CASE WHEN o.id
+    IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score DESC LIMIT 2) THEN
+    1 WHEN o.id NOT IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score
+    DESC LIMIT 2) THEN 0 ELSE -1 END AS second_state FROM membership_window_outer
+    o ORDER BY COALESCE(o.id,-1)
+  expect:
+    data:
+    - id: -1
+      first_state: -1
+      second_state: -1
+    - id: 1
+      first_state: 0
+      second_state: 0
+    - id: 2
+      first_state: 1
+      second_state: 1
+    - id: 3
+      first_state: 0
+      second_state: 1
+    - id: 99
+      first_state: 0
+      second_state: 0
+- name: psql Different order retains separate NULL state
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN o.id IN (SELECT i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC LIMIT 1) THEN 1 WHEN o.id NOT IN (SELECT i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC LIMIT 1) THEN 0 ELSE -1 END AS first_state,CASE WHEN o.id
+    IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score ASC LIMIT 1) THEN
+    1 WHEN o.id NOT IN (SELECT i.id FROM membership_window_rhs i ORDER BY i.score
+    ASC LIMIT 1) THEN 0 ELSE -1 END AS second_state FROM membership_window_outer o
+    ORDER BY COALESCE(o.id,-1)
+  expect:
+    data:
+    - id: -1
+      first_state: -1
+      second_state: -1
+    - id: 1
+      first_state: 0
+      second_state: -1
+    - id: 2
+      first_state: 1
+      second_state: -1
+    - id: 3
+      first_state: 0
+      second_state: -1
+    - id: 99
+      first_state: 0
+      second_state: -1
+- name: psql Different correlated keys retain separate RHS NULL state
+  syntax: psql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN 5 IN (SELECT g.payload FROM membership_key_rhs
+    g WHERE g.lhs=o.id) THEN 1 WHEN 5 NOT IN (SELECT g.payload FROM membership_key_rhs
+    g WHERE g.lhs=o.id) THEN 0 ELSE -1 END AS first_state,CASE WHEN 5 IN (SELECT g.payload
+    FROM membership_key_rhs g WHERE g.rhs=o.id) THEN 1 WHEN 5 NOT IN (SELECT g.payload
+    FROM membership_key_rhs g WHERE g.rhs=o.id) THEN 0 ELSE -1 END AS second_state
+    FROM membership_window_outer o ORDER BY COALESCE(o.id,-1)
+  expect:
+    data:
+    - id: -1
+      first_state: 0
+      second_state: 0
+    - id: 1
+      first_state: 1
+      second_state: -1
+    - id: 2
+      first_state: -1
+      second_state: 1
+    - id: 3
+      first_state: 0
+      second_state: 0
+    - id: 99
+      first_state: 0
+      second_state: 0
+- name: tsql Different caps retain separate row producers
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN o.id IN (SELECT TOP(1) i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC) THEN 1 WHEN o.id NOT IN (SELECT TOP(1) i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC) THEN 0 ELSE -1 END AS first_state,CASE WHEN o.id IN (SELECT
+    TOP(2) i.id FROM membership_window_rhs i ORDER BY i.score DESC) THEN 1 WHEN o.id
+    NOT IN (SELECT TOP(2) i.id FROM membership_window_rhs i ORDER BY i.score DESC)
+    THEN 0 ELSE -1 END AS second_state FROM membership_window_outer o ORDER BY COALESCE(o.id,-1)
+  expect:
+    data:
+    - id: -1
+      first_state: -1
+      second_state: -1
+    - id: 1
+      first_state: 0
+      second_state: 0
+    - id: 2
+      first_state: 1
+      second_state: 1
+    - id: 3
+      first_state: 0
+      second_state: 1
+    - id: 99
+      first_state: 0
+      second_state: 0
+- name: tsql Different order retains separate NULL state
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN o.id IN (SELECT TOP(1) i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC) THEN 1 WHEN o.id NOT IN (SELECT TOP(1) i.id FROM membership_window_rhs
+    i ORDER BY i.score DESC) THEN 0 ELSE -1 END AS first_state,CASE WHEN o.id IN (SELECT
+    TOP(1) i.id FROM membership_window_rhs i ORDER BY i.score ASC) THEN 1 WHEN o.id
+    NOT IN (SELECT TOP(1) i.id FROM membership_window_rhs i ORDER BY i.score ASC)
+    THEN 0 ELSE -1 END AS second_state FROM membership_window_outer o ORDER BY COALESCE(o.id,-1)
+  expect:
+    data:
+    - id: -1
+      first_state: -1
+      second_state: -1
+    - id: 1
+      first_state: 0
+      second_state: -1
+    - id: 2
+      first_state: 1
+      second_state: -1
+    - id: 3
+      first_state: 0
+      second_state: -1
+    - id: 99
+      first_state: 0
+      second_state: -1
+- name: tsql Different correlated keys retain separate RHS NULL state
+  syntax: tsql
+  sql: SELECT COALESCE(o.id,-1) AS id,CASE WHEN 5 IN (SELECT g.payload FROM membership_key_rhs
+    g WHERE g.lhs=o.id) THEN 1 WHEN 5 NOT IN (SELECT g.payload FROM membership_key_rhs
+    g WHERE g.lhs=o.id) THEN 0 ELSE -1 END AS first_state,CASE WHEN 5 IN (SELECT g.payload
+    FROM membership_key_rhs g WHERE g.rhs=o.id) THEN 1 WHEN 5 NOT IN (SELECT g.payload
+    FROM membership_key_rhs g WHERE g.rhs=o.id) THEN 0 ELSE -1 END AS second_state
+    FROM membership_window_outer o ORDER BY COALESCE(o.id,-1)
+  expect:
+    data:
+    - id: -1
+      first_state: 0
+      second_state: 0
+    - id: 1
+      first_state: 1
+      second_state: -1
+    - id: 2
+      first_state: -1
+      second_state: 1
+    - id: 3
+      first_state: 0
+      second_state: 0
+    - id: 99
+      first_state: 0
+      second_state: 0
+- name: sql Paired scalar producers retain opposite order
+  syntax: sql
+  sql: SELECT (SELECT i.id FROM membership_window_rhs i ORDER BY i.score DESC LIMIT
+    1) AS first_value,(SELECT i.id FROM membership_window_rhs i ORDER BY i.score ASC
+    LIMIT 1) AS second_value
+  expect:
+    data:
+    - first_value: 2
+      second_value: null
+- name: psql Paired scalar producers retain opposite order
+  syntax: psql
+  sql: SELECT (SELECT i.id FROM membership_window_rhs i ORDER BY i.score DESC LIMIT
+    1) AS first_value,(SELECT i.id FROM membership_window_rhs i ORDER BY i.score ASC
+    LIMIT 1) AS second_value
+  expect:
+    data:
+    - first_value: 2
+      second_value: null
+- name: tsql Paired scalar producers retain opposite order
+  syntax: tsql
+  sql: SELECT (SELECT TOP(1) i.id FROM membership_window_rhs i ORDER BY i.score DESC)
+    AS first_value,(SELECT TOP(1) i.id FROM membership_window_rhs i ORDER BY i.score
+    ASC) AS second_value
+  expect:
+    data:
+    - first_value: 2
+      second_value: null
+cleanup:
+- sql: DROP TABLE membership_window_outer
+- sql: DROP TABLE membership_window_rhs
+- sql: DROP TABLE membership_key_rhs

@@ -1,0 +1,105 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Necessary constraint catalog name restrictions preserve native metadata rows and SQL predicates
+  syntax: mysql
+  isolated: true
+setup:
+- sql: CREATE TABLE metadata_constraint_source(id INT PRIMARY KEY,value INT,UNIQUE KEY metadata_constraint_unique(value))
+- sql: CREATE TABLE metadata_constraint_peer(id INT PRIMARY KEY,value INT)
+- scm: |-
+    (begin
+     (define s (newsession))
+     (s "username" "root")
+     (s "schema" "memcp-tests")
+     (tsql_execute_request "memcp-tests" "ALTER TABLE metadata_constraint_source ADD CONSTRAINT metadata_constraint_positive CHECK(value>=0)" s nil 0 (lambda (_row) true) (lambda (_fields) true))
+     (tx_rollback s) true)
+- scm: |-
+    (begin
+     (define s (newsession))
+     (s "username" "root")
+     (s "schema" "memcp-tests")
+     (tsql_execute_request "memcp-tests" "ALTER TABLE metadata_constraint_peer ADD CONSTRAINT metadata_constraint_peer_positive CHECK(value>=0)" s nil 0 (lambda (_row) true) (lambda (_fields) true))
+     (tx_rollback s) true)
+test_cases:
+- name: Constraint schema and table predicates retain the actual native CHECK row
+  sql: SELECT c.constraint_schema,c.table_name,c.constraint_name,c.constraint_type FROM information_schema.table_constraints
+    c WHERE c.constraint_schema='memcp-tests' AND c.table_name='metadata_constraint_source' AND c.constraint_type='CHECK'
+  expect:
+    rows: 1
+    data:
+    - constraint_schema: memcp-tests
+      table_name: metadata_constraint_source
+      constraint_name: metadata_constraint_positive
+      constraint_type: CHECK
+- name: Explicit peer table selection reads its real native constraint
+  sql: SELECT c.constraint_schema,c.table_name,c.constraint_name FROM information_schema.table_constraints c WHERE
+    c.constraint_schema='memcp-tests' AND c.table_name='metadata_constraint_peer' AND c.constraint_type='CHECK'
+  expect:
+    rows: 1
+    data:
+    - constraint_schema: memcp-tests
+      table_name: metadata_constraint_peer
+      constraint_name: metadata_constraint_peer_positive
+- name: CHECK source uses the same actual schema contract
+  sql: SELECT c.constraint_schema,c.constraint_name FROM information_schema.check_constraints c WHERE c.constraint_schema='memcp-tests'
+    AND c.constraint_name='metadata_constraint_positive'
+  expect:
+    rows: 1
+    data:
+    - constraint_schema: memcp-tests
+      constraint_name: metadata_constraint_positive
+# MySQL utf8mb4_general_ci is PAD SPACE. The preexisting MySQL equal??
+# path currently ignores case but retains trailing spaces, even for literals.
+# Keep the complete desired result as a positive compatibility target.
+# https://dev.mysql.com/doc/refman/8.0/en/charset-unicode-sets.html
+- name: SQL case and trailing padding equality remain residual value semantics
+  sql: SELECT c.constraint_name FROM information_schema.table_constraints c WHERE c.constraint_schema='MEMCP-TESTS
+    ' AND c.table_name='METADATA_CONSTRAINT_SOURCE ' AND c.constraint_type='CHECK'
+  expect:
+    rows: 1
+    data:
+    - constraint_name: metadata_constraint_positive
+  noncritical: true
+- name: Disjunctive table alternatives retain both complete constraint rows
+  sql: SELECT c.constraint_schema,c.table_name,c.constraint_name FROM information_schema.table_constraints c WHERE
+    c.constraint_schema='memcp-tests' AND (c.table_name='metadata_constraint_source' OR c.table_name='metadata_constraint_peer')
+    AND c.constraint_type='CHECK' ORDER BY c.table_name
+  expect:
+    rows: 2
+    data:
+    - constraint_schema: memcp-tests
+      table_name: metadata_constraint_peer
+      constraint_name: metadata_constraint_peer_positive
+    - constraint_schema: memcp-tests
+      table_name: metadata_constraint_source
+      constraint_name: metadata_constraint_positive
+- name: Nullable metadata equality retains the empty domain
+  sql: SELECT c.constraint_name FROM information_schema.check_constraints c WHERE c.constraint_schema=NULL
+  expect:
+    rows: 0
+- name: Outer join preserves a caller with no matching native constraint
+  sql: SELECT d.name,c.constraint_name FROM (SELECT 'metadata_constraint_source' AS name UNION ALL SELECT 'missing')
+    d LEFT JOIN information_schema.table_constraints c ON c.table_name=d.name AND c.constraint_schema='memcp-tests'
+    AND c.constraint_type='CHECK' ORDER BY d.name
+  expect:
+    rows: 2
+    data:
+    - name: metadata_constraint_source
+      constraint_name: metadata_constraint_positive
+    - name: missing
+      constraint_name: null
+- name: Schema restrictions do not suppress an invalid column declaration
+  sql: SELECT c.nonexistent_column FROM information_schema.table_constraints c WHERE c.constraint_schema='memcp-tests'
+  expect:
+    error: true
+- name: Disjunctive schema selection retains existing public namespace rows
+  sql: SELECT schema_name FROM information_schema.schemata WHERE schema_name='memcp-tests' OR schema_name='system' ORDER BY schema_name
+  expect:
+    rows: 2
+    data:
+    - schema_name: memcp-tests
+    - schema_name: system
+cleanup:
+- sql: DROP TABLE IF EXISTS metadata_constraint_source
+- sql: DROP TABLE IF EXISTS metadata_constraint_peer

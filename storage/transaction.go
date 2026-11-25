@@ -17,6 +17,8 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "context"
+import "fmt"
+import "errors"
 
 import "sync"
 import "runtime"
@@ -34,7 +36,7 @@ type TxMode uint8
 
 const (
 	TxCursorStability TxMode = iota // default: direct writes + undo masks
-	TxACID                          // snapshot isolation + OCC commit
+	TxACID                          // current committed reads + private overlays + write-conflict validation
 )
 
 // TxState tracks the lifecycle of a transaction.
@@ -82,18 +84,27 @@ type storageShardTransaction struct {
 	InsertMask  NonLockingReadMap.NonBlockingBitMap
 	DeletedMask NonLockingReadMap.NonBlockingBitMap
 	// ACID overlay bitmaps
-	DeleteMask   NonLockingReadMap.NonBlockingBitMap
-	UndeleteMask NonLockingReadMap.NonBlockingBitMap
+	DeleteMask    NonLockingReadMap.NonBlockingBitMap
+	UndeleteMask  NonLockingReadMap.NonBlockingBitMap
+	stagedHistory atomic.Pointer[NonLockingReadMap.NonBlockingBitMap] // derived from actual UndeleteRecids
 
 	// Recids for iteration at rollback/commit time.
 	// Append-only; protected by mu.
 	InsertRecids   []uint32
 	DeletedRecids  []uint32
 	DeleteRecids   []uint32
-	UndeleteRecids []uint32
+	UndeleteRecids []stagedVisibilityChange
 	generation     *tableShardTopology
 
 	mu sync.Mutex
+}
+
+// stagedVisibilityChange is one entry in the existing ACID visibility journal.
+// Recording the previous bit makes savepoint rewind idempotent, including an
+// UPDATE/DELETE which removes a row staged before the savepoint.
+type stagedVisibilityChange struct {
+	recid    uint32
+	previous bool
 }
 
 // shardSavepoint records the Recids slice lengths for one shard at a savepoint.
@@ -108,9 +119,13 @@ type shardSavepoint struct {
 // Savepoint captures the state of a transaction at a point in time.
 // Used for nested transactions (trigger recovery, savepoints).
 type Savepoint struct {
-	shardLens map[*storageShard]shardSavepoint
-	remote    map[string]scm.Scmer
-	Depth     uint32
+	shardLens               map[*storageShard]shardSavepoint
+	remote                  map[string]scm.Scmer
+	Depth                   uint32
+	catalogCount            int
+	catalogDeclarationCount int
+	relationSchemaCount     int
+	owner                   *transactionState
 }
 
 // Savepoint boundaries follow physical generation identity when a native shard
@@ -138,7 +153,7 @@ func (sp Savepoint) clusterView() scm.Scmer {
 	for id, lens := range sp.physicalLens() {
 		rows = append(rows, scm.NewSlice([]scm.Scmer{scm.NewString(id.String()), scm.NewInt(int64(lens.InsertLen)), scm.NewInt(int64(lens.DeletedLen)), scm.NewInt(int64(lens.DeleteLen)), scm.NewInt(int64(lens.UndeleteLen)), scm.NewInt(int64(lens.RepartitionLen))}))
 	}
-	return scm.NewSlice([]scm.Scmer{scm.NewInt(int64(sp.Depth)), scm.NewSlice(rows)})
+	return scm.NewSlice([]scm.Scmer{scm.NewInt(int64(sp.Depth)), scm.NewSlice(rows), scm.NewInt(int64(sp.catalogCount)), scm.NewInt(int64(sp.catalogDeclarationCount)), scm.NewInt(int64(sp.relationSchemaCount))})
 }
 
 type repartitionDeleteAction struct {
@@ -161,46 +176,83 @@ var GlobalCommitEpoch uint64
 // readers, callback cleanup and execution budgets private. The shard directory
 // remains nil until the first mutation.
 type transactionState struct {
-	clusterID             string
-	clusterNumber         atomic.Uint64
-	coordinator           *scm.ClusterHandle
-	decisionMu            sync.Mutex
-	migrations            int
-	migrationDone         chan struct{}
-	prepared              *acidPreparation
-	decisionStarted       bool
-	commitDecided         bool
-	remoteActive          int
-	remoteIdle            chan struct{}
-	remoteAdmissionClosed bool
-	sourceSessionID       uint64
-	ID                    uint64
-	Mode                  TxMode
-	State                 TxState
-	SnapshotEpoch         uint64 // ACID: snapshot boundary
-	Depth                 uint32 // nesting depth for savepoints / triggers
-	walTxID               atomic.Pointer[string]
-	shards                atomic.Pointer[sync.Map]
-	readViews             atomic.Pointer[map[*storageShard]*storageShardTransaction] // immutable S copies
-	participants          map[uuid.UUID]*storageShardTransaction
-	participantEpoch      uint64
-	endpoints             map[uuid.UUID]*storageShardTransaction
-	touchedShards         sync.Map // map[*storageShard]bool
-	autoCommit            bool
-	writeHeld             map[*storageShard]uint32 // reentrant write-lock depth per shard
-	repartitionDeletes    []repartitionDeleteAction
-	invalidationDepth     uint32
-	invalidationVisited   map[string]bool
-	mu                    sync.Mutex
+	clusterID                string
+	clusterNumber            atomic.Uint64
+	coordinator              *scm.ClusterHandle
+	decisionMu               sync.Mutex
+	finalizationMu           sync.Mutex // native decision executor, including catalog publication and recovery
+	migrations               int
+	migrationDone            chan struct{}
+	prepared                 *acidPreparation
+	decisionStarted          bool
+	commitDecided            bool
+	remoteActive             int
+	remoteIdle               chan struct{}
+	remoteAdmissionClosed    bool
+	sourceSessionID          uint64
+	ID                       uint64
+	Mode                     TxMode
+	serializable             atomic.Pointer[serializableValidation]
+	State                    TxState
+	rollbackOnly             atomic.Bool // active private view retained until full rollback
+	failurePolicyExecuting   atomic.Bool // observational callback owns the native decision binding
+	failureTracking          atomic.Bool // optional request failure-completion observation
+	statementMutationEntered atomic.Bool
+	SnapshotEpoch            uint64 // original decision metadata; row visibility uses current committed state
+	Depth                    uint32 // nesting depth for savepoints / triggers
+	walTxID                  atomic.Pointer[string]
+	shards                   atomic.Pointer[sync.Map]
+	readViews                atomic.Pointer[map[*storageShard]*storageShardTransaction]  // immutable S copies
+	visibilityProjections    atomic.Pointer[map[uint64]*transactionVisibilityProjection] // immutable native visibility directory
+	visibilityClosed         atomic.Bool
+	participants             map[uuid.UUID]*storageShardTransaction
+	participantEpoch         uint64
+	endpoints                map[uuid.UUID]*storageShardTransaction
+	touchedShards            sync.Map // map[*storageShard]bool
+	resources                transactionResources
+	rowAccessed              atomic.Bool
+	catalogIntents           atomic.Pointer[[]*table]
+	catalogAmendments        atomic.Pointer[[]catalogDeclarationAmendment]
+	publicCatalog            atomic.Pointer[publicCatalogChanges]
+	publicCatalogEntered     atomic.Bool              // declaration-only phase survives a failed first resource constructor; reset allocates a new state
+	sessionClose             *transactionSessionClose // finalizationMu owns an accepted-decision close continuation
+	catalogIdentity          atomic.Pointer[catalogIdentity]
+	catalogCommit            *catalogCommit
+	autoCommit               bool
+	writeHeld                map[*storageShard]uint32 // reentrant write-lock depth per shard
+	repartitionDeletes       []repartitionDeleteAction
+	invalidationDepth        uint32
+	invalidationVisited      map[string]bool
+	mu                       sync.Mutex
+
+	relationSchemaChanges     []*relationSchemaChange
+	relationSchemaRetirements []*relationSchemaChange
+	relationSchemaDecision    atomic.Uint32
+	relationSchemaLayouts     atomic.Pointer[map[*table]*relationSchemaLayout]
+
+	// Native mutation producers borrow the actual state, never its reusable
+	// executor. These fields are protected by mu; readers do not touch them.
+	mutationOperations       int
+	mutationDecisionAttempts int
+	mutationAdmissionClosed  bool
+	mutationSavepoints       int
+	checkedMutation          *nativeMutationOperation
+	relationDataOrigins      int // active borrows of this actual source authority by private data operations
+
+	recoveryNeedsDatabaseDecision atomic.Bool // a checkpoint carries conditional records beyond the original WAL
+	recoveryDecisionDatabases     sync.Map    // map[*database]bool, coarse checkpoint authority and required durability
 }
 
 // TxContext binds a native transaction to one invocation's execution resources.
 type TxContext struct {
 	*transactionState
+	declarationInput *nativeMutationInput     // actual checked producer only; never serialized or adopted
+	postAbort        *nativeAbortContinuation // immutable fresh-execution authority, never an original-T reset
 	// Replication bindings are session-executor-owned, never shared by readers.
 	// Native shard transaction generations supply the ownership-transfer drain.
 	replicationActive   bool
 	replicationWriting  bool
+	invocationContext   context.Context
 	Session             scm.Scmer
 	SessionState        *scm.SessionState // owning connection; retained while the transaction object is parked
 	querySeq            atomic.Uint64     // active request cancellation identity; zero while parked
@@ -210,7 +262,7 @@ type TxContext struct {
 	queryMu             sync.Mutex         // serializes statements which reuse this transaction object
 	queryColumns        map[*column]*table // statement cache leases, protected by mu
 	queryWorkReleases   []func()           // joins precede every reader/column release
-	queryReaderReleases []func()           // reader and cache-carrier leases, protected by mu
+	queryReaderReleases []queryReaderLease // reader and cache-carrier leases, protected by mu
 	// remoteBindings freezes session inputs once per statement, only on cold
 	// remote dispatch. endStatement drops it after all shard workers finish.
 	remoteBindings   atomic.Pointer[scm.SerializationContext]
@@ -220,6 +272,27 @@ type TxContext struct {
 	// single relevant shard never reads or writes this cache line.
 	fanoutLimit atomic.Int32
 	fanoutInUse atomic.Int32
+
+	// Set once on an unpublished, operation-owned binding. This binding must
+	// never be reused by resetBinding; the producer owns its work/readers.
+	mutationOperation *nativeMutationOperation
+	relationData      *relationDataView // native invocation-only routing; never serialized or installed in a session
+	// Independent decision bindings still name the real frontend executor for
+	// accepted-decision recovery's existing queryMu/session-close owner.
+	decisionExecutor *TxContext
+
+	// Coarse execution-binding transitions only. Never held while waiting on
+	// finalizationMu, joining work, or acquiring schema/shard/UNIQUE rights.
+	bindingMu      sync.Mutex
+	bindingAttempt *nativeMutationBindingAttempt
+	// Operation-local execution bindings share the actual producer's scheduling
+	// budget. Copying a fresh GOMAXPROCS budget per nested producer would widen it.
+	fanoutOwner *TxContext
+}
+
+type queryReaderLease struct {
+	source  *table
+	release func()
 }
 
 // NewTxContext creates a new active transaction context with the given mode.
@@ -232,8 +305,14 @@ func NewTxContext(mode TxMode) *TxContext {
 // newInvocation binds the same native transaction to a separate execution
 // scope. It does not copy visibility masks or create a new transaction ID.
 func (tx *TxContext) newInvocation() *TxContext {
-	invocation := &TxContext{transactionState: tx.transactionState, Session: tx.Session, remoteObject: tx.remoteObject}
+	invocation := &TxContext{transactionState: tx.transactionState, Session: tx.Session, remoteObject: tx.remoteObject, relationData: tx.relationData, postAbort: tx.postAbort}
 	invocation.fanoutLimit.Store(int32(runtime.GOMAXPROCS(0)))
+	if tx.relationData != nil {
+		invocation.fanoutOwner = tx
+		if tx.fanoutOwner != nil {
+			invocation.fanoutOwner = tx.fanoutOwner
+		}
+	}
 	return invocation
 }
 
@@ -241,27 +320,85 @@ func (tx *TxContext) newInvocation() *TxContext {
 // Rollback leave the object parked in its Scheme session so the next statement
 // can reuse it without retaining any state from the completed transaction.
 func (tx *TxContext) reset(mode TxMode) {
-	tx.transactionState = new(transactionState)
-	tx.ID = atomic.AddUint64(&txIDCounter, 1)
-	tx.Mode = mode
-	tx.State = TxActive
-	tx.SnapshotEpoch = 0
-	if mode == TxACID {
-		tx.SnapshotEpoch = atomic.LoadUint64(&GlobalCommitEpoch)
+	if tx.postAbort != nil {
+		panic("post-decision execution cannot be rebound")
 	}
-	tx.Depth = 0
-	tx.fanoutLimit.Store(int32(runtime.GOMAXPROCS(0)))
-	tx.fanoutInUse.Store(0)
-	tx.walTxID.Store(nil)
-	tx.remoteBindings.Store(nil)
-	tx.remoteObject = nil
-	tx.shards.Store(nil)
-	tx.touchedShards = sync.Map{}
-	tx.autoCommit = false
-	tx.writeHeld = nil
-	tx.repartitionDeletes = nil
-	tx.invalidationDepth = 0
-	tx.invalidationVisited = nil
+	if err := tx.withMutationDecision("transaction reset", func(previous *TxContext) error {
+		return tx.bindingAttempt.resetBinding(previous, mode, tx.Session)
+	}); err != nil {
+		panic(err)
+	}
+}
+
+// Native transaction controls capture the reusable slot before waiting on the
+// OLD state's finalizer. A busy attempt retains that slot through marker repair;
+// it never prepares a decision or follows a newer executor state.
+func (tx *TxContext) beginSessionTransaction(session scm.Scmer, mode TxMode) {
+	if tx.postAbort != nil {
+		panic("post-decision execution cannot open a replacement transaction")
+	}
+	if err := tx.withMutationDecision("BEGIN", func(previous *TxContext) error {
+		if previous != nil {
+			if previous.decisionPending() {
+				return fmt.Errorf("transaction commit outcome is unknown; retry COMMIT")
+			}
+			if previous.State == TxActive {
+				if err := previous.commit(); err != nil {
+					return fmt.Errorf("BEGIN failed to finish current statement: %w", err)
+				}
+			}
+		}
+		if err := tx.bindingAttempt.resetBinding(previous, mode, session); err != nil {
+			return err
+		}
+		scm.Apply(session, scm.NewString("__memcp_tx"), scm.NewAny(tx))
+		scm.Apply(session, scm.NewString("transaction"), scm.NewInt(1))
+		return nil
+	}); err != nil {
+		panic(err)
+	}
+}
+
+func (tx *TxContext) commitSessionTransaction(session scm.Scmer) {
+	if err := tx.requireCommittable(); err != nil {
+		panic(err)
+	}
+	if err := tx.withMutationDecision("COMMIT", func(decision *TxContext) error {
+		if decision.State == TxAborted && !scm.Apply(session, scm.NewString("transaction")).IsNil() {
+			return fmt.Errorf("transaction is aborted; ROLLBACK required")
+		}
+		if decision.State == TxActive || decision.decisionPending() {
+			if err := decision.commit(); err != nil {
+				if !decision.decisionPending() {
+					scm.Apply(session, scm.NewString("transaction"), scm.NewNil())
+				}
+				return fmt.Errorf("COMMIT failed: %w", err)
+			}
+		}
+		scm.Apply(session, scm.NewString("transaction"), scm.NewNil())
+		return nil
+	}); err != nil {
+		panic(err)
+	}
+}
+
+func (tx *TxContext) rollbackSessionTransaction(session scm.Scmer) {
+	if err := tx.withMutationDecision("ROLLBACK", func(decision *TxContext) error {
+		defer func() {
+			if decision.State != TxActive && !decision.decisionPending() {
+				scm.Apply(session, scm.NewString("transaction"), scm.NewNil())
+			}
+		}()
+		if decision.decisionPending() {
+			return fmt.Errorf("native transaction decision is pending; retry COMMIT")
+		}
+		if decision.State == TxActive {
+			decision.rollback()
+		}
+		return nil
+	}); err != nil {
+		panic(err)
+	}
 }
 
 var walBootID = uuid.NewString()
@@ -300,6 +437,9 @@ func (tx *TxContext) claimFanoutWorkers(maxWorkers int) int {
 	if tx == nil || maxWorkers < 2 {
 		return 0
 	}
+	if tx.fanoutOwner != nil {
+		return tx.fanoutOwner.claimFanoutWorkers(maxWorkers)
+	}
 	for {
 		limit := tx.fanoutLimit.Load()
 		used := tx.fanoutInUse.Load()
@@ -317,9 +457,14 @@ func (tx *TxContext) claimFanoutWorkers(maxWorkers int) int {
 }
 
 func (tx *TxContext) releaseFanoutWorkers(workers int) {
-	if workers > 0 {
-		tx.fanoutInUse.Add(-int32(workers))
+	if workers <= 0 {
+		return
 	}
+	if tx.fanoutOwner != nil {
+		tx.fanoutOwner.releaseFanoutWorkers(workers)
+		return
+	}
+	tx.fanoutInUse.Add(-int32(workers))
 }
 
 func (tx *TxContext) SessionValue(key string) scm.Scmer {
@@ -340,18 +485,13 @@ func (tx *TxContext) QuerySessionState() (*scm.SessionState, uint64) {
 }
 
 func (tx *TxContext) beginQuery(ss *scm.SessionState, seq uint64, info string) {
+	tx.bindingMu.Lock()
+	defer tx.bindingMu.Unlock()
+	if tx.bindingAttempt != nil {
+		panic(newNativeMutationBusyError(tx.bindingAttempt.state, "query entry"))
+	}
 	if tx.remoteObject != nil {
-		tx.mu.Lock()
-		if tx.remoteAdmissionClosed || tx.State != TxActive {
-			tx.mu.Unlock()
-			panic("native transaction participant is finishing")
-		}
-		if tx.remoteActive == 0 {
-			tx.remoteIdle = make(chan struct{})
-		}
-		tx.remoteActive++
-		tx.remoteInvocation = true
-		tx.mu.Unlock()
+		tx.retainRemoteInvocation()
 	}
 	tx.statementGeneration.Store(statementGenerationCounter.Add(1))
 	tx.SessionState = ss
@@ -369,6 +509,22 @@ func (tx *TxContext) beginQuery(ss *scm.SessionState, seq uint64, info string) {
 	if ss != nil {
 		ss.SetQueryInfoPointer(seq, infoPtr)
 	}
+}
+
+// A captured transaction can execute at its original coordinator too. Its
+// borrowed executor must participate in the same decision/drain admission as
+// an imported endpoint, independently of the enclosing operator's transaction.
+func (tx *TxContext) retainRemoteInvocation() {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.remoteAdmissionClosed || tx.State != TxActive {
+		panic("native transaction participant is finishing")
+	}
+	if tx.remoteActive == 0 {
+		tx.remoteIdle = make(chan struct{})
+	}
+	tx.remoteActive++
+	tx.remoteInvocation = true
 }
 
 // retainQueryColumn runs during column publication under the schema lock.
@@ -408,18 +564,18 @@ func (tx *TxContext) retainQueryTable(t *table) bool {
 	if !t.acquireCacheUse() {
 		return false
 	}
-	tx.queryReaderReleases = append(tx.queryReaderReleases, t.releaseCacheUse)
+	tx.queryReaderReleases = append(tx.queryReaderReleases, queryReaderLease{t, t.releaseCacheUse})
 	return true
 }
 
 // retainQueryReader registers a physical lease released after invocation work.
-func (tx *TxContext) retainQueryReader(release func()) bool {
+func (tx *TxContext) retainQueryReader(release func(), source *table) bool {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	if !tx.queryActive.Load() {
 		return false
 	}
-	tx.queryReaderReleases = append(tx.queryReaderReleases, release)
+	tx.queryReaderReleases = append(tx.queryReaderReleases, queryReaderLease{source, release})
 	return true
 }
 
@@ -427,6 +583,13 @@ func (tx *TxContext) retainQueryReader(release func()) bool {
 func (tx *TxContext) RetainQueryWork(join func()) bool {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
+	return tx.retainQueryWorkLocked(join)
+}
+
+// Caller owns the actual state.mu. Operation setup already holds that lock
+// while capturing/registering its parent; do not recursively call the public
+// RetainQueryWork there. Query end detaches the SAME list under the SAME owner.
+func (tx *TxContext) retainQueryWorkLocked(join func()) bool {
 	if !tx.queryActive.Load() {
 		return false
 	}
@@ -437,6 +600,7 @@ func (tx *TxContext) RetainQueryWork(join func()) bool {
 // endStatement joins invocation-owned output and releases physical readers.
 // Request cancellation and process-list identity survive until endQuery below.
 func (tx *TxContext) endStatement() {
+	tx.bindingMu.Lock()
 	tx.remoteBindings.Store(nil)
 	tx.mu.Lock()
 	tx.queryActive.Store(false)
@@ -448,6 +612,7 @@ func (tx *TxContext) endStatement() {
 	readers := tx.queryReaderReleases
 	tx.queryReaderReleases = nil
 	tx.mu.Unlock()
+	tx.bindingMu.Unlock()
 	var failure any
 	releaseOwned := func(release func()) {
 		defer func() {
@@ -461,7 +626,7 @@ func (tx *TxContext) endStatement() {
 		releaseOwned(join)
 	}
 	for _, release := range readers {
-		releaseOwned(release)
+		releaseOwned(release.release)
 	}
 	for c, t := range columns {
 		t.releaseColumnCacheUse(c)
@@ -555,6 +720,12 @@ func (tx *TxContext) getOrCreateShardTxLocked(shard *storageShard) *storageShard
 // Failed enlistment has no mutation effects. Remove its empty overlay through
 // the same publication owner before releasing its native generation pin.
 func (state *transactionState) discardUnenlistedShardLocked(shard *storageShard, participant *storageShardTransaction) {
+	state.releaseShardTransactionLocked(shard, participant)
+}
+
+// Caller owns state.mu and the lifecycle that made this exact participant
+// obsolete. Public row journals otherwise stay registered until decision.
+func (state *transactionState) releaseShardTransactionLocked(shard *storageShard, participant *storageShardTransaction) {
 	directory := state.shards.Load()
 	if directory == nil {
 		return
@@ -594,6 +765,7 @@ func (tx *TxContext) finishRepartitionActions(commit bool) {
 }
 
 func (tx *TxContext) releaseActiveTransactionsLocked() {
+	tx.releaseVisibilityProjections()
 	// Break outgoing forwarding leases once every invocation has joined. Native
 	// peer GC can then collect an entire handover chain, including empty actors.
 	for _, endpoint := range tx.endpoints {
@@ -679,9 +851,10 @@ func (tx *TxContext) LogDelete(shard *storageShard, rowIndex uint32) {
 	st := tx.getOrCreateShardTxLocked(shard)
 	tx.mu.Unlock()
 	st.mu.Lock()
-	st.DeletedMask.Set(uint(rowIndex), true)
+	setOwnedVisibilityBit(&st.DeletedMask, uint(rowIndex), true)
 	st.DeletedRecids = append(st.DeletedRecids, rowIndex)
 	st.mu.Unlock()
+	tx.forwardVisibilityLocked(shard, rowIndex)
 }
 
 // ---------------------------------------------------------------------------
@@ -694,9 +867,12 @@ func (tx *TxContext) AddToDeleteMask(shard *storageShard, recid uint32) {
 	st := tx.getOrCreateShardTxLocked(shard)
 	tx.mu.Unlock()
 	st.mu.Lock()
-	st.DeleteMask.Set(uint(recid), true)
-	st.DeleteRecids = append(st.DeleteRecids, recid)
+	if !st.DeleteMask.Get(uint(recid)) {
+		setOwnedVisibilityBit(&st.DeleteMask, uint(recid), true)
+		st.DeleteRecids = append(st.DeleteRecids, recid)
+	}
 	st.mu.Unlock()
+	tx.forwardVisibilityLocked(shard, recid)
 }
 
 // AddToUndeleteMask records that this ACID tx can see a staged (inserted) row.
@@ -705,20 +881,36 @@ func (tx *TxContext) AddToUndeleteMask(shard *storageShard, recid uint32) {
 	st := tx.getOrCreateShardTxLocked(shard)
 	tx.mu.Unlock()
 	st.mu.Lock()
-	st.UndeleteMask.Set(uint(recid), true)
-	st.UndeleteRecids = append(st.UndeleteRecids, recid)
+	if !st.UndeleteMask.Get(uint(recid)) {
+		st.UndeleteRecids = append(st.UndeleteRecids, stagedVisibilityChange{recid: recid})
+		st.markStagedHistory(recid)
+		setOwnedVisibilityBit(&st.UndeleteMask, uint(recid), true)
+	}
 	st.mu.Unlock()
+	tx.forwardVisibilityLocked(shard, recid)
 }
 
 // UnstageRow removes recid from UndeleteMask (ACID UPDATE/DELETE of a staged row).
 // Returns true if the row was staged by this tx and has been un-staged.
+// Caller holds the shard write lock, as for AddToUndeleteMask: UNIQUE readers
+// consume the journal under the matching shard read lock, without taking st.mu.
 func (tx *TxContext) UnstageRow(shard *storageShard, recid uint32) bool {
 	st := tx.getShardTx(shard)
-	if st == nil || !st.UndeleteMask.Get(uint(recid)) {
+	visible, _, _ := tx.projectedVisibility(shard, recid)
+	if !visible {
 		return false
 	}
-	// plain Set is safe: caller holds the shard write lock
-	st.UndeleteMask.Set(uint(recid), false)
+	if st == nil || st.readOnly {
+		tx.mu.Lock()
+		st = tx.getOrCreateShardTxLocked(shard)
+		tx.mu.Unlock()
+	}
+	st.mu.Lock()
+	st.UndeleteRecids = append(st.UndeleteRecids, stagedVisibilityChange{recid: recid, previous: true})
+	st.markStagedHistory(recid)
+	setOwnedVisibilityBit(&st.UndeleteMask, uint(recid), false)
+	st.mu.Unlock()
+	tx.forwardVisibilityLocked(shard, recid)
 	return true
 }
 
@@ -733,7 +925,30 @@ func (tx *TxContext) RegisterTouchedShard(shard *storageShard) {
 		return
 	}
 	tx.durableID()
-	tx.touchedShards.Store(shard, true)
+	if _, exists := tx.touchedShards.Load(shard); exists {
+		return
+	}
+	// The existing overlay or forwarding writer's mu owns first admission.
+	// Publish its physical lifetime before another registrant sees the key.
+	shard.beginTransactionUse()
+	if _, exists := tx.touchedShards.LoadOrStore(shard, true); exists {
+		shard.endTransactionUse()
+	}
+}
+
+func (tx *TxContext) releaseTouchedShard(shard *storageShard) {
+	if _, exists := tx.touchedShards.LoadAndDelete(shard); exists {
+		shard.endTransactionUse()
+	}
+}
+
+// Decisions have joined their invocations before draining deferred WAL users.
+func (tx *TxContext) releaseTouchedShards() {
+	tx.touchedShards.Range(func(key, _ any) bool {
+		tx.releaseTouchedShard(key.(*storageShard))
+		return true
+	})
+	tx.touchedShards = sync.Map{}
 }
 
 // SyncTouchedShards flushes all pending log writes to durable storage. Only a
@@ -755,7 +970,17 @@ func (tx *TxContext) SyncTouchedShards() error {
 		databases[shard.t.schema] = commit
 		return true
 	})
-	if len(shards) == 1 {
+	if tx.recoveryNeedsDatabaseDecision.Load() {
+		tx.recoveryDecisionDatabases.Range(func(key, value any) bool {
+			db := key.(*database)
+			commit := databases[db]
+			commit.db = db
+			commit.durable = commit.durable || value.(bool)
+			databases[db] = commit
+			return true
+		})
+	}
+	if len(shards) == 1 && !tx.recoveryNeedsDatabaseDecision.Load() {
 		// The common OLTP case needs no coordinator fsync: the commit marker and
 		// its mutations share one WAL and become durable through one barrier.
 		shard := shards[0]
@@ -764,10 +989,10 @@ func (tx *TxContext) SyncTouchedShards() error {
 			return err
 		}
 		if err := persistenceCall(func() { shard.logfile.Flush(durable) }); err != nil {
-			tx.touchedShards = sync.Map{}
+			tx.releaseTouchedShards()
 			return markCommitOutcomeUnknown(err)
 		}
-		tx.touchedShards = sync.Map{}
+		tx.releaseTouchedShards()
 		return nil
 	}
 	for _, shard := range shards {
@@ -781,7 +1006,7 @@ func (tx *TxContext) SyncTouchedShards() error {
 	authorityPublished := false
 	for _, commit := range databases {
 		if err := commit.db.commitTransaction(tx.durableID(), commit.durable); err != nil {
-			tx.touchedShards = sync.Map{}
+			tx.releaseTouchedShards()
 			if authorityPublished {
 				return markCommitOutcomeUnknown(err)
 			}
@@ -789,7 +1014,7 @@ func (tx *TxContext) SyncTouchedShards() error {
 		}
 		authorityPublished = true
 	}
-	tx.touchedShards = sync.Map{}
+	tx.releaseTouchedShards()
 	return nil
 }
 
@@ -799,17 +1024,14 @@ func (tx *TxContext) SyncTouchedShards() error {
 
 // IsVisible determines whether a row is visible to this ACID transaction.
 //
-//	UndeleteMask wins — it is the only way an ACID tx sees its own inserts.
+//	UndeleteMask wins, including non-owning projections of those original masks.
 //	Otherwise: not globally deleted AND not locally (tx-level) deleted.
 func (tx *TxContext) IsVisible(shard *storageShard, recid uint32) bool {
-	st := tx.getShardTx(shard)
-	if st == nil {
-		return !shard.deletions.Get(uint(recid))
-	}
-	if st.UndeleteMask.Get(uint(recid)) {
+	visible, hidden, _ := tx.projectedVisibility(shard, recid)
+	if visible {
 		return true
 	}
-	return !shard.deletions.Get(uint(recid)) && !st.DeleteMask.Get(uint(recid))
+	return !hidden && !shard.deletions.Get(uint(recid))
 }
 
 // releasedUniqueReservation recognizes this transaction's own hidden old
@@ -820,22 +1042,8 @@ func (tx *TxContext) releasedUniqueReservation(shard *storageShard, recid uint32
 	if tx == nil {
 		return false
 	}
-	st := tx.getShardTx(shard)
-	if st == nil {
-		return false
-	}
-	if tx.Mode == TxCursorStability {
-		return st.DeletedMask.Get(uint(recid))
-	}
-	if st.DeleteMask.Get(uint(recid)) {
-		return true
-	}
-	for _, staged := range st.UndeleteRecids {
-		if staged == recid {
-			return !st.UndeleteMask.Get(uint(recid))
-		}
-	}
-	return false
+	_, _, released := tx.projectedVisibility(shard, recid)
+	return released
 }
 
 // ---------------------------------------------------------------------------
@@ -844,15 +1052,51 @@ func (tx *TxContext) releasedUniqueReservation(shard *storageShard, recid uint32
 
 // CreateSavepoint captures the current transaction state for later rollback.
 func (tx *TxContext) CreateSavepoint() Savepoint {
-	release, _ := tx.lockDecision(context.Background(), false, nil)
-	defer release()
-	return tx.createSavepointLocked()
+	finish := tx.admitMutationSavepoint()
+	defer finish()
+	return tx.createMutationSavepoint()
 }
+
+// The statement owner calls this only before publishing its producer. Public
+// savepoints use admitMutationSavepoint instead of borrowing that authority.
+func (tx *TxContext) createMutationSavepoint() Savepoint {
+	if tx.decisionStarted {
+		panic("transaction commit outcome is unknown; retry COMMIT")
+	}
+	tx.beginMutationResourceDecision(tx.mutationOperation)
+	defer tx.finishResourceDecision()
+
+	release, _ := tx.lockDecision(context.Background(), false, nil)
+	var sp Savepoint
+	func() { defer release(); sp = tx.createSavepointLocked() }()
+	if tx.coordinator != nil && tx.catalogIdentity.Load() != nil {
+		count, err := tx.coordinator.Call(scanQueryContext(tx, context.Background()), scm.ClusterRequest{Method: "catalog_position"})
+		if err != nil {
+			panic(err)
+		}
+		position := count.Slice()
+		if len(position) != 2 {
+			panic("invalid native catalog savepoint position")
+		}
+		sp.catalogCount, sp.catalogDeclarationCount = int(position[0].Int()), int(position[1].Int())
+	}
+	return sp
+}
+
 func (tx *TxContext) createSavepointLocked() Savepoint {
 	remote := tx.captureRemoteSavepoints()
+	scope := tx.resourceScope()
+	scope.mu.Lock()
+	defer scope.mu.Unlock()
+	if scope.constructing != 0 {
+		panic("native catalog construction is still active")
+	}
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
-	sp := Savepoint{Depth: tx.Depth, remote: remote}
+	sp := Savepoint{Depth: tx.Depth, remote: remote, owner: tx.transactionState, catalogDeclarationCount: tx.catalogDeclarationPosition(), relationSchemaCount: len(tx.relationSchemaChanges)}
+	if intents := tx.catalogIntents.Load(); intents != nil {
+		sp.catalogCount = len(*intents)
+	}
 	tx.Depth++
 	directory := tx.shardTransactions()
 	if len(directory) > 0 {
@@ -888,15 +1132,43 @@ func (tx *TxContext) trackedShardSetLocked() map[*storageShard]struct{} {
 
 // RollbackToSavepoint undoes all changes made since the savepoint was created.
 func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
-	release, _ := tx.lockDecision(context.Background(), true, nil)
-	defer release()
-	tx.rollbackToSavepointLocked(sp)
+	finish := tx.admitMutationSavepoint()
+	defer finish()
+	tx.restoreMutationSavepoint(sp)
 }
+
+// The statement owner calls this only after its producer/work/frames drained,
+// while its native table exclusions still protect the rows being restored.
+func (tx *TxContext) restoreMutationSavepoint(sp Savepoint) {
+	if sp.owner != nil && sp.owner != tx.transactionState {
+		panic("savepoint belongs to another native transaction")
+	}
+	if tx.decisionStarted {
+		panic("transaction commit outcome is unknown; retry COMMIT")
+	}
+	tx.beginMutationResourceDecision(tx.mutationOperation)
+	defer tx.finishResourceDecision()
+
+	release, _ := tx.lockDecision(context.Background(), true, nil)
+	func() { defer release(); tx.rollbackToSavepointLocked(sp) }()
+	tx.retireCatalogSavepoint(sp.catalogCount, sp.catalogDeclarationCount)
+	tx.transactionState.finishRelationSchema(sp.relationSchemaCount, false)
+}
+
 func (tx *TxContext) rollbackToSavepointLocked(sp Savepoint) {
 	tx.rollbackRemoteSavepoints(sp)
-	for _, table := range tx.contributionMutationTables() {
+	tables := tx.contributionMutationTables()
+	for _, table := range tables {
 		defer table.endContributionMutation()
 	}
+	// Undo changes source visibility after callbacks may already have warmed
+	// dependent values. Retire those values before publishing the restored
+	// contribution revision, after the shard and transaction locks unwind.
+	defer func() {
+		for _, table := range tables {
+			invalidateDependentCaches(table)
+		}
+	}()
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	tx.Depth = sp.Depth
@@ -911,64 +1183,62 @@ func (tx *TxContext) rollbackToSavepointLocked(sp Savepoint) {
 	}
 	tx.repartitionDeletes = kept
 	trackedShards := tx.trackedShardSetLocked()
+	if tx.Mode == TxCursorStability {
+		tx.restoreCursorStability(saved, trackedShards, true)
+		return
+	}
 	for shard, st := range tx.shardTransactions() {
 		lens := saved[shard.uuid] // New physical generations have an empty journal boundary.
-		st.mu.Lock()
-		switch tx.Mode {
-		case TxCursorStability:
-			// Undo inserts: mark as globally deleted
-			for i := len(st.InsertRecids) - 1; i >= lens.InsertLen; i-- {
-				recid := st.InsertRecids[i]
-				st.InsertMask.Set(uint(recid), false)
-				shard.mu.Lock()
-				shard.deletions.Set(uint(recid), true)
-				if shard.logfile != nil {
-					shard.logfile.Write(LogEntryDelete{idx: recid, txID: tx.durableID()})
+		func() {
+			st.mu.Lock()
+			defer st.mu.Unlock()
+			switch tx.Mode {
+			case TxACID:
+				// Rollback DeleteMask additions
+				func() {
+					if tx.writeHeld[shard] == 0 {
+						shard.mu.Lock()
+						defer shard.mu.Unlock()
+					}
+					for i := len(st.DeleteRecids) - 1; i >= lens.DeleteLen; i-- {
+						recid := st.DeleteRecids[i]
+						setOwnedVisibilityBit(&st.DeleteMask, uint(recid), false)
+						tx.forwardVisibilityLocked(shard, recid)
+						shard.syncNextVisibilityLocked(recid, trackedShards, tx, true, tx.writeHeld)
+					}
+				}()
+				st.DeleteRecids = st.DeleteRecids[:lens.DeleteLen]
+				remaining := make(map[uint32]int, len(st.UndeleteRecids))
+				for _, change := range st.UndeleteRecids {
+					remaining[change.recid]++
 				}
-				shard.syncNextVisibilityLocked(recid, trackedShards, tx, true)
-				shard.mu.Unlock()
-			}
-			st.InsertRecids = st.InsertRecids[:lens.InsertLen]
-			// Undo deletes: restore global visibility
-			for i := len(st.DeletedRecids) - 1; i >= lens.DeletedLen; i-- {
-				recid := st.DeletedRecids[i]
-				st.DeletedMask.Set(uint(recid), false)
-				shard.mu.Lock()
-				shard.deletions.Set(uint(recid), false)
-				shard.logVisibilityChangeLocked(recid, false, tx.durableID())
-				shard.rollbackProtected.Set(uint(recid), false)
-				shard.syncNextVisibilityLocked(recid, trackedShards, tx, true)
-				shard.mu.Unlock()
-			}
-			st.DeletedRecids = st.DeletedRecids[:lens.DeletedLen]
-
-		case TxACID:
-			// Rollback DeleteMask additions
-			for i := len(st.DeleteRecids) - 1; i >= lens.DeleteLen; i-- {
-				st.DeleteMask.Set(uint(st.DeleteRecids[i]), false)
-			}
-			st.DeleteRecids = st.DeleteRecids[:lens.DeleteLen]
-			// Rollback UndeleteMask additions (re-hide the staged rows)
-			for i := len(st.UndeleteRecids) - 1; i >= lens.UndeleteLen; i-- {
-				recid := st.UndeleteRecids[i]
-				st.UndeleteMask.Set(uint(recid), false)
-				ownsShardWrite := tx.writeHeld[shard] > 0
-				if !ownsShardWrite {
-					shard.mu.Lock()
-				}
-				shard.deletions.Set(uint(recid), true)
-				shard.rollbackProtected.Set(uint(recid), false)
-				shard.syncNextVisibilityLocked(recid, trackedShards, tx, true)
-				if !ownsShardWrite {
-					shard.mu.Unlock()
+				// Rewind actual visibility changes, not just inserted row IDs. Keep
+				// the last entry until compensation succeeds: a failed restore can
+				// retry the exact same previous bit without toggling it twice.
+				for len(st.UndeleteRecids) > lens.UndeleteLen {
+					change := st.UndeleteRecids[len(st.UndeleteRecids)-1]
+					func() {
+						ownsShardWrite := tx.writeHeld[shard] > 0
+						if !ownsShardWrite {
+							shard.mu.Lock()
+							defer shard.mu.Unlock()
+						}
+						// Both the restored own version and discarded new version
+						// stay globally hidden until the ACID decision.
+						shard.deletions.Set(uint(change.recid), true)
+						shard.rollbackProtected.Set(uint(change.recid), change.previous)
+						setOwnedVisibilityBit(&st.UndeleteMask, uint(change.recid), change.previous)
+						remaining[change.recid]--
+						if remaining[change.recid] == 0 {
+							setOwnedVisibilityBit(st.stagedHistory.Load(), uint(change.recid), false)
+						}
+						tx.forwardVisibilityLocked(shard, change.recid)
+						shard.syncNextVisibilityLocked(change.recid, trackedShards, tx, true, tx.writeHeld)
+						st.UndeleteRecids = st.UndeleteRecids[:len(st.UndeleteRecids)-1]
+					}()
 				}
 			}
-			st.UndeleteRecids = st.UndeleteRecids[:lens.UndeleteLen]
-		}
-		st.mu.Unlock()
-		if tx.Mode == TxCursorStability && shard.t.PersistencyMode == Safe && shard.logfile != nil {
-			shard.logfile.Flush(true)
-		}
+		}()
 	}
 }
 
@@ -978,12 +1248,70 @@ func (tx *TxContext) rollbackToSavepointLocked(sp Savepoint) {
 
 // Commit finalizes the transaction.
 func (tx *TxContext) Commit() error {
-	release, err := tx.lockDecision(context.Background(), true, tx.beforeDecision("commit"))
-	if err != nil {
+	return tx.withMutationDecision("COMMIT", func(decision *TxContext) error { return decision.commit() })
+}
+
+// The decision executor retains ownership across row completion, catalog
+// publication and resource cleanup. Recovery enters through the same owner;
+// decisionMu remains free while obtaining schema/shard coherence rights.
+func (tx *TxContext) commit() (err error) {
+	if err = tx.requireCommittable(); err != nil {
 		return err
 	}
-	defer release()
-	return tx.commitLocked()
+	tx.beginResourceDecision()
+	defer func() {
+		if cleanup := tx.finishResourceCommit(); cleanup != nil {
+			if err == nil {
+				err = cleanup
+			} else {
+				err = fmt.Errorf("%w; %v", err, cleanup)
+			}
+		}
+	}()
+	var release func()
+	if tx.State == TxCommitted {
+		if tx.catalogCommit != nil {
+			return tx.publishCatalogDecision()
+		}
+		return nil
+	}
+	catalog := tx.hasCatalogIntents()
+	if catalog {
+		release, err = tx.lockCatalogDecision(tx.catalogDecisionContext(context.Background()))
+	} else {
+		release, err = tx.lockDecision(context.Background(), true, tx.beforeDecision("commit"))
+	}
+	if err != nil {
+		if !catalog {
+			return err
+		}
+		if !tx.decisionStarted {
+			tx.releaseCatalogPublication()
+			tx.releasePreparation()
+			if rollback := tx.finishRemoteParticipants("rollback"); rollback != nil {
+				return fmt.Errorf("prepare: %v; rollback: %w", err, rollback)
+			}
+			tx.rollbackACID()
+			tx.retireCatalogSavepoint(0, 0)
+		}
+		return err
+	}
+	defer func() {
+		release()
+		if !tx.decisionStarted {
+			tx.releaseCatalogPublication()
+		}
+		if tx.State == TxAborted {
+			tx.retireCatalogSavepoint(0, 0)
+		}
+	}()
+	err = tx.commitLocked()
+	if tx.State == TxCommitted {
+		if publication := tx.publishCatalogDecision(); publication != nil && err == nil {
+			err = publication
+		}
+	}
+	return err
 }
 func (tx *TxContext) commitLocked() error {
 	if tx.State == TxCommitted {
@@ -1003,7 +1331,7 @@ func (tx *TxContext) commitLocked() error {
 			}
 		}
 	}()
-	if tx.Mode == TxACID && len(tx.remoteParticipantOwners()) != 0 {
+	if tx.Mode == TxACID && (tx.hasCatalogIntents() || len(tx.remoteParticipantOwners()) != 0) {
 		if tx.coordinator == nil {
 			return tx.commitDistributedACID()
 		}
@@ -1019,12 +1347,16 @@ func (tx *TxContext) commitLocked() error {
 		trackedShards := tx.trackedShardSetLocked()
 		var propagationErr error
 		for shard, st := range tx.shardTransactions() {
+			// Forwarded UPDATE/DELETE invokes the successor directly, without a
+			// mapper whose Close registers its WAL. Commit owns the complete native
+			// overlay directory, including those successor generations.
+			tx.RegisterTouchedShard(shard)
 			st.mu.Lock()
 			shard.mu.Lock()
 			propagationErr = persistenceCall(func() {
 				for _, recid := range st.DeletedRecids {
 					shard.rollbackProtected.Set(uint(recid), false)
-					shard.syncNextVisibilityLocked(recid, trackedShards, tx, true)
+					shard.syncNextVisibilityLocked(recid, trackedShards, tx, true, tx.writeHeld)
 				}
 			})
 			shard.mu.Unlock()
@@ -1058,6 +1390,10 @@ func (tx *TxContext) commitLocked() error {
 // commitACID locks touched shards in deterministic order, validates,
 // and applies overlay masks to global state.
 func (tx *TxContext) commitACID() error {
+	if err := tx.prepareSerializable(); err != nil {
+		tx.rollbackACID()
+		return err
+	}
 	tx.mu.Lock()
 	directory := tx.shardTransactions()
 	shards := make([]*storageShard, 0, len(directory))
@@ -1072,8 +1408,10 @@ func (tx *TxContext) commitACID() error {
 	hybridsort.Slice(shards, func(i, j int) bool {
 		return shards[i].uuid.String() < shards[j].uuid.String()
 	})
+	heldByCaller := make(map[*storageShard]uint32, len(shards))
 	for _, s := range shards {
 		s.mu.Lock()
+		heldByCaller[s] = 1
 	}
 
 	// Local and distributed preparation share the same OCC validator.
@@ -1114,20 +1452,21 @@ func (tx *TxContext) commitACID() error {
 					continue
 				}
 				shard.deletions.Set(uint(recid), true)
-				shard.syncNextVisibilityLocked(recid, trackedShards, tx, true)
+				shard.syncNextVisibilityLocked(recid, trackedShards, tx, true, heldByCaller)
 			}
 		}
 		// Apply UndeleteMask → clear global deletions (make staged rows visible).
 		for _, shard := range shards {
 			st := directory[shard]
-			for _, recid := range st.UndeleteRecids {
+			for _, change := range st.UndeleteRecids {
+				recid := change.recid
 				shard.rollbackProtected.Set(uint(recid), false)
 				if !st.UndeleteMask.Get(uint(recid)) {
-					shard.syncNextVisibilityLocked(recid, trackedShards, tx, true)
+					shard.syncNextVisibilityLocked(recid, trackedShards, tx, true, heldByCaller)
 					continue // un-staged (row overwritten/deleted in same tx)
 				}
 				shard.deletions.Set(uint(recid), false)
-				shard.syncNextVisibilityLocked(recid, trackedShards, tx, true)
+				shard.syncNextVisibilityLocked(recid, trackedShards, tx, true, heldByCaller)
 			}
 		}
 	})
@@ -1138,7 +1477,7 @@ func (tx *TxContext) commitACID() error {
 			}
 			return markCommitOutcomeUnknown(applyErr)
 		}
-		tx.abortACIDCommit(shards, trackedShards)
+		tx.abortACIDCommit(shards, trackedShards, heldByCaller)
 		return applyErr
 	}
 
@@ -1160,7 +1499,7 @@ func (tx *TxContext) commitACID() error {
 			tx.releasePreparation()
 			return markCommitOutcomeUnknown(err)
 		}
-		tx.abortACIDCommit(shards, trackedShards)
+		tx.abortACIDCommit(shards, trackedShards, heldByCaller)
 		return err
 	}
 	atomic.AddUint64(&GlobalCommitEpoch, 1)
@@ -1182,22 +1521,23 @@ func (tx *TxContext) commitACID() error {
 
 // abortACIDCommit restores visibility after a definite pre-authority failure.
 // Every shard in shards must be write-locked by the caller.
-func (tx *TxContext) abortACIDCommit(shards []*storageShard, trackedShards map[*storageShard]struct{}) {
+func (tx *TxContext) abortACIDCommit(shards []*storageShard, trackedShards map[*storageShard]struct{}, heldByCaller map[*storageShard]uint32) {
 	directory := tx.shardTransactions()
 	for _, shard := range shards {
 		st := directory[shard]
 		for _, recid := range st.DeleteRecids {
 			if st.DeleteMask.Get(uint(recid)) {
 				shard.deletions.Set(uint(recid), false)
-				shard.syncNextVisibilityLocked(recid, trackedShards, tx, false)
+				shard.syncNextVisibilityLocked(recid, trackedShards, tx, false, heldByCaller)
 			}
 		}
-		for _, recid := range st.UndeleteRecids {
+		for _, change := range st.UndeleteRecids {
+			recid := change.recid
 			shard.rollbackProtected.Set(uint(recid), false)
 			if st.UndeleteMask.Get(uint(recid)) {
 				shard.deletions.Set(uint(recid), true)
 			}
-			shard.syncNextVisibilityLocked(recid, trackedShards, tx, false)
+			shard.syncNextVisibilityLocked(recid, trackedShards, tx, false, heldByCaller)
 		}
 	}
 	for _, shard := range shards {
@@ -1209,7 +1549,7 @@ func (tx *TxContext) abortACIDCommit(shards []*storageShard, trackedShards map[*
 	tx.State = TxAborted
 	tx.shards.Store(nil)
 	tx.mu.Unlock()
-	tx.touchedShards = sync.Map{}
+	tx.releaseTouchedShards()
 }
 
 func (tx *TxContext) finishCursorStabilityCommit() {
@@ -1227,11 +1567,31 @@ func (tx *TxContext) finishCursorStabilityCommit() {
 
 // Rollback undoes the transaction.
 func (tx *TxContext) Rollback() {
+	if err := tx.withMutationDecision("ROLLBACK", func(decision *TxContext) error {
+		decision.rollback()
+		return nil
+	}); err != nil {
+		panic(err)
+	}
+}
+
+func (tx *TxContext) rollback() {
+	tx.beginResourceDecision()
+	defer func() {
+		if cleanup := tx.finishResourceCommit(); cleanup != nil {
+			panic(cleanup)
+		}
+	}()
 	release, err := tx.lockDecision(context.Background(), true, tx.beforeDecision("rollback"))
 	if err != nil {
 		panic(err)
 	}
-	defer release()
+	defer func() {
+		release()
+		if tx.State == TxAborted {
+			tx.retireCatalogSavepoint(0, 0)
+		}
+	}()
 	tx.rollbackLocked()
 }
 func (tx *TxContext) rollbackLocked() {
@@ -1245,9 +1605,17 @@ func (tx *TxContext) rollbackLocked() {
 			panic(err)
 		}
 	}
-	for _, table := range tx.contributionMutationTables() {
+	tables := tx.contributionMutationTables()
+	for _, table := range tables {
 		defer table.endContributionMutation()
 	}
+	// A cache read inside the transaction may retain its uncommitted view.
+	// Both native visibility modes must discard it after restoring source rows.
+	defer func() {
+		for _, table := range tables {
+			invalidateDependentCaches(table)
+		}
+	}()
 	switch tx.Mode {
 	case TxCursorStability:
 		tx.rollbackCursorStability(true)
@@ -1256,46 +1624,88 @@ func (tx *TxContext) rollbackLocked() {
 	}
 }
 
-// rollbackCursorStability replays undo masks in reverse to restore global state.
-func (tx *TxContext) rollbackCursorStability(persist bool) {
-	tx.mu.Lock()
-	trackedShards := tx.trackedShardSetLocked()
-	for shard, st := range tx.shardTransactions() {
-		st.mu.Lock()
-		// Undo inserts (reverse order): mark as globally deleted
-		for i := len(st.InsertRecids) - 1; i >= 0; i-- {
-			recid := st.InsertRecids[i]
+// restoreCursorStabilityShard requires the transaction decision/undo owner.
+// Each phase touches only one shard at a time, retaining normal forwarding.
+// The caller orders the phases across the complete native journal directory.
+func (tx *TxContext) restoreCursorStabilityShard(shard *storageShard, st *storageShardTransaction, lens shardSavepoint, tracked map[*storageShard]struct{}, persist, inserts bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if lens.InsertLen < 0 || lens.InsertLen > len(st.InsertRecids) || lens.DeletedLen < 0 || lens.DeletedLen > len(st.DeletedRecids) {
+		panic("invalid native cursor-stability savepoint boundary")
+	}
+	if !inserts {
+		for i := len(st.DeletedRecids) - 1; i >= lens.DeletedLen; i-- {
+			recid := st.DeletedRecids[i]
+			func() {
+				shard.mu.Lock()
+				defer shard.mu.Unlock()
+				shard.deletions.Set(uint(recid), false)
+				if persist {
+					shard.logVisibilityChangeLocked(recid, false, tx.durableID())
+				}
+				shard.rollbackProtected.Set(uint(recid), false)
+				setOwnedVisibilityBit(&st.DeletedMask, uint(recid), false)
+				tx.forwardVisibilityLocked(shard, recid)
+				shard.syncNextVisibilityLocked(recid, tracked, tx, persist, tx.writeHeld)
+			}()
+		}
+		return
+	}
+	for i := len(st.InsertRecids) - 1; i >= lens.InsertLen; i-- {
+		recid := st.InsertRecids[i]
+		func() {
 			shard.mu.Lock()
+			defer shard.mu.Unlock()
 			shard.deletions.Set(uint(recid), true)
 			if persist && shard.logfile != nil {
-				shard.logfile.Write(LogEntryDelete{idx: recid, txID: tx.durableID()})
+				shard.writeRecoveryEntry(LogEntryDelete{idx: recid, txID: tx.durableID()})
 			}
-			shard.syncNextVisibilityLocked(recid, trackedShards, tx, persist)
-			shard.mu.Unlock()
-		}
-		// Undo deletes (reverse order): restore global visibility
-		for i := len(st.DeletedRecids) - 1; i >= 0; i-- {
-			recid := st.DeletedRecids[i]
-			shard.mu.Lock()
-			shard.deletions.Set(uint(recid), false)
-			if persist {
-				shard.logVisibilityChangeLocked(recid, false, tx.durableID())
-			}
-			shard.rollbackProtected.Set(uint(recid), false)
-			shard.syncNextVisibilityLocked(recid, trackedShards, tx, persist)
-			shard.mu.Unlock()
-		}
-		st.mu.Unlock()
-		if persist && shard.t.PersistencyMode == Safe && shard.logfile != nil {
-			shard.logfile.Flush(true)
+			shard.syncNextVisibilityLocked(recid, tracked, tx, persist, tx.writeHeld)
+			st.InsertMask.Set(uint(recid), false)
+		}()
+	}
+}
+
+// Restore deleted rows BEFORE hiding inserted versions across all generations.
+// A source INSERT may enter a checkpoint as a copied row and later acquire only
+// a successor DELETE journal entry. Per-shard undo in map order could otherwise
+// restore that intermediate version after the source's insert undo hid it.
+// Keep every journal suffix until both phases and every required WAL barrier
+// succeed, so a failed append/flush retains the complete retry boundary.
+// Caller owns tx.mu and the native transaction decision/undo owner.
+func (tx *TxContext) restoreCursorStability(saved map[uuid.UUID]shardSavepoint, tracked map[*storageShard]struct{}, persist bool) {
+	directory := tx.shardTransactions()
+	for _, inserts := range []bool{false, true} {
+		for shard, st := range directory {
+			tx.restoreCursorStabilityShard(shard, st, saved[shard.uuid], tracked, persist, inserts)
 		}
 	}
+	if persist {
+		for shard := range directory {
+			if shard.t.PersistencyMode == Safe && shard.logfile != nil {
+				shard.logfile.Flush(true)
+			}
+		}
+	}
+	for shard, st := range directory {
+		st.mu.Lock()
+		lens := saved[shard.uuid]
+		st.DeletedRecids = st.DeletedRecids[:lens.DeletedLen]
+		st.InsertRecids = st.InsertRecids[:lens.InsertLen]
+		st.mu.Unlock()
+	}
+}
+
+func (tx *TxContext) rollbackCursorStability(persist bool) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	trackedShards := tx.trackedShardSetLocked()
+	tx.restoreCursorStability(nil, trackedShards, persist)
 	tx.repartitionDeletes = nil
 	tx.releaseActiveTransactionsLocked()
 	tx.State = TxAborted
 	tx.shards.Store(nil)
-	tx.touchedShards = sync.Map{}
-	tx.mu.Unlock()
+	tx.releaseTouchedShards()
 }
 
 // rollbackACID discards overlay masks. Staged rows that were globally hidden
@@ -1306,9 +1716,10 @@ func (tx *TxContext) rollbackACID() {
 	for shard, st := range tx.shardTransactions() {
 		st.mu.Lock()
 		shard.mu.Lock()
-		for _, recid := range st.UndeleteRecids {
+		for _, change := range st.UndeleteRecids {
+			recid := change.recid
 			shard.rollbackProtected.Set(uint(recid), false)
-			shard.syncNextVisibilityLocked(recid, trackedShards, tx, false)
+			shard.syncNextVisibilityLocked(recid, trackedShards, tx, false, tx.writeHeld)
 		}
 		shard.mu.Unlock()
 		st.mu.Unlock()
@@ -1318,7 +1729,7 @@ func (tx *TxContext) rollbackACID() {
 	tx.State = TxAborted
 	tx.shards.Store(nil)
 	tx.mu.Unlock()
-	tx.touchedShards = sync.Map{}
+	tx.releaseTouchedShards()
 }
 
 // SessionStateFromTx returns the SessionState from the given tx, falling back
@@ -1358,6 +1769,7 @@ func transactionForSession(session scm.Scmer) *TxContext {
 	tx := NewTxContext(TxCursorStability)
 	tx.Session = session
 	tx.State = TxCommitted
+	tx.closeResources()
 	sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
 	return tx
 }
@@ -1373,9 +1785,18 @@ func WithAutocommit(session scm.Scmer, ss *scm.SessionState, querySeq uint64, qu
 	defer tx.endQuery(querySeq)
 	// Preserve the preexisting single-statement compatibility exception.
 	// New request executors supply a parsed, generic recovery capability.
-	return runAutocommitStatement(tx, session, strings.EqualFold(strings.TrimSpace(query), "ROLLBACK"), fn)
+	return runAutocommitStatement(tx, session, strings.EqualFold(strings.TrimSpace(query), "ROLLBACK"), TxCursorStability, fn)
 }
-func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, fn scm.Scmer) scm.Scmer {
+func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, implicitMode TxMode, fn scm.Scmer, policies ...scm.Scmer) scm.Scmer {
+	var policy scm.Scmer
+	if len(policies) != 0 {
+		policy = policies[0]
+	}
+	defer func() {
+		tx.finalizationMu.Lock()
+		defer tx.finalizationMu.Unlock()
+		tx.finishResourceDecision()
+	}()
 	if !recovery || !tx.replicationActive {
 		replicationEnter(tx, session)
 	}
@@ -1392,11 +1813,19 @@ func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, fn 
 	}
 
 	if !explicit {
-		tx.reset(TxCursorStability)
+		tx.reset(implicitMode)
 		tx.autoCommit = true
 		tx.Session = session
 	}
 
+	trackedState := tx.transactionState
+	if !policy.IsNil() {
+		trackedState.statementMutationEntered.Store(false)
+		trackedState.failureTracking.Store(true)
+		defer trackedState.failureTracking.Store(false)
+	}
+	statementTransactionID := tx.ID
+	statementGeneration := tx.statementGeneration.Load()
 	var result scm.Scmer
 	var panicVal any
 	func() {
@@ -1413,8 +1842,57 @@ func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, fn 
 	}()
 
 	if panicVal != nil {
+		drainFailed := false
+		if !policy.IsNil() {
+			// Drain query work as well as the checked native producer before a
+			// language policy observes its completion. Deferred retirement is idempotent.
+			func() {
+				defer func() {
+					if failure := recover(); failure != nil {
+						drainFailed = true
+						panicVal = failure
+					}
+				}()
+				tx.endStatement()
+			}()
+		}
+		var admission *rollbackOnlyViolation
+		if failure, ok := panicVal.(error); ok && explicit && !drainFailed && tx.rollbackOnly.Load() && errors.As(failure, &admission) && !nativeFailurePolicyExcluded(panicVal) {
+			panic(panicVal)
+		}
+		clearMarker := false
+		if explicit && !policy.IsNil() && !drainFailed {
+			var preserve bool
+			var policyFailure any
+			func() {
+				defer func() { policyFailure = recover() }()
+				preserve, clearMarker = tx.chooseFailureDisposition(policy, statementTransactionID, statementGeneration, panicVal)
+			}()
+			if policyFailure != nil {
+				panicVal = policyFailure
+			}
+			if preserve {
+				panic(panicVal)
+			}
+		}
+		// Only the actual outer statement owner emits this fact, after all row
+		// callbacks/work have drained and its complete savepoint undo succeeded.
+		// The marker must name this exact transaction and statement scope.
+		// A private sink or nested source cannot preserve its caller by carrying
+		// an undo fact from a different execution. Autocommit still aborts.
+		if explicit && policy.IsNil() {
+			if failure, ok := panicVal.(error); ok {
+				var restored *nativeStatementRestoredError
+				if errors.As(failure, &restored) && restored.restoredBy(statementTransactionID, statementGeneration) {
+					panic(panicVal)
+				}
+			}
+		}
 		if tx.State == TxActive && !tx.decisionStarted {
-			if _, persistenceFailure := panicVal.(*PersistenceFailure); persistenceFailure {
+			tx.mu.Lock()
+			checkedUndo := tx.checkedMutation != nil
+			tx.mu.Unlock()
+			if _, persistenceFailure := panicVal.(*PersistenceFailure); persistenceFailure && !checkedUndo {
 				if tx.Mode == TxCursorStability {
 					tx.rollbackCursorStability(false)
 				} else {
@@ -1423,6 +1901,9 @@ func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, fn 
 			} else {
 				tx.Rollback()
 			}
+		}
+		if clearMarker && tx.State == TxAborted && !tx.decisionPending() {
+			sessionFn(scm.NewString("transaction"), scm.NewNil())
 		}
 		panic(panicVal)
 	}
@@ -1433,12 +1914,21 @@ func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, fn 
 	if !sessionFn(scm.NewString("transaction")).IsNil() {
 		return result
 	}
+	// An explicit control statement may already have completed the native
+	// decision. Its request wrapper must not commit an already rolled-back owner.
+	if tx.State != TxActive && !tx.decisionPending() {
+		return result
+	}
 
 	if err := tx.Commit(); err != nil {
-		if tx.decisionStarted && tx.State == TxActive {
-			sessionFn(scm.NewString("transaction"), scm.NewBool(true))
-		}
-		panic("autocommit failed: " + err.Error())
+		func() {
+			tx.finalizationMu.Lock()
+			defer tx.finalizationMu.Unlock()
+			if tx.decisionPending() {
+				sessionFn(scm.NewString("transaction"), scm.NewBool(true))
+			}
+		}()
+		panic(fmt.Errorf("autocommit failed: %w", err))
 	}
 	return result
 }
@@ -1446,18 +1936,30 @@ func runAutocommitStatement(tx *TxContext, session scm.Scmer, recovery bool, fn 
 // WithQueryRequest owns cancellation/process-list state for a complete request.
 // fn receives a sequential statement executor (text, recovery, body). Recovery
 // is a trusted frontend capability derived from its parsed control statement,
-// never a SQL keyword interpreted here. Native transaction records are reused.
-func WithQueryRequest(session scm.Scmer, ss *scm.SessionState, querySeq uint64, query string, fn scm.Scmer) scm.Scmer {
+// never a SQL keyword interpreted here. implicitMode selects only the reset of
+// implicit statements; an explicit transaction retains its existing owner and
+// mode. Native transaction records are reused.
+func WithQueryRequest(session scm.Scmer, ss *scm.SessionState, querySeq uint64, query string, implicitMode TxMode, fn scm.Scmer) scm.Scmer {
+	if implicitMode != TxCursorStability && implicitMode != TxACID {
+		panic("unsupported implicit transaction strategy")
+	}
 	tx := transactionForSession(session)
 	tx.queryMu.Lock()
 	defer tx.queryMu.Unlock()
-	tx.SessionState = ss
-	tx.querySeq.Store(querySeq)
-	info := &query
-	tx.queryInfo.Store(info)
-	if ss != nil {
-		ss.SetQueryInfoPointer(querySeq, info)
-	}
+	func() {
+		tx.bindingMu.Lock()
+		defer tx.bindingMu.Unlock()
+		if tx.bindingAttempt != nil {
+			panic(newNativeMutationBusyError(tx.bindingAttempt.state, "request entry"))
+		}
+		tx.SessionState = ss
+		tx.querySeq.Store(querySeq)
+		info := &query
+		tx.queryInfo.Store(info)
+		if ss != nil {
+			ss.SetQueryInfoPointer(querySeq, info)
+		}
+	}()
 	var live, executing atomic.Bool
 	live.Store(true)
 	defer live.Store(false)
@@ -1477,16 +1979,64 @@ func WithQueryRequest(session scm.Scmer, ss *scm.SessionState, querySeq uint64, 
 		}
 		tx.beginQuery(ss, querySeq, a[0].String())
 		defer tx.endStatement()
-		return runAutocommitStatement(tx, session, a[1].Bool(), a[2])
+		if len(a) != 3 && len(a) != 4 {
+			panic("statement executor requires text, recovery, body and optional failure policy")
+		}
+		var policy scm.Scmer
+		if len(a) == 4 {
+			policy = a[3]
+		}
+		return runAutocommitStatement(tx, session, a[1].Bool(), implicitMode, a[2], policy)
 	})
 	return scm.Apply(fn, statement)
 }
 
+// checkQueryCancellation is the existing tx_check request boundary. Call it
+// before an operator starts work, never inside a row loop.
+func (tx *TxContext) checkQueryCancellation() {
+	if tx == nil {
+		return
+	}
+	ss, seq := tx.QuerySessionState()
+	if ss == nil || seq == 0 {
+		return
+	}
+	if ss.IsKilledSeq(seq) {
+		panic(context.Canceled)
+	}
+	if ctx := ss.QueryContext(seq); ctx != nil && ctx.Err() != nil {
+		panic(ctx.Err())
+	}
+}
+
 func txRequiresQueryLocalCache(tx *TxContext) bool {
-	return tx != nil && (!tx.autoCommit || tx.Mode == TxACID || tx.SessionState.HasLocks())
+	// Terminal owners have already closed their native resources. Recovery
+	// controls can compile independently; admission still rejects ordinary work
+	// while an explicit failed owner remains parked in the session.
+	return tx != nil && tx.State == TxActive && (!tx.autoCommit || tx.Mode == TxACID || tx.SessionState.HasLocks())
 }
 
 func initTransaction(en scm.Env) {
+	initMutationBuiltins(&en)
+	scm.Declare(&en, &scm.Declaration{Name: "tx_savepoint", Fn: func(a ...scm.Scmer) scm.Scmer {
+		tx := scmerToTxContext(a[0])
+		if tx == nil || tx.State != TxActive {
+			panic("savepoint requires an active native transaction")
+		}
+		return scm.NewAny(tx.CreateSavepoint())
+	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Params: []*scm.TypeDescriptor{{Kind: "any", Label: "transaction"}}, Return: &scm.TypeDescriptor{Kind: "any"}}})
+	scm.Declare(&en, &scm.Declaration{Name: "tx_rollback_to_savepoint", Fn: func(a ...scm.Scmer) scm.Scmer {
+		tx := scmerToTxContext(a[0])
+		sp, ok := a[1].Any().(Savepoint)
+		if tx == nil || tx.State != TxActive || !ok {
+			panic("rollback requires native transaction and savepoint capabilities")
+		}
+		tx.RollbackToSavepoint(sp)
+		return scm.NewBool(true)
+	}, Type: &scm.TypeDescriptor{Kind: "func", HasSideEffects: true, Params: []*scm.TypeDescriptor{{Kind: "any", Label: "transaction"}, {Kind: "any", Label: "savepoint"}}, Return: &scm.TypeDescriptor{Kind: "bool"}}})
+	initTransactionResources(&en)
+	initTransactionState(&en)
+	initSerializableValidation(&en)
 	scm.DeclareTitle("Transactions")
 	scm.Declare(&en, &scm.Declaration{
 		Name: "tx_query",
@@ -1512,18 +2062,9 @@ func initTransaction(en scm.Env) {
 		Name: "tx_check",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			tx := scmerToTxContext(a[0])
-			if tx == nil {
-				return scm.NewBool(true)
-			}
-			ss, seq := tx.QuerySessionState()
-			if ss == nil || seq == 0 {
-				return scm.NewBool(true)
-			}
-			if ss.IsKilledSeq(seq) {
-				panic(context.Canceled)
-			}
-			if ctx := ss.QueryContext(seq); ctx != nil && ctx.Err() != nil {
-				panic(ctx.Err())
+			tx.checkQueryCancellation()
+			if err := tx.validateSerializableReads(); err != nil {
+				panic(err)
 			}
 			return scm.NewBool(true)
 		},
@@ -1547,22 +2088,13 @@ func initTransaction(en scm.Env) {
 		Name: "tx_begin",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			sessionFn := a[0].Func()
 			tx := transactionForSession(a[0])
 			if len(a) > 1 && !a[1].IsNil() {
-				if current, ok := a[1].Any().(*TxContext); ok {
+				if current := scmerToTxContext(a[1]); current != nil {
 					tx = current
 				}
 			}
-			if tx.State == TxActive {
-				if err := tx.Commit(); err != nil {
-					panic("BEGIN failed to finish current statement: " + err.Error())
-				}
-			}
-			tx.reset(TxCursorStability)
-			tx.Session = a[0]
-			sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
-			sessionFn(scm.NewString("transaction"), scm.NewInt(1))
+			tx.beginSessionTransaction(a[0], TxCursorStability)
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Begins a new cursor-stability transaction. Takes the session function as argument. Stores the transaction context in the session.", HasSideEffects: true,
@@ -1575,25 +2107,16 @@ func initTransaction(en scm.Env) {
 		Name: "tx_begin_acid",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			sessionFn := a[0].Func()
 			tx := transactionForSession(a[0])
 			if len(a) > 1 && !a[1].IsNil() {
-				if current, ok := a[1].Any().(*TxContext); ok {
+				if current := scmerToTxContext(a[1]); current != nil {
 					tx = current
 				}
 			}
-			if tx.State == TxActive {
-				if err := tx.Commit(); err != nil {
-					panic("BEGIN failed to finish current statement: " + err.Error())
-				}
-			}
-			tx.reset(TxACID)
-			tx.Session = a[0]
-			sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
-			sessionFn(scm.NewString("transaction"), scm.NewInt(1))
+			tx.beginSessionTransaction(a[0], TxACID)
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "Begins a new ACID transaction with snapshot isolation and OCC commit. Takes the session function as argument.", HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Begins a new ACID private-overlay transaction with current committed reads and write-conflict validation. Takes the session function as argument.", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{{Kind: "func", Label: "session", Description: "the session function to store tx state in", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}, {Kind: "any", Label: "tx", Optional: true}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -1603,19 +2126,12 @@ func initTransaction(en scm.Env) {
 		Name: "tx_commit",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			sessionFn := a[0].Func()
-			existingTx := sessionFn(scm.NewString("__memcp_tx"))
-			if !existingTx.IsNil() {
-				if tx, ok := existingTx.Any().(*TxContext); ok && tx.State == TxActive {
-					if err := tx.Commit(); err != nil {
-						if !tx.decisionStarted || tx.State != TxActive {
-							sessionFn(scm.NewString("transaction"), scm.NewNil())
-						}
-						panic("COMMIT failed: " + err.Error())
-					}
-				}
+			existingTx := scm.Apply(a[0], scm.NewString("__memcp_tx"))
+			if tx, ok := existingTx.Any().(*TxContext); ok && tx != nil {
+				tx.commitSessionTransaction(a[0])
+			} else {
+				scm.Apply(a[0], scm.NewString("transaction"), scm.NewNil())
 			}
-			sessionFn(scm.NewString("transaction"), scm.NewNil())
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Commits the current transaction.", HasSideEffects: true,
@@ -1628,14 +2144,12 @@ func initTransaction(en scm.Env) {
 		Name: "tx_rollback",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			sessionFn := a[0].Func()
-			existingTx := sessionFn(scm.NewString("__memcp_tx"))
-			if !existingTx.IsNil() {
-				if tx, ok := existingTx.Any().(*TxContext); ok && tx.State == TxActive {
-					tx.Rollback()
-				}
+			existingTx := scm.Apply(a[0], scm.NewString("__memcp_tx"))
+			if tx, ok := existingTx.Any().(*TxContext); ok && tx != nil {
+				tx.rollbackSessionTransaction(a[0])
+			} else {
+				scm.Apply(a[0], scm.NewString("transaction"), scm.NewNil())
 			}
-			sessionFn(scm.NewString("transaction"), scm.NewNil())
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Rolls back the current transaction.", HasSideEffects: true,
@@ -1647,17 +2161,30 @@ func initTransaction(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "with_query_request",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if len(a) != 6 || !a[4].IsString() {
+				panic("with_query_request requires session, state, sequence, query, implicit strategy and callback")
+			}
+			var implicitMode TxMode
+			switch a[4].String() {
+			case "cursor-stability":
+				implicitMode = TxCursorStability
+			case "acid":
+				implicitMode = TxACID
+			default:
+				panic("unsupported implicit transaction strategy")
+			}
 			var ss *scm.SessionState
 			if !a[1].IsNil() {
 				ss, _ = a[1].Any().(*scm.SessionState)
 			}
-			return WithQueryRequest(a[0], ss, uint64(a[2].Int()), a[3].String(), a[4])
+			return WithQueryRequest(a[0], ss, uint64(a[2].Int()), a[3].String(), implicitMode, a[5])
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "owns one request while executing sequential statements with independent autocommit and cache lifetimes", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "func", Label: "session"}, {Kind: "any", Label: "session_state"},
 				{Kind: "int", Label: "query_seq"}, {Kind: "string", Label: "query"},
-				{Kind: "func", Label: "fn", Params: []*scm.TypeDescriptor{{Kind: "func", Label: "statement", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "text"}, {Kind: "bool", Label: "recovery"}, {Kind: "func", Label: "body", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "any"}}}, Return: &scm.TypeDescriptor{Kind: "any"}}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "string", Label: "implicit_strategy", Description: "native strategy for implicit statements: acid or cursor-stability; explicit transactions retain their existing mode"},
+				{Kind: "func", Label: "fn", Params: []*scm.TypeDescriptor{{Kind: "func", Label: "statement", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "text"}, {Kind: "bool", Label: "recovery"}, {Kind: "func", Label: "body", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "any"}}, {Kind: "func", Label: "failure_policy", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", Label: "failure"}, {Kind: "string", Label: "completion"}}, Return: &scm.TypeDescriptor{Kind: "string"}}}, Return: &scm.TypeDescriptor{Kind: "any"}}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			}, Return: &scm.TypeDescriptor{Kind: "any"},
 		},
 	})

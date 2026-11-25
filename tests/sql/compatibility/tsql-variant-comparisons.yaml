@@ -1,0 +1,132 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server comparison references: https://dbfiddle.uk/GU68BktN and
+# https://dbfiddle.uk/IG7TC2wU. Intrinsic variant declarations, not SCM tags,
+# determine the family precedence and character comparison profile.
+metadata:
+  description: SQL variant intrinsic metadata owns comparison precedence, NULL results and compatible character ordering
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+setup:
+- sql: CREATE TABLE variant_comparison_rows(id INT PRIMARY KEY, marker INT)
+- sql: INSERT variant_comparison_rows VALUES(1,1),(2,0),(3,NULL)
+cleanup:
+- sql: DROP TABLE IF EXISTS variant_comparison_rows
+test_cases:
+- name: A NULL intrinsic variant compares UNKNOWN in both directions
+  sql: |
+    SELECT CASE WHEN SERVERPROPERTY('Unknown')=3 THEN 1 WHEN NOT(SERVERPROPERTY('Unknown')=3) THEN 0 ELSE -1 END AS left_null,
+      CASE WHEN 3=SERVERPROPERTY('Unknown') THEN 1 WHEN NOT(3=SERVERPROPERTY('Unknown')) THEN 0 ELSE -1 END AS right_null,
+      CASE WHEN SERVERPROPERTY('Unknown')<>SERVERPROPERTY('Unknown') THEN 1 WHEN NOT(SERVERPROPERTY('Unknown')<>SERVERPROPERTY('Unknown')) THEN 0 ELSE -1 END AS both_null
+  expect: {rows: 1, data: [{left_null: -1, right_null: -1, both_null: -1}]}
+- name: Deployment feature predicates preserve SQL UNKNOWN and leave their flag unset
+  sql: |
+    DECLARE @enabled BIT=0;
+    IF ((SERVERPROPERTY(N'EngineEdition')=3)
+      AND (((@@microsoftversion/POWER(2,24)=9) AND (@@microsoftversion&0xffff>=3024))
+        OR ((@@microsoftversion/POWER(2,24)=10) AND (@@microsoftversion&0xffff>=1600))))
+      SET @enabled=1;
+    SELECT @enabled AS enabled;
+  expect: {rows: 1, data: [{enabled: false}]}
+- name: Exact numeric variants compare with ordinary integer and BIT values
+  sql: |
+    SELECT CASE WHEN SESSIONPROPERTY('ANSI_NULLS')=CAST(1 AS INT) THEN 1 ELSE 0 END AS integer_equal,
+      CASE WHEN CAST(1 AS INT)=SESSIONPROPERTY('ANSI_NULLS') THEN 1 ELSE 0 END AS reversed_equal,
+      CASE WHEN SESSIONPROPERTY('ANSI_NULLS')=CAST(1 AS BIT) THEN 1 ELSE 0 END AS bit_equal
+  expect: {rows: 1, data: [{integer_equal: 1, reversed_equal: 1, bit_equal: 1}]}
+- name: Every comparison operator consumes the intrinsic numeric value
+  sql: |
+    SELECT CASE WHEN SESSIONPROPERTY('ANSI_NULLS')<>0 THEN 1 ELSE 0 END AS not_equal,
+      CASE WHEN SESSIONPROPERTY('ANSI_NULLS')>0 THEN 1 ELSE 0 END AS greater_value,
+      CASE WHEN SESSIONPROPERTY('ANSI_NULLS')>=1 THEN 1 ELSE 0 END AS greater_equal,
+      CASE WHEN SESSIONPROPERTY('ANSI_NULLS')<2 THEN 1 ELSE 0 END AS lesser_value,
+      CASE WHEN SESSIONPROPERTY('ANSI_NULLS')<=1 THEN 1 ELSE 0 END AS lesser_equal
+  expect: {rows: 1, data: [{not_equal: 1, greater_value: 1, greater_equal: 1, lesser_value: 1, lesser_equal: 1}]}
+- name: Exact numeric comparison preserves supported decimal declarations
+  sql: |
+    SELECT CASE WHEN SESSIONPROPERTY('ANSI_NULLS')=CAST(1 AS DECIMAL(3,2)) THEN 1 ELSE 0 END AS decimal_equal,
+      CASE WHEN SESSIONPROPERTY('ANSI_NULLS')<CAST(1.1 AS DECIMAL(3,2)) THEN 1 ELSE 0 END AS fraction_order
+  expect: {rows: 1, data: [{decimal_equal: 1, fraction_order: 1}]}
+- name: Full decimal comparison retains the independent high-scale numeric target
+  sql: |
+    SELECT CASE WHEN SESSIONPROPERTY('ANSI_NULLS')=CAST(1 AS DECIMAL(3,2)) THEN 1 ELSE 0 END AS decimal_equal,
+      CASE WHEN SESSIONPROPERTY('ANSI_NULLS')<CAST(1.1 AS DECIMAL(3,2)) THEN 1 ELSE 0 END AS fraction_order,
+      CASE WHEN SESSIONPROPERTY('ANSI_NULLS')>CAST(0 AS DECIMAL(38,38)) THEN 1 ELSE 0 END AS narrow_decimal,
+      CASE WHEN CAST(0 AS DECIMAL(38,38))<SESSIONPROPERTY('ANSI_NULLS') THEN 1 ELSE 0 END AS reversed_decimal
+  expect: {rows: 1, data: [{decimal_equal: 1, fraction_order: 1, narrow_decimal: 1, reversed_decimal: 1}]}
+  # The existing native DECIMAL scale cap rejects CAST(...,38,38) before any
+  # variant comparison. Preserve the complete positive target independently.
+  noncritical: true
+- name: Approximate and exact numeric families compare by precedence before value
+  sql: |
+    SELECT CASE WHEN SESSIONPROPERTY('ANSI_NULLS')=CAST(1 AS FLOAT) THEN 1 ELSE 0 END AS equal_value,
+      CASE WHEN SESSIONPROPERTY('ANSI_NULLS')<CAST(-100 AS FLOAT) THEN 1 ELSE 0 END AS family_order,
+      CASE WHEN CAST(-100 AS FLOAT)>SESSIONPROPERTY('ANSI_NULLS') THEN 1 ELSE 0 END AS reversed_order
+  expect: {rows: 1, data: [{equal_value: 0, family_order: 1, reversed_order: 1}]}
+- name: Numeric variants outrank character and binary families without parsing their values
+  sql: |
+    SELECT CASE WHEN SESSIONPROPERTY('ANSI_NULLS')>N'99999' THEN 1 ELSE 0 END AS national_order,
+      CASE WHEN SESSIONPROPERTY('ANSI_NULLS')>'not numeric' THEN 1 ELSE 0 END AS ansi_order,
+      CASE WHEN SESSIONPROPERTY('ANSI_NULLS')>CAST(0xff AS VARBINARY(1)) THEN 1 ELSE 0 END AS binary_order
+  expect: {rows: 1, data: [{national_order: 1, ansi_order: 1, binary_order: 1}]}
+- name: Character variants compare values within their declared collation
+  sql: |
+    SELECT CASE WHEN SERVERPROPERTY('Edition')=N'MemCP' THEN 1 ELSE 0 END AS exact_value,
+      CASE WHEN SERVERPROPERTY('Edition')=N'MEMCP   ' THEN 1 ELSE 0 END AS padded_case,
+      CASE WHEN SERVERPROPERTY('Edition')='MemCP' THEN 1 ELSE 0 END AS ansi_value,
+      CASE WHEN SERVERPROPERTY('Edition')<N'MemCQ' THEN 1 ELSE 0 END AS lesser_value,
+      CASE WHEN SERVERPROPERTY('Edition')>N'MemCO' THEN 1 ELSE 0 END AS greater_value,
+      CASE WHEN SERVERPROPERTY('Edition')<>N'other' THEN 1 ELSE 0 END AS not_equal
+  expect: {rows: 1, data: [{exact_value: 1, padded_case: 1, ansi_value: 1, lesser_value: 1, greater_value: 1, not_equal: 1}]}
+- name: Two intrinsic variants retain value comparison and numeric versus character precedence
+  sql: |
+    SELECT CASE WHEN SERVERPROPERTY('Edition')=SERVERPROPERTY('Edition') THEN 1 ELSE 0 END AS same_value,
+      CASE WHEN SESSIONPROPERTY('ANSI_NULLS')>SERVERPROPERTY('Edition') THEN 1 ELSE 0 END AS family_order,
+      CASE WHEN SERVERPROPERTY('Edition')<SESSIONPROPERTY('ANSI_NULLS') THEN 1 ELSE 0 END AS reversed_order
+  expect: {rows: 1, data: [{same_value: 1, family_order: 1, reversed_order: 1}]}
+- name: Row predicates preserve nullable inputs and exact row identity
+  sql: SELECT id FROM variant_comparison_rows WHERE SESSIONPROPERTY('ANSI_NULLS')=marker ORDER BY id
+  expect: {rows: 1, data: [{id: 1}]}
+- name: Aggregates retain the comparison values rather than intrinsic carriers
+  sql: SELECT SUM(CASE WHEN SESSIONPROPERTY('ANSI_NULLS')=marker THEN id ELSE 0 END) AS matched,COUNT(*) AS all_rows FROM variant_comparison_rows
+  expect: {rows: 1, data: [{matched: 1, all_rows: 3}]}
+- name: A grouped character comparison retains an immutable intrinsic declaration
+  sql: SELECT SUM(CASE WHEN SERVERPROPERTY('Edition')=N'MemCP' THEN id ELSE 0 END) AS matched FROM variant_comparison_rows
+  expect: {rows: 1, data: [{matched: 6}]}
+- name: Repeated cached predicates and aggregates observe changed session coordinates
+  tds:
+    statements:
+    - sql: SET CONCAT_NULL_YIELDS_NULL OFF
+    - sql: SELECT id FROM variant_comparison_rows WHERE SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL')=marker ORDER BY id
+      expect: {rows: 1, data: [{id: 2}]}
+    - sql: SELECT SUM(CASE WHEN SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL')=marker THEN id ELSE 0 END) AS matched FROM variant_comparison_rows
+      expect: {rows: 1, data: [{matched: 2}]}
+    - sql: SET CONCAT_NULL_YIELDS_NULL ON
+    - sql: SELECT id FROM variant_comparison_rows WHERE SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL')=marker ORDER BY id
+      expect: {rows: 1, data: [{id: 1}]}
+    - sql: SELECT SUM(CASE WHEN SESSIONPROPERTY('CONCAT_NULL_YIELDS_NULL')=marker THEN id ELSE 0 END) AS matched FROM variant_comparison_rows
+      expect: {rows: 1, data: [{matched: 1}]}
+- name: Collation bytes expose the comparison tuple rather than their byte-string order
+  scm: (tsql_variant_collation_tuple (hex2bin "0904d00034"))
+  expect: {result: [1033,0,13,52]}
+- name: Collation metadata precedes equal character payloads
+  scm: |
+    (begin
+      (define first (tsql_variant_box (list "kind" 231 "size" 20 "collation" (hex2bin "0904d00034")) "same"))
+      (define second (tsql_variant_box (list "kind" 231 "size" 20 "collation" (hex2bin "0904d01034")) "same"))
+      (list (tsql_variant_order first second) (tsql_variant_order second first)))
+  expect: {result: [-1,1]}
+- name: MAX character values cannot be promoted to intrinsic variants
+  sql: SELECT CASE WHEN SERVERPROPERTY('Edition')=CAST(N'MemCP' AS NVARCHAR(MAX)) THEN 1 ELSE 0 END AS value
+  expect: {error: true}
+- name: The intrinsic national character payload retains its complete byte boundary
+  scm: (utf16_length ((tsql_variant_box (list "kind" 231 "size" 8000 "collation" (hex2bin "0904d00034")) (string_repeat "x" 4000)) "value"))
+  expect: {result: 4000}
+- name: An intrinsic national character payload cannot exceed its SQL type limit
+  scm: (tsql_variant_box (list "kind" 231 "size" 8000 "collation" (hex2bin "0904d00034")) (string_repeat "x" 4001))
+  expect: {error: true}
+- name: Additional character collation profiles retain their correct result target
+  sql: SELECT CASE WHEN SERVERPROPERTY('Edition')=N'MemCP' COLLATE Latin1_General_100_BIN2 THEN 1 ELSE 0 END AS value
+  expect: {rows: 1, data: [{value: 0}]}
+  noncritical: true

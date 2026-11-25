@@ -1,0 +1,967 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Lifted scalar projections retain every locally produced operand
+setup:
+- sql: CREATE TABLE projection_inputs(id INT,token INT)
+- sql: CREATE TABLE projection_values(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE projection_empty(value INT)
+- sql: CREATE TABLE projection_payload_inputs(seq INT PRIMARY KEY,id INT,token INT)
+- sql: CREATE TABLE projection_string_inputs(seq INT PRIMARY KEY,id INT,token VARCHAR(8))
+- sql: INSERT INTO projection_inputs VALUES(1,10),(2,20),(3,30),(1,40),(NULL,50)
+- sql: INSERT INTO projection_string_inputs VALUES(1,1,'A'),(2,1,'a'),(3,1,'A '),(4,1,'a '),(5,1,'A')
+- sql: INSERT INTO projection_values VALUES(1,100),(2,200),(3,NULL)
+- sql: INSERT INTO projection_payload_inputs VALUES(1,1,10),(2,1,10),(3,1,40),(4,1,NULL),(5,2,20),(6,3,30),(7,4,60),(8,NULL,50)
+- sql: CREATE TABLE projection_feature_flags(actor INT PRIMARY KEY,active BOOLEAN)
+- sql: INSERT INTO projection_feature_flags VALUES(7,TRUE),(8,FALSE),(9,FALSE)
+cleanup:
+- sql: DROP TABLE IF EXISTS projection_inputs
+- sql: DROP TABLE IF EXISTS projection_values
+- sql: DROP TABLE IF EXISTS projection_empty
+- sql: DROP TABLE IF EXISTS projection_payload_inputs
+- sql: DROP TABLE IF EXISTS projection_string_inputs
+- sql: DROP TABLE IF EXISTS projection_feature_flags
+test_cases:
+- name: A nested MAX remains in the scalar input rather than escaping its producer
+  sql: SELECT q.token,(SELECT c.value+(SELECT MAX(z.value) FROM projection_values z) FROM projection_values c WHERE c.id=q.id) AS found FROM projection_inputs q ORDER BY q.token
+  expect:
+    data: [{token: 10,found: 300},{token: 20,found: 400},{token: 30,found: null},{token: 40,found: 300},{token: 50,found: null}]
+- name: A nested MAX retains lexical shadowing across a duplicate preserving UNION
+  sql: SELECT q.token,(SELECT c.value+(SELECT MAX(c.value) FROM projection_values c) FROM projection_values c WHERE c.id=q.id) AS found FROM(SELECT id,token FROM projection_inputs WHERE token<=20 UNION ALL SELECT id,token FROM projection_inputs WHERE token>20)q ORDER BY q.token
+  expect:
+    data: [{token: 10,found: 300},{token: 20,found: 400},{token: 30,found: null},{token: 40,found: 300},{token: 50,found: null}]
+- name: An empty nested aggregate keeps NULL inside each matching scalar row
+  sql: SELECT q.token,(SELECT c.value+(SELECT MAX(z.value) FROM projection_empty z) FROM projection_values c WHERE c.id=q.id) AS found FROM projection_inputs q ORDER BY q.token
+  expect:
+    data: [{token: 10,found: null},{token: 20,found: null},{token: 30,found: null},{token: 40,found: null},{token: 50,found: null}]
+- name: Outer coordinates remain available to a safe strict raw column projection
+  sql: SELECT q.token,(SELECT c.value+q.token FROM projection_values c WHERE c.id=q.id) AS found FROM projection_inputs q ORDER BY q.token
+  expect:
+    data: [{token: 10,found: 110},{token: 20,found: 220},{token: 30,found: null},{token: 40,found: 140},{token: 50,found: null}]
+- name: A nested existence operand retains its local producer and SQL Boolean value
+  sql: SELECT q.token,(SELECT c.value+EXISTS(SELECT 1 FROM projection_values z WHERE z.id=2) FROM projection_values c WHERE c.id=q.id) AS found FROM projection_inputs q ORDER BY q.token
+  expect:
+    data: [{token: 10,found: 101},{token: 20,found: 201},{token: 30,found: null},{token: 40,found: 101},{token: 50,found: null}]
+- name: sql Mixed multi-column scalar payload retains repeated and NULL caller coordinates
+  syntax: sql
+  sql: SELECT q.seq,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token
+    END FROM projection_values c WHERE c.id=q.id) AS found FROM projection_payload_inputs
+    q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: null
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: 30
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: sql A NULL caller coordinate remains an identity binding rather than an SQL
+    filter
+  syntax: sql
+  sql: SELECT q.seq,(SELECT CASE WHEN q.token IS NULL THEN c.id ELSE c.value+c.id+q.token
+    END FROM projection_values c WHERE c.id=q.id) AS found FROM projection_payload_inputs
+    q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: 1
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: null
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: sql A NULL payload does not suppress scalar multiple-row errors
+  syntax: sql
+  sql: SELECT (SELECT c.id+c.value+q.token FROM projection_values c WHERE c.id>=q.id)
+    AS found FROM projection_payload_inputs q WHERE q.seq=4
+  expect:
+    error: true
+- name: tsql Mixed multi-column scalar payload retains repeated and NULL caller coordinates
+  syntax: tsql
+  sql: SELECT q.seq,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token
+    END FROM projection_values c WHERE c.id=q.id) AS found FROM projection_payload_inputs
+    q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: null
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: 30
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: tsql A NULL caller coordinate remains an identity binding rather than an SQL
+    filter
+  syntax: tsql
+  sql: SELECT q.seq,(SELECT CASE WHEN q.token IS NULL THEN c.id ELSE c.value+c.id+q.token
+    END FROM projection_values c WHERE c.id=q.id) AS found FROM projection_payload_inputs
+    q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: 1
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: null
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: tsql A NULL payload does not suppress scalar multiple-row errors
+  syntax: tsql
+  sql: SELECT (SELECT c.id+c.value+q.token FROM projection_values c WHERE c.id>=q.id)
+    AS found FROM projection_payload_inputs q WHERE q.seq=4
+  expect:
+    error: true
+- name: psql Mixed multi-column scalar payload retains repeated and NULL caller coordinates
+  syntax: psql
+  sql: SELECT q.seq,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token
+    END FROM projection_values c WHERE c.id=q.id) AS found FROM projection_payload_inputs
+    q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: null
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: 30
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: psql A NULL caller coordinate remains an identity binding rather than an SQL
+    filter
+  syntax: psql
+  sql: SELECT q.seq,(SELECT CASE WHEN q.token IS NULL THEN c.id ELSE c.value+c.id+q.token
+    END FROM projection_values c WHERE c.id=q.id) AS found FROM projection_payload_inputs
+    q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: 1
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: null
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: psql A NULL payload does not suppress scalar multiple-row errors
+  syntax: psql
+  sql: SELECT (SELECT c.id+c.value+q.token FROM projection_values c WHERE c.id>=q.id)
+    AS found FROM projection_payload_inputs q WHERE q.seq=4
+  expect:
+    error: true
+- name: sql Scalar string payload preserves caller case spacing and duplicates
+  syntax: sql
+  sql: SELECT q.seq,(SELECT CONCAT(c.value,q.token) FROM projection_values c WHERE
+    c.id=q.id) AS found FROM projection_string_inputs q ORDER BY q.seq
+  expect:
+    rows: 5
+    data:
+    - seq: 1
+      found: 100A
+    - seq: 2
+      found: 100a
+    - seq: 3
+      found: '100A '
+    - seq: 4
+      found: '100a '
+    - seq: 5
+      found: 100A
+- name: tsql Scalar string payload preserves caller case spacing and duplicates
+  syntax: tsql
+  sql: SELECT q.seq,(SELECT CONCAT(c.value,q.token) FROM projection_values c WHERE
+    c.id=q.id) AS found FROM projection_string_inputs q ORDER BY q.seq
+  expect:
+    rows: 5
+    data:
+    - seq: 1
+      found: 100A
+    - seq: 2
+      found: 100a
+    - seq: 3
+      found: '100A '
+    - seq: 4
+      found: '100a '
+    - seq: 5
+      found: 100A
+- name: psql Scalar string payload preserves caller case spacing and duplicates
+  syntax: psql
+  sql: SELECT q.seq,(SELECT CONCAT(c.value,q.token) FROM projection_values c WHERE
+    c.id=q.id) AS found FROM projection_string_inputs q ORDER BY q.seq
+  expect:
+    rows: 5
+    data:
+    - seq: 1
+      found: 100A
+    - seq: 2
+      found: 100a
+    - seq: 3
+      found: '100A '
+    - seq: 4
+      found: '100a '
+    - seq: 5
+      found: 100A
+
+- name: sql LIMIT 1 mixed payload keeps repeated and nullable caller values
+  syntax: sql
+  sql: SELECT q.seq,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
+    c WHERE c.id=q.id LIMIT 1) AS found FROM projection_payload_inputs q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: null
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: 30
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: sql LIMIT 1 sibling presence output remains an explicit payload coordinate
+  syntax: sql
+  sql: SELECT q.seq,(SELECT CASE WHEN q.present THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=c.id
+    AND z.value=q.token) END FROM projection_values c WHERE c.id=q.id LIMIT 1) AS found FROM (SELECT i.seq,i.id,i.token,EXISTS(SELECT
+    1 FROM projection_values a WHERE a.id=1) AS present FROM projection_payload_inputs i) q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: true
+    - seq: 2
+      found: true
+    - seq: 3
+      found: true
+    - seq: 4
+      found: true
+    - seq: 5
+      found: true
+    - seq: 6
+      found: true
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: sql Ordered LIMIT 1 range keeps projected caller values outside its bound
+  syntax: sql
+  sql: SELECT q.seq,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
+    c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS found,(SELECT CASE WHEN c.value IS NULL THEN q.id ELSE c.value+c.id+q.id
+    END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS bound_value FROM projection_payload_inputs
+    q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+      bound_value: 102
+    - seq: 2
+      found: 111
+      bound_value: 102
+    - seq: 3
+      found: 141
+      bound_value: 102
+    - seq: 4
+      found: null
+      bound_value: 102
+    - seq: 5
+      found: 222
+      bound_value: 204
+    - seq: 6
+      found: 30
+      bound_value: 3
+    - seq: 7
+      found: 60
+      bound_value: 4
+    - seq: 8
+      found: null
+      bound_value: null
+- name: psql LIMIT 1 mixed payload keeps repeated and nullable caller values
+  syntax: psql
+  sql: SELECT q.seq,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
+    c WHERE c.id=q.id LIMIT 1) AS found FROM projection_payload_inputs q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: null
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: 30
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: psql LIMIT 1 sibling presence output remains an explicit payload coordinate
+  syntax: psql
+  sql: SELECT q.seq,(SELECT CASE WHEN q.present THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=c.id
+    AND z.value=q.token) END FROM projection_values c WHERE c.id=q.id LIMIT 1) AS found FROM (SELECT i.seq,i.id,i.token,EXISTS(SELECT
+    1 FROM projection_values a WHERE a.id=1) AS present FROM projection_payload_inputs i) q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: true
+    - seq: 2
+      found: true
+    - seq: 3
+      found: true
+    - seq: 4
+      found: true
+    - seq: 5
+      found: true
+    - seq: 6
+      found: true
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: psql Ordered LIMIT 1 range keeps projected caller values outside its bound
+  syntax: psql
+  sql: SELECT q.seq,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
+    c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS found,(SELECT CASE WHEN c.value IS NULL THEN q.id ELSE c.value+c.id+q.id
+    END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS bound_value FROM projection_payload_inputs
+    q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+      bound_value: 102
+    - seq: 2
+      found: 111
+      bound_value: 102
+    - seq: 3
+      found: 141
+      bound_value: 102
+    - seq: 4
+      found: null
+      bound_value: 102
+    - seq: 5
+      found: 222
+      bound_value: 204
+    - seq: 6
+      found: 30
+      bound_value: 3
+    - seq: 7
+      found: 60
+      bound_value: 4
+    - seq: 8
+      found: null
+      bound_value: null
+- name: tsql LIMIT 1 mixed payload keeps repeated and nullable caller values
+  syntax: tsql
+  sql: SELECT q.seq,(SELECT TOP(1) CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
+    c WHERE c.id=q.id) AS found FROM projection_payload_inputs q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+    - seq: 2
+      found: 111
+    - seq: 3
+      found: 141
+    - seq: 4
+      found: null
+    - seq: 5
+      found: 222
+    - seq: 6
+      found: 30
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: tsql LIMIT 1 sibling presence output remains an explicit payload coordinate
+  syntax: tsql
+  sql: |
+    SELECT q.seq,(SELECT TOP(1)
+      CASE WHEN q.present=CAST(1 AS bit) THEN CAST(1 AS bit)
+        ELSE CASE WHEN EXISTS(SELECT 1 FROM projection_values z WHERE z.id=c.id AND z.value=q.token)
+          THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END END
+      FROM projection_values c WHERE c.id=q.id) AS found
+    FROM (SELECT i.seq,i.id,i.token,
+      CASE WHEN EXISTS(SELECT 1 FROM projection_values a WHERE a.id=1)
+        THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS present
+      FROM projection_payload_inputs i) q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: true
+    - seq: 2
+      found: true
+    - seq: 3
+      found: true
+    - seq: 4
+      found: true
+    - seq: 5
+      found: true
+    - seq: 6
+      found: true
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: tsql Ordered LIMIT 1 range keeps projected caller values outside its bound
+  syntax: tsql
+  sql: SELECT q.seq,(SELECT TOP(1) CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values
+    c WHERE c.id<=q.id ORDER BY c.id DESC) AS found,(SELECT TOP(1) CASE WHEN c.value IS NULL THEN q.id ELSE c.value+c.id+q.id
+    END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC) AS bound_value FROM projection_payload_inputs
+    q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+      bound_value: 102
+    - seq: 2
+      found: 111
+      bound_value: 102
+    - seq: 3
+      found: 141
+      bound_value: 102
+    - seq: 4
+      found: null
+      bound_value: 102
+    - seq: 5
+      found: 222
+      bound_value: 204
+    - seq: 6
+      found: 30
+      bound_value: 3
+    - seq: 7
+      found: 60
+      bound_value: 4
+    - seq: 8
+      found: null
+      bound_value: null
+
+- name: Bind projection actor 9 for initial inactive actor
+  sql: SET @projection_actor=9
+  session_id: projection-invariant-owner
+- name: Initial inactive actor binds the actual outer and nested invariant
+  sql: |-
+    SELECT q.seq,r.outer_flag,r.found
+    FROM projection_payload_inputs q
+    LEFT JOIN (
+      SELECT c.id,
+        EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE) AS outer_flag,
+        COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE)
+          THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=n.id AND z.value=999) END
+          FROM projection_values n WHERE n.id=c.id LIMIT 1),FALSE) AS found
+      FROM projection_values c
+    ) r ON r.id=q.id ORDER BY q.seq
+  session_id: projection-invariant-owner
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      outer_flag: false
+      found: false
+    - seq: 2
+      outer_flag: false
+      found: false
+    - seq: 3
+      outer_flag: false
+      found: false
+    - seq: 4
+      outer_flag: false
+      found: false
+    - seq: 5
+      outer_flag: false
+      found: false
+    - seq: 6
+      outer_flag: false
+      found: false
+    - seq: 7
+      outer_flag: null
+      found: null
+    - seq: 8
+      outer_flag: null
+      found: null
+- name: Bind projection actor 7 for active actor after inactive caller
+  sql: SET @projection_actor=7
+  session_id: projection-invariant-owner
+- name: Active actor after inactive caller binds the actual outer and nested invariant
+  sql: |-
+    SELECT q.seq,r.outer_flag,r.found
+    FROM projection_payload_inputs q
+    LEFT JOIN (
+      SELECT c.id,
+        EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE) AS outer_flag,
+        COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE)
+          THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=n.id AND z.value=999) END
+          FROM projection_values n WHERE n.id=c.id LIMIT 1),FALSE) AS found
+      FROM projection_values c
+    ) r ON r.id=q.id ORDER BY q.seq
+  session_id: projection-invariant-owner
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      outer_flag: true
+      found: true
+    - seq: 2
+      outer_flag: true
+      found: true
+    - seq: 3
+      outer_flag: true
+      found: true
+    - seq: 4
+      outer_flag: true
+      found: true
+    - seq: 5
+      outer_flag: true
+      found: true
+    - seq: 6
+      outer_flag: true
+      found: true
+    - seq: 7
+      outer_flag: null
+      found: null
+    - seq: 8
+      outer_flag: null
+      found: null
+- name: Bind projection actor 8 for second inactive actor after active caller
+  sql: SET @projection_actor=8
+  session_id: projection-invariant-owner
+- name: Second inactive actor after active caller binds the actual outer and nested invariant
+  sql: |-
+    SELECT q.seq,r.outer_flag,r.found
+    FROM projection_payload_inputs q
+    LEFT JOIN (
+      SELECT c.id,
+        EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE) AS outer_flag,
+        COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE)
+          THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=n.id AND z.value=999) END
+          FROM projection_values n WHERE n.id=c.id LIMIT 1),FALSE) AS found
+      FROM projection_values c
+    ) r ON r.id=q.id ORDER BY q.seq
+  session_id: projection-invariant-owner
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      outer_flag: false
+      found: false
+    - seq: 2
+      outer_flag: false
+      found: false
+    - seq: 3
+      outer_flag: false
+      found: false
+    - seq: 4
+      outer_flag: false
+      found: false
+    - seq: 5
+      outer_flag: false
+      found: false
+    - seq: 6
+      outer_flag: false
+      found: false
+    - seq: 7
+      outer_flag: null
+      found: null
+    - seq: 8
+      outer_flag: null
+      found: null
+- name: Bind projection actor 7 for active actor restored in the cached query
+  sql: SET @projection_actor=7
+  session_id: projection-invariant-owner
+- name: Active actor restored in the cached query binds the actual outer and nested invariant
+  sql: |-
+    SELECT q.seq,r.outer_flag,r.found
+    FROM projection_payload_inputs q
+    LEFT JOIN (
+      SELECT c.id,
+        EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE) AS outer_flag,
+        COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE)
+          THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=n.id AND z.value=999) END
+          FROM projection_values n WHERE n.id=c.id LIMIT 1),FALSE) AS found
+      FROM projection_values c
+    ) r ON r.id=q.id ORDER BY q.seq
+  session_id: projection-invariant-owner
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      outer_flag: true
+      found: true
+    - seq: 2
+      outer_flag: true
+      found: true
+    - seq: 3
+      outer_flag: true
+      found: true
+    - seq: 4
+      outer_flag: true
+      found: true
+    - seq: 5
+      outer_flag: true
+      found: true
+    - seq: 6
+      outer_flag: true
+      found: true
+    - seq: 7
+      outer_flag: null
+      found: null
+    - seq: 8
+      outer_flag: null
+      found: null
+- name: Delete the current actor flag without changing its session coordinate
+  sql: DELETE FROM projection_feature_flags WHERE actor=7
+  session_id: projection-invariant-owner
+- name: Same actor invalidates outer and nested truth after actual DELETE
+  sql: |-
+    SELECT q.seq,r.outer_flag,r.found
+    FROM projection_payload_inputs q
+    LEFT JOIN (
+      SELECT c.id,
+        EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE) AS outer_flag,
+        COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE)
+          THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=n.id AND z.value=999) END
+          FROM projection_values n WHERE n.id=c.id LIMIT 1),FALSE) AS found
+      FROM projection_values c
+    ) r ON r.id=q.id ORDER BY q.seq
+  session_id: projection-invariant-owner
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      outer_flag: false
+      found: false
+    - seq: 2
+      outer_flag: false
+      found: false
+    - seq: 3
+      outer_flag: false
+      found: false
+    - seq: 4
+      outer_flag: false
+      found: false
+    - seq: 5
+      outer_flag: false
+      found: false
+    - seq: 6
+      outer_flag: false
+      found: false
+    - seq: 7
+      outer_flag: null
+      found: null
+    - seq: 8
+      outer_flag: null
+      found: null
+- name: Restore the current actor flag without changing its session coordinate
+  sql: INSERT INTO projection_feature_flags VALUES(7,TRUE)
+  session_id: projection-invariant-owner
+- name: Same actor observes restored outer and nested truth
+  sql: |-
+    SELECT q.seq,r.outer_flag,r.found
+    FROM projection_payload_inputs q
+    LEFT JOIN (
+      SELECT c.id,
+        EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE) AS outer_flag,
+        COALESCE((SELECT CASE WHEN EXISTS(SELECT 1 FROM projection_feature_flags f WHERE f.actor=@projection_actor AND f.active=TRUE)
+          THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=n.id AND z.value=999) END
+          FROM projection_values n WHERE n.id=c.id LIMIT 1),FALSE) AS found
+      FROM projection_values c
+    ) r ON r.id=q.id ORDER BY q.seq
+  session_id: projection-invariant-owner
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      outer_flag: true
+      found: true
+    - seq: 2
+      outer_flag: true
+      found: true
+    - seq: 3
+      outer_flag: true
+      found: true
+    - seq: 4
+      outer_flag: true
+      found: true
+    - seq: 5
+      outer_flag: true
+      found: true
+    - seq: 6
+      outer_flag: true
+      found: true
+    - seq: 7
+      outer_flag: null
+      found: null
+    - seq: 8
+      outer_flag: null
+      found: null
+
+- name: sql A row-dependent sibling presence output follows the exact caller row
+  syntax: sql
+  sql: SELECT q.seq,(SELECT CASE WHEN q.present THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=c.id
+    AND z.value=q.token) END FROM projection_values c WHERE c.id=q.id LIMIT 1) AS found FROM (SELECT i.seq,i.id,i.token,EXISTS(SELECT
+    1 FROM projection_values a WHERE a.id=i.id AND a.value>i.token) AS present FROM projection_payload_inputs i)
+    q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: true
+    - seq: 2
+      found: true
+    - seq: 3
+      found: true
+    - seq: 4
+      found: false
+    - seq: 5
+      found: true
+    - seq: 6
+      found: false
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: psql A row-dependent sibling presence output follows the exact caller row
+  syntax: psql
+  sql: SELECT q.seq,(SELECT CASE WHEN q.present THEN TRUE ELSE EXISTS(SELECT 1 FROM projection_values z WHERE z.id=c.id
+    AND z.value=q.token) END FROM projection_values c WHERE c.id=q.id LIMIT 1) AS found FROM (SELECT i.seq,i.id,i.token,EXISTS(SELECT
+    1 FROM projection_values a WHERE a.id=i.id AND a.value>i.token) AS present FROM projection_payload_inputs i)
+    q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: true
+    - seq: 2
+      found: true
+    - seq: 3
+      found: true
+    - seq: 4
+      found: false
+    - seq: 5
+      found: true
+    - seq: 6
+      found: false
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: tsql A row-dependent sibling presence output follows the exact caller row
+  syntax: tsql
+  sql: |
+    SELECT q.seq,(SELECT TOP(1)
+      CASE WHEN q.present=CAST(1 AS bit) THEN CAST(1 AS bit)
+        ELSE CASE WHEN EXISTS(SELECT 1 FROM projection_values z WHERE z.id=c.id AND z.value=q.token)
+          THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END END
+      FROM projection_values c WHERE c.id=q.id) AS found
+    FROM (SELECT i.seq,i.id,i.token,
+      CASE WHEN EXISTS(SELECT 1 FROM projection_values a WHERE a.id=i.id AND a.value>i.token)
+        THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS present
+      FROM projection_payload_inputs i) q ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: true
+    - seq: 2
+      found: true
+    - seq: 3
+      found: true
+    - seq: 4
+      found: false
+    - seq: 5
+      found: true
+    - seq: 6
+      found: false
+    - seq: 7
+      found: null
+    - seq: 8
+      found: null
+- name: sql Bundled ordered scalar payloads retain caller bindings in joined row callbacks
+  syntax: sql
+  sql: |-
+    SELECT q.seq,l.token AS caller_token,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS found,(SELECT CASE WHEN c.value IS NULL THEN q.id ELSE c.value+c.id+q.id END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS bound_value FROM projection_payload_inputs q JOIN projection_payload_inputs l ON l.seq=q.seq ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+      bound_value: 102
+      caller_token: 10
+    - seq: 2
+      found: 111
+      bound_value: 102
+      caller_token: 10
+    - seq: 3
+      found: 141
+      bound_value: 102
+      caller_token: 40
+    - seq: 4
+      found: null
+      bound_value: 102
+      caller_token: null
+    - seq: 5
+      found: 222
+      bound_value: 204
+      caller_token: 20
+    - seq: 6
+      found: 30
+      bound_value: 3
+      caller_token: 30
+    - seq: 7
+      found: 60
+      bound_value: 4
+      caller_token: 60
+    - seq: 8
+      found: null
+      bound_value: null
+      caller_token: 50
+- name: psql Bundled ordered scalar payloads retain caller bindings in joined row callbacks
+  syntax: psql
+  sql: |-
+    SELECT q.seq,l.token AS caller_token,(SELECT CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS found,(SELECT CASE WHEN c.value IS NULL THEN q.id ELSE c.value+c.id+q.id END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC LIMIT 1) AS bound_value FROM projection_payload_inputs q JOIN projection_payload_inputs l ON l.seq=q.seq ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+      bound_value: 102
+      caller_token: 10
+    - seq: 2
+      found: 111
+      bound_value: 102
+      caller_token: 10
+    - seq: 3
+      found: 141
+      bound_value: 102
+      caller_token: 40
+    - seq: 4
+      found: null
+      bound_value: 102
+      caller_token: null
+    - seq: 5
+      found: 222
+      bound_value: 204
+      caller_token: 20
+    - seq: 6
+      found: 30
+      bound_value: 3
+      caller_token: 30
+    - seq: 7
+      found: 60
+      bound_value: 4
+      caller_token: 60
+    - seq: 8
+      found: null
+      bound_value: null
+      caller_token: 50
+- name: tsql Bundled ordered scalar payloads retain caller bindings in joined row callbacks
+  syntax: tsql
+  sql: |-
+    SELECT q.seq,l.token AS caller_token,(SELECT TOP(1) CASE WHEN c.value IS NULL THEN q.token ELSE c.value+c.id+q.token END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC) AS found,(SELECT TOP(1) CASE WHEN c.value IS NULL THEN q.id ELSE c.value+c.id+q.id END FROM projection_values c WHERE c.id<=q.id ORDER BY c.id DESC) AS bound_value FROM projection_payload_inputs q JOIN projection_payload_inputs l ON l.seq=q.seq ORDER BY q.seq
+  expect:
+    rows: 8
+    data:
+    - seq: 1
+      found: 111
+      bound_value: 102
+      caller_token: 10
+    - seq: 2
+      found: 111
+      bound_value: 102
+      caller_token: 10
+    - seq: 3
+      found: 141
+      bound_value: 102
+      caller_token: 40
+    - seq: 4
+      found: null
+      bound_value: 102
+      caller_token: null
+    - seq: 5
+      found: 222
+      bound_value: 204
+      caller_token: 20
+    - seq: 6
+      found: 30
+      bound_value: 3
+      caller_token: 30
+    - seq: 7
+      found: 60
+      bound_value: 4
+      caller_token: 60
+    - seq: 8
+      found: null
+      bound_value: null
+      caller_token: 50

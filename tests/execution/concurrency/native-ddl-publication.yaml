@@ -1,0 +1,87 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Native declaration writers acquire database publication before table DDL ownership
+  isolated: true
+setup:
+  - sql: CREATE TABLE ddl_order_parent (id INT PRIMARY KEY) ENGINE=MEMORY
+  - sql: CREATE TABLE ddl_order_child (id INT PRIMARY KEY, marker INT) ENGINE=MEMORY
+  - sql: INSERT INTO ddl_order_parent VALUES (1)
+cleanup:
+  - sql: DROP TABLE IF EXISTS ddl_order_child
+  - sql: DROP TABLE IF EXISTS ddl_order_parent
+test_cases:
+  # Mirror TestConstraintMetadataNativeDDLPublication's four iterations using
+  # native APIs. Parallel is the existing joined Scheme special form; there
+  # are no scheduler barriers, sleeps, lock hooks or retries.
+  - name: Four native FK and column writers publish both endpoint declarations
+    scm: |
+      (begin
+        (define child (table "memcp-tests" false "ddl_order_child" false nil))
+        (define parent (table "memcp-tests" false "ddl_order_parent" false nil))
+        (reduce (produceN 4) (lambda (ok i) (begin
+          (define column (concat "extra_" i))
+          (parallel
+            (createforeignkey child "fk" '("id") parent '("id") "restrict" "restrict")
+            (createcolumn child column "INT" '() '()))
+          (define child_keys (get_assoc (show child "constraints") "ForeignKeys"))
+          (define parent_keys (get_assoc (show parent "constraints") "ForeignKeys"))
+          (define coherent (and
+            (expression_equal? (map child_keys (lambda (key) (get_assoc key "Id"))) '("fk"))
+            (expression_equal? (map parent_keys (lambda (key) (get_assoc key "Id"))) '("fk"))
+            (equal? (get_assoc (car child_keys) "Role") "referencing")
+            (equal? (get_assoc (car parent_keys) "Role") "referenced")
+            (expression_equal? (get_assoc (car child_keys) "LocalColumns") '("id"))
+            (expression_equal? (get_assoc (car parent_keys) "LocalColumns") '("id"))
+            (equal? (get_assoc (show child "column" column) "Field") column)))
+          (define cleared (if (< i 3)
+            (and (dropforeignkey child "fk")
+              (empty_list? (get_assoc (show child "constraints") "ForeignKeys"))
+              (empty_list? (get_assoc (show parent "constraints") "ForeignKeys"))) true))
+          (and ok coherent cleared))) true))
+    expect:
+      result: true
+  - name: Concurrently published FK rejects an actual orphan
+    sql: INSERT INTO ddl_order_child (id,marker) VALUES (99,7)
+    expect:
+      error: true
+      contains: foreign key constraint
+  - name: Concurrently published FK accepts its existing parent
+    sql: INSERT INTO ddl_order_child (id,marker) VALUES (1,7)
+  - name: Native FK removal and column publication preserve both endpoint snapshots
+    scm: |
+      (begin
+        (define child (table "memcp-tests" false "ddl_order_child" false nil))
+        (define parent (table "memcp-tests" false "ddl_order_parent" false nil))
+        (parallel
+          (dropforeignkey child "fk")
+          (createcolumn child "drop_extra" "INT" '() '()))
+        (and
+          (empty_list? (get_assoc (show child "constraints") "ForeignKeys"))
+          (empty_list? (get_assoc (show parent "constraints") "ForeignKeys"))
+          (equal? (get_assoc (show child "column" "drop_extra") "Field") "drop_extra")))
+    expect:
+      result: true
+  - name: Removed FK permits a formerly invalid reference
+    sql: INSERT INTO ddl_order_child (id,marker) VALUES (2,7)
+  - name: Native trigger and column writers retain the new column
+    scm: |
+      (begin
+        (define child (table "memcp-tests" false "ddl_order_child" false nil))
+        (parallel
+          (createtrigger child "ddl_order_add10" "before_insert" "" ""
+            (lambda (OLD NEW session tx) (set_assoc NEW "marker" (+ (get_assoc NEW "marker") 10))) true)
+          (createcolumn child "trigger_extra" "INT" '() '()))
+        (equal? (get_assoc (show child "column" "trigger_extra") "Field") "trigger_extra"))
+    expect:
+      result: true
+  - name: Concurrently published native trigger changes the actual inserted row
+    sql: INSERT INTO ddl_order_child (id,marker) VALUES (3,7)
+  - name: Native declaration writers preserve every column and exact callback effects
+    sql: SELECT id,marker,extra_0,extra_1,extra_2,extra_3,drop_extra,trigger_extra FROM ddl_order_child ORDER BY id
+    expect:
+      rows: 3
+      data:
+        - {id: 1, marker: 7, extra_0: null, extra_1: null, extra_2: null, extra_3: null, drop_extra: null, trigger_extra: null}
+        - {id: 2, marker: 7, extra_0: null, extra_1: null, extra_2: null, extra_3: null, drop_extra: null, trigger_extra: null}
+        - {id: 3, marker: 17, extra_0: null, extra_1: null, extra_2: null, extra_3: null, drop_extra: null, trigger_extra: null}

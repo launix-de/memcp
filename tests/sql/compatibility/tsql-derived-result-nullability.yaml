@@ -1,0 +1,117 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: Derived column nullability follows declarations without exposing native editability
+# SQL Server 2022 declaration-only reference: https://dbfiddle.uk/77v5Z-qJ
+setup:
+- sql: CREATE TABLE nullable_parent(id INT NOT NULL PRIMARY KEY,optional INT NULL)
+- sql: CREATE TABLE nullable_head(id INT NOT NULL PRIMARY KEY,parent_id INT NOT NULL)
+- sql: CREATE TABLE nullable_child(id INT NOT NULL PRIMARY KEY,head_id INT NOT NULL)
+- sql: INSERT INTO nullable_parent VALUES(1,7),(2,8),(3,9)
+- sql: INSERT INTO nullable_head VALUES(10,1),(20,2)
+- sql: INSERT INTO nullable_child VALUES(100,10),(101,10)
+- sql: >-
+    CREATE VIEW nullable_source AS
+    SELECT p.id AS pid,p.optional,h.id AS hid,c.id AS cid
+    FROM nullable_parent p LEFT JOIN
+      (nullable_head h INNER JOIN nullable_child c ON c.head_id=h.id) ON h.parent_id=p.id
+- sql: CREATE VIEW nullable_wrapper AS SELECT pid,optional,hid,cid FROM nullable_source
+- sql: >-
+    CREATE VIEW nullable_right AS
+    SELECT p.id AS pid,h.id AS hid,c.id AS cid
+    FROM nullable_head h INNER JOIN nullable_child c ON c.head_id=h.id
+    RIGHT JOIN nullable_parent p ON p.id=h.parent_id
+- sql: CREATE TABLE nullable_identity(id INT IDENTITY PRIMARY KEY)
+- sql: CREATE VIEW nullable_identity_view AS SELECT id FROM nullable_identity
+test_cases:
+- name: Empty stored view results preserve nonnullable and nullable declaration bits
+  tds:
+    statements:
+    - sql: SELECT TOP(0) pid,optional,hid,cid FROM nullable_wrapper
+      expect:
+        rows: 0
+        column_types: &left_types
+        - {name: pid,type: INT,nullable: false}
+        - {name: optional,type: INT,nullable: true}
+        - {name: hid,type: INT,nullable: true}
+        - {name: cid,type: INT,nullable: true}
+- name: Declared nullability remains independent of actual rows and duplicate outer matches
+  tds:
+    statements:
+    - sql: SELECT pid,optional,hid,cid FROM nullable_wrapper ORDER BY pid,cid
+      expect:
+        rows: 4
+        data: [{pid: 1,optional: 7,hid: 10,cid: 100},{pid: 1,optional: 7,hid: 10,cid: 101},{pid: 2,optional: 8,hid: null,cid: null},{pid: 3,optional: 9,hid: null,cid: null}]
+        column_types: *left_types
+- name: A RIGHT joined view preserves the right key and null extends the complete left operand
+  tds:
+    statements:
+    - sql: SELECT TOP(0) pid,hid,cid FROM nullable_right
+      expect:
+        rows: 0
+        column_types:
+        - {name: pid,type: INT,nullable: false}
+        - {name: hid,type: INT,nullable: true}
+        - {name: cid,type: INT,nullable: true}
+- name: An outer consumer can null extend an otherwise nonnullable stored export
+  tds:
+    statements:
+    - sql: SELECT TOP(0) p.id AS parent_id,v.pid AS matched_id FROM nullable_parent p LEFT JOIN nullable_wrapper v ON p.id=v.pid
+      expect:
+        rows: 0
+        column_types:
+        - {name: parent_id,type: INT,nullable: false}
+        - {name: matched_id,type: INT,nullable: true}
+- name: Further derived layers preserve each column declaration independently
+  tds:
+    statements:
+    - sql: SELECT TOP(0) d.pid,d.hid FROM (SELECT pid,hid FROM nullable_wrapper) d
+      expect:
+        rows: 0
+        column_types:
+        - {name: pid,type: INT,nullable: false}
+        - {name: hid,type: INT,nullable: true}
+- name: Declaration-only nullability does not expose derived identity source or editability
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests")
+      (define result (newsession))
+      (tsql_execute_request "memcp-tests" "SELECT TOP(0) id FROM nullable_identity_view" session nil 0
+        (lambda (_row) true) (lambda (_names fields) (result "fields" fields)))
+      (define field (car (result "fields")))
+      (and (equal? (bit_and (field "flags") 1) 0)
+        (equal? (bit_and (field "flags") 20) 0)
+        (equal? (field "user_type") 0) (nil? (field "source"))))
+  expect: {result: true}
+- name: Native direct identity metadata retains its own identity contract
+  scm: |
+    (begin
+      (define session (newsession)) (session "username" "root") (session "schema" "memcp-tests")
+      (define result (newsession))
+      (tsql_execute_request "memcp-tests" "SELECT TOP(0) id FROM nullable_identity" session nil 0
+        (lambda (_row) true) (lambda (_names fields) (result "fields" fields)))
+      (define field (car (result "fields")))
+      (and (equal? (bit_and (field "flags") 1) 0)
+        (equal? (bit_and (field "flags") 16) 16) (not (nil? (field "source")))))
+  expect: {result: true}
+- name: Restart after publishing nested result declarations
+  action: restart
+- name: Cold empty results retain their exact declared nullability through stored views
+  tds:
+    statements:
+    - sql: SELECT TOP(0) pid,optional,hid,cid FROM nullable_wrapper
+      expect:
+        rows: 0
+        column_types: *left_types
+cleanup:
+- sql: DROP VIEW nullable_identity_view
+- sql: DROP VIEW nullable_right
+- sql: DROP VIEW nullable_wrapper
+- sql: DROP VIEW nullable_source
+- sql: DROP TABLE nullable_identity
+- sql: DROP TABLE nullable_child
+- sql: DROP TABLE nullable_head
+- sql: DROP TABLE nullable_parent

@@ -1,0 +1,1627 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/alter-table-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Atomic column property claims retain original transactions ordered history and scalar predecessors
+setup:
+- sql: DROP TABLE IF EXISTS property_comp_reverse_b
+- sql: DROP TABLE IF EXISTS property_comp_reverse_a
+- sql: DROP TABLE IF EXISTS property_comp_commit_b
+- sql: DROP TABLE IF EXISTS property_comp_commit_a
+- sql: DROP TABLE IF EXISTS property_comp_rollback_b
+- sql: DROP TABLE IF EXISTS property_comp_rollback_a
+- sql: DROP TABLE IF EXISTS property_claim_cross_a4
+- sql: DROP TABLE IF EXISTS property_claim_cross_b4
+- sql: DROP TABLE IF EXISTS property_claim_cross_a3
+- sql: DROP TABLE IF EXISTS property_claim_cross_b3
+- sql: DROP TABLE IF EXISTS property_claim_cross_a2
+- sql: DROP TABLE IF EXISTS property_claim_cross_b2
+- sql: DROP TABLE IF EXISTS property_claim_cross_a1
+- sql: DROP TABLE IF EXISTS property_claim_cross_b1
+- sql: DROP TABLE IF EXISTS property_claim_drop_rollback
+- sql: DROP TABLE IF EXISTS property_claim_drop_savepoint
+- sql: DROP TABLE IF EXISTS property_claim_drop_commit
+- sql: DROP TABLE IF EXISTS property_claim_drop_netzero
+- sql: DROP TABLE IF EXISTS property_claim_plain
+- sql: DROP TABLE IF EXISTS property_claim_mix_type
+- sql: DROP TABLE IF EXISTS property_claim_mix_append
+- sql: DROP TABLE IF EXISTS property_claim_alias_rows
+- sql: DROP TABLE IF EXISTS property_claim_rows
+- sql: DROP TABLE IF EXISTS property_claim_prefix
+- sql: DROP TYPE IF EXISTS property_claim_alias
+- sql: CREATE TABLE property_claim_rows(id INT NOT NULL PRIMARY KEY,guid_a UNIQUEIDENTIFIER NULL DEFAULT('00000000-0000-0000-0000-000000000009'),guid_b UNIQUEIDENTIFIER NULL DEFAULT('00000000-0000-0000-0000-000000000008'))
+- sql: INSERT property_claim_rows VALUES(1,'00000000-0000-0000-0000-000000000001',NULL),(2,'00000000-0000-0000-0000-000000000001',NULL),(3,NULL,NULL)
+- sql: CREATE TABLE property_claim_prefix(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+- sql: INSERT property_claim_prefix VALUES(1,0)
+- sql: CREATE TABLE property_claim_drop_rollback(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+- sql: INSERT property_claim_drop_rollback VALUES(1,NULL)
+- sql: CREATE TABLE property_claim_drop_savepoint(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+- sql: INSERT property_claim_drop_savepoint VALUES(1,NULL)
+- sql: CREATE TABLE property_claim_drop_commit(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+- sql: INSERT property_claim_drop_commit VALUES(1,NULL)
+- sql: CREATE TABLE property_claim_drop_netzero(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+- sql: INSERT property_claim_drop_netzero VALUES(1,NULL)
+- sql: CREATE TABLE property_claim_plain(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+- sql: CREATE TABLE property_claim_mix_type(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+- sql: INSERT property_claim_mix_type VALUES(1,'00000000-0000-0000-0000-000000000001')
+- sql: CREATE TABLE property_claim_mix_append(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+- sql: INSERT property_claim_mix_append VALUES(1,'00000000-0000-0000-0000-000000000001')
+- scm: (altercolumn (table "memcp-tests" false "property_claim_rows" false nil) "guid_a" "properties" '("client.marker" 7 "client.label" "unchanged"))
+- sql: CREATE TABLE property_comp_rollback_a(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+- sql: INSERT property_comp_rollback_a VALUES(1,11)
+- sql: CREATE TABLE property_comp_rollback_b(id INT NOT NULL PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+- sql: INSERT property_comp_rollback_b VALUES(1,NULL)
+- sql: CREATE TABLE property_comp_commit_a(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+- sql: INSERT property_comp_commit_a VALUES(1,11)
+- sql: CREATE TABLE property_comp_commit_b(id INT NOT NULL PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+- sql: INSERT property_comp_commit_b VALUES(1,NULL)
+- sql: CREATE TABLE property_comp_reverse_a(id INT NOT NULL PRIMARY KEY,value INT NOT NULL)
+- sql: INSERT property_comp_reverse_a VALUES(1,11)
+- sql: CREATE TABLE property_comp_reverse_b(id INT NOT NULL PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+- sql: INSERT property_comp_reverse_b VALUES(1,NULL)
+- sql: DROP TABLE IF EXISTS property_restore_commit
+- sql: CREATE TABLE property_restore_commit(id INT NOT NULL PRIMARY KEY,token UNIQUEIDENTIFIER NOT NULL ROWGUIDCOL CONSTRAINT property_restore_commit_token_default
+    DEFAULT NEWID(),spare UNIQUEIDENTIFIER NULL,marker VARCHAR(8) NOT NULL CONSTRAINT property_restore_commit_marker_default DEFAULT('keep'))
+- sql: INSERT property_restore_commit(id,token,spare,marker) VALUES(1,'00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000011','a'),(2,'00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000012','b')
+- sql: DROP TABLE IF EXISTS property_restore_rollback
+- sql: CREATE TABLE property_restore_rollback(id INT NOT NULL PRIMARY KEY,token UNIQUEIDENTIFIER NOT NULL ROWGUIDCOL CONSTRAINT property_restore_rollback_token_default
+    DEFAULT NEWID(),spare UNIQUEIDENTIFIER NULL,marker VARCHAR(8) NOT NULL CONSTRAINT property_restore_rollback_marker_default DEFAULT('keep'))
+- sql: INSERT property_restore_rollback(id,token,spare,marker) VALUES(1,'00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000011','a'),(2,'00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000012','b')
+- sql: DROP TABLE IF EXISTS property_restore_savepoint
+- sql: CREATE TABLE property_restore_savepoint(id INT NOT NULL PRIMARY KEY,token UNIQUEIDENTIFIER NOT NULL ROWGUIDCOL CONSTRAINT property_restore_savepoint_token_default
+    DEFAULT NEWID(),spare UNIQUEIDENTIFIER NULL,marker VARCHAR(8) NOT NULL CONSTRAINT property_restore_savepoint_marker_default DEFAULT('keep'))
+- sql: INSERT property_restore_savepoint(id,token,spare,marker) VALUES(1,'00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000011','a'),(2,'00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000012','b')
+- sql: DROP TABLE IF EXISTS property_restore_removal_a
+- sql: CREATE TABLE property_restore_removal_a(id INT NOT NULL PRIMARY KEY,token UNIQUEIDENTIFIER NOT NULL ROWGUIDCOL CONSTRAINT property_restore_removal_a_token_default
+    DEFAULT NEWID(),spare UNIQUEIDENTIFIER NULL,marker VARCHAR(8) NOT NULL CONSTRAINT property_restore_removal_a_marker_default DEFAULT('keep'))
+- sql: INSERT property_restore_removal_a(id,token,spare,marker) VALUES(1,'00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000011','a'),(2,'00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000012','b')
+- sql: DROP TABLE IF EXISTS property_restore_removal_b
+- sql: CREATE TABLE property_restore_removal_b(id INT NOT NULL PRIMARY KEY,token UNIQUEIDENTIFIER NOT NULL ROWGUIDCOL CONSTRAINT property_restore_removal_b_token_default
+    DEFAULT NEWID(),spare UNIQUEIDENTIFIER NULL,marker VARCHAR(8) NOT NULL CONSTRAINT property_restore_removal_b_marker_default DEFAULT('keep'))
+- sql: INSERT property_restore_removal_b(id,token,spare,marker) VALUES(1,'00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000011','a'),(2,'00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000012','b')
+- sql: DROP TABLE IF EXISTS property_restore_claim_a
+- sql: CREATE TABLE property_restore_claim_a(id INT NOT NULL PRIMARY KEY,token UNIQUEIDENTIFIER NOT NULL ROWGUIDCOL CONSTRAINT property_restore_claim_a_token_default
+    DEFAULT NEWID(),spare UNIQUEIDENTIFIER NULL,marker VARCHAR(8) NOT NULL CONSTRAINT property_restore_claim_a_marker_default DEFAULT('keep'))
+- sql: INSERT property_restore_claim_a(id,token,spare,marker) VALUES(1,'00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000011','a'),(2,'00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000012','b')
+- sql: DROP TABLE IF EXISTS property_restore_claim_b
+- sql: CREATE TABLE property_restore_claim_b(id INT NOT NULL PRIMARY KEY,token UNIQUEIDENTIFIER NOT NULL CONSTRAINT property_restore_claim_b_token_default
+    DEFAULT NEWID(),spare UNIQUEIDENTIFIER NULL,marker VARCHAR(8) NOT NULL CONSTRAINT property_restore_claim_b_marker_default DEFAULT('keep'))
+- sql: INSERT property_restore_claim_b(id,token,spare,marker) VALUES(1,'00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000011','a'),(2,'00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000012','b')
+- sql: DROP TABLE IF EXISTS property_restore_conflict
+- sql: CREATE TABLE property_restore_conflict(id INT NOT NULL PRIMARY KEY,token UNIQUEIDENTIFIER NOT NULL ROWGUIDCOL CONSTRAINT property_restore_conflict_token_default
+    DEFAULT NEWID(),spare UNIQUEIDENTIFIER NULL,marker VARCHAR(8) NOT NULL CONSTRAINT property_restore_conflict_marker_default DEFAULT('keep'))
+- sql: INSERT property_restore_conflict(id,token,spare,marker) VALUES(1,'00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000011','a'),(2,'00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000012','b')
+- sql: DROP TABLE IF EXISTS property_restore_final_drop
+- sql: CREATE TABLE property_restore_final_drop(id INT NOT NULL PRIMARY KEY,token UNIQUEIDENTIFIER NOT NULL ROWGUIDCOL CONSTRAINT property_restore_final_drop_token_default
+    DEFAULT NEWID(),spare UNIQUEIDENTIFIER NULL,marker VARCHAR(8) NOT NULL CONSTRAINT property_restore_final_drop_marker_default DEFAULT('keep'))
+- sql: INSERT property_restore_final_drop(id,token,spare,marker) VALUES(1,'00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000011','a'),(2,'00000000-0000-4000-8000-000000000002','00000000-0000-4000-8000-000000000012','b')
+cleanup:
+- sql: DROP TABLE IF EXISTS property_comp_reverse_b
+- sql: DROP TABLE IF EXISTS property_comp_reverse_a
+- sql: DROP TABLE IF EXISTS property_comp_commit_b
+- sql: DROP TABLE IF EXISTS property_comp_commit_a
+- sql: DROP TABLE IF EXISTS property_comp_rollback_b
+- sql: DROP TABLE IF EXISTS property_comp_rollback_a
+- sql: DROP TABLE IF EXISTS property_claim_cross_a4
+- sql: DROP TABLE IF EXISTS property_claim_cross_b4
+- sql: DROP TABLE IF EXISTS property_claim_cross_a3
+- sql: DROP TABLE IF EXISTS property_claim_cross_b3
+- sql: DROP TABLE IF EXISTS property_claim_cross_a2
+- sql: DROP TABLE IF EXISTS property_claim_cross_b2
+- sql: DROP TABLE IF EXISTS property_claim_cross_a1
+- sql: DROP TABLE IF EXISTS property_claim_cross_b1
+- sql: DROP TABLE IF EXISTS property_claim_drop_rollback
+- sql: DROP TABLE IF EXISTS property_claim_drop_savepoint
+- sql: DROP TABLE IF EXISTS property_claim_drop_commit
+- sql: DROP TABLE IF EXISTS property_claim_drop_netzero
+- sql: DROP TABLE IF EXISTS property_claim_plain
+- sql: DROP TABLE IF EXISTS property_claim_mix_type
+- sql: DROP TABLE IF EXISTS property_claim_mix_append
+- sql: DROP TABLE IF EXISTS property_claim_alias_rows
+- sql: DROP TABLE IF EXISTS property_claim_rows
+- sql: DROP TABLE IF EXISTS property_claim_prefix
+- sql: DROP TYPE IF EXISTS property_claim_alias
+- sql: DROP TABLE IF EXISTS property_restore_commit
+- sql: DROP TABLE IF EXISTS property_restore_rollback
+- sql: DROP TABLE IF EXISTS property_restore_savepoint
+- sql: DROP TABLE IF EXISTS property_restore_removal_a
+- sql: DROP TABLE IF EXISTS property_restore_removal_b
+- sql: DROP TABLE IF EXISTS property_restore_claim_a
+- sql: DROP TABLE IF EXISTS property_restore_claim_b
+- sql: DROP TABLE IF EXISTS property_restore_conflict
+- sql: DROP TABLE IF EXISTS property_restore_final_drop
+test_cases:
+- name: Unmarked stored GUID columns retain their complete declaration flags
+  sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_rows',N'U') ORDER BY column_id
+  expect:
+    data: [{name: id, marked: 0}, {name: guid_a, marked: 0}, {name: guid_b, marked: 0}]
+- name: A private claim is visible only to its original transaction and rolls back with prior rows
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; UPDATE property_claim_prefix SET value=7 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE property_claim_rows ALTER COLUMN guid_a ADD ROWGUIDCOL
+    - connection: owner
+      sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_rows',N'U') ORDER BY column_id
+      expect: {data: [{name: id, marked: 0}, {name: guid_a, marked: 1}, {name: guid_b, marked: 0}]}
+    - connection: observer
+      sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_rows',N'U') ORDER BY column_id
+      expect: {data: [{name: id, marked: 0}, {name: guid_a, marked: 0}, {name: guid_b, marked: 0}]}
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT value FROM property_claim_prefix
+      expect: {data: [{value: 0}]}
+- name: Ordered claims and retirements rewind to the actual savepoint without losing earlier DML
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; UPDATE property_claim_prefix SET value=9 WHERE id=1; SAVE TRANSACTION before_claim
+    - connection: owner
+      sql: ALTER TABLE property_claim_rows ALTER COLUMN guid_a ADD ROWGUIDCOL; ALTER TABLE property_claim_rows ALTER COLUMN guid_a DROP ROWGUIDCOL; ALTER TABLE property_claim_rows ALTER COLUMN guid_b ADD ROWGUIDCOL
+    - connection: owner
+      sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_rows',N'U') ORDER BY column_id
+      expect: {data: [{name: id, marked: 0}, {name: guid_a, marked: 0}, {name: guid_b, marked: 1}]}
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_claim
+    - connection: owner
+      sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_rows',N'U') ORDER BY column_id
+      expect: {data: [{name: id, marked: 0}, {name: guid_a, marked: 0}, {name: guid_b, marked: 0}]}
+    - connection: owner
+      sql: SELECT value FROM property_claim_prefix
+      expect: {data: [{value: 9}]}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: A property claim and the original data prefix commit through one native decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; UPDATE property_claim_prefix SET value=12 WHERE id=1; ALTER TABLE property_claim_rows ALTER COLUMN guid_a ADD ROWGUIDCOL
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_rows') AND name=N'guid_a'
+      expect: {data: [{marked: 0}]}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_rows') AND name=N'guid_a'
+      expect: {data: [{marked: 1}]}
+- name: Reclaiming an occupied marker reports its semantic SQL error and preserves a valid prefix
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF; BEGIN TRANSACTION; UPDATE property_claim_prefix SET value=14 WHERE id=1
+    - connection: owner
+      sql: BEGIN TRY ALTER TABLE property_claim_rows ALTER COLUMN guid_a ADD ROWGUIDCOL; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code,XACT_STATE() AS active_state,@@TRANCOUNT AS depth; END CATCH
+      expect: {data: [{code: 4925, active_state: 1, depth: 1}]}
+    - connection: owner
+      sql: SELECT value FROM property_claim_prefix
+      expect: {data: [{value: 14}]}
+    - connection: observer
+      sql: SELECT value FROM property_claim_prefix
+      expect: {data: [{value: 12}]}
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: A second column cannot claim the same table-scoped marker
+  sql: BEGIN TRY ALTER TABLE property_claim_rows ALTER COLUMN guid_b ADD ROWGUIDCOL; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH
+  expect: {data: [{code: 4925}]}
+- name: A claimed GUID marker changes neither actual values nor nullable duplicate semantics
+  sql: SELECT id,guid_a,guid_b FROM property_claim_rows ORDER BY id
+  expect:
+    data:
+    - {id: 1, guid_a: '00000000-0000-0000-0000-000000000001', guid_b: null}
+    - {id: 2, guid_a: '00000000-0000-0000-0000-000000000001', guid_b: null}
+    - {id: 3, guid_a: null, guid_b: null}
+- name: Claiming one property retains unrelated scalar metadata and its existing default
+  scm: |
+    (begin
+      (define col (show (table "memcp-tests" false "property_claim_rows" false nil) "column" "guid_a" false))
+      (list ((col "Properties") "client.marker") ((col "Properties") "client.label")
+        ((col "Properties") "tsql.rowguidcol") (col "Default") (col "Null")))
+  expect: {result: [7, unchanged, true, '00000000-0000-0000-0000-000000000009', true]}
+- name: Marker claims do not replace independently declared future defaults
+  sql: INSERT property_claim_rows(id) VALUES(4)
+  expect: {affected_rows: 1}
+- name: Both actual default values remain available after claiming the marker
+  sql: SELECT id,guid_a,guid_b FROM property_claim_rows WHERE id=4
+  expect: {data: [{id: 4, guid_a: '00000000-0000-0000-0000-000000000009', guid_b: '00000000-0000-0000-0000-000000000008'}]}
+- name: Moving a committed marker remains private and full rollback restores its original owner
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; ALTER TABLE property_claim_rows ALTER COLUMN guid_a DROP ROWGUIDCOL; ALTER TABLE property_claim_rows ALTER COLUMN guid_b ADD ROWGUIDCOL
+    - connection: owner
+      sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_rows',N'U') ORDER BY column_id
+      expect: {data: [{name: id, marked: 0}, {name: guid_a, marked: 0}, {name: guid_b, marked: 1}]}
+    - connection: observer
+      sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_rows',N'U') ORDER BY column_id
+      expect: {data: [{name: id, marked: 0}, {name: guid_a, marked: 1}, {name: guid_b, marked: 0}]}
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+- name: Ordered DROP claim DROP claim commits the final exact marker owner
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; ALTER TABLE property_claim_rows ALTER COLUMN guid_a DROP ROWGUIDCOL; ALTER TABLE property_claim_rows ALTER COLUMN guid_b ADD ROWGUIDCOL; ALTER TABLE property_claim_rows ALTER COLUMN guid_b DROP ROWGUIDCOL; ALTER TABLE property_claim_rows ALTER COLUMN guid_a ADD ROWGUIDCOL; ALTER TABLE property_claim_rows ALTER COLUMN guid_a DROP ROWGUIDCOL; ALTER TABLE property_claim_rows ALTER COLUMN guid_b ADD ROWGUIDCOL; COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_rows',N'U') ORDER BY column_id
+      expect: {data: [{name: id, marked: 0}, {name: guid_a, marked: 0}, {name: guid_b, marked: 1}]}
+- name: The retired property owner has no implicit marker
+  sql: BEGIN TRY ALTER TABLE property_claim_rows ALTER COLUMN guid_a DROP ROWGUIDCOL; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH
+  expect: {data: [{code: 4926}]}
+- name: A missing property endpoint reports the actual missing column
+  sql: BEGIN TRY ALTER TABLE property_claim_rows ALTER COLUMN absent_guid ADD ROWGUIDCOL; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code; END CATCH
+  expect: {data: [{code: 4924}]}
+- name: An integer column cannot acquire a SQL GUID marker
+  sql: ALTER TABLE property_claim_rows ALTER COLUMN id ADD ROWGUIDCOL
+  expect: {error: true, contains: ROWGUIDCOL requires the native UNIQUEIDENTIFIER declaration}
+- name: Create a genuine GUID alias and an ordinary alias-typed column
+  sql: CREATE TYPE property_claim_alias FROM UNIQUEIDENTIFIER; CREATE TABLE property_claim_alias_rows(id INT PRIMARY KEY,guid property_claim_alias NULL)
+- name: A GUID alias is not a direct GUID declaration for marker eligibility
+  sql: ALTER TABLE property_claim_alias_rows ALTER COLUMN guid ADD ROWGUIDCOL
+  expect: {error: true, contains: ROWGUIDCOL requires the native UNIQUEIDENTIFIER declaration}
+- name: Generic native property claims preserve scalar values and the unchanged descriptor
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (try (lambda () (begin
+        (define h (table "memcp-tests" false "property_claim_rows" false (owner "__memcp_tx")))
+        (define expected (lambda (name) (tsql_column_declaration_tuple (show h "column" name true (owner "__memcp_tx")))))
+        (altercolumn h "guid_a" "claim_property" (list "client.version" 1.0 (expected "guid_a")) (owner "__memcp_tx"))
+        (altercolumn h "guid_b" "claim_property" (list "client.version" 2 (expected "guid_b")) (owner "__memcp_tx"))
+        (tx_commit owner)
+        (list (((show h "column" "guid_a" false) "Properties") "client.version")
+          (((show h "column" "guid_b" false) "Properties") "client.version"))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: [1.0, 2]}
+- name: The accepted original data and ordered property decisions survive a hard interruption
+  scm: (crash)
+  restart_timeout: 60
+  expect: {interrupted_ok: true}
+- name: Restart the accepted ordered property history
+  action: restart
+- name: Recovered marker metadata names only the final actual owner
+  sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_rows',N'U') ORDER BY column_id
+  expect: {data: [{name: id, marked: 0}, {name: guid_a, marked: 0}, {name: guid_b, marked: 1}]}
+- name: Recovery retains the original data prefix and unrelated properties
+  scm: |
+    (begin
+      (define h (table "memcp-tests" false "property_claim_rows" false nil))
+      (define col (show h "column" "guid_a" false))
+      (list (scan nil (table "memcp-tests" false "property_claim_prefix" false nil) '() '() '() (lambda () true)
+          '("value") (lambda (total value) (+ total value)) 0 + false)
+        ((col "Properties") "client.marker") ((col "Properties") "client.label")
+        ((col "Properties") "client.version")))
+  expect: {result: [14, 7, unchanged, 1.0]}
+- name: Recovered numeric ownership retains its semantic scalar value
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (try (lambda () (begin
+        (define h (table "memcp-tests" false "property_claim_rows" false (owner "__memcp_tx")))
+        (define before (show h "column" "guid_a" true (owner "__memcp_tx")))
+        (altercolumn h "guid_a" "drop_property" "client.version" (owner "__memcp_tx"))
+        (altercolumn h "guid_a" "claim_property" (list "client.version" 1.0 (tsql_column_declaration_tuple before)) (owner "__memcp_tx"))
+        (tx_commit owner) true)) (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect: {result: true}
+- name: The recovered marker still permits NULL and duplicate GUID data
+  sql: INSERT property_claim_rows(id,guid_a,guid_b) VALUES(5,NULL,NULL),(6,NULL,'00000000-0000-0000-0000-000000000008')
+  expect: {affected_rows: 2}
+- name: Recovery and later writes retain all stored values without a generator or extra key
+  sql: SELECT id,guid_b FROM property_claim_rows ORDER BY id
+  expect:
+    data:
+    - {id: 1, guid_b: null}
+    - {id: 2, guid_b: null}
+    - {id: 3, guid_b: null}
+    - {id: 4, guid_b: '00000000-0000-0000-0000-000000000008'}
+    - {id: 5, guid_b: null}
+    - {id: 6, guid_b: '00000000-0000-0000-0000-000000000008'}
+- name: Claim a marker on a nullable declaration with no default
+  sql: ALTER TABLE property_claim_plain ALTER COLUMN guid ADD ROWGUIDCOL
+- name: A marker alone supplies no implicit GUID value
+  sql: INSERT property_claim_plain(id) VALUES(1),(2)
+  expect: {affected_rows: 2}
+- name: An omitted marked nullable value stays NULL
+  sql: SELECT id,guid FROM property_claim_plain ORDER BY id
+  expect: {data: [{id: 1, guid: null}, {id: 2, guid: null}]}
+- name: A same-endpoint type declaration and marker claim share one ordered decision
+  noncritical: true
+  tds:
+    statements:
+    - connection: mixed_type
+      sql: BEGIN TRANSACTION; ALTER TABLE property_claim_mix_type ALTER COLUMN guid UNIQUEIDENTIFIER NOT NULL; ALTER TABLE property_claim_mix_type ALTER COLUMN guid ADD ROWGUIDCOL; COMMIT TRANSACTION
+    - connection: mixed_type
+      sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked,CAST(is_nullable AS INT) AS nullable FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_mix_type') ORDER BY column_id
+      expect: {data: [{name: id, marked: 0, nullable: 0}, {name: guid, marked: 1, nullable: 0}]}
+- name: A marker claim and fresh nullable append share one ordered endpoint history
+  noncritical: true
+  tds:
+    statements:
+    - connection: mixed_append
+      sql: BEGIN TRANSACTION; ALTER TABLE property_claim_mix_append ALTER COLUMN guid ADD ROWGUIDCOL; ALTER TABLE property_claim_mix_append ADD label VARCHAR(8) NULL; COMMIT TRANSACTION
+    - connection: mixed_append
+      sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_mix_append') ORDER BY column_id
+      expect: {data: [{name: id, marked: 0}, {name: guid, marked: 1}, {name: label, marked: 0}]}
+    - connection: mixed_append
+      sql: SELECT id,guid,label FROM property_claim_mix_append
+      expect: {data: [{id: 1, guid: '00000000-0000-0000-0000-000000000001', label: null}]}
+- name: A claim followed by same-table retirement remains private and full rollback restores rows and metadata
+  tds:
+    statements:
+    - connection: drop_rollback_owner
+      sql: BEGIN TRANSACTION; ALTER TABLE property_claim_drop_rollback ALTER COLUMN guid ADD ROWGUIDCOL; DROP TABLE property_claim_drop_rollback
+    - connection: drop_rollback_owner
+      sql: SELECT OBJECT_ID(N'property_claim_drop_rollback',N'U') AS id
+      expect: {data: [{id: null}]}
+    - connection: drop_rollback_observer
+      sql: SELECT id,guid FROM property_claim_drop_rollback
+      expect: {data: [{id: 1, guid: null}]}
+    - connection: drop_rollback_owner
+      sql: ROLLBACK TRANSACTION
+    - connection: drop_rollback_observer
+      sql: SELECT name,CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_drop_rollback') ORDER BY column_id
+      expect: {data: [{name: id, marked: 0}, {name: guid, marked: 0}]}
+- name: Rewinding same-table retirement restores the earlier exact claim for the original decision
+  tds:
+    statements:
+    - connection: drop_savepoint_owner
+      sql: BEGIN TRANSACTION; ALTER TABLE property_claim_drop_savepoint ALTER COLUMN guid ADD ROWGUIDCOL; SAVE TRANSACTION retained_claim; DROP TABLE property_claim_drop_savepoint
+    - connection: drop_savepoint_owner
+      sql: ROLLBACK TRANSACTION retained_claim
+    - connection: drop_savepoint_owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_drop_savepoint') AND name=N'guid'
+      expect: {data: [{marked: 1}]}
+    - connection: drop_savepoint_observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_claim_drop_savepoint') AND name=N'guid'
+      expect: {data: [{marked: 0}]}
+    - connection: drop_savepoint_owner
+      sql: COMMIT TRANSACTION
+- name: Same-table retirement supersedes property actions and shares the original row commit
+  tds:
+    statements:
+    - connection: drop_commit_owner
+      sql: BEGIN TRANSACTION; UPDATE property_claim_prefix SET value=20 WHERE id=1; ALTER TABLE property_claim_drop_commit ALTER COLUMN guid ADD ROWGUIDCOL; DROP TABLE property_claim_drop_commit
+    - connection: drop_commit_observer
+      sql: SELECT id,guid FROM property_claim_drop_commit
+      expect: {data: [{id: 1, guid: null}]}
+    - connection: drop_commit_owner
+      sql: COMMIT TRANSACTION
+    - connection: drop_commit_observer
+      sql: SELECT OBJECT_ID(N'property_claim_drop_commit',N'U') AS id
+      expect: {data: [{id: null}]}
+    - connection: drop_commit_observer
+      sql: SELECT value FROM property_claim_prefix
+      expect: {data: [{value: 20}]}
+- name: A netzero claim and property retirement leave only the whole-table retirement decision
+  sql: BEGIN TRANSACTION; ALTER TABLE property_claim_drop_netzero ALTER COLUMN guid ADD ROWGUIDCOL; ALTER TABLE property_claim_drop_netzero ALTER COLUMN guid DROP ROWGUIDCOL; DROP TABLE property_claim_drop_netzero; COMMIT TRANSACTION
+- name: Accepted retired tables and restored savepoint claims survive interruption
+  scm: (crash)
+  restart_timeout: 60
+  expect: {interrupted_ok: true}
+- name: Restart the exact retirement and surviving claim decisions
+  action: restart
+- name: Recovery retains both whole-table removals and the restored full row
+  sql: SELECT OBJECT_ID(N'property_claim_drop_commit',N'U') AS committed_drop,OBJECT_ID(N'property_claim_drop_netzero',N'U') AS netzero_drop
+  expect: {data: [{committed_drop: null, netzero_drop: null}]}
+- name: Recovery retains the earlier savepoint claim and every surviving row
+  sql: SELECT r.id,r.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_claim_drop_savepoint r CROSS JOIN sys.columns c WHERE c.object_id=OBJECT_ID(N'property_claim_drop_savepoint') AND c.name=N'guid'
+  expect: {data: [{id: 1, guid: null, marked: 1}]}
+- name: Recovery retains full rollback of the other table and the original committed data prefix
+  sql: SELECT r.id,r.guid,p.value FROM property_claim_drop_rollback r CROSS JOIN property_claim_prefix p
+  expect: {data: [{id: 1, guid: null, value: 20}]}
+- name: Cross-table property composition 1 preserves the complete requested declaration and retirement result
+  noncritical: true
+  setup:
+  - sql: CREATE TABLE property_claim_cross_a1(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+  - sql: INSERT property_claim_cross_a1 VALUES(1,NULL)
+  - sql: CREATE TABLE property_claim_cross_b1(id INT PRIMARY KEY,value INT)
+  - sql: INSERT property_claim_cross_b1 VALUES(2,7)
+  tds:
+    statements:
+    - connection: cross_property_owner_1
+      sql: BEGIN TRANSACTION; ALTER TABLE property_claim_cross_a1 ALTER COLUMN guid ADD ROWGUIDCOL; DROP TABLE property_claim_cross_b1; COMMIT TRANSACTION
+    - connection: cross_property_owner_1
+      sql: SELECT r.id,r.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_claim_cross_a1 r CROSS JOIN sys.columns c WHERE c.object_id=OBJECT_ID(N'property_claim_cross_a1') AND c.name=N'guid'
+      expect: {data: [{id: 1, guid: null, marked: 1}]}
+    - connection: cross_property_owner_1
+      sql: SELECT OBJECT_ID(N'property_claim_cross_b1',N'U') AS removed_table
+      expect: {data: [{removed_table: null}]}
+- name: Cross-table property composition 2 preserves the complete requested declaration and retirement result
+  noncritical: true
+  setup:
+  - sql: CREATE TABLE property_claim_cross_a2(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER NULL)
+  - sql: INSERT property_claim_cross_a2 VALUES(1,NULL)
+  - sql: CREATE TABLE property_claim_cross_b2(id INT PRIMARY KEY,value INT)
+  - sql: INSERT property_claim_cross_b2 VALUES(2,7)
+  tds:
+    statements:
+    - connection: cross_property_owner_2
+      sql: BEGIN TRANSACTION; DROP TABLE property_claim_cross_b2; ALTER TABLE property_claim_cross_a2 ALTER COLUMN guid ADD ROWGUIDCOL; COMMIT TRANSACTION
+    - connection: cross_property_owner_2
+      sql: SELECT r.id,r.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_claim_cross_a2 r CROSS JOIN sys.columns c WHERE c.object_id=OBJECT_ID(N'property_claim_cross_a2') AND c.name=N'guid'
+      expect: {data: [{id: 1, guid: null, marked: 1}]}
+    - connection: cross_property_owner_2
+      sql: SELECT OBJECT_ID(N'property_claim_cross_b2',N'U') AS removed_table
+      expect: {data: [{removed_table: null}]}
+- name: Cross-table property composition 3 preserves the complete requested declaration and retirement result
+  noncritical: true
+  setup:
+  - sql: CREATE TABLE property_claim_cross_a3(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER ROWGUIDCOL NULL)
+  - sql: INSERT property_claim_cross_a3 VALUES(1,NULL)
+  - sql: CREATE TABLE property_claim_cross_b3(id INT PRIMARY KEY,value INT)
+  - sql: INSERT property_claim_cross_b3 VALUES(2,7)
+  tds:
+    statements:
+    - connection: cross_property_owner_3
+      sql: BEGIN TRANSACTION; ALTER TABLE property_claim_cross_a3 ALTER COLUMN guid DROP ROWGUIDCOL; DROP TABLE property_claim_cross_b3; COMMIT TRANSACTION
+    - connection: cross_property_owner_3
+      sql: SELECT r.id,r.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_claim_cross_a3 r CROSS JOIN sys.columns c WHERE c.object_id=OBJECT_ID(N'property_claim_cross_a3') AND c.name=N'guid'
+      expect: {data: [{id: 1, guid: null, marked: 0}]}
+    - connection: cross_property_owner_3
+      sql: SELECT OBJECT_ID(N'property_claim_cross_b3',N'U') AS removed_table
+      expect: {data: [{removed_table: null}]}
+- name: Cross-table property composition 4 preserves the complete requested declaration and retirement result
+  noncritical: true
+  setup:
+  - sql: CREATE TABLE property_claim_cross_a4(id INT PRIMARY KEY,guid UNIQUEIDENTIFIER ROWGUIDCOL NULL)
+  - sql: INSERT property_claim_cross_a4 VALUES(1,NULL)
+  - sql: CREATE TABLE property_claim_cross_b4(id INT PRIMARY KEY,value INT)
+  - sql: INSERT property_claim_cross_b4 VALUES(2,7)
+  tds:
+    statements:
+    - connection: cross_property_owner_4
+      sql: BEGIN TRANSACTION; DROP TABLE property_claim_cross_b4; ALTER TABLE property_claim_cross_a4 ALTER COLUMN guid DROP ROWGUIDCOL; COMMIT TRANSACTION
+    - connection: cross_property_owner_4
+      sql: SELECT r.id,r.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_claim_cross_a4 r CROSS JOIN sys.columns c WHERE c.object_id=OBJECT_ID(N'property_claim_cross_a4') AND c.name=N'guid'
+      expect: {data: [{id: 1, guid: null, marked: 0}]}
+    - connection: cross_property_owner_4
+      sql: SELECT OBJECT_ID(N'property_claim_cross_b4',N'U') AS removed_table
+      expect: {data: [{removed_table: null}]}
+- name: Rollback composed constant append and other endpoint claim preserve original transaction visibility and defaults
+  tds:
+    statements:
+    - connection: property_comp_rollback_owner
+      sql: BEGIN TRANSACTION; ALTER TABLE property_comp_rollback_a ADD amount FLOAT NOT NULL DEFAULT(5); ALTER TABLE property_comp_rollback_b ALTER COLUMN guid ADD ROWGUIDCOL; ALTER
+        TABLE property_comp_rollback_b ADD CONSTRAINT property_comp_rollback_b_default DEFAULT('00000000-0000-0000-0000-000000000007') FOR guid
+    - connection: property_comp_rollback_owner
+      sql: SELECT a.id,a.value,a.amount,b.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_comp_rollback_a a CROSS JOIN property_comp_rollback_b b CROSS JOIN sys.columns c WHERE
+        c.object_id=OBJECT_ID(N'property_comp_rollback_b') AND c.name=N'guid'
+      expect:
+        data:
+        - id: 1
+          value: 11
+          amount: 5
+          guid: null
+          marked: 1
+    - connection: property_comp_rollback_owner_observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_rollback_b') AND name=N'guid'
+      expect:
+        data:
+        - marked: 0
+    - connection: property_comp_rollback_owner_observer
+      sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_rollback_a') ORDER BY column_id
+      expect:
+        data:
+        - name: id
+        - name: value
+    - connection: property_comp_rollback_owner
+      sql: ROLLBACK TRANSACTION
+    - connection: property_comp_rollback_owner_observer
+      sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_rollback_a') ORDER BY column_id
+      expect:
+        data:
+        - name: id
+        - name: value
+    - connection: property_comp_rollback_owner_observer
+      sql: SELECT id,value FROM property_comp_rollback_a
+      expect:
+        data:
+        - id: 1
+          value: 11
+    - connection: property_comp_rollback_owner_observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_rollback_b') AND name=N'guid'
+      expect:
+        data:
+        - marked: 0
+- name: Commit composed constant append and other endpoint claim preserve original transaction visibility and defaults
+  tds:
+    statements:
+    - connection: property_comp_commit_owner
+      sql: BEGIN TRANSACTION; ALTER TABLE property_comp_commit_a ADD amount FLOAT NOT NULL DEFAULT(5); ALTER TABLE property_comp_commit_b ALTER COLUMN guid ADD ROWGUIDCOL; ALTER TABLE
+        property_comp_commit_b ADD CONSTRAINT property_comp_commit_b_default DEFAULT('00000000-0000-0000-0000-000000000007') FOR guid
+    - connection: property_comp_commit_owner
+      sql: SELECT a.id,a.value,a.amount,b.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_comp_commit_a a CROSS JOIN property_comp_commit_b b CROSS JOIN sys.columns c WHERE
+        c.object_id=OBJECT_ID(N'property_comp_commit_b') AND c.name=N'guid'
+      expect:
+        data:
+        - id: 1
+          value: 11
+          amount: 5
+          guid: null
+          marked: 1
+    - connection: property_comp_commit_owner_observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_commit_b') AND name=N'guid'
+      expect:
+        data:
+        - marked: 0
+    - connection: property_comp_commit_owner_observer
+      sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_commit_a') ORDER BY column_id
+      expect:
+        data:
+        - name: id
+        - name: value
+    - connection: property_comp_commit_owner
+      sql: COMMIT TRANSACTION
+    - connection: property_comp_commit_owner_observer
+      sql: SELECT a.id,a.value,a.amount,b.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_comp_commit_a a CROSS JOIN property_comp_commit_b b CROSS JOIN sys.columns c WHERE
+        c.object_id=OBJECT_ID(N'property_comp_commit_b') AND c.name=N'guid'
+      expect:
+        data: [{id: 1, value: 11, amount: 5, guid: null, marked: 1}]
+- name: Reverse composed constant append and other endpoint claim preserve original transaction visibility and defaults
+  tds:
+    statements:
+    - connection: property_comp_reverse_owner
+      sql: BEGIN TRANSACTION; ALTER TABLE property_comp_reverse_b ADD CONSTRAINT property_comp_reverse_b_default DEFAULT('00000000-0000-0000-0000-000000000007') FOR guid; ALTER TABLE
+        property_comp_reverse_b ALTER COLUMN guid ADD ROWGUIDCOL; ALTER TABLE property_comp_reverse_a ADD amount FLOAT NOT NULL DEFAULT(5)
+    - connection: property_comp_reverse_owner
+      sql: SELECT a.id,a.value,a.amount,b.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_comp_reverse_a a CROSS JOIN property_comp_reverse_b b CROSS JOIN sys.columns c WHERE
+        c.object_id=OBJECT_ID(N'property_comp_reverse_b') AND c.name=N'guid'
+      expect:
+        data:
+        - id: 1
+          value: 11
+          amount: 5
+          guid: null
+          marked: 1
+    - connection: property_comp_reverse_owner_observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_reverse_b') AND name=N'guid'
+      expect:
+        data:
+        - marked: 0
+    - connection: property_comp_reverse_owner_observer
+      sql: SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_reverse_a') ORDER BY column_id
+      expect:
+        data:
+        - name: id
+        - name: value
+    - connection: property_comp_reverse_owner
+      sql: COMMIT TRANSACTION
+    - connection: property_comp_reverse_owner_observer
+      sql: SELECT a.id,a.value,a.amount,b.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_comp_reverse_a a CROSS JOIN property_comp_reverse_b b CROSS JOIN sys.columns c WHERE
+        c.object_id=OBJECT_ID(N'property_comp_reverse_b') AND c.name=N'guid'
+      expect:
+        data: [{id: 1, value: 11, amount: 5, guid: null, marked: 1}]
+- name: Interrupt after composed initialization and property decisions
+  scm: (crash)
+  restart_timeout: 60
+  expect:
+    interrupted_ok: true
+- name: Restart composed initial values property flags and default declarations
+  action: restart
+- name: Recovered commit composition preserves historical values and independently applies future defaults
+  steps:
+  - sql: SELECT a.id,a.value,a.amount,b.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_comp_commit_a a CROSS JOIN property_comp_commit_b b CROSS JOIN sys.columns c WHERE c.object_id=OBJECT_ID(N'property_comp_commit_b')
+      AND c.name=N'guid'
+    expect:
+      data:
+      - id: 1
+        value: 11
+        amount: 5
+        guid: null
+        marked: 1
+  - sql: INSERT property_comp_commit_a(id,value) VALUES(2,22)
+  - sql: INSERT property_comp_commit_b(id) VALUES(2)
+  - sql: SELECT id,value,amount FROM property_comp_commit_a ORDER BY id
+    expect:
+      data:
+      - id: 1
+        value: 11
+        amount: 5
+      - id: 2
+        value: 22
+        amount: 5
+  - sql: SELECT id,guid FROM property_comp_commit_b ORDER BY id
+    expect:
+      data:
+      - id: 1
+        guid: null
+      - id: 2
+        guid: 00000000-0000-0000-0000-000000000007
+  - sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_commit_b') AND name=N'guid'
+    expect:
+      data:
+      - marked: 1
+- name: Recovered reverse composition preserves historical values and independently applies future defaults
+  steps:
+  - sql: SELECT a.id,a.value,a.amount,b.guid,CAST(c.is_rowguidcol AS INT) AS marked FROM property_comp_reverse_a a CROSS JOIN property_comp_reverse_b b CROSS JOIN sys.columns c WHERE
+      c.object_id=OBJECT_ID(N'property_comp_reverse_b') AND c.name=N'guid'
+    expect:
+      data:
+      - id: 1
+        value: 11
+        amount: 5
+        guid: null
+        marked: 1
+  - sql: INSERT property_comp_reverse_a(id,value) VALUES(2,22)
+  - sql: INSERT property_comp_reverse_b(id) VALUES(2)
+  - sql: SELECT id,value,amount FROM property_comp_reverse_a ORDER BY id
+    expect:
+      data:
+      - id: 1
+        value: 11
+        amount: 5
+      - id: 2
+        value: 22
+        amount: 5
+  - sql: SELECT id,guid FROM property_comp_reverse_b ORDER BY id
+    expect:
+      data:
+      - id: 1
+        guid: null
+      - id: 2
+        guid: 00000000-0000-0000-0000-000000000007
+  - sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_comp_reverse_b') AND name=N'guid'
+    expect:
+      data:
+      - marked: 1
+
+- name: Exact baseline property restoration and constant appends commit original UUID rows and defaults
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE property_restore_commit ALTER COLUMN token DROP ROWGUIDCOL
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_commit') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 0
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_commit') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: owner
+      sql: ALTER TABLE property_restore_commit ADD inactive BIT NOT NULL CONSTRAINT property_restore_commit_inactive_default DEFAULT(0)
+    - connection: owner
+      sql: ALTER TABLE property_restore_commit ADD attempts SMALLINT NOT NULL CONSTRAINT property_restore_commit_attempts_default DEFAULT(0)
+    - connection: owner
+      sql: ALTER TABLE property_restore_commit ADD note VARCHAR(76) NOT NULL CONSTRAINT property_restore_commit_note_default DEFAULT('')
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_commit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker FROM property_restore_commit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_commit') AND name IN ('inactive','attempts','note')
+      expect:
+        rows: 1
+        data:
+        - n: 3
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_commit') AND name IN ('inactive','attempts','note')
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: ALTER TABLE property_restore_commit ALTER COLUMN token ADD ROWGUIDCOL
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_commit') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_commit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_commit ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_commit') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_commit') AND name IN ('inactive','attempts','note')
+      expect:
+        rows: 1
+        data:
+        - n: 3
+    - connection: owner
+      sql: INSERT property_restore_commit(id,token,spare) VALUES(3,'00000000-0000-4000-8000-000000000003','00000000-0000-4000-8000-000000000013')
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_commit ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 3
+          token: 00000000-0000-4000-8000-000000000003
+          spare: 00000000-0000-4000-8000-000000000013
+          marker: keep
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.default_constraints WHERE parent_object_id=OBJECT_ID('property_restore_commit') AND name='property_restore_commit_token_default'
+      expect:
+        rows: 1
+        data:
+        - n: 1
+- name: Rollback of restored property and appended layout preserves original UUID rows and property
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE property_restore_rollback ALTER COLUMN token DROP ROWGUIDCOL
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_rollback') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 0
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_rollback') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: owner
+      sql: ALTER TABLE property_restore_rollback ADD inactive BIT NOT NULL CONSTRAINT property_restore_rollback_inactive_default DEFAULT(0)
+    - connection: owner
+      sql: ALTER TABLE property_restore_rollback ADD attempts SMALLINT NOT NULL CONSTRAINT property_restore_rollback_attempts_default DEFAULT(0)
+    - connection: owner
+      sql: ALTER TABLE property_restore_rollback ADD note VARCHAR(76) NOT NULL CONSTRAINT property_restore_rollback_note_default DEFAULT('')
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_rollback ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker FROM property_restore_rollback ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_rollback') AND name IN ('inactive','attempts','note')
+      expect:
+        rows: 1
+        data:
+        - n: 3
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_rollback') AND name IN ('inactive','attempts','note')
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: ALTER TABLE property_restore_rollback ALTER COLUMN token ADD ROWGUIDCOL
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_rollback') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_rollback ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker FROM property_restore_rollback ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_rollback') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_rollback') AND name IN ('inactive','attempts','note')
+      expect:
+        rows: 1
+        data:
+        - n: 0
+- name: Savepoint keeps raw property retirement and append visibility after a restored cycle is rewound
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE property_restore_savepoint ALTER COLUMN token DROP ROWGUIDCOL
+    - connection: owner
+      sql: ALTER TABLE property_restore_savepoint ADD inactive BIT NOT NULL CONSTRAINT property_restore_savepoint_inactive_default DEFAULT(0)
+    - connection: owner
+      sql: ALTER TABLE property_restore_savepoint ADD attempts SMALLINT NOT NULL CONSTRAINT property_restore_savepoint_attempts_default DEFAULT(0)
+    - connection: owner
+      sql: ALTER TABLE property_restore_savepoint ADD note VARCHAR(76) NOT NULL CONSTRAINT property_restore_savepoint_note_default DEFAULT('')
+    - connection: owner
+      sql: SAVE TRANSACTION before_restoration
+    - connection: owner
+      sql: ALTER TABLE property_restore_savepoint ALTER COLUMN token ADD ROWGUIDCOL
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_savepoint') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_savepoint ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_restoration
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_savepoint') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 0
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_savepoint ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_savepoint') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_savepoint') AND name IN ('inactive','attempts','note')
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: owner
+      sql: ALTER TABLE property_restore_savepoint ALTER COLUMN token ADD ROWGUIDCOL
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_savepoint') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_savepoint ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_savepoint') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+- name: Restored append endpoint preserves a genuine removal on another endpoint
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE property_restore_removal_b ALTER COLUMN token DROP ROWGUIDCOL
+    - connection: owner
+      sql: ALTER TABLE property_restore_removal_a ALTER COLUMN token DROP ROWGUIDCOL
+    - connection: owner
+      sql: ALTER TABLE property_restore_removal_a ADD inactive BIT NOT NULL CONSTRAINT property_restore_removal_a_inactive_default DEFAULT(0)
+    - connection: owner
+      sql: ALTER TABLE property_restore_removal_a ADD attempts SMALLINT NOT NULL CONSTRAINT property_restore_removal_a_attempts_default DEFAULT(0)
+    - connection: owner
+      sql: ALTER TABLE property_restore_removal_a ADD note VARCHAR(76) NOT NULL CONSTRAINT property_restore_removal_a_note_default DEFAULT('')
+    - connection: owner
+      sql: ALTER TABLE property_restore_removal_a ALTER COLUMN token ADD ROWGUIDCOL
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_removal_a') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_removal_b') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 0
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_removal_b') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_removal_a ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker FROM property_restore_removal_b ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_removal_a') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_removal_b') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 0
+- name: Restored append endpoint composes with a genuine other endpoint claim
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE property_restore_claim_a ALTER COLUMN token DROP ROWGUIDCOL
+    - connection: owner
+      sql: ALTER TABLE property_restore_claim_a ADD inactive BIT NOT NULL CONSTRAINT property_restore_claim_a_inactive_default DEFAULT(0)
+    - connection: owner
+      sql: ALTER TABLE property_restore_claim_a ADD attempts SMALLINT NOT NULL CONSTRAINT property_restore_claim_a_attempts_default DEFAULT(0)
+    - connection: owner
+      sql: ALTER TABLE property_restore_claim_a ADD note VARCHAR(76) NOT NULL CONSTRAINT property_restore_claim_a_note_default DEFAULT('')
+    - connection: owner
+      sql: ALTER TABLE property_restore_claim_a ALTER COLUMN token ADD ROWGUIDCOL
+    - connection: owner
+      sql: ALTER TABLE property_restore_claim_b ALTER COLUMN token ADD ROWGUIDCOL
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_claim_a') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_claim_b') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_claim_b') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 0
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_claim_a ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker FROM property_restore_claim_b ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_claim_a') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_claim_b') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+- name: A real conflicting claim preserves the restored append prefix and original transaction
+  tds:
+    statements:
+    - connection: owner
+      sql: SET XACT_ABORT OFF
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE property_restore_conflict ALTER COLUMN token DROP ROWGUIDCOL
+    - connection: owner
+      sql: ALTER TABLE property_restore_conflict ADD inactive BIT NOT NULL CONSTRAINT property_restore_conflict_inactive_default DEFAULT(0)
+    - connection: owner
+      sql: ALTER TABLE property_restore_conflict ADD attempts SMALLINT NOT NULL CONSTRAINT property_restore_conflict_attempts_default DEFAULT(0)
+    - connection: owner
+      sql: ALTER TABLE property_restore_conflict ADD note VARCHAR(76) NOT NULL CONSTRAINT property_restore_conflict_note_default DEFAULT('')
+    - connection: owner
+      sql: ALTER TABLE property_restore_conflict ALTER COLUMN token ADD ROWGUIDCOL
+    - connection: owner
+      sql: BEGIN TRY ALTER TABLE property_restore_conflict ALTER COLUMN spare ADD ROWGUIDCOL; END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS code,XACT_STATE()
+        AS active_state,@@TRANCOUNT AS depth; END CATCH
+      expect:
+        rows: 1
+        data:
+        - code: 4925
+          active_state: 1
+          depth: 1
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_conflict') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_conflict') AND name=N'spare'
+      expect:
+        rows: 1
+        data:
+        - marked: 0
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_conflict ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker FROM property_restore_conflict ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_conflict ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_conflict') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 1
+- name: A terminal retirement after a neutral restore cycle remains a genuine durable removal
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE property_restore_final_drop ALTER COLUMN token DROP ROWGUIDCOL
+    - connection: owner
+      sql: ALTER TABLE property_restore_final_drop ADD inactive BIT NOT NULL CONSTRAINT property_restore_final_drop_inactive_default DEFAULT(0)
+    - connection: owner
+      sql: ALTER TABLE property_restore_final_drop ADD attempts SMALLINT NOT NULL CONSTRAINT property_restore_final_drop_attempts_default DEFAULT(0)
+    - connection: owner
+      sql: ALTER TABLE property_restore_final_drop ADD note VARCHAR(76) NOT NULL CONSTRAINT property_restore_final_drop_note_default DEFAULT('')
+    - connection: owner
+      sql: ALTER TABLE property_restore_final_drop ALTER COLUMN token ADD ROWGUIDCOL
+    - connection: owner
+      sql: ALTER TABLE property_restore_final_drop ALTER COLUMN token DROP ROWGUIDCOL
+    - connection: owner
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_final_drop') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 0
+    - connection: owner
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_final_drop ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM
+        property_restore_final_drop ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          token: 00000000-0000-4000-8000-000000000001
+          spare: 00000000-0000-4000-8000-000000000011
+          marker: a
+          inactive: 0
+          attempts: 0
+          note: ''
+        - id: 2
+          token: 00000000-0000-4000-8000-000000000002
+          spare: 00000000-0000-4000-8000-000000000012
+          marker: b
+          inactive: 0
+          attempts: 0
+          note: ''
+    - connection: observer
+      sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_final_drop') AND name=N'token'
+      expect:
+        rows: 1
+        data:
+        - marked: 0
+- name: Hard interruption after accepted restored property append decisions
+  scm: (crash)
+  restart_timeout: 60
+  expect:
+    interrupted_ok: true
+- name: Restart the accepted restored property append decisions
+  action: restart
+- name: Recovered restored layouts retain complete UUID rows defaults and genuine property survivors
+  steps:
+  - sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM property_restore_commit
+      ORDER BY id
+    expect:
+      rows: 3
+      data:
+      - id: 1
+        token: 00000000-0000-4000-8000-000000000001
+        spare: 00000000-0000-4000-8000-000000000011
+        marker: a
+        inactive: 0
+        attempts: 0
+        note: ''
+      - id: 2
+        token: 00000000-0000-4000-8000-000000000002
+        spare: 00000000-0000-4000-8000-000000000012
+        marker: b
+        inactive: 0
+        attempts: 0
+        note: ''
+      - id: 3
+        token: 00000000-0000-4000-8000-000000000003
+        spare: 00000000-0000-4000-8000-000000000013
+        marker: keep
+        inactive: 0
+        attempts: 0
+        note: ''
+  - sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_commit') AND name=N'token'
+    expect:
+      rows: 1
+      data:
+      - marked: 1
+  - sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker FROM property_restore_rollback ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        token: 00000000-0000-4000-8000-000000000001
+        spare: 00000000-0000-4000-8000-000000000011
+        marker: a
+      - id: 2
+        token: 00000000-0000-4000-8000-000000000002
+        spare: 00000000-0000-4000-8000-000000000012
+        marker: b
+  - sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_rollback') AND name=N'token'
+    expect:
+      rows: 1
+      data:
+      - marked: 1
+  - sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM property_restore_savepoint
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        token: 00000000-0000-4000-8000-000000000001
+        spare: 00000000-0000-4000-8000-000000000011
+        marker: a
+        inactive: 0
+        attempts: 0
+        note: ''
+      - id: 2
+        token: 00000000-0000-4000-8000-000000000002
+        spare: 00000000-0000-4000-8000-000000000012
+        marker: b
+        inactive: 0
+        attempts: 0
+        note: ''
+  - sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_savepoint') AND name=N'token'
+    expect:
+      rows: 1
+      data:
+      - marked: 1
+  - sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM property_restore_removal_a
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        token: 00000000-0000-4000-8000-000000000001
+        spare: 00000000-0000-4000-8000-000000000011
+        marker: a
+        inactive: 0
+        attempts: 0
+        note: ''
+      - id: 2
+        token: 00000000-0000-4000-8000-000000000002
+        spare: 00000000-0000-4000-8000-000000000012
+        marker: b
+        inactive: 0
+        attempts: 0
+        note: ''
+  - sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_removal_a') AND name=N'token'
+    expect:
+      rows: 1
+      data:
+      - marked: 1
+  - sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker FROM property_restore_removal_b ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        token: 00000000-0000-4000-8000-000000000001
+        spare: 00000000-0000-4000-8000-000000000011
+        marker: a
+      - id: 2
+        token: 00000000-0000-4000-8000-000000000002
+        spare: 00000000-0000-4000-8000-000000000012
+        marker: b
+  - sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_removal_b') AND name=N'token'
+    expect:
+      rows: 1
+      data:
+      - marked: 0
+  - sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM property_restore_claim_a
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        token: 00000000-0000-4000-8000-000000000001
+        spare: 00000000-0000-4000-8000-000000000011
+        marker: a
+        inactive: 0
+        attempts: 0
+        note: ''
+      - id: 2
+        token: 00000000-0000-4000-8000-000000000002
+        spare: 00000000-0000-4000-8000-000000000012
+        marker: b
+        inactive: 0
+        attempts: 0
+        note: ''
+  - sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_claim_a') AND name=N'token'
+    expect:
+      rows: 1
+      data:
+      - marked: 1
+  - sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker FROM property_restore_claim_b ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        token: 00000000-0000-4000-8000-000000000001
+        spare: 00000000-0000-4000-8000-000000000011
+        marker: a
+      - id: 2
+        token: 00000000-0000-4000-8000-000000000002
+        spare: 00000000-0000-4000-8000-000000000012
+        marker: b
+  - sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_claim_b') AND name=N'token'
+    expect:
+      rows: 1
+      data:
+      - marked: 1
+  - sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM property_restore_conflict
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        token: 00000000-0000-4000-8000-000000000001
+        spare: 00000000-0000-4000-8000-000000000011
+        marker: a
+        inactive: 0
+        attempts: 0
+        note: ''
+      - id: 2
+        token: 00000000-0000-4000-8000-000000000002
+        spare: 00000000-0000-4000-8000-000000000012
+        marker: b
+        inactive: 0
+        attempts: 0
+        note: ''
+  - sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_conflict') AND name=N'token'
+    expect:
+      rows: 1
+      data:
+      - marked: 1
+  - sql: SELECT id,CONVERT(VARCHAR(36),token) AS token,CONVERT(VARCHAR(36),spare) AS spare,marker,CAST(inactive AS INT) AS inactive,attempts,note FROM property_restore_final_drop
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        token: 00000000-0000-4000-8000-000000000001
+        spare: 00000000-0000-4000-8000-000000000011
+        marker: a
+        inactive: 0
+        attempts: 0
+        note: ''
+      - id: 2
+        token: 00000000-0000-4000-8000-000000000002
+        spare: 00000000-0000-4000-8000-000000000012
+        marker: b
+        inactive: 0
+        attempts: 0
+        note: ''
+  - sql: SELECT CAST(is_rowguidcol AS INT) AS marked FROM sys.columns WHERE object_id=OBJECT_ID(N'property_restore_final_drop') AND name=N'token'
+    expect:
+      rows: 1
+      data:
+      - marked: 0

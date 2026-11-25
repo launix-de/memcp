@@ -1,0 +1,926 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/create-trigger-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Statement trigger amendments after actual rows retain the original transaction and affect only following events
+setup:
+- sql: DROP TABLE IF EXISTS late_trigger_cross_rewind
+- sql: DROP TABLE IF EXISTS late_trigger_cross_rewind_audit
+- sql: DROP TABLE IF EXISTS late_trigger_cross_rewind_prior
+- sql: DROP TABLE IF EXISTS late_trigger_insert
+- sql: DROP TABLE IF EXISTS late_trigger_insert_audit
+- sql: DROP TABLE IF EXISTS late_trigger_insert_prior
+- sql: DROP TABLE IF EXISTS late_trigger_delete
+- sql: DROP TABLE IF EXISTS late_trigger_delete_audit
+- sql: DROP TABLE IF EXISTS late_trigger_delete_prior
+- sql: DROP TABLE IF EXISTS late_trigger_read_committed
+- sql: DROP TABLE IF EXISTS late_trigger_read_committed_audit
+- sql: DROP TABLE IF EXISTS late_trigger_read_committed_prior
+- sql: DROP TABLE IF EXISTS late_trigger_unrelated_audit
+- sql: DROP TABLE IF EXISTS late_trigger_unrelated
+- sql: DROP TABLE IF EXISTS late_trigger_unrelated_prior
+- sql: CREATE TABLE late_trigger_unrelated(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_unrelated VALUES(1,1)
+- sql: CREATE TABLE late_trigger_unrelated_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_unrelated_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_unrelated_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: DROP TABLE IF EXISTS late_trigger_same_audit
+- sql: DROP TABLE IF EXISTS late_trigger_same
+- sql: DROP TABLE IF EXISTS late_trigger_same_prior
+- sql: CREATE TABLE late_trigger_same(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_same VALUES(1,1)
+- sql: CREATE TABLE late_trigger_same_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_same_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_same_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: DROP TABLE IF EXISTS late_trigger_rollback_audit
+- sql: DROP TABLE IF EXISTS late_trigger_rollback
+- sql: DROP TABLE IF EXISTS late_trigger_rollback_prior
+- sql: CREATE TABLE late_trigger_rollback(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_rollback VALUES(1,1)
+- sql: CREATE TABLE late_trigger_rollback_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_rollback_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_rollback_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: DROP TABLE IF EXISTS late_trigger_savepoint_audit
+- sql: DROP TABLE IF EXISTS late_trigger_savepoint
+- sql: DROP TABLE IF EXISTS late_trigger_savepoint_prior
+- sql: CREATE TABLE late_trigger_savepoint(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_savepoint VALUES(1,1)
+- sql: CREATE TABLE late_trigger_savepoint_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_savepoint_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_savepoint_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: DROP TABLE IF EXISTS late_trigger_alter_audit
+- sql: DROP TABLE IF EXISTS late_trigger_alter
+- sql: DROP TABLE IF EXISTS late_trigger_alter_prior
+- sql: CREATE TABLE late_trigger_alter(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_alter VALUES(1,1)
+- sql: CREATE TABLE late_trigger_alter_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_alter_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_alter_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: DROP TABLE IF EXISTS late_trigger_drop_audit
+- sql: DROP TABLE IF EXISTS late_trigger_drop
+- sql: DROP TABLE IF EXISTS late_trigger_drop_prior
+- sql: CREATE TABLE late_trigger_drop(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_drop VALUES(1,1)
+- sql: CREATE TABLE late_trigger_drop_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_drop_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_drop_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: DROP TABLE IF EXISTS late_trigger_enabled_audit
+- sql: DROP TABLE IF EXISTS late_trigger_enabled
+- sql: DROP TABLE IF EXISTS late_trigger_enabled_prior
+- sql: CREATE TABLE late_trigger_enabled(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_enabled VALUES(1,1)
+- sql: CREATE TABLE late_trigger_enabled_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_enabled_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_enabled_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: DROP TABLE IF EXISTS late_trigger_empty_audit
+- sql: DROP TABLE IF EXISTS late_trigger_empty
+- sql: DROP TABLE IF EXISTS late_trigger_empty_prior
+- sql: CREATE TABLE late_trigger_empty(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_empty VALUES(1,1)
+- sql: CREATE TABLE late_trigger_empty_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_empty_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_empty_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: DROP TABLE IF EXISTS late_trigger_default_audit
+- sql: DROP TABLE IF EXISTS late_trigger_default
+- sql: DROP TABLE IF EXISTS late_trigger_default_prior
+- sql: CREATE TABLE late_trigger_default(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_default VALUES(1,1)
+- sql: CREATE TABLE late_trigger_default_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_default_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_default_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: CREATE TRIGGER late_trigger_alter_program ON late_trigger_alter AFTER UPDATE AS BEGIN INSERT late_trigger_alter_audit(id,old_value,new_value,phase)
+    SELECT i.id,d.value,i.value,10 FROM inserted i INNER JOIN deleted d ON i.id=d.id; END
+- sql: CREATE TRIGGER late_trigger_drop_program ON late_trigger_drop AFTER UPDATE AS BEGIN INSERT late_trigger_drop_audit(id,old_value,new_value,phase)
+    SELECT i.id,d.value,i.value,10 FROM inserted i INNER JOIN deleted d ON i.id=d.id; END
+- sql: CREATE TRIGGER late_trigger_enabled_program ON late_trigger_enabled AFTER UPDATE AS BEGIN INSERT late_trigger_enabled_audit(id,old_value,new_value,phase)
+    SELECT i.id,d.value,i.value,10 FROM inserted i INNER JOIN deleted d ON i.id=d.id; END
+- sql: CREATE TABLE late_trigger_read_committed(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_read_committed VALUES(1,1)
+- sql: CREATE TABLE late_trigger_read_committed_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_read_committed_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_read_committed_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: CREATE TABLE late_trigger_delete(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_delete VALUES(1,1)
+- sql: CREATE TABLE late_trigger_delete_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_delete_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_delete_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: CREATE TABLE late_trigger_insert(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_insert VALUES(1,1)
+- sql: CREATE TABLE late_trigger_insert_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_insert_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_insert_audit(id INT,old_value INT,new_value INT,phase INT)
+- sql: CREATE TABLE late_trigger_cross_rewind(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_cross_rewind VALUES(1,1)
+- sql: CREATE TABLE late_trigger_cross_rewind_prior(id INT NOT NULL PRIMARY KEY,value INT NULL)
+- sql: INSERT late_trigger_cross_rewind_prior VALUES(1,10)
+- sql: CREATE TABLE late_trigger_cross_rewind_audit(id INT,old_value INT,new_value INT,phase INT)
+cleanup:
+- sql: DROP TABLE IF EXISTS late_trigger_unrelated
+- sql: DROP TABLE IF EXISTS late_trigger_unrelated_audit
+- sql: DROP TABLE IF EXISTS late_trigger_unrelated_prior
+- sql: DROP TABLE IF EXISTS late_trigger_same
+- sql: DROP TABLE IF EXISTS late_trigger_same_audit
+- sql: DROP TABLE IF EXISTS late_trigger_same_prior
+- sql: DROP TABLE IF EXISTS late_trigger_rollback
+- sql: DROP TABLE IF EXISTS late_trigger_rollback_audit
+- sql: DROP TABLE IF EXISTS late_trigger_rollback_prior
+- sql: DROP TABLE IF EXISTS late_trigger_savepoint
+- sql: DROP TABLE IF EXISTS late_trigger_savepoint_audit
+- sql: DROP TABLE IF EXISTS late_trigger_savepoint_prior
+- sql: DROP TABLE IF EXISTS late_trigger_alter
+- sql: DROP TABLE IF EXISTS late_trigger_alter_audit
+- sql: DROP TABLE IF EXISTS late_trigger_alter_prior
+- sql: DROP TABLE IF EXISTS late_trigger_drop
+- sql: DROP TABLE IF EXISTS late_trigger_drop_audit
+- sql: DROP TABLE IF EXISTS late_trigger_drop_prior
+- sql: DROP TABLE IF EXISTS late_trigger_enabled
+- sql: DROP TABLE IF EXISTS late_trigger_enabled_audit
+- sql: DROP TABLE IF EXISTS late_trigger_enabled_prior
+- sql: DROP TABLE IF EXISTS late_trigger_empty
+- sql: DROP TABLE IF EXISTS late_trigger_empty_audit
+- sql: DROP TABLE IF EXISTS late_trigger_empty_prior
+- sql: DROP TABLE IF EXISTS late_trigger_default
+- sql: DROP TABLE IF EXISTS late_trigger_default_audit
+- sql: DROP TABLE IF EXISTS late_trigger_default_prior
+- sql: DROP TABLE IF EXISTS late_trigger_read_committed
+- sql: DROP TABLE IF EXISTS late_trigger_read_committed_audit
+- sql: DROP TABLE IF EXISTS late_trigger_read_committed_prior
+- sql: DROP TABLE IF EXISTS late_trigger_delete
+- sql: DROP TABLE IF EXISTS late_trigger_delete_audit
+- sql: DROP TABLE IF EXISTS late_trigger_delete_prior
+- sql: DROP TABLE IF EXISTS late_trigger_insert
+- sql: DROP TABLE IF EXISTS late_trigger_insert_audit
+- sql: DROP TABLE IF EXISTS late_trigger_insert_prior
+- sql: DROP TABLE IF EXISTS late_trigger_cross_rewind
+- sql: DROP TABLE IF EXISTS late_trigger_cross_rewind_audit
+- sql: DROP TABLE IF EXISTS late_trigger_cross_rewind_prior
+test_cases:
+- name: An unrelated row prefix and a new AFTER program share the original decision
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_unrelated_prior SET value=11 WHERE id=1
+    - connection: owner
+      sql: CREATE TRIGGER late_trigger_unrelated_program ON late_trigger_unrelated AFTER UPDATE AS BEGIN INSERT late_trigger_unrelated_audit(id,old_value,new_value,phase)
+        SELECT i.id,d.value,i.value,10 FROM inserted i INNER JOIN deleted d ON i.id=d.id; END
+    - connection: owner
+      sql: UPDATE late_trigger_unrelated SET value=2 WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM late_trigger_unrelated ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 2
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_unrelated_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_unrelated ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 1
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_unrelated_audit ORDER BY old_value,phase
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'late_trigger_unrelated_program',N'TR') AS trigger_id
+      expect:
+        rows: 1
+        data:
+        - trigger_id: null
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 1
+          depth: 1
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_unrelated ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 2
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_unrelated_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 0
+          depth: 0
+- name: Earlier writes on the same endpoint do not fire a later trigger retroactively
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_same SET value=2 WHERE id=1
+    - connection: owner
+      sql: CREATE TRIGGER late_trigger_same_program ON late_trigger_same AFTER UPDATE AS BEGIN INSERT late_trigger_same_audit(id,old_value,new_value,phase)
+        SELECT i.id,d.value,i.value,10 FROM inserted i INNER JOIN deleted d ON i.id=d.id; END
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_same_audit ORDER BY old_value,phase
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: UPDATE late_trigger_same SET value=3 WHERE id=1
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_same_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 2
+          new_value: 3
+          phase: 10
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_same ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 1
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_same ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 3
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_same_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 2
+          new_value: 3
+          phase: 10
+- name: Rollback restores the original rows declaration and audit effects together
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_rollback_prior SET value=11 WHERE id=1
+    - connection: owner
+      sql: CREATE TRIGGER late_trigger_rollback_program ON late_trigger_rollback AFTER UPDATE AS BEGIN INSERT late_trigger_rollback_audit(id,old_value,new_value,phase)
+        SELECT i.id,d.value,i.value,10 FROM inserted i INNER JOIN deleted d ON i.id=d.id; END
+    - connection: owner
+      sql: UPDATE late_trigger_rollback SET value=2 WHERE id=1
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_rollback_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_rollback ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 1
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_rollback_audit ORDER BY old_value,phase
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'late_trigger_rollback_program',N'TR') AS trigger_id
+      expect:
+        rows: 1
+        data:
+        - trigger_id: null
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_rollback_prior
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 10
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 0
+          depth: 0
+- name: Savepoint rewind removes the declaration and suffix while preserving the row prefix
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_savepoint SET value=2 WHERE id=1
+    - connection: owner
+      sql: SAVE TRANSACTION before_program
+    - connection: owner
+      sql: CREATE TRIGGER late_trigger_savepoint_program ON late_trigger_savepoint AFTER UPDATE AS BEGIN INSERT late_trigger_savepoint_audit(id,old_value,new_value,phase)
+        SELECT i.id,d.value,i.value,10 FROM inserted i INNER JOIN deleted d ON i.id=d.id; END
+    - connection: owner
+      sql: UPDATE late_trigger_savepoint SET value=3 WHERE id=1
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_savepoint_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 2
+          new_value: 3
+          phase: 10
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_program
+    - connection: owner
+      sql: SELECT id,value FROM late_trigger_savepoint ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 2
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_savepoint_audit ORDER BY old_value,phase
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'late_trigger_savepoint_program',N'TR') AS trigger_id
+      expect:
+        rows: 1
+        data:
+        - trigger_id: null
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_savepoint SET value=4 WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM late_trigger_savepoint ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 4
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_savepoint_audit ORDER BY old_value,phase
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'late_trigger_savepoint_program',N'TR') AS trigger_id
+      expect:
+        rows: 1
+        data:
+        - trigger_id: null
+- name: ALTER after completed DML changes only subsequent statement programs
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_alter SET value=2 WHERE id=1
+    - connection: owner
+      sql: ALTER TRIGGER late_trigger_alter_program ON late_trigger_alter AFTER UPDATE AS BEGIN INSERT late_trigger_alter_audit(id,old_value,new_value,phase)
+        SELECT i.id,d.value,i.value,20 FROM inserted i INNER JOIN deleted d ON i.id=d.id; END
+    - connection: owner
+      sql: UPDATE late_trigger_alter SET value=3 WHERE id=1
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_alter_audit ORDER BY old_value,phase
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+        - id: 1
+          old_value: 2
+          new_value: 3
+          phase: 20
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_alter ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 1
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_alter_audit ORDER BY old_value,phase
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_alter_audit ORDER BY old_value,phase
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+        - id: 1
+          old_value: 2
+          new_value: 3
+          phase: 20
+- name: DROP after DML retains the preceding event and retires only following events
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_drop SET value=2 WHERE id=1
+    - connection: owner
+      sql: DROP TRIGGER late_trigger_drop_program
+    - connection: owner
+      sql: UPDATE late_trigger_drop SET value=3 WHERE id=1
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_drop_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_drop ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 3
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_drop_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'late_trigger_drop_program',N'TR') AS trigger_id
+      expect:
+        rows: 1
+        data:
+        - trigger_id: null
+- name: Disabled and enabled amendments after DML retain actual event ordering
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_enabled SET value=2 WHERE id=1
+    - connection: owner
+      sql: DISABLE TRIGGER late_trigger_enabled_program ON late_trigger_enabled
+    - connection: owner
+      sql: UPDATE late_trigger_enabled SET value=3 WHERE id=1
+    - connection: owner
+      sql: ENABLE TRIGGER late_trigger_enabled_program ON late_trigger_enabled
+    - connection: owner
+      sql: UPDATE late_trigger_enabled SET value=4 WHERE id=1
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_enabled_audit ORDER BY old_value,phase
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+        - id: 1
+          old_value: 3
+          new_value: 4
+          phase: 10
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_enabled ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 4
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_enabled_audit ORDER BY old_value,phase
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+        - id: 1
+          old_value: 3
+          new_value: 4
+          phase: 10
+- name: A newly declared AFTER program fires once for an empty actual UPDATE
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_empty_prior SET value=11 WHERE id=1
+    - connection: owner
+      sql: CREATE TRIGGER late_trigger_empty_program ON late_trigger_empty AFTER UPDATE AS INSERT late_trigger_empty_audit
+        VALUES(0,0,0,10)
+    - connection: owner
+      sql: UPDATE late_trigger_empty SET value=9 WHERE id=99
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_empty_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 0
+          old_value: 0
+          new_value: 0
+          phase: 10
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_empty_audit ORDER BY old_value,phase
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'late_trigger_empty_program',N'TR') AS trigger_id
+      expect:
+        rows: 1
+        data:
+        - trigger_id: null
+- name: An earlier default declaration and row suffix can precede another endpoint trigger
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE late_trigger_default_prior ADD CONSTRAINT late_trigger_prior_default DEFAULT(11) FOR value
+    - connection: owner
+      sql: UPDATE late_trigger_default_prior SET value=DEFAULT WHERE id=1
+    - connection: owner
+      sql: CREATE TRIGGER late_trigger_default_program ON late_trigger_default AFTER UPDATE AS BEGIN INSERT late_trigger_default_audit(id,old_value,new_value,phase)
+        SELECT i.id,d.value,i.value,10 FROM inserted i INNER JOIN deleted d ON i.id=d.id; END
+    - connection: owner
+      sql: UPDATE late_trigger_default SET value=2 WHERE id=1
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_default_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+    - connection: owner
+      sql: SELECT id,value FROM late_trigger_default_prior
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 1
+          depth: 1
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_default ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 2
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_default_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+- name: A new AFTER DELETE program captures only its actual subsequent transition
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_delete_prior SET value=11 WHERE id=1
+    - connection: owner
+      sql: CREATE TRIGGER late_trigger_delete_program ON late_trigger_delete AFTER DELETE AS INSERT late_trigger_delete_audit
+        SELECT id,value,NULL,10 FROM deleted
+    - connection: owner
+      sql: DELETE FROM late_trigger_delete WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM late_trigger_delete ORDER BY id
+      expect:
+        rows: 0
+        data: &id001 []
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_delete_audit ORDER BY id
+      expect:
+        rows: 1
+        data: &id002
+        - id: 1
+          old_value: 1
+          new_value: null
+          phase: 10
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_delete ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 1
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_delete_audit ORDER BY id
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_delete ORDER BY id
+      expect:
+        rows: 0
+        data: *id001
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_delete_audit ORDER BY id
+      expect:
+        rows: 1
+        data: *id002
+- name: A new AFTER INSERT program captures only its actual subsequent transition
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_insert_prior SET value=11 WHERE id=1
+    - connection: owner
+      sql: CREATE TRIGGER late_trigger_insert_program ON late_trigger_insert AFTER INSERT AS INSERT late_trigger_insert_audit
+        SELECT id,NULL,value,10 FROM inserted
+    - connection: owner
+      sql: INSERT late_trigger_insert VALUES(2,2)
+    - connection: owner
+      sql: SELECT id,value FROM late_trigger_insert ORDER BY id
+      expect:
+        rows: 2
+        data: &id003
+        - id: 1
+          value: 1
+        - id: 2
+          value: 2
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_insert_audit ORDER BY id
+      expect:
+        rows: 1
+        data: &id004
+        - id: 2
+          old_value: null
+          new_value: 2
+          phase: 10
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_insert ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 1
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_insert_audit ORDER BY id
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_insert ORDER BY id
+      expect:
+        rows: 2
+        data: *id003
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_insert_audit ORDER BY id
+      expect:
+        rows: 1
+        data: *id004
+- name: A rewound first trigger leaves a usable actual endpoint while another declaration survives
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_cross_rewind_prior SET value=11 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE late_trigger_cross_rewind_prior ADD CONSTRAINT late_trigger_rewind_default DEFAULT(42) FOR value
+    - connection: owner
+      sql: SAVE TRANSACTION before_other_program
+    - connection: owner
+      sql: CREATE TRIGGER late_trigger_cross_rewind_program ON late_trigger_cross_rewind AFTER UPDATE AS INSERT late_trigger_cross_rewind_audit
+        SELECT i.id,d.value,i.value,10 FROM inserted i JOIN deleted d ON i.id=d.id
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_other_program
+    - connection: owner
+      sql: UPDATE late_trigger_cross_rewind SET value=2 WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM late_trigger_cross_rewind
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 2
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_cross_rewind_audit
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'late_trigger_cross_rewind_program',N'TR') AS trigger_id
+      expect:
+        rows: 1
+        data:
+        - trigger_id: null
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_cross_rewind
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 1
+    - connection: owner
+      sql: UPDATE late_trigger_cross_rewind_prior SET value=DEFAULT WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM late_trigger_cross_rewind_prior
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 42
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_cross_rewind
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 2
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_cross_rewind_prior
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 42
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_cross_rewind_audit
+      expect:
+        rows: 0
+        data: []
+- name: Read committed row prefixes retain the same later trigger semantics
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE late_trigger_read_committed_prior SET value=11 WHERE id=1
+    - connection: owner
+      sql: CREATE TRIGGER late_trigger_read_committed_program ON late_trigger_read_committed AFTER UPDATE AS BEGIN INSERT
+        late_trigger_read_committed_audit(id,old_value,new_value,phase) SELECT i.id,d.value,i.value,10 FROM inserted i INNER
+        JOIN deleted d ON i.id=d.id; END
+    - connection: owner
+      sql: UPDATE late_trigger_read_committed SET value=2 WHERE id=1
+    - connection: owner
+      sql: SELECT id,value FROM late_trigger_read_committed ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 2
+    - connection: owner
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_read_committed_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_read_committed ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 1
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_read_committed_audit ORDER BY old_value,phase
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: SELECT OBJECT_ID(N'late_trigger_read_committed_program',N'TR') AS trigger_id
+      expect:
+        rows: 1
+        data:
+        - trigger_id: null
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 1
+          depth: 1
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,value FROM late_trigger_read_committed ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 2
+    - connection: observer
+      sql: SELECT id,old_value,new_value,phase FROM late_trigger_read_committed_audit ORDER BY old_value,phase
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_value: 1
+          new_value: 2
+          phase: 10
+    - connection: owner
+      sql: SELECT XACT_STATE() AS state,@@TRANCOUNT AS depth
+      expect:
+        rows: 1
+        data:
+        - state: 0
+          depth: 0

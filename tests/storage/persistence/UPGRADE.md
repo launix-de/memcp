@@ -1,6 +1,136 @@
 <!-- Copyright (C) 2026 Carl-Philip Hänsch -->
 # Upgrade compatibility contract
 
+## Joint owned namespace and nullable append decisions
+
+Ordinary nullable prefix appends may join unrelated private CREATE operations
+in the existing V22 decision and unrelated whole-table retirements in an already
+recognized V23 owned/name decision. Native table names and UUIDs must be disjoint
+between append and retirement endpoints. The actual surviving constructor list
+and canonical projected name/key program supply the existing format proof.
+Bare DROP plus append without that proof remains unsupported; realized/generated
+append profiles retain their earlier boundaries.
+
+Admission validates a prospective immutable declaration history before effects.
+A later DROP cannot erase its sole supporting name action. Constructor discard
+validates the candidate surviving directory before retiring storage; a real
+savepoint removes dependent append history with that constructor. The drained
+decision repeats validation. No reader domain or encoding changes: recovery
+installs accepted private tables, applies append headers to exact existing
+physical generations, replays ordered native actions, then retires old tables
+before publishing the one namespace cut.
+
+`joint-owned-nullable-append.yaml` covers copied replacements, checked typed
+rows, unrelated progress, observers, rollback, savepoints, supported V22/V23
+compositions, refusal of unsupported compositions and accepted/unaccepted
+crash recovery. Native controls also exercise prospective name loss and the
+actual partial constructor-discard rejection without changing selected inputs.
+
+## Nullable historical prefixes and checked writes
+
+New ordinary nullable appends capture their actual main/delta generation extents
+through the existing `catalog-v19/` historical-prefix owner. Their historical
+value is genuine NULL; no future DEFAULT is invented, and no row scan or backfill
+is performed. The existing checked INSERT/UPDATE producer consumes the complete
+immutable input in the original transaction. Its normal row WAL records explicit
+later values, including those written before the append decision commits.
+
+Fresh-endpoint admission, retained raw-callback exclusion and the original
+savepoint/statement Undo owners remain in effect. Earlier V16 records retain
+their original read-only pending profile; no legacy record is upgraded by
+inference. Required V19 fields and all old journal format gates are unchanged.
+`nullable-column-checked-writes.yaml` covers nested transaction depth, correlated
+updates, NULL/missing scalar inputs, metadata without defaults, rollback,
+savepoints, failed statements, future inserts and accepted/unaccepted recovery.
+
+## Historical generated-ID column appends
+
+The required `catalog-v10/v31/` domain composes a generated-ID append with the
+same original transaction's realized row journals, selected allocator epoch and
+existing ordered declaration actions, including V30 CHECK replacement. The
+append records the new column's configured positive origin. It does not replace
+the table allocator's authentic Start or Issued provenance. The new operation
+requires a proven unused native allocator and no existing identity column;
+unknown and previously issued predecessors are rejected before publication.
+
+A native scan reserves one typed range for the visible historical rows. Finite
+per-shard offsets assign distinct values through the existing realized column
+initializer. The header and private allocator branch share one amendment and
+savepoint history. Recovery replays stored values and the accepted epoch; it
+never reruns a generator or reserves a second range.
+
+All earlier journal domains reject the new `generated_ids` field, including an
+explicit null spelling. Checkpoints use version 2 of the required column-name
+binding with the configured origin, so an older reader also fails closed after
+journal retirement. Ordinary and renamed legacy columns keep their previous
+encodings. `identity-column-append.yaml` covers historical rows, tombstones,
+original row work, rollback, savepoints, overflow, signed exhaustion, mixed CHECK
+replacement, checkpoint recovery and inherited seed reflection. These source
+controls require matching-native runtime qualification before a release claim.
+
+## Pending foreign-key enforcement state
+
+The `catalog-v10/v29/` domain records the final enabled and trusted state of
+foreign keys added by the same original transaction. A disabled foreign key
+retains its declaration, endpoint dependencies and metadata; it installs no
+enforcement programs. Disabling clears historical trust. Reenabling without
+validation preserves the untrusted state. CHECK declarations retain their
+existing requirement to be enabled and validated at commit.
+
+V29 composes the existing ordered declaration, column-retirement and allocator
+actions in one native decision. Earlier journal domains reject the enforcement
+field, including an explicit false spelling. The retained required journal
+envelope survives checkpoint compaction and storage moves. A disabled schema
+descriptor also encodes its mandatory update-mode field as the closed
+`disabled-v1/0`, `disabled-v1/1` or `disabled-v1/2` discriminator. Historical
+numeric readers therefore reject standalone schema imports as well. Enabled
+legacy descriptors keep their existing encoding.
+
+`unchecked-foreign-after-rows.yaml`, `disabled-foreign-after-rows.yaml` and
+`pending-foreign-state.yaml` cover original transaction row work, prospective
+enforcement, independent trust and enabled state, rollback, savepoints,
+dependency retention, crash recovery and checkpoint metadata. The native
+compatibility tests cover malformed descriptors and strict journal domains.
+Changing the state of an already committed foreign key remains outside the
+pending-declaration API's admitted profile.
+
+## Candidate row-initialized column appends
+
+The proposed `catalog-v21/` domain carries ordinary column appends whose
+historical values were realized by the original transaction's native row WAL.
+The recipe retains inert future default data and optional exclusive property
+claims. It never retains or re-executes the initializer callback. Versions
+1–20 reject the new fields, including explicit null spellings; their existing
+constant initialization and declaration domains remain unchanged.
+
+One existing native statement undo boundary spans the complete ADD batch.
+The final private declaration follows completion of the existing parallel scan
+workers. Rollback and savepoints restore the same transaction's row and catalog
+suffix. Unaccepted wider WAL rows are handled by the existing hidden-row replay
+and original transaction decision, without requiring publication of their
+unfinished column declaration.
+
+`column-row-initialization.yaml` supplies positive original-transaction,
+exact-value, generator-failure, highwater, SAFE/LOGGED crash and restart controls.
+Unordered property-removal composition remains a positive noncritical feature
+case; it is rejected before effects in both orders. This proposal requires
+independent source review and runtime qualification before publication.
+
+The current source composition retains physical WAL pins and predecessor
+retirement dependencies from the native transaction owner. Initializer row
+replacements copy existing identity values explicitly and do not reserve new
+identities; only later ordinary INSERT preparation advances the allocator.
+The focused controls include unchanged identity observations, restart and a
+pending original row carried through two rebuild generations before ADD.
+These controls remain unexecuted until matching-native qualification.
+
+The SQL slice binds closed UUID generators in SCM; statement-clock and
+identity generators are separate declaration contracts. Actual-Tx nested
+mutation/declaration calls retain ordinary exclusion. Arbitrary administrative
+SCM initializers which deliberately invoke nil-Tx temporary-column DDL are
+not qualified: that existing path can wait on the retained DDL lease and has
+no original-call parentage. This proposal adds no ambient ownership inference.
+
 The Upgrade Compatibility workflow proves that the candidate can open data
 written by every supported predecessor. It always tests the pull request's
 base commit (the previous `master`) and every Git tag matching
@@ -49,7 +179,9 @@ The predecessor binary creates the complete fixture and supplies two oracles:
   stored value;
 - results from a public SQL workload, including repeated grouping, aggregate
   ordering, expression group keys, correlated equality/range lookups and
-  windows with opposing order directions.
+  windows with opposing order directions, and native calendar values with
+  constant/varying whole seconds, NULLs, duplicate grouping, comparisons,
+  indexed gathers and ordered pages.
 
 The same SQL workload runs on the predecessor, after a predecessor restart,
 after opening the data with the candidate, after cold and warm source-table
@@ -57,6 +189,12 @@ updates, and after a candidate restart. Each execution must return the declared
 result and the candidate's unchanged executions must equal the predecessor's
 saved query oracle. The updates are restored before the full data snapshot is
 compared.
+
+Calendar snapshots use public `DATE_FORMAT` expressions for DATE, DATETIME and
+TIMESTAMP rather than a predecessor's integer or text wire carrier. The same
+canonical expressions run on both writers and readers. These fixtures contain
+whole seconds understood by every pin; they do not assert fractional precision
+that an old writer could never produce.
 
 Queries which can create adaptive caches run repeatedly. This is deliberate:
 the workload must cross normal admission thresholds through public SQL rather
@@ -100,3 +238,66 @@ GITHUB_WORKSPACE="$PWD" bash candidate/tests/storage/persistence/upgrade-run.sh
 
 Optional `UPGRADE_API_PORT` and `UPGRADE_MYSQL_PORT` values select isolated
 ports. Full-suite validation remains a CI responsibility.
+
+
+## Table allocator provenance
+
+The native table allocator now persists a version 1 `allocator` schema member
+and checksummed `allocator-v1` database-authority WAL records. The state binds
+the table UUID, actual configured start, known/unknown issued state, highwater
+as monotone UUID-bound facts. No second counter infers issue order.
+SAFE reservations are flushed before acknowledgement;
+LOGGED retains process-crash durability. Unused accepted intervals survive row
+rollback and savepoint rewind. MEMORY and SLOPPY keep their existing durability
+contracts. Checkpoint and storage MOVE preserve the same authority records.
+
+Historical `Auto_increment` fields remain readable. They prove only a
+highwater, not the original start or whether that start has been issued. The
+reader does not assign a guessed seed. Native `table_id_state` exposes unknown
+facts explicitly; TSQL `IDENT_CURRENT` reports unsupported provenance rather
+than confusing it with SQL NULL for a missing or inaccessible object. A later
+real reservation can establish its actual current value without claiming the
+unknown historical start. New constructors persist their real start.
+
+This is a new writer format; older binaries are not supported writers of data
+containing the new allocator authority. The UUID-bound cluster allocator uses
+the distinct `cluster.table_ids` operation with explicit request/reply version
+2. The previous `cluster.reserve_ids` operation is no longer registered, so an
+older unversioned request cannot be mistaken for a version marker. Within the
+new protocol, an empty identity is accepted only for an actual UUID-less,
+provenance-free predecessor table and only for reservation. Its response has
+an explicitly empty provenance payload and preserves the old highwater-only
+allocation contract; it cannot reserve against a UUID-backed replacement or
+support the new current-value observation. The historical row/WAL readers
+remain unchanged. Independent noncluster replication writers retain
+their existing highwater merge; this does not establish a global current-value
+owner, so the new observation API rejects that scope explicitly.
+`table-id-allocator.yaml` supplies current-writer value, rollback, crash, checkpoint and name-reuse controls; predecessor-writer
+provenance coverage remains a separate qualification obligation.
+
+### Realized ADD with original creation and bound names
+
+The current candidate writes realized historical initializers in the strict
+`catalog-v10/v24/` envelope. Its explicit submagic makes the qualified V23
+predecessor reject a new uncheckpointed decision in both authority-first load
+and participant-first enrollment verification; it cannot treat that decision
+as an unrelated transaction identifier. The earlier standalone V21 envelope
+remains readable with its original tables-free profile. V1–V20 and V22/V23
+retain their existing domains, including rejection of the new initializer
+fields even when explicitly null.
+
+V24 requires a realized-row append and reuses the sole original decision,
+ordered declarations, actual created-generation proof and participant recovery
+owner. Created tables and stable name bindings are optional; table retirement
+and unordered FK/property streams are excluded. The new compound full-value
+controls create a real second table and primary key before initializing a
+nonempty existing table, retain exact captured UUIDs through original own-row
+versions, commit/rollback/savepoint and real restarts, and verify fresh physical
+binding when a retired visible column spelling is reused. A real third-row
+factory exception must unwind the whole ADD batch while preserving an earlier
+private created generation and committable row prefix. No qualifier here
+substitutes a plan or journal-shape oracle for public values.
+
+Qualification of old-reader refusal before checkpoint and interrupted accepted
+compound decisions remains the matching-binary runner's responsibility; this
+source candidate does not claim execution or crash evidence until recorded.

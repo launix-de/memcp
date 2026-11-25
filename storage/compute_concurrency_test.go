@@ -186,7 +186,7 @@ func countCollapsedComputor() scm.Scmer {
 		Body: scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("scan"),
 			scm.NewNil(),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString("compconc"), scm.NewBool(false), scm.NewString("feature"), scm.NewBool(false)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString("compconc"), scm.NewBool(false), scm.NewString("feature"), scm.NewBool(false), scm.NewNil()}),
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), accessSchema}),
 			accessValues,
 			filterColumns,
@@ -317,7 +317,7 @@ func TestInsertSanitizationDoesNotMutateCallerRows(t *testing.T) {
 
 func TestComputeColumnRejectsColdRemoteShardBeforeMaterialization(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tcomputeremote", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	var freed [numEvictableTypes]int64
 	if !shardCleanup(shard, &freed) || shard.state() != COLD {
@@ -347,7 +347,7 @@ func TestComputeColumnRejectsColdRemoteShardBeforeMaterialization(t *testing.T) 
 
 func TestComputeColumnRetainsPayloadThroughCallbackAndPanic(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tcomputeread", 4)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	shard := tbl.ActiveShards()[0]
 	r := &replicationManager{cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 	cell := r.shardCell(shard)
@@ -381,7 +381,7 @@ func TestComputeColumnRetainsPayloadThroughCallbackAndPanic(t *testing.T) {
 			t.Fatalf("preparation calls=%d leaked readers=%d", calls, shard.cacheReaders.Load())
 		}
 		if !fail {
-			reader := shard.ColumnReaderTx(nil, name, false, ReadAuto)
+			reader := shard.ColumnReaderTx(nil, name, false, ReadAuto, shard.t.bindColumnInput(nil))
 			if got := reader.GetValue(0).Int(); got != 2 {
 				t.Errorf("computed value = %d, want 2", got)
 			}
@@ -446,7 +446,7 @@ func TestComputeColumnCancellationKeepsSharedAcquisition(t *testing.T) {
 func TestComputeColumnWaitsForStartedShardsAfterFailure(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tcomputedrain", 4)
 	tbl.CreateColumn("cached", "INT", nil, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	if !tbl.beginManualRepartition() {
 		t.Fatal("manual repartition was not claimed")
 	}
@@ -574,7 +574,7 @@ func TestFilteredComputeColumnReusesValidValuesAcrossFilters(t *testing.T) {
 	if changedFilterProxy != canonicalProxy {
 		t.Fatal("changed filter replaced the canonical compute proxy")
 	}
-	reader := shard.ColumnReaderTx(nil, "cached", false, ReadAuto)
+	reader := shard.ColumnReaderTx(nil, "cached", false, ReadAuto, shard.t.bindColumnInput(nil))
 	defer ReleaseColumnReader(reader)
 	for i := uint32(0); i < 4; i++ {
 		if got := reader.GetValue(i).Int(); got != int64(i+1) {
@@ -627,7 +627,7 @@ func TestUnfilteredComputeColumnReusesCompletePreparationUntilMutation(t *testin
 		t.Fatalf("post-insert repair invoked computor %d times, want 4 total", got)
 	}
 
-	reader := tbl.ActiveShards()[0].ColumnReaderTx(nil, "cached", false, ReadAuto).GetValue
+	reader := tbl.ActiveShards()[0].ColumnReaderTx(nil, "cached", false, ReadAuto, tbl.ActiveShards()[0].t.bindColumnInput(nil)).GetValue
 	if got := reader(3).Int(); got != 80 {
 		t.Fatalf("repaired appended computed value = %d, want 80", got)
 	}
@@ -742,7 +742,7 @@ func TestComputeSetDoesNotUpgradeShardReadOwnership(t *testing.T) {
 					scm.Apply(args[1], scm.NewInt(42))
 					return args[0]
 				})
-				mapper := shard.OpenMapReducer([]string{"$set:cached"}, callback, false, 0, nil, nil)
+				mapper := shard.OpenMapReducer([]string{"$set:cached"}, callback, false, 0, nil, nil, shard.t.bindColumnInput(nil))
 				defer mapper.Close()
 				id := uint32(0)
 				if !main {
@@ -858,7 +858,7 @@ func TestComputeColumnWaitsForRequestedPublication(t *testing.T) {
 			tbl, _ := CreateTable("compconc", "preparation_completion", Memory, false)
 			tbl.CreateColumn("id", "INT", nil, nil)
 			tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
-			RebuildTable(tbl, true, false)
+			RebuildTable(tbl, true, false, nil)
 			tbl.CreateColumn("cached", "INT", nil, nil)
 			var source, calls atomic.Int64
 			source.Store(1)

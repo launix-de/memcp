@@ -1,0 +1,290 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: mysql
+  isolated: true
+  requires_tds: true
+  description: Row trigger source binds visible names once to selected native row and DML coordinates
+setup:
+- sql: DROP TABLE IF EXISTS row_binding_after
+- sql: DROP TABLE IF EXISTS row_binding_before
+- sql: DROP TABLE IF EXISTS row_binding_audit
+- sql: CREATE TABLE row_binding_before(id INT PRIMARY KEY,old_value INT,payload INT) ENGINE=sloppy
+- sql: CREATE TABLE row_binding_audit(old_audit_id INT,before_value INT,after_value INT) ENGINE=sloppy
+test_cases:
+- name: Existing native row and audit inputs receive new SQL-visible names
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.row_binding_before.old_value',N'new_value',N'COLUMN'
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.row_binding_audit.old_audit_id',N'audit_id',N'COLUMN'
+- name: A new MySQL BEFORE program writes the selected physical NEW coordinates in sequence
+  sql: CREATE TRIGGER row_binding_bi BEFORE INSERT ON row_binding_before FOR EACH ROW BEGIN SET NEW.new_value=NEW.new_value+2;
+    SET NEW.payload=NEW.new_value+1; END
+- name: A new MySQL AFTER program binds both row images and its renamed native INSERT destination
+  sql: CREATE TRIGGER row_binding_au AFTER UPDATE ON row_binding_before FOR EACH ROW BEGIN INSERT INTO row_binding_audit(audit_id,before_value,after_value)
+    VALUES(NEW.id,OLD.new_value,NEW.new_value); END
+- name: Cold row programs retain complete updated rows and actual OLD NEW audit values
+  steps:
+  - sql: INSERT INTO row_binding_before(id,new_value,payload) VALUES(1,5,0)
+  - sql: UPDATE row_binding_before SET new_value=11 WHERE id=1
+  - sql: SELECT id,new_value,payload FROM row_binding_before ORDER BY id
+    expect:
+      data:
+      - id: 1
+        new_value: 11
+        payload: 8
+      rows: 1
+  - sql: SELECT audit_id,before_value,after_value FROM row_binding_audit ORDER BY audit_id,after_value
+    expect:
+      data:
+      - audit_id: 1
+        before_value: 7
+        after_value: 11
+      rows: 1
+- name: A table address rename preserves the same native row program inputs
+  tds:
+    statements:
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.row_binding_before',N'row_binding_after',N'OBJECT'
+- name: Compiled row programs consume the renamed table without changing their source
+  steps:
+  - sql: INSERT INTO row_binding_after(id,new_value,payload) VALUES(2,13,0)
+  - sql: UPDATE row_binding_after SET new_value=19 WHERE id=2
+  - sql: SELECT id,new_value,payload FROM row_binding_after ORDER BY id
+    expect:
+      data:
+      - id: 1
+        new_value: 11
+        payload: 8
+      - id: 2
+        new_value: 19
+        payload: 16
+      rows: 2
+  - sql: SELECT audit_id,before_value,after_value FROM row_binding_audit ORDER BY audit_id,after_value
+    expect:
+      data:
+      - audit_id: 1
+        before_value: 7
+        after_value: 11
+      - audit_id: 2
+        before_value: 15
+        after_value: 19
+      rows: 2
+- name: Reload language-owned row programs using actual native input declarations
+  action: restart
+- name: Recovered row programs retain values through both column and table address changes
+  steps:
+  - sql: INSERT INTO row_binding_after(id,new_value,payload) VALUES(3,23,0)
+  - sql: UPDATE row_binding_after SET new_value=29 WHERE id=3
+  - sql: SELECT id,new_value,payload FROM row_binding_after ORDER BY id
+    expect:
+      data:
+      - id: 1
+        new_value: 11
+        payload: 8
+      - id: 2
+        new_value: 19
+        payload: 16
+      - id: 3
+        new_value: 29
+        payload: 26
+      rows: 3
+  - sql: SELECT audit_id,before_value,after_value FROM row_binding_audit ORDER BY audit_id,after_value
+    expect:
+      data:
+      - audit_id: 1
+        before_value: 7
+        after_value: 11
+      - audit_id: 2
+        before_value: 15
+        after_value: 19
+      - audit_id: 3
+        before_value: 25
+        after_value: 29
+      rows: 3
+- name: Prepare a persisted row-language program without executing its callback
+  steps:
+  - sql: DROP TABLE IF EXISTS trigger_binding_isolation
+  - sql: DROP TABLE IF EXISTS trigger_binding_isolation_audit
+  - sql: CREATE TABLE trigger_binding_isolation(id INT PRIMARY KEY,a INT,b INT) ENGINE=sloppy
+  - sql: CREATE TABLE trigger_binding_isolation_audit(id INT,observed_a INT) ENGINE=sloppy
+  - sql: CREATE TRIGGER trigger_binding_isolation_ai AFTER INSERT ON trigger_binding_isolation FOR EACH ROW BEGIN
+      INSERT INTO trigger_binding_isolation_audit(id,observed_a) VALUES(NEW.id,NEW.a); END
+- name: Reload the existing language-owned trigger before private namespace changes
+  action: restart
+- name: A private name reuse and its data fully rewind before the next public writer
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.trigger_binding_isolation.a',N'old_a',N'COLUMN'
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.trigger_binding_isolation.b',N'a',N'COLUMN'
+    - connection: owner
+      sql: INSERT trigger_binding_isolation(id,old_a,a) VALUES(1,10,20)
+    - connection: owner
+      sql: SELECT id,old_a,a FROM trigger_binding_isolation ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          old_a: 10
+          a: 20
+    - connection: owner
+      sql: SELECT id,observed_a FROM trigger_binding_isolation_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          observed_a: 20
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,a,b FROM trigger_binding_isolation ORDER BY id
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: SELECT id,observed_a FROM trigger_binding_isolation_audit ORDER BY id
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: INSERT trigger_binding_isolation(id,a,b) VALUES(2,30,40)
+    - connection: observer
+      sql: SELECT id,a,b FROM trigger_binding_isolation ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          a: 30
+          b: 40
+    - connection: observer
+      sql: SELECT id,observed_a FROM trigger_binding_isolation_audit ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 2
+          observed_a: 30
+- name: Statement trigger creation state and removal use the renamed containing table through rollback
+  tds:
+    statements:
+    - connection: owner
+      sql: DROP TABLE IF EXISTS statement_name_after
+    - connection: owner
+      sql: DROP TABLE IF EXISTS statement_name_before
+    - connection: owner
+      sql: DROP TABLE IF EXISTS statement_name_audit
+    - connection: owner
+      sql: CREATE TABLE statement_name_before(id INT NOT NULL PRIMARY KEY,payload INT)
+    - connection: owner
+      sql: CREATE TABLE statement_name_audit(id INT,payload INT)
+    - connection: owner
+      sql: INSERT statement_name_before VALUES(1,10)
+    - connection: owner
+      sql: EXEC sp_rename N'dbo.statement_name_before',N'statement_name_after',N'OBJECT'
+    - connection: owner
+      sql: CREATE TRIGGER statement_name_tracking ON statement_name_after AFTER UPDATE AS BEGIN INSERT statement_name_audit(id,payload)
+        SELECT id,payload FROM inserted; END
+    - connection: owner
+      sql: UPDATE statement_name_after SET payload=20 WHERE id=1
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_audit ORDER BY id,payload
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 20
+    - connection: owner
+      sql: DISABLE TRIGGER statement_name_tracking ON statement_name_after
+    - connection: owner
+      sql: UPDATE statement_name_after SET payload=30 WHERE id=1
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_audit ORDER BY id,payload
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 20
+    - connection: owner
+      sql: ENABLE TRIGGER statement_name_tracking ON statement_name_after
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE statement_name_after SET payload=40 WHERE id=1
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_after ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 40
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_audit ORDER BY id,payload
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          payload: 20
+        - id: 1
+          payload: 40
+    - connection: observer
+      sql: SELECT id,payload FROM statement_name_after ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 30
+    - connection: observer
+      sql: SELECT id,payload FROM statement_name_audit ORDER BY id,payload
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 20
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_after ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 30
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_audit ORDER BY id,payload
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 20
+    - connection: owner
+      sql: DROP TRIGGER statement_name_tracking
+    - connection: owner
+      sql: UPDATE statement_name_after SET payload=50 WHERE id=1
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_after ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 50
+    - connection: owner
+      sql: SELECT id,payload FROM statement_name_audit ORDER BY id,payload
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          payload: 20
+cleanup:
+- sql: DROP TABLE IF EXISTS row_binding_after
+- sql: DROP TABLE IF EXISTS row_binding_before
+- sql: DROP TABLE IF EXISTS row_binding_audit
+- sql: DROP TABLE IF EXISTS trigger_binding_isolation
+- sql: DROP TABLE IF EXISTS trigger_binding_isolation_audit
+- sql: DROP TABLE IF EXISTS statement_name_after
+- sql: DROP TABLE IF EXISTS statement_name_before
+- sql: DROP TABLE IF EXISTS statement_name_audit

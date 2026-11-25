@@ -1,0 +1,61 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/set-noexec-transact-sql
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: Unresolved UNION inputs defer compile-only column binding until their real relation declarations exist
+setup:
+- sql: CREATE TABLE deferred_union_dates(id INT,datum DATETIME)
+- sql: INSERT deferred_union_dates VALUES(1,'2024-01-01')
+- sql: CREATE TABLE deferred_union_other(id INT,datum DATETIME)
+- sql: CREATE TABLE deferred_union_sink(datum DATETIME)
+cleanup:
+- sql: SET NOEXEC OFF
+- sql: DROP TABLE IF EXISTS deferred_union_sink
+- sql: DROP TABLE IF EXISTS deferred_union_other
+- sql: DROP TABLE IF EXISTS deferred_union_dates
+test_cases:
+- name: A missing input already defers the column phase without a set operation
+  sql: >-
+    SET NOEXEC ON; INSERT deferred_union_sink SELECT datum FROM #pending_dates p INNER JOIN deferred_union_dates d ON p.id=d.id; SET NOEXEC OFF; SELECT COUNT(*) AS inserted FROM deferred_union_sink
+  expect: {rows: 1,data: [{inserted: 0}]}
+- name: UNION ALL keeps the same unresolved input contract before inferring branch column types
+  sql: >-
+    SET NOEXEC ON; INSERT deferred_union_sink SELECT datum FROM #pending_dates p INNER JOIN deferred_union_dates d ON p.id=d.id UNION ALL SELECT other_date FROM #pending_dates; SET NOEXEC OFF; SELECT COUNT(*) AS inserted FROM deferred_union_sink
+  expect: {rows: 1,data: [{inserted: 0}]}
+- name: Distinct UNION also defers unknown relation binding without executing either branch
+  sql: >-
+    SET NOEXEC ON; INSERT deferred_union_sink SELECT datum FROM #pending_dates p INNER JOIN deferred_union_dates d ON p.id=d.id UNION SELECT other_date FROM #pending_dates; SET NOEXEC OFF; SELECT COUNT(*) AS inserted FROM deferred_union_sink
+  expect: {rows: 1,data: [{inserted: 0}]}
+- name: A nested set source retains the unresolved declaration rather than manufacturing columns
+  sql: >-
+    SET NOEXEC ON; INSERT deferred_union_sink SELECT combined.datum FROM (SELECT datum FROM #pending_dates p INNER JOIN deferred_union_dates d ON p.id=d.id UNION ALL SELECT other_date FROM #pending_dates) combined; SET NOEXEC OFF; SELECT COUNT(*) AS inserted FROM deferred_union_sink
+  expect: {rows: 1,data: [{inserted: 0}]}
+- name: A CTE export preserves the unresolved branch source for the statement binder
+  sql: >-
+    SET NOEXEC ON; WITH combined AS (SELECT datum FROM #pending_dates p INNER JOIN deferred_union_dates d ON p.id=d.id UNION ALL SELECT other_date FROM #pending_dates) INSERT deferred_union_sink SELECT datum FROM combined; SET NOEXEC OFF; SELECT COUNT(*) AS inserted FROM deferred_union_sink
+  expect: {rows: 1,data: [{inserted: 0}]}
+- name: Known UNION inputs still reject a genuinely ambiguous column
+  sql: SET NOEXEC ON; INSERT deferred_union_sink SELECT datum FROM deferred_union_dates d JOIN deferred_union_other o ON d.id=o.id UNION ALL SELECT datum FROM deferred_union_dates
+  expect: {error: true,contains: ambiguous}
+- name: Known UNION inputs still reject incompatible branch widths
+  sql: SET NOEXEC ON; INSERT deferred_union_sink SELECT datum,id FROM deferred_union_dates UNION ALL SELECT datum FROM deferred_union_dates
+  expect: {error: true,contains: column count mismatch}
+- name: An undeclared variable is rejected even while table binding is deferred
+  sql: >-
+    SET NOEXEC ON; INSERT deferred_union_sink SELECT @undeclared FROM #pending_dates UNION ALL SELECT datum FROM deferred_union_dates
+  expect: {error: true,contains: Must declare the scalar variable}
+- name: The same SQL binds and executes after a real temporary declaration becomes available
+  tds:
+    statements:
+    - sql: SET NOEXEC ON
+    - sql: >-
+        INSERT deferred_union_sink SELECT datum FROM #pending_dates p INNER JOIN deferred_union_dates d ON p.id=d.id UNION ALL SELECT other_date FROM #pending_dates
+    - sql: >-
+        SET NOEXEC OFF; CREATE TABLE #pending_dates(id INT,other_date DATETIME); INSERT #pending_dates VALUES(1,'2024-01-02')
+    - sql: >-
+        INSERT deferred_union_sink SELECT datum FROM #pending_dates p INNER JOIN deferred_union_dates d ON p.id=d.id UNION ALL SELECT other_date FROM #pending_dates
+    - sql: SELECT COUNT(*) AS total,DAY(MIN(datum)) AS first_day,DAY(MAX(datum)) AS last_day FROM deferred_union_sink
+      expect: {rows: 1,data: [{total: 2,first_day: 1,last_day: 2}]}

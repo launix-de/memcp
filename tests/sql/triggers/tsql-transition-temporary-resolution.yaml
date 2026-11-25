@@ -1,0 +1,49 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Typed transition inputs preserve caller temporary namespace identities
+setup:
+- sql: DROP TABLE IF EXISTS transition_resolution_events
+- sql: DROP TABLE IF EXISTS transition_resolution_target
+- sql: CREATE TABLE transition_resolution_target(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE transition_resolution_events(value INT,approved_value INT)
+- sql: INSERT INTO transition_resolution_target VALUES(1,7)
+- sql: |
+    CREATE TRIGGER transition_resolution_capture ON transition_resolution_target AFTER UPDATE AS
+    BEGIN
+      SET NOCOUNT ON
+      IF (SELECT COUNT(*) FROM inserted i
+          INNER JOIN #transition_resolution_allowed a ON a.id=i.id) = 1
+      INSERT INTO transition_resolution_events(value,approved_value)
+        SELECT i.value,a.approved_value FROM inserted i
+        INNER JOIN #transition_resolution_allowed a ON a.id=i.id
+    END
+test_cases:
+- name: Recreating a caller temporary table cannot inherit an earlier physical input
+  steps:
+  - sql: 'CREATE TABLE #transition_resolution_allowed(id INT,approved_value INT)'
+    session_id: transition_resolution_namespace
+  - sql: 'INSERT INTO #transition_resolution_allowed VALUES(1,11)'
+    session_id: transition_resolution_namespace
+  - sql: UPDATE transition_resolution_target SET value=8 WHERE id=1
+    session_id: transition_resolution_namespace
+  - sql: 'DROP TABLE #transition_resolution_allowed'
+    session_id: transition_resolution_namespace
+  - sql: 'CREATE TABLE #transition_resolution_allowed(id INT,approved_value INT)'
+    session_id: transition_resolution_namespace
+  - sql: 'INSERT INTO #transition_resolution_allowed VALUES(1,22)'
+    session_id: transition_resolution_namespace
+  - sql: UPDATE transition_resolution_target SET value=9 WHERE id=1
+    session_id: transition_resolution_namespace
+  - sql: SELECT value,approved_value FROM transition_resolution_events ORDER BY value
+    session_id: transition_resolution_namespace
+    expect:
+      rows: 2
+      data: [{value: 8,approved_value: 11},{value: 9,approved_value: 22}]
+  - sql: 'DROP TABLE #transition_resolution_allowed'
+    session_id: transition_resolution_namespace
+cleanup:
+- sql: DROP TABLE IF EXISTS transition_resolution_events
+- sql: DROP TABLE IF EXISTS transition_resolution_target

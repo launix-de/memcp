@@ -1,0 +1,509 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: T-SQL date validation, session date order and localized calendar names
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+setup:
+- sql: DROP TABLE IF EXISTS date_name_items
+- sql: CREATE TABLE date_name_items (id INT PRIMARY KEY, label NVARCHAR(100), moment DATETIME, precise DATETIME2)
+- sql: INSERT INTO date_name_items VALUES (1,N'2024-02-29',N'2024-02-29 12:34:56',N'2024-02-29 12:34:56'),(2,N'2023-02-29',NULL,NULL),(3,NULL,NULL,NULL)
+- sql: DROP TABLE IF EXISTS date_numeric_inputs
+- sql: CREATE TABLE date_numeric_inputs (id INT PRIMARY KEY, integral INT, large BIGINT, exact_value DECIMAL(10,0))
+- sql: INSERT INTO date_numeric_inputs VALUES (1,20240101,20240229,20240101),(2,20240230,20230229,20240230),(3,NULL,NULL,NULL)
+cleanup:
+- sql: DROP TABLE IF EXISTS date_numeric_inputs
+- sql: DROP TABLE IF EXISTS date_context_defaults
+- sql: DROP TABLE IF EXISTS date_context_values
+- sql: DROP TABLE IF EXISTS date_context_add
+- sql: DROP PROCEDURE IF EXISTS date_context_scope
+- sql: DROP TABLE IF EXISTS date_name_items
+test_cases:
+- name: ISDATE recognizes compact and ISO dates
+  sql: SELECT ISDATE(N'20240102') AS compact, ISDATE(N'2024-01-02') AS iso
+  expect: {rows: 1, data: [{compact: 1, iso: 1}]}
+- name: ISDATE validates leap days rather than accepting a date-shaped token
+  sql: SELECT ISDATE(N'20240229') AS leap,ISDATE(N'20230229') AS invalid,ISDATE(N'19000229') AS century,ISDATE(N'20000229') AS leap_century
+  expect: {rows: 1, data: [{leap: 1, invalid: 0, century: 0, leap_century: 1}]}
+- name: ISDATE checks legacy datetime bounds
+  sql: SELECT ISDATE(N'1752-12-31') AS before_minimum,ISDATE(N'1753-01-01') AS minimum,ISDATE(N'9999-12-31') AS maximum,ISDATE(N'10000-01-01') AS overflow
+  expect: {rows: 1, data: [{before_minimum: 0, minimum: 1, maximum: 1, overflow: 0}]}
+- name: ISDATE validates fractional precision without retaining a fractional carrier
+  sql: SELECT ISDATE(N'2024-01-02T12:34:56.123') AS millisecond,ISDATE(N'2024-01-02 12:34:56.1234') AS excessive,ISDATE(N'2024-01-02 12:34:56.0000') AS excessive_zero
+  expect: {rows: 1, data: [{millisecond: 1, excessive: 0, excessive_zero: 0}]}
+- name: Maximum legacy datetime rejects fractional rounding past the final year
+  sql: SELECT ISDATE(N'9999-12-31 23:59:59.997') AS allowed,ISDATE(N'9999-12-31 23:59:59.999') AS overflow
+  expect: {rows: 1, data: [{allowed: 1, overflow: 0}]}
+- name: Default English numeric dates use month day year and the 2049 cutoff
+  sql: SELECT ISDATE(N'12/31/2024') AS mdy,ISDATE(N'31/12/2024') AS invalid,ISDATE(N'2/29/24') AS short_year,ISDATE(N'2/29/00') AS century
+  expect: {rows: 1, data: [{mdy: 1, invalid: 0, short_year: 1, century: 1}]}
+- name: English month names and abbreviated month names are accepted
+  sql: SELECT ISDATE(N'January 2, 2024') AS full,ISDATE(N'2 jan 2024') AS abbreviated,ISDATE(N'February 30 2024') AS invalid
+  expect: {rows: 1, data: [{full: 1, abbreviated: 1, invalid: 0}]}
+- name: Time-only values use the legacy base date
+  sql: SELECT ISDATE(N'12:34') AS short_clock,ISDATE(N'1:05 PM') AS afternoon,ISDATE(N'24:00:00') AS invalid
+  expect: {rows: 1, data: [{short_clock: 1, afternoon: 1, invalid: 0}]}
+- name: ISDATE rejects malformed clocks, suffixes, zero dates and empty input
+  sql: SELECT ISDATE(N'2024-01-02 12:99:00') AS clock,ISDATE(N'2024-01-02 extra') AS suffix,ISDATE(N'0000-00-00') AS zero_date,ISDATE(N'') AS empty
+  expect: {rows: 1, data: [{clock: 0, suffix: 0, zero_date: 0, empty: 0}]}
+- name: ISDATE returns zero for NULL and numeric declarations
+  sql: SELECT ISDATE(NULL) AS missing,ISDATE(123) AS number,ISDATE(CAST(NULL AS NVARCHAR(10))) AS text_null
+  expect: {rows: 1, data: [{missing: 0, number: 0, text_null: 0}]}
+- name: ISDATE distinguishes DATETIME and DATETIME2 from their declarations
+  sql: SELECT ISDATE(moment) AS legacy,ISDATE(precise) AS precise FROM date_name_items WHERE id=1
+  # SQL Server rejects a declared DATETIME2 argument with 8116, before row evaluation.
+  expect: {error: true, contains: '8116'}
+- name: ISDATE applies to stored text including NULL
+  sql: SELECT id,ISDATE(label) AS valid FROM date_name_items ORDER BY id
+  expect: {rows: 3, data: [{id: 1, valid: 1}, {id: 2, valid: 0}, {id: 3, valid: 0}]}
+- name: DATENAME returns text for numeric calendar parts
+  sql: SELECT DATENAME(year,CONVERT(DATE,N'20240102',112)) AS year,DATENAME(quarter,N'2024-05-02') AS quarter,DATENAME(day,N'2024-05-02') AS day,DATENAME(dayofyear,N'2024-02-29') AS day_of_year
+  expect: {rows: 1, data: [{year: '2024', quarter: '2', day: '2', day_of_year: '60'}]}
+- name: DATENAME uses full English month and weekday names
+  sql: SELECT DATENAME(month,N'2024-02-29') AS month,DATENAME(weekday,N'2024-02-29') AS weekday
+  expect: {rows: 1, data: [{month: February, weekday: Thursday}]}
+- name: DATENAME accepts the documented datepart abbreviations
+  sql: SELECT DATENAME(yy,N'20240102') AS year,DATENAME(mm,N'20240102') AS month,DATENAME(dw,N'20240102') AS weekday
+  expect: {rows: 1, data: [{year: '2024', month: January, weekday: Tuesday}]}
+- name: DATENAME extracts the clock and accepts English textual inputs
+  sql: SELECT DATENAME(hour,N'January 2 2024 1:05 PM') AS hour,DATENAME(minute,N'13:05:06') AS minute,DATENAME(second,N'13:05:06.123') AS second
+  expect: {rows: 1, data: [{hour: '13', minute: '5', second: '6'}]}
+- name: DATENAME NULL values remain SQL NULL
+  sql: SELECT DATENAME(year,NULL) AS year,DATENAME(month,NULL) AS month,DATENAME(weekday,NULL) AS weekday
+  expect: {rows: 1, data: [{year: null, month: null, weekday: null}]}
+- name: DATENAME handles declared temporal column values
+  sql: SELECT id,DATENAME(month,moment) AS month,DATENAME(weekday,precise) AS weekday FROM date_name_items ORDER BY id
+  expect: {rows: 3, data: [{id: 1, month: February, weekday: Thursday}, {id: 2, month: null, weekday: null}, {id: 3, month: null, weekday: null}]}
+- name: DATENAME week consumes the visible DATEFIRST setting
+  sql: SET DATEFIRST 7; SELECT DATENAME(week,N'2024-01-07') AS week
+  expect: {rows: 1, data: [{week: '2'}]}
+- name: DATENAME week rebinding does not reuse a stale result
+  sql: SET DATEFIRST 1; SELECT DATENAME(week,N'2024-01-07') AS week
+  expect: {rows: 1, data: [{week: '1'}]}
+- name: Weekday spelling is independent of its numeric DATEFIRST position
+  sql: SET DATEFIRST 1; SELECT DATENAME(weekday,N'2024-01-07') AS weekday
+  expect: {rows: 1, data: [{weekday: Sunday}]}
+- name: ISDATE arity is checked
+  sql: SELECT ISDATE()
+  expect: {error: true}
+- name: DATENAME requires a supported datepart
+  sql: SELECT DATENAME(millisecond,N'2024-01-02 00:00:00.123')
+  expect: {error: true}
+- name: DATENAME rejects invalid calendar input
+  sql: SELECT DATENAME(month,N'2023-02-29')
+  expect: {error: true}
+- name: A typed TIME does not acquire a missing date part
+  sql: SELECT DATENAME(year,CAST(N'12:34:56' AS TIME))
+  expect: {error: true}
+- name: ISDATE does not hide errors in its operand
+  sql: SELECT ISDATE(CAST(N'invalid' AS DATETIME2))
+  expect: {error: true}
+- name: Date functions declare INT and NVARCHAR results on the wire
+  tds:
+    statements:
+    - sql: SELECT ISDATE(N'20240102') AS valid,DATENAME(month,N'20240102') AS month
+      expect:
+        rows: 1
+        data: [{valid: 1, month: January}]
+        column_types: [{name: valid, type: INT}, {name: month, type: NVARCHAR, length: 4000}]
+- name: Calendar names preserve the default two digit year cutoff
+  sql: SELECT DATENAME(year,N'01/02/49') AS before_cutoff,DATENAME(year,N'01/02/50') AS after_cutoff
+  expect: {rows: 1, data: [{before_cutoff: '2049', after_cutoff: '1950'}]}
+- name: DATENAME literal dates retain the DATETIME2 calendar range
+  sql: SELECT DATENAME(year,N'0001-01-01') AS year,ISDATE(N'0001-01-01') AS legacy
+  expect: {rows: 1, data: [{year: '1', legacy: 0}]}
+- name: Clock literals expose their base date while typed TIME remains strict
+  sql: SELECT DATENAME(year,N'12:34:56') AS year,DATENAME(month,N'12:34:56') AS month,DATENAME(hour,CAST(N'12:34:56' AS TIME)) AS hour
+  expect: {rows: 1, data: [{year: '1900', month: January, hour: '12'}]}
+- name: Numeric calendar inputs retain their day-offset contract
+  sql: SELECT DATENAME(year,0) AS year,DATENAME(weekday,0) AS weekday
+  expect: {rows: 1, data: [{year: '1900', weekday: Monday}]}
+- name: ISDATE rejects timezone suffixes for legacy datetime values
+  sql: SELECT ISDATE(N'2024-01-02T12:34:56Z') AS utc,ISDATE(N'2024-01-02 12:34:56+01:00') AS zone_offset
+  expect: {rows: 1, data: [{utc: 0, zone_offset: 0}]}
+- name: ISDATE does not turn operand arithmetic errors into a false result
+  sql: SELECT ISDATE(1/0) AS value
+  expect: {error: true}
+- name: ISDATE rejects additional arguments
+  sql: SELECT ISDATE(NULL,1)
+  expect: {error: true}
+- name: DATENAME does not expose the native MySQL zero-date sentinel
+  sql: SELECT DATENAME(year,N'0000-00-00')
+  expect: {error: true}
+- name: DATENAME rejects year zero rather than using the native proleptic calendar
+  sql: SELECT DATENAME(month,N'0000-01-01')
+  expect: {error: true}
+# Historical unsupported cases now assert the implemented documented contract.
+- name: Unsupported date languages fail before names are evaluated
+  sql: SET LANGUAGE German; SELECT DATENAME(month,N'20240101') AS month; SET LANGUAGE us_english
+  expect: {rows: 1, data: [{month: Januar}]}
+- name: Unsupported date format changes are explicit
+  sql: SET DATEFORMAT dmy; SELECT ISDATE(N'31/12/2024') AS valid; SET LANGUAGE us_english
+  expect: {rows: 1, data: [{valid: 1}]}
+- name: ISDATE filters malformed stored text through the normal predicate compiler
+  sql: SELECT id FROM date_name_items WHERE ISDATE(label)=1 ORDER BY id
+  expect: {rows: 1, data: [{id: 1}]}
+- name: Date validation protects a lazy conversion branch from malformed rows
+  sql: SELECT id,CASE WHEN ISDATE(label)=1 THEN YEAR(CONVERT(DATE,label)) ELSE 0 END AS year FROM date_name_items ORDER BY id
+  expect: {rows: 3, data: [{id: 1, year: 2024}, {id: 2, year: 0}, {id: 3, year: 0}]}
+
+# Runtime date input context: documented SET LANGUAGE / SET DATEFORMAT contracts.
+- name: DATEFORMAT mdy maps separated legacy datetime fields
+  tds:
+    statements:
+    - sql: SET DATEFORMAT mdy
+    - sql: SELECT CONVERT(VARCHAR(30),CAST(N'12.31.2099 10:11:12.003' AS DATETIME),121) AS value
+      expect:
+        rows: 1
+        data:
+        - value: '2099-12-31 10:11:12.003'
+- name: DATEFORMAT dmy maps separated legacy datetime fields
+  tds:
+    statements:
+    - sql: SET DATEFORMAT dmy
+    - sql: SELECT CONVERT(VARCHAR(30),CAST(N'31/12/2099 10:11:12.003' AS DATETIME),121) AS value
+      expect:
+        rows: 1
+        data:
+        - value: '2099-12-31 10:11:12.003'
+- name: DATEFORMAT ymd maps separated legacy datetime fields
+  tds:
+    statements:
+    - sql: SET DATEFORMAT ymd
+    - sql: SELECT CONVERT(VARCHAR(30),CAST(N'2099-12-31 10:11:12.003' AS DATETIME),121) AS value
+      expect:
+        rows: 1
+        data:
+        - value: '2099-12-31 10:11:12.003'
+- name: DATEFORMAT ydm maps separated legacy datetime fields
+  tds:
+    statements:
+    - sql: SET DATEFORMAT ydm
+    - sql: SELECT CONVERT(VARCHAR(30),CAST(N'2099/31/12 10:11:12.003' AS DATETIME),121) AS value
+      expect:
+        rows: 1
+        data:
+        - value: '2099-12-31 10:11:12.003'
+- name: DATEFORMAT myd maps separated legacy datetime fields
+  tds:
+    statements:
+    - sql: SET DATEFORMAT myd
+    - sql: SELECT CONVERT(VARCHAR(30),CAST(N'12/2099/31 10:11:12.003' AS DATETIME),121) AS value
+      expect:
+        rows: 1
+        data:
+        - value: '2099-12-31 10:11:12.003'
+- name: DATEFORMAT dym maps separated legacy datetime fields
+  tds:
+    statements:
+    - sql: SET DATEFORMAT dym
+    - sql: SELECT CONVERT(VARCHAR(30),CAST(N'31-2099-12 10:11:12.003' AS DATETIME),121) AS value
+      expect:
+        rows: 1
+        data:
+        - value: '2099-12-31 10:11:12.003'
+- name: Modern temporal domains reject ydm while ISO and compact inputs remain independent
+  tds:
+    statements:
+    - sql: SET DATEFORMAT ydm
+    - sql: SELECT TRY_CAST(N'2099/31/12' AS DATE) AS d,TRY_CAST(N'2099/31/12' AS DATETIME2) AS d2,ISDATE(N'2099/31/12')
+        AS legacy,CAST(N'20991231' AS DATE) AS compact,CAST(N'2099-12-31T10:11:12' AS DATE) AS iso
+      expect:
+        rows: 1
+        data:
+        - d: null
+          d2: null
+          legacy: 1
+          compact:
+            temporal_type: date
+            value: '2099-12-31'
+          iso:
+            temporal_type: date
+            value: '2099-12-31'
+- name: SET DATEFORMAT and LANGUAGE accept batch variables and override each other at execution
+  tds:
+    statements:
+    - sql: DECLARE @language SYSNAME=N'German'; DECLARE @order VARCHAR(3)='mdy'; SET LANGUAGE @language; SET DATEFORMAT
+        @order; SELECT @@LANGUAGE AS language,@@DATEFIRST AS first,CAST(N'12/31/2099' AS DATE) AS value
+      expect:
+        rows: 1
+        data:
+        - language: Deutsch
+          first: 1
+          value:
+            temporal_type: date
+            value: '2099-12-31'
+    - sql: SET LANGUAGE English; SELECT @@LANGUAGE AS language,@@DATEFIRST AS first,CAST(N'12/31/2099' AS DATE)
+        AS value
+      expect:
+        rows: 1
+        data:
+        - language: us_english
+          first: 7
+          value:
+            temporal_type: date
+            value: '2099-12-31'
+- name: German names and ISDATE share the executing language rather than a second parser
+  tds:
+    statements:
+    - sql: SET LANGUAGE Deutsch
+    - sql: SELECT DATENAME(month,CAST(N'20260315' AS DATE)) AS month,DATENAME(weekday,CAST(N'20260315' AS DATE))
+        AS weekday,CAST(N'15 März 2026' AS DATE) AS full,CAST(N'15 Mär 2026' AS DATETIME2) AS short,ISDATE(N'15
+        March 2026') AS english
+      expect:
+        rows: 1
+        data:
+        - month: März
+          weekday: Sonntag
+          full:
+            temporal_type: date
+            value: '2026-03-15'
+          short:
+            temporal_type: datetime2
+            value: '2026-03-15T00:00:00Z'
+          english: 0
+- name: Invalid language and dateformat leave the complete prior session context intact
+  tds:
+    statements:
+    - sql: SET LANGUAGE Deutsch
+    - sql: SET DATEFORMAT myd
+    - sql: SET LANGUAGE unsupported_language
+      expect:
+        error: true
+    - sql: SET DATEFORMAT invalid_order
+      expect:
+        error: true
+    - sql: SELECT @@LANGUAGE AS language,@@DATEFIRST AS first,CAST(N'12/2099/31' AS DATE) AS value
+      expect:
+        rows: 1
+        data:
+        - language: Deutsch
+          first: 1
+          value:
+            temporal_type: date
+            value: '2099-12-31'
+- name: One held cached formula observes DATEFORMAT and LANGUAGE changes in two sessions
+  scm: "(begin\n  (define cache (newcachemap))\n  (define s (newsession))\n  (define other (newsession))\n  (define\
+    \ output (newsession))\n  (define formula (cached_parse cache \"tsql\" (list parse_tsql) \"memcp-tests\"\n \
+    \   \"SELECT CONVERT(VARCHAR(10),CAST(N'03/04/2026' AS DATE),23) AS value,DATENAME(month,CAST(N'20260315' AS\
+    \ DATE)) AS month\"\n    nil nil s false nil))\n  (define invoke (lambda (session) (begin\n    (with_autocommit\
+    \ session nil nil \"held date context\" (lambda (tx)\n      (sql_execute_formula session tx formula (lambda\
+    \ (row) (output \"row\" row)) (lambda fields true))))\n    (output \"row\"))))\n  (tsql_set_language s \"English\"\
+    )\n  (define english (invoke s))\n  (tsql_set_language s \"German\")\n  (define german (invoke s))\n  (s \"\
+    __tsql_dateformat\" (tsql_dateformat_value \"mdy\"))\n  (define override (invoke s))\n  (tsql_set_language other\
+    \ \"English\")\n  (define isolated (invoke other))\n  (and (equal? (english \"value\") \"2026-03-04\") (equal?\
+    \ (english \"month\") \"March\")\n    (equal? (german \"value\") \"2026-04-03\") (equal? (german \"month\")\
+    \ \"März\")\n    (equal? (override \"value\") \"2026-03-04\") (equal? (override \"month\") \"März\")\n    (equal?\
+    \ (isolated \"value\") \"2026-03-04\") (equal? (isolated \"month\") \"March\")))"
+  expect:
+    result: true
+- name: Date context table for assignment and defaults
+  sql: CREATE TABLE date_context_values(id INT PRIMARY KEY,moment DATETIME,precise DATETIME2(7))
+- name: Ordinary insert and update compile date context as runtime inputs
+  tds:
+    statements:
+    - sql: SET LANGUAGE Deutsch
+    - sql: INSERT INTO date_context_values VALUES(1,N'31.12.2099 12:13:14.003',N'31.12.2099 12:13:14.1234567')
+    - sql: UPDATE date_context_values SET moment=N'30.11.2099 12:13:14.007' WHERE id=1
+    - sql: SELECT CONVERT(VARCHAR(30),moment,121) AS moment,CONVERT(VARCHAR(30),precise,121) AS precise FROM date_context_values
+        WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - moment: '2099-11-30 12:13:14.007'
+          precise: '2099-12-31 12:13:14.1234567'
+- name: Temporal literal default is declared before the consuming language is selected
+  sql: CREATE TABLE date_context_defaults(id INT PRIMARY KEY,moment DATETIME DEFAULT('31.12.2099'),ambiguous DATE)
+- name: ALTER DEFAULT preserves text source until default execution
+  sql: ALTER TABLE date_context_defaults ADD CONSTRAINT df_context_precise DEFAULT('31.12.2099') FOR ambiguous
+- name: ALTER default can be replaced before insertion
+  sql: ALTER TABLE date_context_defaults DROP CONSTRAINT df_context_precise
+- name: ALTER default retains an ambiguous conversion for execution
+  sql: ALTER TABLE date_context_defaults ADD CONSTRAINT df_context_ambiguous DEFAULT('03/04/2026') FOR ambiguous
+- name: DEFAULT insertion and update use the current context rather than CREATE context
+  tds:
+    statements:
+    - sql: SET LANGUAGE Deutsch
+    - sql: INSERT INTO date_context_defaults(id) VALUES(1)
+    - sql: SET DATEFORMAT mdy
+    - sql: UPDATE date_context_defaults SET ambiguous=DEFAULT WHERE id=1
+    - sql: SELECT CONVERT(VARCHAR(30),moment,121) AS moment,ambiguous FROM date_context_defaults WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - moment: '2099-12-31 00:00:00.000'
+          ambiguous:
+            temporal_type: date
+            value: '2026-03-04'
+- name: English default conversion rejects the same incompatible input without inserting a row
+  tds:
+    statements:
+    - sql: SET LANGUAGE English
+    - sql: INSERT INTO date_context_defaults(id) VALUES(2)
+      expect:
+        error: true
+    - sql: SELECT COUNT(*) AS count FROM date_context_defaults WHERE id=2
+      expect:
+        rows: 1
+        data:
+        - count: 0
+- name: Bulk omitted and NULL defaults consume session context while typed dates stay typed
+  tds:
+    statements:
+    - sql: SET LANGUAGE Deutsch
+    - bulk:
+        table: '[memcp-tests].[dbo].[date_context_defaults]'
+        columns:
+        - id
+        keep_nulls: false
+        rows:
+        - - 3
+      expect:
+        rows: 1
+    - bulk:
+        table: '[memcp-tests].[dbo].[date_context_values]'
+        columns:
+        - id
+        - moment
+        - precise
+        keep_nulls: true
+        rows:
+        - - 4
+          - '2099-12-31 01:02:03Z'
+          - '2099-12-31 01:02:03Z'
+      expect:
+        rows: 1
+    - sql: SELECT CONVERT(VARCHAR(30),moment,121) AS moment,ambiguous FROM date_context_defaults WHERE id=3
+      expect:
+        rows: 1
+        data:
+        - moment: '2099-12-31 00:00:00.000'
+          ambiguous:
+            temporal_type: date
+            value: '2026-04-03'
+- name: Deferred default schema survives a real restart
+  syntax: mysql
+  sql: SHUTDOWN
+- name: Restarted deferred default is evaluated by the new executing session
+  tds:
+    statements:
+    - sql: SET LANGUAGE Deutsch
+    - sql: INSERT INTO date_context_defaults(id) VALUES(5)
+    - sql: SELECT CONVERT(VARCHAR(30),moment,121) AS moment FROM date_context_defaults WHERE id=5
+      expect:
+        rows: 1
+        data:
+        - moment: '2099-12-31 00:00:00.000'
+- name: Historical ADD fixture
+  sql: CREATE TABLE date_context_add(id INT PRIMARY KEY)
+- name: Historical row for deferred ADD rejection
+  sql: INSERT INTO date_context_add VALUES(1)
+- name: Deferred NOT NULL ALTER ADD rejects before adding any earlier column
+  tds:
+    statements:
+    - sql: SET LANGUAGE Deutsch
+    - sql: ALTER TABLE date_context_add ADD preceding INT,unavailable DATETIME NOT NULL DEFAULT('31.12.2099')
+      expect:
+        error: true
+    - sql: SELECT COUNT(*) AS count FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.date_context_add')
+      expect:
+        rows: 1
+        data:
+        - count: 1
+    - sql: SELECT id FROM date_context_add
+      expect:
+        rows: 1
+        data:
+        - id: 1
+- name: Module SET context restores the invoking session
+  tds:
+    statements:
+    - sql: CREATE PROCEDURE date_context_scope AS SET LANGUAGE Deutsch; SELECT @@LANGUAGE AS language,DATENAME(month,CAST(N'20260315'
+        AS DATE)) AS month
+    - sql: SET LANGUAGE us_english
+    - sql: EXEC date_context_scope
+      expect:
+        rows: 1
+        data:
+        - language: Deutsch
+          month: März
+    - sql: SELECT @@LANGUAGE AS language,@@DATEFIRST AS first
+      expect:
+        rows: 1
+        data:
+        - language: us_english
+          first: 7
+- name: Every DATEDIFF text input follows the modern datetime2 date-order contract
+  tds:
+    statements:
+    - sql: SET DATEFORMAT ydm
+    - sql: SELECT DATEDIFF(day,N'2099/30/12',N'2099/31/12') AS value
+      expect:
+        error: true
+    - sql: SELECT DATEDIFF_BIG(second,N'2099/30/12',N'2099/31/12') AS value
+      expect:
+        error: true
+    - sql: SELECT DATEDIFF(day,N'20991230',N'20991231') AS days,DATEDIFF_BIG(ms,N'2099-12-31T00:00:00',N'2099-12-31T00:00:00.003')
+        AS millis
+      expect:
+        rows: 1
+        data:
+        - days: 1
+          millis: 3
+- name: ISDATE converts declared integral numbers to date text rather than day offsets
+  sql: SELECT ISDATE(20240101) AS valid,ISDATE(20240230) AS invalid,ISDATE(202401) AS six_digits,ISDATE(0) AS zero_value,ISDATE(1) AS one_value,ISDATE(CAST(NULL AS INT)) AS null_value,ISDATE(CAST(20240101 AS BIGINT)) AS large_value,ISDATE(CAST(20240101 AS DECIMAL(10,0))) AS exact_value
+  expect:
+    rows: 1
+    data: [{valid: 1, invalid: 0, six_digits: 0, zero_value: 0, one_value: 0, null_value: 0, large_value: 1, exact_value: 1}]
+- name: ISDATE consumes declared numeric text including decimal scale and float notation
+  sql: SELECT CONVERT(VARCHAR(30),CAST(20240101 AS DECIMAL(10,2))) AS decimal_text,ISDATE(CAST(20240101 AS DECIMAL(10,2))) AS decimal_value,CONVERT(VARCHAR(30),CAST(20240101 AS FLOAT)) AS float_text,ISDATE(CAST(20240101 AS FLOAT)) AS float_value,CONVERT(VARCHAR(30),CAST(12.31 AS MONEY)) AS money_text,ISDATE(CAST(12.31 AS MONEY)) AS money_value,ISDATE(CAST(1 AS BIT)) AS bit_value
+  expect:
+    rows: 1
+    data: [{decimal_text: '20240101.00', decimal_value: 0, float_text: '2.02401e+007', float_value: 0, money_text: '12.31', money_value: 0, bit_value: 0}]
+- name: Short decimal monetary and floating inputs use conversion rather than numeric truthiness
+  sql: SELECT ISDATE(CAST(12.31 AS DECIMAL(6,2))) AS decimal_date,ISDATE(CAST(1.01 AS DECIMAL(6,2))) AS small_decimal,ISDATE(CAST(12.31 AS MONEY)) AS money_date,ISDATE(CAST(1231 AS FLOAT)) AS short_float,ISDATE(CAST(1.1 AS FLOAT)) AS fractional_float,ISDATE(CAST(20240101 AS REAL)) AS real_value
+  expect:
+    rows: 1
+    data: [{decimal_date: 0, small_decimal: 0, money_date: 0, short_float: 0, fractional_float: 0, real_value: 0}]
+- name: ISDATE applies declared numeric conversion to stored values and NULL
+  sql: SELECT id,ISDATE(integral) AS integral_date,ISDATE(large) AS large_date,ISDATE(exact_value) AS exact_date FROM date_numeric_inputs ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 1, integral_date: 1, large_date: 1, exact_date: 1}, {id: 2, integral_date: 0, large_date: 0, exact_date: 0}, {id: 3, integral_date: 0, large_date: 0, exact_date: 0}]
+- name: ISDATE preserves compact numeric dates across English and German execution contexts
+  tds:
+    statements:
+    - sql: SET LANGUAGE us_english; SET DATEFORMAT mdy
+    - sql: SELECT ISDATE(20240101) AS valid,ISDATE(20240230) AS invalid,ISDATE(202401) AS six_digits
+      expect: {rows: 1, data: [{valid: 1, invalid: 0, six_digits: 0}]}
+    - sql: SET LANGUAGE Deutsch; SET DATEFORMAT dmy
+    - sql: SELECT ISDATE(20240101) AS valid,ISDATE(20240230) AS invalid,ISDATE(202401) AS six_digits
+      expect: {rows: 1, data: [{valid: 1, invalid: 0, six_digits: 0}]}
+    - sql: SET LANGUAGE us_english
+- name: Prepared numeric ISDATE arguments retain an INT result descriptor
+  tds:
+    statements:
+    - sql: SELECT ISDATE(CAST(@value AS INT)) AS integral_date,ISDATE(CAST(@value AS BIGINT)) AS large_date,ISDATE(CAST(@value AS DECIMAL(10,0))) AS exact_date,ISDATE(CAST(NULL AS INT)) AS missing
+      prepare: true
+      parameters: [{name: value, value: 20240101}]
+      expect:
+        rows: 1
+        data: [{integral_date: 1, large_date: 1, exact_date: 1, missing: 0}]
+        column_types: [{name: integral_date, type: INT}, {name: large_date, type: INT}, {name: exact_date, type: INT}, {name: missing, type: INT}]
+- name: Legacy datetime declarations remain valid ISDATE operands
+  sql: SELECT ISDATE(CAST(N'20240101' AS DATETIME)) AS legacy,ISDATE(CAST(N'20240101' AS SMALLDATETIME)) AS short_legacy,ISDATE(CAST(NULL AS DATETIME)) AS missing
+  expect: {rows: 1, data: [{legacy: 1, short_legacy: 1, missing: 0}]}
+- name: Prepared ISDATE rejects the DATETIME2 argument declaration
+  tds:
+    statements:
+    - sql: SELECT ISDATE(CAST(@value AS DATETIME2)) AS unsupported
+      prepare: true
+      parameters: [{name: value, value: '2024-01-01'}]
+      expect: {error: true, contains: ['8116']}
+- name: ISDATE rejects a modern DATE argument even when its value is NULL
+  sql: SELECT ISDATE(CAST(NULL AS DATE)) AS unsupported
+  expect: {error: true, contains: '8116'}
+- name: ISDATE rejects a modern TIME argument declaration
+  sql: SELECT ISDATE(CAST(N'12:34:56' AS TIME)) AS unsupported
+  expect: {error: true, contains: '8116'}

@@ -1,0 +1,346 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: TSQL compatibility rights derive only from real native database membership
+setup:
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER native_db_member IDENTIFIED BY 'pw'" nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER native_db_outsider IDENTIFIED BY 'pw'" nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO native_db_member" nil))
+- sql: CREATE TABLE native_db_rights_rows(id INT PRIMARY KEY,value INT)
+- sql: INSERT native_db_rights_rows VALUES(1,10)
+cleanup:
+- sql: DROP TABLE IF EXISTS native_db_rights_rows
+- sql: DROP TABLE IF EXISTS native_db_rights_created
+- sql: DROP DATABASE IF EXISTS native_db_forbidden
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS native_db_member" nil))
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS native_db_outsider" nil))
+test_cases:
+- name: Native database membership admits every database action without granular grants
+  scm: |
+    (and (reduce '("CONNECT" "SELECT" "INSERT" "UPDATE" "DELETE" "ALTER" "CREATE TABLE" "CREATE VIEW"
+      "CREATE PROCEDURE" "REFERENCES" "BACKUP DATABASE" "CONTROL" "ALTER DATABASE")
+      (lambda (allowed action) (and allowed (tsql_permission? "native_db_member" "memcp-tests" action))) true)
+      (not (tsql_permission? "native_db_member" "memcp-tests" "NATIVE ADMIN"))
+      (not (tsql_permission? "native_db_member" "system" "SELECT"))
+      (not (tsql_permission? "native_db_outsider" "memcp-tests" "CONNECT")))
+  expect: {result: true}
+- name: Native member reads existing rows
+  username: native_db_member
+  password: pw
+  sql: SELECT value FROM native_db_rights_rows
+  expect: {data: [{value: 10}]}
+- name: Native member inserts without a separate INSERT grant
+  username: native_db_member
+  password: pw
+  sql: INSERT native_db_rights_rows VALUES(2,20)
+- name: Native member updates without a separate UPDATE grant
+  username: native_db_member
+  password: pw
+  sql: UPDATE native_db_rights_rows SET value=21 WHERE id=2
+- name: Native member deletes without a separate DELETE grant
+  username: native_db_member
+  password: pw
+  sql: DELETE FROM native_db_rights_rows WHERE id=2
+- name: Native member creates and alters database objects
+  username: native_db_member
+  password: pw
+  sql: CREATE TABLE native_db_rights_created(id INT); ALTER TABLE native_db_rights_created ADD extra INT
+- name: A database member does not obtain server account creation
+  username: native_db_member
+  password: pw
+  sql: CREATE DATABASE native_db_forbidden
+  expect: {error: true, contains: access denied}
+- name: Native member retains its actual database principal name
+  username: native_db_member
+  password: pw
+  sql: SELECT USER_NAME() AS name
+  expect: {data: [{name: native_db_member}]}
+- name: Unknown object and principal access requests are no-ops
+  sql: GRANT SELECT ON dbo.missing TO missing; DENY UPDATE ON OBJECT::dbo.missing TO missing; REVOKE ALL PRIVILEGES FROM missing
+  expect: {affected_rows: 0}
+- name: Column and schema access requests do not create fine-grained rules
+  sql: GRANT SELECT(value) ON dbo.native_db_rights_rows TO missing; DENY CONTROL ON SCHEMA::dbo TO public
+  expect: {affected_rows: 0}
+- name: Permission requests inside a transaction have no native effects
+  sql: BEGIN TRANSACTION; GRANT ALL TO public; DENY SELECT TO native_db_member; REVOKE CONTROL FROM native_db_member; COMMIT TRANSACTION
+  expect: {affected_rows: 0}
+- name: A member can send ignored access requests without acquiring server authority
+  username: native_db_member
+  password: pw
+  sql: GRANT CONTROL SERVER TO missing WITH GRANT OPTION; DENY ALTER ANY LOGIN TO public
+  expect: {affected_rows: 0}
+- name: Revoke and deny requests do not remove real native membership
+  username: native_db_member
+  password: pw
+  sql: SELECT value FROM native_db_rights_rows
+  expect: {data: [{value: 10}]}
+- name: SQL grants never enroll the outsider
+  sql: GRANT CONNECT,SELECT,CONTROL TO native_db_outsider
+  expect: {affected_rows: 0}
+- name: An outsider remains unable to connect after ignored grants
+  username: native_db_outsider
+  password: pw
+  sql: SELECT 1 AS value
+  expect: {error: true, contains: access denied}
+- name: Native access rows remain the only persisted membership
+  sql: SELECT username FROM system.access WHERE [database]='memcp-tests' AND username IN('native_db_member','native_db_outsider')
+  expect: {rows: 1,data: [{username: native_db_member}]}
+- name: Owner requests neither resolve an unknown login nor grant native membership
+  sql: EXEC sp_changedbowner N'native_db_unknown_owner'
+  expect: {affected_rows: 0}
+- name: Member principal remains unchanged after ignored ownership requests
+  username: native_db_member
+  password: pw
+  sql: SELECT USER_NAME() AS name
+  expect: {data: [{name: native_db_member}]}
+- name: Metadata is visible throughout an accessible native database
+  username: native_db_member
+  password: pw
+  sql: EXEC sp_columns @table_name=N'native_db_rights_rows'
+  expect: {rows: 2}
+- name: Metadata does not expose a database without native access
+  username: native_db_member
+  password: pw
+  sql: SELECT column_name FROM information_schema.columns WHERE table_catalog=N'system' AND table_name=N'user'
+  expect: {rows: 0}
+- name: No frontend action or owner catalog is bootstrapped
+  scm: (filter (show "system") (lambda (name) (has? '("tsql_database_permissions" "tsql_database_owners") name)))
+  expect: {result: []}
+- name: Real TDS no-ops retain the database-only model
+  tds:
+    username: native_db_member
+    password: pw
+    statements:
+    - sql: DENY SELECT ON dbo.native_db_rights_rows TO native_db_member
+      expect: {}
+    - sql: SELECT value FROM native_db_rights_rows
+      expect: {data: [{value: 10}]}
+    - sql: REVOKE GRANT OPTION FOR SELECT ON dbo.missing FROM missing CASCADE
+      expect: {}
+- name: MySQL database members can ensure their existing database without creating one
+  syntax: mysql
+  username: native_db_member
+  password: pw
+  sql: CREATE DATABASE IF NOT EXISTS `memcp-tests`
+  expect: {}
+- name: MySQL SCHEMA and charset forms share existing database admission
+  syntax: mysql
+  username: native_db_member
+  password: pw
+  sql: CREATE SCHEMA IF NOT EXISTS `memcp-tests` DEFAULT CHARACTER SET utf8mb4
+  expect: {}
+- name: PostgreSQL existing SCHEMA admission uses the same database owner
+  syntax: postgresql
+  username: native_db_member
+  password: pw
+  sql: CREATE SCHEMA IF NOT EXISTS "memcp-tests"
+  expect: {}
+- name: PostgreSQL plain CREATE DATABASE still requires an administrator
+  syntax: postgresql
+  username: native_db_member
+  password: pw
+  sql: CREATE DATABASE native_db_forbidden
+  expect: {error: true, contains: access denied}
+- name: TSQL database members can ensure their existing database
+  username: native_db_member
+  password: pw
+  sql: CREATE DATABASE IF NOT EXISTS [memcp-tests]
+  expect: {}
+- name: Existing database access never admits plain CREATE DATABASE
+  syntax: mysql
+  username: native_db_member
+  password: pw
+  sql: CREATE DATABASE `memcp-tests`
+  expect: {error: true, contains: access denied}
+- name: Existing database access cannot create a missing database with IF NOT EXISTS
+  username: native_db_member
+  password: pw
+  sql: CREATE DATABASE IF NOT EXISTS native_db_forbidden
+  expect: {error: true, contains: access denied}
+- name: Membership in another database cannot ensure an inaccessible existing database
+  syntax: mysql
+  username: native_db_member
+  password: pw
+  sql: CREATE DATABASE IF NOT EXISTS system
+  expect: {error: true, contains: access denied}
+- name: Existing database no-ops preserve native rows and do not create missing databases
+  sql: SELECT value FROM native_db_rights_rows WHERE id=1
+  expect: {rows: 1, data: [{value: 10}]}
+- name: Rejected client creation has no namespace or native membership effect
+  scm: |
+    (and (nil? (show "native_db_forbidden"))
+      (expression_equal? (scan_lookup nil (table "system" false "access" false nil)
+        (list 371635467059200 (scan_boundary "equal" "username" 0 0 true true "" false)
+          (scan_boundary "equal" "database" 1 1 true true "" false))
+        '("native_db_member" "native_db_forbidden")) false))
+  expect: {result: true}
+- name: Real TDS creation admission preserves member access without server authority
+  tds:
+    username: native_db_member
+    password: pw
+    statements:
+    - sql: CREATE DATABASE IF NOT EXISTS [memcp-tests]
+    - sql: CREATE DATABASE IF NOT EXISTS native_db_forbidden
+      expect: {error: true, contains: [access denied]}
+    - sql: SELECT value FROM native_db_rights_rows WHERE id=1
+      expect: {rows: 1, data: [{value: 10}]}
+- name: A held CREATE formula observes native revocation and later regrant
+  scm: |
+    (begin
+      (define runtime (newsession))
+      (runtime "username" "native_db_member")
+      (define held (cached_parse (newcachemap) "sql" (list parse_sql) "memcp-tests"
+        "CREATE DATABASE IF NOT EXISTS `memcp-tests`" (list (quote sql-policy-for) "native_db_member")
+        "native_db_member" runtime false nil))
+      (define invoke (lambda () (sql_execute_formula runtime nil held
+        (lambda (_row) nil) (lambda (_fields) nil))))
+      (invoke)
+      (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM native_db_member" nil))
+      (define denied (try (lambda () (begin (invoke) false))
+        (lambda (failure) (strlike (string failure) "%access denied%"))))
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO native_db_member" nil))
+      (and denied (expression_equal? (invoke) false)))
+  expect: {result: true}
+- name: A held CREATE formula cannot inherit a replacement login incarnation
+  cleanup:
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS native_db_create_replaced" nil))
+  scm: |
+    (begin
+      (eval (parse_sql "memcp-tests" "CREATE USER native_db_create_replaced IDENTIFIED BY 'pw'" nil))
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO native_db_create_replaced" nil))
+      (define held (parse_sql "memcp-tests" "CREATE DATABASE IF NOT EXISTS `memcp-tests`"
+        (sql_policy "native_db_create_replaced")))
+      (eval (parse_sql "memcp-tests" "DROP USER native_db_create_replaced" nil))
+      (eval (parse_sql "memcp-tests" "CREATE USER native_db_create_replaced IDENTIFIED BY 'pw'" nil))
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO native_db_create_replaced" nil))
+      (define denied (try (lambda () (begin (eval held) false))
+        (lambda (failure) (strlike (string failure) "%identity changed%"))))
+      (and denied (expression_equal? (eval (parse_sql "memcp-tests"
+        "CREATE DATABASE IF NOT EXISTS `memcp-tests`" (sql_policy "native_db_create_replaced"))) false)))
+  expect: {result: true}
+- name: A namespace dropped after admission is never recreated by a held member CREATE
+  cleanup:
+  - sql: DROP DATABASE IF EXISTS native_db_create_transient
+  scm: |
+    (begin
+      (createdatabase "native_db_create_transient" false)
+      (eval (parse_sql "memcp-tests" "GRANT ALL ON native_db_create_transient.* TO native_db_member" nil))
+      (define runtime (newsession))
+      (runtime "username" "native_db_member")
+      (define held (cached_parse (newcachemap) "sql" (list parse_sql) "memcp-tests"
+        "CREATE DATABASE IF NOT EXISTS native_db_create_transient" (list (quote sql-policy-for) "native_db_member")
+        "native_db_member" runtime false nil))
+      (define invoke (lambda () (sql_execute_formula runtime nil held
+        (lambda (_row) nil) (lambda (_fields) nil))))
+      (invoke)
+      (dropdatabase "native_db_create_transient" false)
+      (define denied (try (lambda () (begin (invoke) false))
+        (lambda (failure) (strlike (string failure) "%access denied%"))))
+      (and denied (nil? (show "native_db_create_transient"))))
+  expect: {result: true}
+- name: SQL and MySQL cache separates replacement logins while retaining old session identity
+  cleanup:
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS native_db_cache_sql" nil))
+  scm: |
+    (begin
+      (define username "native_db_cache_sql")
+      (define create (lambda () (begin
+        (eval (parse_sql "memcp-tests" (concat "CREATE USER " username " IDENTIFIED BY 'pw'") nil))
+        (eval (parse_sql "memcp-tests" (concat "GRANT ALL ON `memcp-tests`.* TO " username) nil)))))
+      (define authenticate (lambda (runtime) (begin
+        (define account (sql_authenticate_account username "pw"))
+        (if account true (error "test login authentication failed"))
+        (sql_session_actor runtime username (account "principal_id")))))
+      (define cache (newcachemap))
+      (define query "CREATE DATABASE IF NOT EXISTS `memcp-tests`")
+      (define compile (lambda (runtime text) (cached_parse cache "sql" (list parse_sql)
+        "memcp-tests" text (list (quote sql-policy-for) username) username runtime false nil)))
+      (define invoke (lambda (runtime formula) (sql_execute_formula runtime nil formula
+        (lambda (_row) nil) (lambda (_fields) nil))))
+      (create)
+      (define old_session (newsession))
+      (define old_actor (authenticate old_session))
+      (define held (compile old_session query))
+      (invoke old_session held)
+      (eval (parse_sql "memcp-tests" (concat "DROP USER " username) nil))
+      (create)
+      (define new_session (newsession))
+      (define new_actor (authenticate new_session))
+      (define fresh (compile new_session query))
+      (define fresh_result (invoke new_session fresh))
+      (define old_held_denied (try (lambda () (begin (invoke old_session held) false))
+        (lambda (failure) (strlike (concat failure) "%identity changed%"))))
+      (define old_miss_denied (try (lambda () (begin (compile old_session (concat query " ")) false))
+        (lambda (failure) (strlike (concat failure) "%identity changed%"))))
+      (and (not (equal? (cadr old_actor) (cadr new_actor)))
+        (expression_equal? fresh_result false) old_held_denied old_miss_denied
+        (not (nil? (show "memcp-tests")))))
+  expect: {result: true}
+- name: PostgreSQL cache separates replacement logins while retaining old session identity
+  cleanup:
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS native_db_cache_pg" nil))
+  scm: |
+    (begin
+      (define username "native_db_cache_pg")
+      (define create (lambda () (begin
+        (eval (parse_sql "memcp-tests" (concat "CREATE USER " username " IDENTIFIED BY 'pw'") nil))
+        (eval (parse_sql "memcp-tests" (concat "GRANT ALL ON `memcp-tests`.* TO " username) nil)))))
+      (define authenticate (lambda (runtime) (begin
+        (define account (sql_authenticate_account username "pw"))
+        (if account true (error "test login authentication failed"))
+        (sql_session_actor runtime username (account "principal_id")))))
+      (define cache (newcachemap))
+      (define query "CREATE SCHEMA IF NOT EXISTS \"memcp-tests\"")
+      (define compile (lambda (runtime text) (cached_parse cache "psql" (list parse_psql)
+        "memcp-tests" text (list (quote sql-policy-for) username) username runtime false nil)))
+      (define invoke (lambda (runtime formula) (sql_execute_formula runtime nil formula
+        (lambda (_row) nil) (lambda (_fields) nil))))
+      (create)
+      (define old_session (newsession))
+      (define old_actor (authenticate old_session))
+      (define held (compile old_session query))
+      (invoke old_session held)
+      (eval (parse_sql "memcp-tests" (concat "DROP USER " username) nil))
+      (create)
+      (define new_session (newsession))
+      (define new_actor (authenticate new_session))
+      (define fresh (compile new_session query))
+      (define fresh_result (invoke new_session fresh))
+      (define old_held_denied (try (lambda () (begin (invoke old_session held) false))
+        (lambda (failure) (strlike (concat failure) "%identity changed%"))))
+      (define old_miss_denied (try (lambda () (begin (compile old_session (concat query " ")) false))
+        (lambda (failure) (strlike (concat failure) "%identity changed%"))))
+      (and (not (equal? (cadr old_actor) (cadr new_actor)))
+        (expression_equal? fresh_result false) old_held_denied old_miss_denied
+        (not (nil? (show "memcp-tests")))))
+  expect: {result: true}
+- name: Trusted custom allow-or-error policies may return no value
+  scm: |
+    (expression_equal? (eval (parse_sql "memcp-tests"
+      "CREATE DATABASE IF NOT EXISTS `memcp-tests`" (lambda (_db _name _write) nil))) false)
+  expect: {result: true}
+- name: Native system database membership is not server administrator authority
+  syntax: mysql
+  username: native_db_create_system
+  password: pw
+  setup:
+  - scm: (eval (parse_sql "memcp-tests" "CREATE USER native_db_create_system IDENTIFIED BY 'pw'" nil))
+  - scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO native_db_create_system" nil))
+  - scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON system.* TO native_db_create_system" nil))
+  cleanup:
+  - scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS native_db_create_system" nil))
+  sql: CREATE DATABASE IF NOT EXISTS native_db_forbidden
+  expect: {error: true, contains: access denied}
+- name: Native administrators retain actual database creation and existing database no-ops
+  cleanup:
+  - sql: DROP DATABASE IF EXISTS native_db_create_admin
+  scm: |
+    (begin
+      (define create (parse_sql "memcp-tests" "CREATE DATABASE native_db_create_admin" (sql_policy "root")))
+      (eval create)
+      (define ensure (parse_sql "memcp-tests" "CREATE DATABASE IF NOT EXISTS native_db_create_admin" (sql_policy "root")))
+      (and (not (nil? (show "native_db_create_admin"))) (expression_equal? (eval ensure) false)))
+  expect: {result: true}

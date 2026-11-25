@@ -1,0 +1,208 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Named standalone indexes retain native ownership separately from constraints and automatic physical indexes
+setup:
+- sql: DROP TABLE IF EXISTS logical_ix_child
+- sql: DROP TABLE IF EXISTS logical_ix_rows
+- sql: DROP TABLE IF EXISTS logical_ix_private
+- sql: CREATE TABLE logical_ix_rows(id INT PRIMARY KEY,code INT,payload INT,CONSTRAINT UQ_logical_code UNIQUE(code))
+- sql: INSERT logical_ix_rows VALUES(1,11,101),(2,22,202)
+test_cases:
+- name: Nonunique ASC DESC and INCLUDE declaration is visible with the actual table identity
+  sql: CREATE NONCLUSTERED INDEX IX_logical_payload ON logical_ix_rows(payload DESC,id ASC) INCLUDE(code)
+- name: Nonunique declaration has its own named catalog row
+  sql: SELECT name FROM sys.indexes WHERE object_id=OBJECT_ID(N'logical_ix_rows') AND name=N'IX_logical_payload'
+  expect:
+    rows: 1
+    data:
+    - name: IX_logical_payload
+- name: Nonunique declaration does not invent uniqueness
+  sql: INSERT logical_ix_rows VALUES(3,33,101)
+- name: Duplicate index name is a real declaration conflict
+  sql: CREATE INDEX IX_logical_payload ON logical_ix_rows(code)
+  expect:
+    error: true
+- name: Included column remains a real retirement dependency
+  sql: ALTER TABLE logical_ix_rows DROP COLUMN code
+  expect:
+    error: true
+- name: DROP INDEX cannot remove a UNIQUE constraint
+  sql: DROP INDEX UQ_logical_code ON logical_ix_rows
+  expect:
+    error: true
+- name: Constraint enforcement survives rejected DROP INDEX
+  sql: INSERT logical_ix_rows VALUES(4,11,404)
+  expect:
+    error: true
+- name: Exact nonunique standalone declaration can retire
+  sql: DROP INDEX IX_logical_payload ON logical_ix_rows
+- name: Missing name is not silently accepted
+  sql: DROP INDEX IX_logical_payload ON logical_ix_rows
+  expect:
+    error: true
+- name: Explicit IF EXISTS supports an absent standalone name
+  sql: DROP INDEX IF EXISTS IX_logical_payload ON logical_ix_rows
+- name: A standalone unique index owns its native enforcement
+  sql: CREATE UNIQUE INDEX UX_logical_payload ON logical_ix_rows(id,payload)
+- name: A standalone unique index is not a UNIQUE constraint object
+  sql: SELECT name FROM sys.key_constraints WHERE name=N'UX_logical_payload'
+  expect:
+    rows: 0
+    data: []
+- name: Standalone unique declaration retires atomically
+  sql: DROP INDEX UX_logical_payload ON logical_ix_rows
+- name: Original transaction and savepoint select exact standalone headers
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE INDEX IX_logical_private ON logical_ix_rows(payload)
+    - connection: owner
+      sql: SELECT name FROM sys.indexes WHERE object_id=OBJECT_ID(N'logical_ix_rows') AND name=N'IX_logical_private'
+      expect:
+        rows: 1
+        data: [{name: IX_logical_private}]
+    - connection: observer
+      sql: SELECT name FROM sys.indexes WHERE object_id=OBJECT_ID(N'logical_ix_rows') AND name=N'IX_logical_private'
+      expect:
+        rows: 0
+        data: []
+    - connection: owner
+      sql: DELETE FROM logical_ix_rows WHERE id=3
+    - connection: owner
+      sql: SELECT id,payload FROM logical_ix_rows ORDER BY id
+      expect:
+        rows: 2
+        data: [{id: 1,payload: 101},{id: 2,payload: 202}]
+    - connection: owner
+      sql: SAVE TRANSACTION after_index
+    - connection: owner
+      sql: DROP INDEX IX_logical_private ON logical_ix_rows
+    - connection: owner
+      sql: ROLLBACK TRANSACTION after_index
+    - connection: owner
+      sql: SELECT name FROM sys.indexes WHERE object_id=OBJECT_ID(N'logical_ix_rows') AND name=N'IX_logical_private'
+      expect:
+        rows: 1
+        data: [{name: IX_logical_private}]
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT name FROM sys.indexes WHERE object_id=OBJECT_ID(N'logical_ix_rows') AND name=N'IX_logical_private'
+      expect:
+        rows: 0
+        data: []
+- name: Constructor declaration and rows share the same original decision
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE TABLE logical_ix_private(id INT,payload INT)
+    - connection: owner
+      sql: CREATE UNIQUE INDEX UX_logical_private ON logical_ix_private(id)
+    - connection: owner
+      sql: INSERT logical_ix_private VALUES(7,70)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,payload FROM logical_ix_private
+      expect:
+        rows: 1
+        data: [{id: 7,payload: 70}]
+    - connection: observer
+      sql: INSERT logical_ix_private VALUES(7,71)
+      expect:
+        error: true
+- name: A standalone enforcing index is retained while a foreign key needs it
+  sql: CREATE TABLE logical_ix_child(id INT,CONSTRAINT FK_logical_index FOREIGN KEY(id) REFERENCES logical_ix_private(id))
+- name: Foreign key dependency rejects standalone index retirement
+  sql: DROP INDEX UX_logical_private ON logical_ix_private
+  expect:
+    error: true
+- name: Exact foreign retirement releases only its actual dependency
+  sql: ALTER TABLE logical_ix_child DROP CONSTRAINT FK_logical_index
+- name: Standalone retirement removes enforcement after its foreign dependency is gone
+  sql: DROP INDEX UX_logical_private ON logical_ix_private
+- name: Retired enforcing index permits formerly conflicting rows
+  sql: INSERT logical_ix_private VALUES(7,71); SELECT id,payload FROM logical_ix_private ORDER BY payload
+  expect:
+    rows: 2
+    data: [{id: 7,payload: 70},{id: 7,payload: 71}]
+- name: Populated scoped nonunique index and row work survive the same transaction savepoint
+  tds:
+    statements:
+    - connection: tempowner
+      sql: 'CREATE TABLE #logical_temp(id INT,payload INT)'
+    - connection: tempowner
+      sql: 'INSERT #logical_temp VALUES(1,10),(2,20)'
+    - connection: tempowner
+      sql: BEGIN TRANSACTION
+    - connection: tempowner
+      sql: 'CREATE NONCLUSTERED INDEX IX_temp ON #logical_temp(payload DESC) INCLUDE(id)'
+    - connection: tempowner
+      sql: SAVE TRANSACTION index_present
+    - connection: tempowner
+      sql: 'DROP INDEX IX_temp ON #logical_temp'
+    - connection: tempowner
+      sql: ROLLBACK TRANSACTION index_present
+    - connection: tempowner
+      sql: 'UPDATE #logical_temp SET payload=payload+1 WHERE id=1'
+    - connection: tempowner
+      sql: COMMIT TRANSACTION
+    - connection: tempowner
+      sql: 'DROP INDEX IX_temp ON #logical_temp'
+    - connection: tempowner
+      sql: 'SELECT id,payload FROM #logical_temp ORDER BY id'
+      expect:
+        rows: 2
+        data: [{id: 1,payload: 11},{id: 2,payload: 20}]
+    - connection: tempowner
+      sql: 'DROP TABLE #logical_temp'
+- name: A populated scoped unique index enforces selected keys before commit and retires on rewind
+  tds:
+    statements:
+    - connection: tempunique
+      sql: 'CREATE TABLE #logical_unique(id INT,payload INT)'
+    - connection: tempunique
+      sql: 'INSERT #logical_unique VALUES(1,10),(2,20)'
+    - connection: tempunique
+      sql: SET XACT_ABORT OFF
+    - connection: tempunique
+      sql: BEGIN TRANSACTION
+    - connection: tempunique
+      sql: SAVE TRANSACTION before_unique
+    - connection: tempunique
+      sql: 'CREATE UNIQUE INDEX UX_temp ON #logical_unique(payload)'
+    - connection: tempunique
+      sql: "BEGIN TRY INSERT #logical_unique VALUES(3,10); END TRY BEGIN CATCH SELECT ERROR_NUMBER() AS number,CASE WHEN ERROR_MESSAGE() LIKE N'%UX_temp%' THEN 1 ELSE 0 END AS declared_index,@@TRANCOUNT AS depth,XACT_STATE() AS state; END CATCH"
+      expect:
+        rows: 1
+        data: [{number: 1062,declared_index: 1,depth: 1,state: 1}]
+    - connection: tempunique
+      sql: 'SELECT id,payload,@@TRANCOUNT AS depth,XACT_STATE() AS state FROM #logical_unique ORDER BY id'
+      expect:
+        rows: 2
+        data: [{id: 1,payload: 10,depth: 1,state: 1},{id: 2,payload: 20,depth: 1,state: 1}]
+    - connection: tempunique
+      sql: ROLLBACK TRANSACTION before_unique
+    - connection: tempunique
+      sql: 'INSERT #logical_unique VALUES(3,10)'
+    - connection: tempunique
+      sql: COMMIT TRANSACTION
+    - connection: tempunique
+      sql: 'SELECT id,payload FROM #logical_unique ORDER BY id'
+      expect:
+        rows: 3
+        data: [{id: 1,payload: 10},{id: 2,payload: 20},{id: 3,payload: 10}]
+    - connection: tempunique
+      sql: 'DROP TABLE #logical_unique'
+cleanup:
+- sql: DROP TABLE IF EXISTS logical_ix_child
+- sql: DROP TABLE IF EXISTS logical_ix_rows
+- sql: DROP TABLE IF EXISTS logical_ix_private

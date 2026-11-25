@@ -1,0 +1,167 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Ordered scalar range cuts bind the complete caller domain without a
+    point correlation
+  version: '1.0'
+setup:
+- sql: DROP TABLE IF EXISTS scalar_range_unit_history
+- sql: CREATE TABLE scalar_range_unit_history (id INT PRIMARY KEY, owner_id INT, coordinate
+    INT, amount INT, UNIQUE KEY owner_coordinate(owner_id,coordinate))
+- sql: INSERT INTO scalar_range_unit_history VALUES (1,1,0,1),(2,1,20,3),(3,2,10,7),(4,2,30,NULL)
+test_cases:
+- name: sql Cold zero-point range preserves boundary values
+  syntax: sql
+  sql: SELECT d.x,(SELECT h.amount FROM scalar_range_unit_history h WHERE h.owner_id=1
+    AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) AS amount FROM (SELECT
+    10 AS x UNION ALL SELECT 20 UNION ALL SELECT 30) d ORDER BY d.x
+  expect: &id001
+    data:
+    - x: 10
+      amount: 1
+    - x: 20
+      amount: 3
+    - x: 30
+      amount: 3
+- name: sql Warm after EXPLAIN zero-point range preserves boundary values
+  syntax: sql
+  sql: SELECT d.x,(SELECT h.amount FROM scalar_range_unit_history h WHERE h.owner_id=1
+    AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) AS amount FROM (SELECT
+    10 AS x UNION ALL SELECT 20 UNION ALL SELECT 30) d ORDER BY d.x
+  expect: *id001
+  setup:
+  - sql: EXPLAIN SELECT d.x,(SELECT h.amount FROM scalar_range_unit_history h WHERE
+      h.owner_id=1 AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) AS amount
+      FROM (SELECT 10 AS x UNION ALL SELECT 20 UNION ALL SELECT 30) d ORDER BY d.x
+    syntax: sql
+- name: sql Reversed cuts retain each caller value
+  syntax: sql
+  sql: SELECT d.x,(SELECT h.amount FROM scalar_range_unit_history h WHERE h.owner_id=1
+    AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) AS amount FROM (SELECT
+    30 AS x UNION ALL SELECT 20 UNION ALL SELECT 10) d ORDER BY d.x DESC
+  expect:
+    data:
+    - x: 30
+      amount: 3
+    - x: 20
+      amount: 3
+    - x: 10
+      amount: 1
+- name: sql NULL cut empty range and selected NULL remain distinct domains
+  syntax: sql
+  sql: SELECT d.x,(SELECT h.amount FROM scalar_range_unit_history h WHERE h.owner_id=2
+    AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) AS amount FROM (SELECT
+    NULL AS x UNION ALL SELECT 0 UNION ALL SELECT 10 UNION ALL SELECT 30) d ORDER
+    BY COALESCE(d.x,-1)
+  expect:
+    data:
+    - x: null
+      amount: null
+    - x: 0
+      amount: null
+    - x: 10
+      amount: 7
+    - x: 30
+      amount: null
+- name: psql Cold zero-point range preserves boundary values
+  syntax: psql
+  sql: SELECT d.x,(SELECT h.amount FROM scalar_range_unit_history h WHERE h.owner_id=1
+    AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) AS amount FROM (SELECT
+    10 AS x UNION ALL SELECT 20 UNION ALL SELECT 30) d ORDER BY d.x
+  expect: &id002
+    data:
+    - x: 10
+      amount: 1
+    - x: 20
+      amount: 3
+    - x: 30
+      amount: 3
+- name: psql Warm after EXPLAIN zero-point range preserves boundary values
+  syntax: psql
+  sql: SELECT d.x,(SELECT h.amount FROM scalar_range_unit_history h WHERE h.owner_id=1
+    AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) AS amount FROM (SELECT
+    10 AS x UNION ALL SELECT 20 UNION ALL SELECT 30) d ORDER BY d.x
+  expect: *id002
+  setup:
+  - sql: EXPLAIN SELECT d.x,(SELECT h.amount FROM scalar_range_unit_history h WHERE
+      h.owner_id=1 AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) AS amount
+      FROM (SELECT 10 AS x UNION ALL SELECT 20 UNION ALL SELECT 30) d ORDER BY d.x
+    syntax: psql
+- name: psql Reversed cuts retain each caller value
+  syntax: psql
+  sql: SELECT d.x,(SELECT h.amount FROM scalar_range_unit_history h WHERE h.owner_id=1
+    AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) AS amount FROM (SELECT
+    30 AS x UNION ALL SELECT 20 UNION ALL SELECT 10) d ORDER BY d.x DESC
+  expect:
+    data:
+    - x: 30
+      amount: 3
+    - x: 20
+      amount: 3
+    - x: 10
+      amount: 1
+- name: psql NULL cut empty range and selected NULL remain distinct domains
+  syntax: psql
+  sql: SELECT d.x,(SELECT h.amount FROM scalar_range_unit_history h WHERE h.owner_id=2
+    AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) AS amount FROM (SELECT
+    NULL AS x UNION ALL SELECT 0 UNION ALL SELECT 10 UNION ALL SELECT 30) d ORDER
+    BY COALESCE(d.x,-1)
+  expect:
+    data:
+    - x: null
+      amount: null
+    - x: 0
+      amount: null
+    - x: 10
+      amount: 7
+    - x: 30
+      amount: null
+- name: tsql Cold zero-point range preserves boundary values
+  syntax: tsql
+  sql: SELECT d.x,(SELECT TOP(1) h.amount FROM scalar_range_unit_history h WHERE h.owner_id=1
+    AND h.coordinate<=d.x ORDER BY h.coordinate DESC) AS amount FROM (SELECT 10 AS
+    x UNION ALL SELECT 20 UNION ALL SELECT 30) d ORDER BY d.x
+  expect: &id003
+    data:
+    - x: 10
+      amount: 1
+    - x: 20
+      amount: 3
+    - x: 30
+      amount: 3
+- name: tsql Warm zero-point range preserves boundary values
+  syntax: tsql
+  sql: SELECT d.x,(SELECT TOP(1) h.amount FROM scalar_range_unit_history h WHERE h.owner_id=1
+    AND h.coordinate<=d.x ORDER BY h.coordinate DESC) AS amount FROM (SELECT 10 AS
+    x UNION ALL SELECT 20 UNION ALL SELECT 30) d ORDER BY d.x
+  expect: *id003
+- name: tsql Reversed cuts retain each caller value
+  syntax: tsql
+  sql: SELECT d.x,(SELECT TOP(1) h.amount FROM scalar_range_unit_history h WHERE h.owner_id=1
+    AND h.coordinate<=d.x ORDER BY h.coordinate DESC) AS amount FROM (SELECT 30 AS
+    x UNION ALL SELECT 20 UNION ALL SELECT 10) d ORDER BY d.x DESC
+  expect:
+    data:
+    - x: 30
+      amount: 3
+    - x: 20
+      amount: 3
+    - x: 10
+      amount: 1
+- name: tsql NULL cut empty range and selected NULL remain distinct domains
+  syntax: tsql
+  sql: SELECT d.x,(SELECT TOP(1) h.amount FROM scalar_range_unit_history h WHERE h.owner_id=2
+    AND h.coordinate<=d.x ORDER BY h.coordinate DESC) AS amount FROM (SELECT NULL
+    AS x UNION ALL SELECT 0 UNION ALL SELECT 10 UNION ALL SELECT 30) d ORDER BY COALESCE(d.x,-1)
+  expect:
+    data:
+    - x: null
+      amount: null
+    - x: 0
+      amount: null
+    - x: 10
+      amount: 7
+    - x: 30
+      amount: null
+cleanup:
+- sql: DROP TABLE scalar_range_unit_history

@@ -423,7 +423,7 @@ func TestPruneScanResidualKeepsSecondRangeColumn(t *testing.T) {
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("a"), scm.NewSymbol("b")}),
 		scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("and"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("<="), scm.NewSymbol("a"), scm.NewInt(2)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol(">="), scm.NewSymbol("a"), scm.NewInt(2)}),
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("<="), scm.NewSymbol("b"), scm.NewInt(1)}),
 		}),
 	})

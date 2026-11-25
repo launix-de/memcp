@@ -1,0 +1,207 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  version: '1.0'
+  syntax: tsql
+  isolated: true
+  description: Typed invocation inputs retain fresh native transition rows and rollback
+setup:
+- sql: DROP TABLE IF EXISTS transition_events
+- sql: DROP TABLE IF EXISTS transition_allowed
+- sql: DROP TABLE IF EXISTS transition_target
+- sql: CREATE TABLE transition_target(id INT PRIMARY KEY,payload INT NULL)
+- sql: CREATE TABLE transition_allowed(id INT,payload INT)
+- sql: CREATE TABLE transition_events(id INT,payload INT,phase INT)
+- sql: INSERT INTO transition_target VALUES(1,7),(2,9)
+- sql: INSERT INTO transition_allowed VALUES(1,7),(1,8)
+- sql: |
+    CREATE TRIGGER transition_validation ON transition_target AFTER UPDATE AS
+    BEGIN
+      SET NOCOUNT ON
+      IF EXISTS(SELECT TOP (1) i.id
+        FROM inserted i LEFT JOIN transition_allowed a
+          ON i.id=a.id AND i.payload=a.payload
+        WHERE CASE WHEN (SELECT COUNT(*) FROM transition_allowed c WHERE c.id=i.id)=0
+          THEN i.payload ELSE a.payload END IS NULL)
+      BEGIN
+        RAISERROR('invalid transition value',16,1)
+        ROLLBACK
+      END
+      INSERT INTO transition_events SELECT id,payload,0 FROM deleted
+      INSERT INTO transition_events SELECT id,payload,1 FROM inserted
+      SET NOCOUNT OFF
+    END
+test_cases:
+- name: A native statement binds distinct OLD and NEW values
+  steps:
+  - sql: UPDATE transition_target SET payload=8 WHERE id=1
+    session_id: typed_transition_inputs
+  - sql: SELECT id,payload,phase FROM transition_events ORDER BY id,phase
+    session_id: typed_transition_inputs
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        payload: 7
+        phase: 0
+      - id: 1
+        payload: 8
+        phase: 1
+- name: Repeated original-transaction invocations rollback their own rows
+  steps:
+  - sql: BEGIN TRANSACTION
+    session_id: typed_transition_inputs
+  - sql: UPDATE transition_target SET payload=7 WHERE id=1
+    session_id: typed_transition_inputs
+  - sql: UPDATE transition_target SET payload=8 WHERE id=1
+    session_id: typed_transition_inputs
+  - sql: ROLLBACK TRANSACTION
+    session_id: typed_transition_inputs
+  - sql: SELECT id,payload FROM transition_target ORDER BY id
+    session_id: typed_transition_inputs
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        payload: 8
+      - id: 2
+        payload: 9
+  - sql: SELECT id,payload,phase FROM transition_events ORDER BY id,phase
+    session_id: typed_transition_inputs
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        payload: 7
+        phase: 0
+      - id: 1
+        payload: 8
+        phase: 1
+- name: The next invocation reads its new transition and empty matching constraint
+    set
+  steps:
+  - sql: UPDATE transition_target SET payload=10 WHERE id=2
+    session_id: typed_transition_inputs
+  - sql: SELECT id,payload,phase FROM transition_events ORDER BY id,phase
+    session_id: typed_transition_inputs
+    expect:
+      rows: 4
+      data:
+      - id: 1
+        payload: 7
+        phase: 0
+      - id: 1
+        payload: 8
+        phase: 1
+      - id: 2
+        payload: 9
+        phase: 0
+      - id: 2
+        payload: 10
+        phase: 1
+- name: A reused original transaction sees the new invalid row and rolls back its earlier valid work
+  steps:
+  - sql: BEGIN TRANSACTION
+    session_id: typed_transition_inputs
+  - sql: UPDATE transition_target SET payload=7 WHERE id=1
+    session_id: typed_transition_inputs
+  - sql: UPDATE transition_target SET payload=999 WHERE id=1
+    session_id: typed_transition_inputs
+    expect: {error: true, contains: invalid transition value}
+  - sql: SELECT id,payload FROM transition_target ORDER BY id
+    session_id: typed_transition_inputs
+    expect:
+      rows: 2
+      data: [{id: 1,payload: 8},{id: 2,payload: 10}]
+  - sql: SELECT id,payload,phase FROM transition_events ORDER BY id,phase,payload
+    session_id: typed_transition_inputs
+    expect:
+      # SQL Server continues this trigger after ROLLBACK. Its trailing
+      # audit INSERTs persist; work from before the rollback does not.
+      # https://learn.microsoft.com/en-us/sql/t-sql/language-elements/rollback-transaction-transact-sql#interoperability
+      rows: 6
+      data:
+      - {id: 1,payload: 7,phase: 0}
+      - {id: 1,payload: 7,phase: 0}
+      - {id: 1,payload: 8,phase: 1}
+      - {id: 1,payload: 999,phase: 1}
+      - {id: 2,payload: 9,phase: 0}
+      - {id: 2,payload: 10,phase: 1}
+- name: Eighty-five same-value updates retain every statement effect within a bounded original transaction
+  setup: &transition_plan_setup
+  - sql: DROP TABLE IF EXISTS transition_plan_allowed
+  - sql: DROP TABLE IF EXISTS transition_plan_marker
+  - sql: DROP TABLE IF EXISTS transition_plan_counter
+  - sql: CREATE TABLE transition_plan_marker(id INT PRIMARY KEY,marker_value VARCHAR(100) NULL)
+  - sql: CREATE TABLE transition_plan_counter(id INT PRIMARY KEY,completed INT NOT NULL)
+  - sql: CREATE TABLE transition_plan_allowed(id INT NOT NULL,allowed_value VARCHAR(100) NOT NULL,PRIMARY KEY(id,allowed_value))
+  - sql: INSERT INTO transition_plan_marker VALUES(432,'initial')
+  - sql: INSERT INTO transition_plan_counter VALUES(1,0)
+  - sql: ALTER TABLE transition_plan_allowed ADD CONSTRAINT FK_transition_plan_allowed_marker FOREIGN KEY(id) REFERENCES transition_plan_marker(id)
+  - sql: |
+      CREATE TRIGGER transition_plan_validate ON transition_plan_marker AFTER UPDATE AS
+      BEGIN
+        SET NOCOUNT ON
+        UPDATE transition_plan_counter SET completed=completed+1 WHERE id=1
+        IF EXISTS(
+          SELECT TOP (1) i.id FROM inserted i
+          LEFT JOIN transition_plan_allowed a ON i.id=a.id AND i.marker_value=a.allowed_value
+          WHERE CASE WHEN (SELECT COUNT(*) FROM transition_plan_allowed c WHERE c.id=i.id)=0
+            THEN i.marker_value ELSE a.allowed_value END IS NULL)
+        BEGIN
+          RAISERROR('invalid marker',16,1)
+          ROLLBACK TRANSACTION
+        END
+        SET NOCOUNT OFF
+      END
+  cleanup: &transition_plan_cleanup
+  - sql: DROP TABLE IF EXISTS transition_plan_allowed
+  - sql: DROP TABLE IF EXISTS transition_plan_marker
+  - sql: DROP TABLE IF EXISTS transition_plan_counter
+  # Exactly one measured SQL batch: one cold plus84 warm invocations, with
+  # no warmup/discard. Every invocation has a visible counter effect before
+  # rollback; the entire batch, including its exact results, is bounded.
+  max_time: 5
+  sql: |
+    BEGIN TRANSACTION
+    DECLARE @iteration INT=0
+    WHILE @iteration<85
+    BEGIN
+      UPDATE transition_plan_marker SET marker_value='unchanged' WHERE id=432
+      SET @iteration=@iteration+1
+    END
+    SELECT @iteration AS iterations,c.completed,@@TRANCOUNT AS depth,m.marker_value
+      FROM transition_plan_counter c CROSS JOIN transition_plan_marker m
+      WHERE c.id=1 AND m.id=432
+    ROLLBACK TRANSACTION
+    SELECT @iteration AS iterations,c.completed,@@TRANCOUNT AS depth,m.marker_value
+      FROM transition_plan_counter c CROSS JOIN transition_plan_marker m
+      WHERE c.id=1 AND m.id=432
+  expect:
+    rows: 2
+    data:
+    - {iterations: 85,completed: 85,depth: 1,marker_value: unchanged}
+    - {iterations: 85,completed: 0,depth: 0,marker_value: initial}
+- name: A fresh invalid transition cannot reuse the preceding valid decision
+  setup: *transition_plan_setup
+  cleanup: *transition_plan_cleanup
+  steps:
+  - sql: BEGIN TRANSACTION
+    session_id: transition_plan_invalid
+  - sql: UPDATE transition_plan_marker SET marker_value='unchanged' WHERE id=432
+    session_id: transition_plan_invalid
+  - sql: UPDATE transition_plan_marker SET marker_value=NULL WHERE id=432
+    session_id: transition_plan_invalid
+    expect: {error: true,contains: invalid marker}
+  - sql: |
+      SELECT c.completed,@@TRANCOUNT AS depth,m.marker_value
+        FROM transition_plan_counter c CROSS JOIN transition_plan_marker m
+        WHERE c.id=1 AND m.id=432
+    session_id: transition_plan_invalid
+    expect:
+      rows: 1
+      data: [{completed: 0,depth: 0,marker_value: initial}]
+cleanup:
+- sql: DROP TABLE IF EXISTS transition_events
+- sql: DROP TABLE IF EXISTS transition_allowed
+- sql: DROP TABLE IF EXISTS transition_target

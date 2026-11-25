@@ -1,0 +1,64 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Nested membership retains caller coordinates and SQL truth values
+setup:
+- sql: CREATE TABLE identity_left(id INT,k INT,flag INT)
+- sql: CREATE TABLE identity_right(id INT,k INT,flag INT)
+- sql: CREATE TABLE identity_probe(id INT,k INT,flag INT)
+- sql: INSERT identity_left VALUES(1,10,1),(1,10,1),(2,NULL,1),(3,30,0)
+- sql: INSERT identity_right VALUES(4,10,1),(4,10,1),(5,NULL,1),(6,60,1)
+- sql: INSERT identity_probe VALUES(1,10,1),(2,30,0),(3,60,1),(4,99,1),(5,NULL,1),(6,10,0)
+cleanup:
+- sql: DROP TABLE IF EXISTS identity_left
+- sql: DROP TABLE IF EXISTS identity_right
+- sql: DROP TABLE IF EXISTS identity_probe
+test_cases:
+- name: A nested presence probe binds both correlated coordinates
+  sql: |
+    SELECT p.id,CASE WHEN EXISTS(
+      SELECT 1 FROM identity_left l FULL JOIN identity_right r ON l.k=r.k
+      WHERE COALESCE(l.k,r.k)=p.k AND COALESCE(l.flag,r.flag)=p.flag
+    ) THEN 1 ELSE 0 END AS present
+    FROM identity_probe p ORDER BY p.id
+  expect:
+    rows: 6
+    data: [{id: 1,present: 1},{id: 2,present: 1},{id: 3,present: 1},
+      {id: 4,present: 0},{id: 5,present: 0},{id: 6,present: 0}]
+- name: Renamed aliases and a different predicate retain their own value
+  sql: |
+    SELECT caller.id,CASE WHEN EXISTS(
+      SELECT 1 FROM identity_left first_input FULL JOIN identity_right second_input
+        ON first_input.k=second_input.k
+      WHERE COALESCE(first_input.k,second_input.k)=caller.k
+        AND COALESCE(first_input.flag,second_input.flag)<>caller.flag
+    ) THEN 1 ELSE 0 END AS present
+    FROM identity_probe caller ORDER BY caller.id
+  expect:
+    rows: 6
+    data: [{id: 1,present: 0},{id: 2,present: 0},{id: 3,present: 0},
+      {id: 4,present: 0},{id: 5,present: 0},{id: 6,present: 1}]
+- name: Explicit NULL predicates retain the nullable caller domain
+  sql: |
+    SELECT p.id,CASE WHEN EXISTS(
+      SELECT 1 FROM identity_left l FULL JOIN identity_right r ON l.k=r.k
+      WHERE p.k IS NULL AND COALESCE(l.k,r.k) IS NULL
+    ) THEN 1 ELSE 0 END AS present
+    FROM identity_probe p ORDER BY p.id
+  expect:
+    rows: 6
+    data: [{id: 1,present: 0},{id: 2,present: 0},{id: 3,present: 0},
+      {id: 4,present: 0},{id: 5,present: 1},{id: 6,present: 0}]
+- name: IN and NOT IN retain UNKNOWN for a NULL key or a NULL-containing unmatched set
+  sql: |
+    SELECT p.id,CASE
+      WHEN p.k IN(SELECT COALESCE(l.k,r.k) FROM identity_left l FULL JOIN identity_right r ON l.k=r.k) THEN 1
+      WHEN p.k NOT IN(SELECT COALESCE(l.k,r.k) FROM identity_left l FULL JOIN identity_right r ON l.k=r.k) THEN 0
+      ELSE -1 END AS membership
+    FROM identity_probe p ORDER BY p.id
+  expect:
+    rows: 6
+    data: [{id: 1,membership: 1},{id: 2,membership: 1},{id: 3,membership: 1},
+      {id: 4,membership: -1},{id: 5,membership: -1},{id: 6,membership: 1}]

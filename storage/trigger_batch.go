@@ -26,6 +26,7 @@ type triggerBatch struct {
 	rows   []dataset
 	table  *table
 	isOld  bool // true for DELETE (rows are OLD), false for INSERT (rows are NEW)
+	input  *nativeMutationInput
 	tx     *TxContext
 }
 
@@ -37,6 +38,7 @@ func (t *table) BeginTriggerBatch(timing TriggerTiming, isOld bool, tx *TxContex
 		table:  t,
 		isOld:  isOld,
 		tx:     tx,
+		input:  tx.mutationInputFor(t),
 	}
 }
 
@@ -59,7 +61,7 @@ func (b *triggerBatch) Flush() {
 	if len(rows) == 0 {
 		return
 	}
-	b.table.ExecuteTriggersBatch(b.timing, rows, b.isOld, b.tx)
+	b.table.ExecuteTriggersBatch(b.timing, rows, b.isOld, b.tx, b.input)
 }
 
 // Len returns the current batch size.

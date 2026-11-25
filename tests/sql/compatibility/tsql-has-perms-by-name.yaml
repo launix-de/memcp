@@ -1,0 +1,354 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Named permissions project native database grants and real system procedure declarations; xp_logevent writes the Linux
+    server log without a Windows Event Log facility
+setup:
+- sql: CREATE TABLE permission_named_rows(id INT PRIMARY KEY,value INT)
+- sql: CREATE VIEW permission_named_view AS SELECT id,value FROM permission_named_rows
+- sql: CREATE PROCEDURE permission_named_proc AS SELECT 1 AS value
+- sql: CREATE FUNCTION permission_named_fn() RETURNS INT AS BEGIN RETURN 1; END
+- sql: CREATE TABLE permission_named_inputs(id INT PRIMARY KEY,object_name NVARCHAR(128))
+- sql: INSERT permission_named_inputs VALUES(1,N'permission_named_rows'),(2,N'permission_named_missing'),(3,NULL)
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER permission_named_member IDENTIFIED BY 'pw'" nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO permission_named_member" nil))
+cleanup:
+- sql: DROP TABLE IF EXISTS permission_named_transient
+- sql: DROP FUNCTION IF EXISTS permission_named_fn
+- sql: DROP PROCEDURE IF EXISTS permission_named_proc
+- sql: DROP VIEW IF EXISTS permission_named_view
+- sql: DROP TABLE IF EXISTS permission_named_inputs
+- sql: DROP TABLE IF EXISTS permission_named_rows
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS permission_named_member" nil))
+test_cases:
+- name: Current database and supported schemas use real database authority
+  sql: SELECT HAS_PERMS_BY_NAME(NULL,N'DATABASE',N'SELECT') AS current_right,HAS_PERMS_BY_NAME(DB_NAME(),N'DATABASE',N'ANY') AS any_right,HAS_PERMS_BY_NAME(N'dbo',N'SCHEMA',N'ALTER')
+    AS schema_right
+  expect:
+    rows: 1
+    data:
+    - current_right: 1
+      any_right: 1
+      schema_right: 1
+- name: Object permissions observe actual tables views and source modules
+  sql: SELECT HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'SELECT') AS table_right,HAS_PERMS_BY_NAME(N'permission_named_view',N'OBJECT',N'SELECT')
+    AS view_right,HAS_PERMS_BY_NAME(N'permission_named_proc',N'OBJECT',N'EXECUTE') AS proc_right,HAS_PERMS_BY_NAME(N'permission_named_fn',N'OBJECT',N'EXECUTE')
+    AS fn_right
+  expect:
+    rows: 1
+    data:
+    - table_right: 1
+      view_right: 1
+      proc_right: 1
+      fn_right: 1
+- name: Missing supported securables return zero
+  sql: SELECT HAS_PERMS_BY_NAME(N'permission_named_missing',N'OBJECT',N'SELECT') AS object_right,HAS_PERMS_BY_NAME(N'permission_named_missing',N'DATABASE',N'SELECT')
+    AS db_right,HAS_PERMS_BY_NAME(N'permission_named_missing',N'SCHEMA',N'SELECT') AS schema_right
+  expect:
+    rows: 1
+    data:
+    - object_right: 0
+      db_right: 0
+      schema_right: 0
+- name: Invalid class permission and NULL object inputs retain NULL
+  sql: SELECT HAS_PERMS_BY_NAME(N'permission_named_rows',N'WRONG',N'SELECT') AS bad_class,HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'WRONG')
+    AS bad_permission,HAS_PERMS_BY_NAME(N'permission_named_rows',NULL,N'SELECT') AS null_class,HAS_PERMS_BY_NAME(NULL,N'OBJECT',N'SELECT')
+    AS null_object,HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',NULL) AS null_permission
+  expect:
+    rows: 1
+    data:
+    - bad_class: null
+      bad_permission: null
+      null_class: null
+      null_object: null
+      null_permission: null
+- name: Permission vocabulary is case insensitive with trailing spaces only
+  sql: SELECT HAS_PERMS_BY_NAME(N'[dbo].[permission_named_rows]',N'object ',N'select ') AS valid_right,HAS_PERMS_BY_NAME(N'permission_named_rows',N'
+    OBJECT',N'SELECT') AS leading_class,HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N' SELECT') AS leading_permission
+  expect:
+    rows: 1
+    data:
+    - valid_right: 1
+      leading_class: null
+      leading_permission: null
+- name: Column checks consume declared native and virtual catalog fields
+  sql: SELECT HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'SELECT',N'id',N'COLUMN') AS native_right,HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'SELECT',N'missing',N'COLUMN')
+    AS missing_right,HAS_PERMS_BY_NAME(N'sys.objects',N'OBJECT',N'SELECT',N'name',N'COLUMN') AS catalog_right
+  expect:
+    rows: 1
+    data:
+    - native_right: 1
+      missing_right: 0
+      catalog_right: 1
+- name: Column mode validates both optional arguments and permission scope
+  sql: SELECT HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'SELECT',NULL,NULL) AS ordinary_right,HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'SELECT',N'id')
+    AS no_subclass,HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'SELECT',NULL,N'COLUMN') AS no_column,HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'ANY',N'id',N'COLUMN')
+    AS column_any,HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'EXECUTE',N'id',N'COLUMN') AS column_execute
+  expect:
+    rows: 1
+    data:
+    - ordinary_right: 1
+      no_subclass: null
+      no_column: null
+      column_any: null
+      column_execute: null
+- name: Scalar metadata arguments bind real input columns
+  sql: SELECT id,HAS_PERMS_BY_NAME(object_name,N'OBJECT',N'SELECT') AS access_right FROM permission_named_inputs ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      access_right: 1
+    - id: 2
+      access_right: 0
+    - id: 3
+      access_right: null
+- name: Database members retain table rights independently of SQL object ACL syntax
+  username: permission_named_member
+  password: pw
+  sql: DENY SELECT ON permission_named_rows TO permission_named_member; SELECT HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'SELECT')
+    AS read_right,HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'UPDATE') AS write_right
+  expect:
+    rows: 1
+    data:
+    - read_right: 1
+      write_right: 1
+- name: Ordinary members respect object-kind capabilities
+  username: permission_named_member
+  password: pw
+  sql: SELECT HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'EXECUTE') AS table_execute,HAS_PERMS_BY_NAME(N'permission_named_proc',N'OBJECT',N'SELECT')
+    AS proc_select,HAS_PERMS_BY_NAME(N'permission_named_fn',N'OBJECT',N'EXECUTE') AS fn_execute
+  expect:
+    rows: 1
+    data:
+    - table_execute: 0
+      proc_select: 0
+      fn_execute: 1
+- name: Database membership does not imply native administration
+  username: permission_named_member
+  password: pw
+  sql: SELECT HAS_PERMS_BY_NAME(DB_NAME(),N'DATABASE',N'CREATE DATABASE') AS create_database,HAS_PERMS_BY_NAME(N'sys.xp_logevent',N'OBJECT',N'EXECUTE')
+    AS log_execute
+  expect:
+    rows: 1
+    data:
+    - create_database: 0
+      log_execute: 0
+- name: Actual system dispatch declarations provide executable names
+  sql: SELECT HAS_PERMS_BY_NAME(N'sys.xp_logevent',N'OBJECT',N'EXECUTE') AS log_execute,HAS_PERMS_BY_NAME(N'sys.sp_executesql',N'OBJECT',N'EXECUTE')
+    AS dynamic_execute,HAS_PERMS_BY_NAME(N'sys.permission_named_missing',N'OBJECT',N'EXECUTE') AS missing_execute
+  expect:
+    rows: 1
+    data:
+    - log_execute: 1
+      dynamic_execute: 1
+      missing_execute: 0
+- name: System procedure identity agrees with the shared execution declaration
+  sql: SELECT CASE WHEN OBJECT_ID(N'sys.xp_logevent',N'X') IS NOT NULL THEN 1 ELSE 0 END AS actual_extended,CASE WHEN OBJECT_ID(N'sys.xp_logevent',N'P')
+    IS NULL THEN 1 ELSE 0 END AS not_source_proc
+  expect:
+    rows: 1
+    data:
+    - actual_extended: 1
+      not_source_proc: 1
+- name: Native metadata changes are not frozen by a warm permission expression
+  session_id: permission-named-warm
+  setup:
+  - sql: CREATE TABLE permission_named_transient(id INT)
+  sql: SELECT HAS_PERMS_BY_NAME(N'permission_named_transient',N'OBJECT',N'SELECT') AS access_right
+  expect:
+    rows: 1
+    data:
+    - access_right: 1
+- name: Dropped object disappears from the same warm permission expression
+  session_id: permission-named-warm
+  setup:
+  - sql: DROP TABLE permission_named_transient
+  sql: SELECT HAS_PERMS_BY_NAME(N'permission_named_transient',N'OBJECT',N'SELECT') AS access_right
+  expect:
+    rows: 1
+    data:
+    - access_right: 0
+- name: Native database members do not acquire server permissions
+  username: permission_named_member
+  password: pw
+  sql: SELECT HAS_PERMS_BY_NAME(NULL,NULL,N'ALTER ANY LOGIN') AS login_right,HAS_PERMS_BY_NAME(NULL,NULL,N'ALTER ANY CONNECTION') AS
+    connection_right,HAS_PERMS_BY_NAME(NULL,NULL,N'VIEW ANY DEFINITION') AS definition_right,HAS_PERMS_BY_NAME(NULL,NULL,N'VIEW SERVER
+    STATE') AS state_right
+  expect:
+    rows: 1
+    data:
+    - login_right: 0
+      connection_right: 0
+      definition_right: 0
+      state_right: 0
+- name: Membership visibility uses the actual actor incarnation
+  session_id: permission-member-warm
+  username: permission_named_member
+  password: pw
+  sql: SELECT HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'SELECT') AS access_right
+  expect:
+    rows: 1
+    data:
+    - access_right: 1
+- name: Revoking native membership invalidates the warm caller authority
+  setup:
+  - scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON `memcp-tests`.* FROM permission_named_member" nil))
+  username: permission_named_member
+  password: pw
+  session_id: permission-member-warm
+  sql: SELECT HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'SELECT') AS access_right
+  expect:
+    error: true
+    contains: access denied
+- name: Logevent success returns zero without a client result set
+  sql: DECLARE @status INT; EXEC @status=sys.xp_logevent 50001,'Synthetic server logging control'; SELECT @status AS return_status,@@ERROR
+    AS error_status
+  expect:
+    rows: 1
+    data:
+    - return_status: 0
+      error_status: 0
+- name: Logevent invalid number returns one without a thrown SQL error
+  sql: DECLARE @status INT; EXEC @status=sys.xp_logevent 50000,'Synthetic server logging control','INFORMATIONAL'; SELECT @status AS
+    return_status,@@ERROR AS error_status
+  expect:
+    rows: 1
+    data:
+    - return_status: 1
+      error_status: 0
+- name: Logevent invalid severity returns one without a thrown SQL error
+  sql: DECLARE @status INT; EXEC @status=sys.xp_logevent 50001,'Synthetic server logging control','INVALID'; SELECT @status AS return_status,@@ERROR
+    AS error_status
+  expect:
+    rows: 1
+    data:
+    - return_status: 1
+      error_status: 0
+- name: Logevent supports warning error and declared scalar arguments
+  sql: DECLARE @number INT=50002,@message VARCHAR(100)='Synthetic typed server logging control',@status INT; EXEC @status=sys.xp_logevent
+    @number,@message,'WARNING'; SELECT @status AS warning_status; EXEC @status=sys.xp_logevent @number,@message,'ERROR'; SELECT @status
+    AS error_status
+  expect:
+    rows: 2
+    data:
+    - warning_status: 0
+    - error_status: 0
+- name: A native database member cannot execute the server logging operation
+  setup:
+  - scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO permission_named_member" nil))
+  username: permission_named_member
+  password: pw
+  sql: EXEC sys.xp_logevent 50001,'Synthetic denied logging control'
+  expect:
+    error: true
+    contains: native administrator required
+- name: Permission results retain the INT contract with no rows
+  tds:
+    statements:
+    - sql: SELECT HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'SELECT') AS access_right WHERE 1=0
+      expect:
+        rows: 0
+        data: []
+        column_types:
+        - name: access_right
+          type: INT
+- name: Too few permission arguments are invalid syntax
+  sql: SELECT HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT')
+  expect:
+    error: true
+- name: Too many permission arguments are invalid syntax
+  sql: SELECT HAS_PERMS_BY_NAME(N'permission_named_rows',N'OBJECT',N'SELECT',NULL,NULL,NULL)
+  expect:
+    error: true
+- name: Stored view column permissions retain their positive declaration target
+  noncritical: true
+  sql: SELECT HAS_PERMS_BY_NAME(N'permission_named_view',N'OBJECT',N'SELECT',N'id',N'COLUMN') AS access_right
+  expect:
+    rows: 1
+    data:
+    - access_right: 1
+- name: Server permission introspection retains its positive native administrator target
+  sql: SELECT HAS_PERMS_BY_NAME(NULL,NULL,N'VIEW SERVER STATE') AS access_right
+  expect:
+    rows: 1
+    data:
+    - access_right: 1
+- name: Every declared server permission uses native administrator authority
+  sql: SELECT HAS_PERMS_BY_NAME(NULL,NULL,N'ALTER ANY LOGIN') AS login_right,HAS_PERMS_BY_NAME(NULL,NULL,N'ALTER ANY CONNECTION') AS
+    connection_right,HAS_PERMS_BY_NAME(NULL,NULL,N'VIEW ANY DEFINITION') AS definition_right,HAS_PERMS_BY_NAME(NULL,NULL,N'VIEW SERVER
+    SECURITY AUDIT') AS audit_right,HAS_PERMS_BY_NAME(NULL,NULL,N'ANY') AS any_right
+  expect:
+    rows: 1
+    data:
+    - login_right: 1
+      connection_right: 1
+      definition_right: 1
+      audit_right: 1
+      any_right: 1
+- name: Server scope retains exact NULL and optional argument rules
+  sql: SELECT HAS_PERMS_BY_NAME(NULL,NULL,N'SELECT') AS invalid_permission,HAS_PERMS_BY_NAME(NULL,N'SERVER',N'VIEW SERVER STATE') AS
+    null_server,HAS_PERMS_BY_NAME(N'permission_named_rows',NULL,N'VIEW SERVER STATE') AS null_class,HAS_PERMS_BY_NAME(NULL,NULL,N'VIEW
+    SERVER STATE',N'id',N'COLUMN') AS bad_column,HAS_PERMS_BY_NAME(NULL,NULL,N'VIEW SERVER STATE',NULL,NULL) AS ordinary_right,HAS_PERMS_BY_NAME(N'permission_named_rows',N'SERVER',N'VIEW
+    SERVER STATE') AS named_server
+  expect:
+    rows: 1
+    data:
+    - invalid_permission: null
+      null_server: null
+      null_class: null
+      bad_column: null
+      ordinary_right: 1
+      named_server: 1
+- name: System procedure casing shares execution and metadata identity
+  sql: EXEC sys.SP_EXECUTESQL N'SELECT 7 AS value'; SELECT HAS_PERMS_BY_NAME(N'sys.SP_EXECUTESQL',N'OBJECT',N'EXECUTE') AS access_right,CASE
+    WHEN OBJECT_ID(N'sys.SP_EXECUTESQL',N'X') IS NOT NULL THEN 1 ELSE 0 END AS actual_proc
+  expect:
+    rows: 2
+    data:
+    - value: 7
+    - access_right: 1
+      actual_proc: 1
+- name: Broader SimpleFold spellings cannot advertise phantom system procedures
+  sql: SELECT HAS_PERMS_BY_NAME(N'sys.ſp_tables',N'OBJECT',N'EXECUTE') AS access_right,CASE WHEN OBJECT_ID(N'sys.ſp_tables') IS NULL
+    THEN 1 ELSE 0 END AS missing_proc
+  expect:
+    rows: 1
+    data:
+    - access_right: 0
+      missing_proc: 1
+- name: Canonical system logging dispatch retains the actual return status
+  sql: DECLARE @status INT; EXEC @status=sys.XP_LOGEVENT 50001,'Synthetic canonical logging control','warning'; SELECT @status AS return_status
+  expect:
+    rows: 1
+    data:
+    - return_status: 0
+- name: Other security classes retain their positive supported SQL target
+  noncritical: true
+  sql: SELECT HAS_PERMS_BY_NAME(SUSER_SNAME(),N'LOGIN',N'IMPERSONATE') AS access_right
+  expect:
+    rows: 1
+    data:
+    - access_right: 1
+- name: Metadata procedure kind reflects the actual extended declaration
+  sql: SELECT CASE WHEN OBJECT_ID(N'sys.sp_describe_undeclared_parameters',N'X') IS NOT NULL THEN 1 ELSE 0 END AS actual_extended,CASE
+    WHEN OBJECT_ID(N'sys.sp_describe_undeclared_parameters',N'P') IS NULL THEN 1 ELSE 0 END AS not_source_proc
+  expect:
+    rows: 1
+    data:
+    - actual_extended: 1
+      not_source_proc: 1
+- name: Database metadata names accept hyphens with exact padding rules
+  sql: SELECT HAS_PERMS_BY_NAME(N'memcp-tests',N'DATABASE',N'ANY') AS raw_right,HAS_PERMS_BY_NAME(N'[memcp-tests]',N'DATABASE',N'SELECT')
+    AS quoted_right,HAS_PERMS_BY_NAME(N'memcp-tests ',N'DATABASE',N'SELECT') AS trailing_right,HAS_PERMS_BY_NAME(N' memcp-tests',N'DATABASE',N'SELECT')
+    AS leading_right
+  expect:
+    rows: 1
+    data:
+    - raw_right: 1
+      quoted_right: 1
+      trailing_right: 1
+      leading_right: 0

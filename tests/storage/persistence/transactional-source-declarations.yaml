@@ -1,0 +1,177 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Native source definitions use the same durable declaration decision as public foreign keys
+setup:
+- sql: CREATE TABLE source_decl_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE source_decl_child(id INT PRIMARY KEY,parent_id INT)
+- sql: INSERT INTO source_decl_parent VALUES(1)
+- sql: INSERT INTO source_decl_child VALUES(2,1)
+- scm: (registerprocedurelanguage "source-declaration-literal" (lambda (source _context) (lambda () (simplify source))))
+cleanup:
+- scm: (dropprocedure "memcp-tests" "source_decl_kept" true)
+- scm: (dropprocedure "memcp-tests" "source_decl_nested" true)
+- scm: (dropprocedure "memcp-tests" "source_decl_rolledback" true)
+- scm: (dropprocedure "memcp-tests" "source_decl_missing" true)
+- sql: DROP TABLE IF EXISTS source_decl_child
+- sql: DROP TABLE IF EXISTS source_decl_parent
+test_cases:
+- name: Source-only create has real owner visibility and rollback leaves no public declaration
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createprocedure "memcp-tests" "source_decl_rolledback" "source-declaration-literal" "7" nil false tx)
+      (define own ((procedure "memcp-tests" "source_decl_rolledback" false tx)))
+      (define outside (showprocedures "memcp-tests" "source_decl_rolledback" nil))
+      (tx_rollback owner)
+      (and (equal? own 7) (empty_list? outside)
+        (empty_list? (showprocedures "memcp-tests" "source_decl_rolledback" nil))))
+  expect: {result: true}
+- name: A source-only declaration commits without needing a foreign key or a table anchor
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (createprocedure "memcp-tests" "source_decl_kept" "source-declaration-literal" "11" nil false (owner "__memcp_tx"))
+      (tx_commit owner)
+      (equal? ((procedure "memcp-tests" "source_decl_kept")) 11))
+  expect: {result: true}
+- name: Replacement and drop rewind to actual prior callables at nested native savepoints
+  scm: |
+    (begin
+      (define held (procedure "memcp-tests" "source_decl_kept"))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define zero (tx_savepoint tx))
+      (createprocedure "memcp-tests" "source_decl_kept" "source-declaration-literal" "12" nil true tx)
+      (define middle (tx_savepoint tx))
+      (dropprocedure "memcp-tests" "source_decl_kept" false tx)
+      (define absent (empty_list? (showprocedures "memcp-tests" "source_decl_kept" tx)))
+      (tx_rollback_to_savepoint tx middle)
+      (define restored ((procedure "memcp-tests" "source_decl_kept" false tx)))
+      (tx_rollback_to_savepoint tx zero)
+      (define original ((procedure "memcp-tests" "source_decl_kept" false tx)))
+      (tx_commit owner)
+      (and absent (equal? restored 12) (equal? original 11) (equal? (held) 11)
+        (equal? ((procedure "memcp-tests" "source_decl_kept")) 11)))
+  expect: {result: true}
+- name: Interleaved source and foreign-key amendments rewind in their common history order
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "source_decl_child" false tx))
+      (define parent (table "memcp-tests" false "source_decl_parent" false tx))
+      (createprocedure "memcp-tests" "source_decl_nested" "source-declaration-literal" "21" nil false tx)
+      (define before_fk (tx_savepoint tx))
+      (createforeignkey child "FK_source_decl_nested" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (createprocedure "memcp-tests" "source_decl_nested" "source-declaration-literal" "22" nil true tx)
+      (define pending (and (equal? ((procedure "memcp-tests" "source_decl_nested" false tx)) 22)
+        (equal? (count ((show child "constraints" tx) "ForeignKeys")) 1)))
+      (tx_rollback_to_savepoint tx before_fk)
+      (define reverted (and (equal? ((procedure "memcp-tests" "source_decl_nested" false tx)) 21)
+        (empty_list? ((show child "constraints" tx) "ForeignKeys"))))
+      (tx_commit owner)
+      (and pending reverted (equal? ((procedure "memcp-tests" "source_decl_nested")) 21)
+        (empty_list? ((show child "constraints") "ForeignKeys"))))
+  expect: {result: true}
+- name: A pending real source name rejects unrelated replacement and failure preserves the owner
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (createprocedure "memcp-tests" "source_decl_kept" "source-declaration-literal" "31" nil true tx)
+      (define rejected (try (lambda () (begin
+        (createprocedure "memcp-tests" "source_decl_kept" "source-declaration-literal" "32" nil true) false))
+        (lambda (failure) (strlike (string failure) "%reserved by a native transaction%"))))
+      (define own ((procedure "memcp-tests" "source_decl_kept" false tx)))
+      (define outside ((procedure "memcp-tests" "source_decl_kept")))
+      (tx_rollback owner)
+      (and rejected (equal? own 31) (equal? outside 11)
+        (equal? ((procedure "memcp-tests" "source_decl_kept")) 11)))
+  expect: {result: true}
+- name: A failed first source admission can retry in the same native owner without publishing the rejected program
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define rejected (try (lambda () (begin
+        (createprocedure "memcp-tests" "source_decl_kept" "source-declaration-literal" "41" nil false tx) false))
+        (lambda (failure) (strlike (string failure) "%procedure already exists%"))))
+      (createprocedure "memcp-tests" "source_decl_kept" "source-declaration-literal" "42" nil true tx)
+      (define value ((procedure "memcp-tests" "source_decl_kept" false tx)))
+      (tx_rollback owner)
+      (and rejected (equal? value 42) (equal? ((procedure "memcp-tests" "source_decl_kept")) 11)))
+  expect: {result: true}
+- name: Mixed source and historical foreign declarations share one commit and real enforcement
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "source_decl_child" false tx))
+      (define parent (table "memcp-tests" false "source_decl_parent" false tx))
+      (createforeignkey child "FK_source_decl_committed" '("parent_id") parent '("id") "restrict" "restrict" tx)
+      (createprocedure "memcp-tests" "source_decl_kept" "source-declaration-literal" "51" nil true tx)
+      (tx_commit owner)
+      (define rejected (try (lambda () (begin
+        (insert child '("id" "parent_id") (list (list 3 999))) false))
+        (lambda (failure) (strlike (string failure) "%foreign key constraint%"))))
+      (and rejected (equal? ((procedure "memcp-tests" "source_decl_kept")) 51)
+        (equal? (count ((show child "constraints") "ForeignKeys")) 1)))
+  expect: {result: true}
+- name: Native must-exist replacement rejects a missing name before publication
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define rejected (try (lambda () (begin
+        (createprocedure "memcp-tests" "source_decl_missing" "source-declaration-literal" "61" nil true tx true) false))
+        (lambda (failure) (strlike (string failure) "%procedure does not exist%"))))
+      (tx_rollback owner)
+      (and rejected (empty_list? (showprocedures "memcp-tests" "source_decl_missing"))))
+  expect: {result: true}
+- name: Source-only savepoint zero retains its real header and name reservation then releases them on rollback
+  scm: |
+    (begin
+      (define bytes (lambda () (simplify (car (split (cadr (split (stat "memcp-tests")
+        "Database metadata bytes = ")) "\n")))))
+      (define initial (bytes))
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx")) (define zero (tx_savepoint tx))
+      (createprocedure "memcp-tests" "source_decl_rolledback" "source-declaration-literal" (string_repeat "z" 8192) nil false tx)
+      (define own_length (strlen ((procedure "memcp-tests" "source_decl_rolledback" false tx))))
+      (define staged (bytes))
+      (tx_rollback_to_savepoint tx zero)
+      (define rewound (bytes))
+      (define empty (empty_list? (showprocedures "memcp-tests" "source_decl_rolledback" tx)))
+      (define reserved (try (lambda () (begin
+        (createprocedure "memcp-tests" "source_decl_rolledback" "source-declaration-literal" "62" nil false) false))
+        (lambda (failure) (strlike (string failure) "%reserved by a native transaction%"))))
+      (tx_rollback owner)
+      (and (equal? own_length 8192) empty reserved (> (- staged rewound) 8000)
+        (> rewound initial) (equal? (bytes) initial)))
+  expect: {result: true}
+- name: Restart replays the same native mixed declaration decision
+  action: restart
+- name: Restart regenerates the real source callable and preserves native row enforcement
+  scm: |
+    (begin
+      (registerprocedurelanguage "source-declaration-literal" (lambda (source _context) (lambda () (simplify source))))
+      (define child (table "memcp-tests" false "source_decl_child" false nil))
+      (define rejected (try (lambda () (begin (insert child '("id" "parent_id") (list (list 4 998))) false))
+        (lambda (failure) (strlike (string failure) "%foreign key constraint%"))))
+      (and rejected (equal? ((procedure "memcp-tests" "source_decl_kept")) 51)
+        (equal? ((procedure "memcp-tests" "source_decl_nested")) 21)))
+  expect: {result: true}
+- name: A source drop is a real durable catalog deletion
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (dropprocedure "memcp-tests" "source_decl_nested" false tx)
+      (define absent (empty_list? (showprocedures "memcp-tests" "source_decl_nested" tx)))
+      (define observed ((procedure "memcp-tests" "source_decl_nested")))
+      (tx_commit owner)
+      (and absent (equal? observed 21) (empty_list? (showprocedures "memcp-tests" "source_decl_nested"))))
+  expect: {result: true}

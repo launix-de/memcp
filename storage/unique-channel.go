@@ -17,9 +17,10 @@ import "github.com/launix-de/memcp/storage/mosi"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
 type uniqueNativeShard struct {
-	shard *storageShard
-	guard *uniqueWriteGuard
-	tx    *TxContext
+	columnInput nativeTableInput
+	shard       *storageShard
+	guard       *uniqueWriteGuard
+	tx          *TxContext
 }
 
 type uniqueReservationBusy struct {
@@ -191,20 +192,22 @@ func uniqueKeyValues(columns []string, row []scm.Scmer, constraint uniqueKey, me
 // rechecked under reservations; already delivered collision callbacks are never
 // repeated. In particular an all-duplicate IGNORE needs no writer admission.
 func (t *table) uniqueReadOnlyPrefix(columns []string, rows [][]scm.Scmer, mergeNull bool, tx *TxContext, failure func(string, []scm.Scmer)) [][]scm.Scmer {
+	columnInput := t.bindColumnInput(tx)
 	for index, row := range rows {
 		topology := t.pinActiveTopology()
 		found := false
 		func() {
 			defer topology.releaseOperation()
-			for constraintIndex := t.nextUniqueConstraint(columns, 0); constraintIndex < len(t.Unique); constraintIndex = t.nextUniqueConstraint(columns, constraintIndex+1) {
+			for constraintIndex := t.nextUniqueConstraint(columns, 0, nil); constraintIndex < len(t.Unique); constraintIndex = t.nextUniqueConstraint(columns, constraintIndex+1, nil) {
 				constraint := t.Unique[constraintIndex]
 				key, comparable := uniqueKeyValues(columns, row, constraint, mergeNull)
 				if !comparable {
 					continue
 				}
 				access := exactScanAccess(newExactScanAccessSchema(constraint.Cols), key)
+				access.columnInput = columnInput
 				for _, shard := range t.uniqueProbeShards(topology, constraint.Cols, key) {
-					if shard != nil && shard.probeUnique(access, tx) {
+					if shard != nil && shard.probeUnique(access, tx, nil) {
 						failure(constraint.Id, nil)
 						found = true
 						return
@@ -319,7 +322,9 @@ func (set *uniqueReservationSet) call(shard *storageShard, operation string, arg
 			}
 			key := arguments[1].Slice()
 			if anchor := set.uniqueProbeAnchor(columns, key); anchor != nil {
-				found := shard.probeUnique(exactScanAccess(newExactScanAccessSchema(columns), key), anchor.tx)
+				access := exactScanAccess(newExactScanAccessSchema(columns), key)
+				access.columnInput = anchor.columnInput
+				found := shard.probeUnique(access, anchor.tx, nil)
 				return scm.NewSlice([]scm.Scmer{scm.NewBool(found), scm.NewInt(0), scm.NewSlice(nil)})
 			}
 		}
@@ -339,24 +344,62 @@ func (set *uniqueReservationSet) call(shard *storageShard, operation string, arg
 	return value
 }
 
-func (set *uniqueReservationSet) probe(shard *storageShard, columns []string, key []scm.Scmer, projection []string) (uint32, bool, []scm.Scmer) {
+func (set *uniqueReservationSet) probe(shard *storageShard, columns []string, key []scm.Scmer, projection []string, exclude *recMapTarget) (uint32, bool, []scm.Scmer) {
 	if part := set.nativeShard(shard); part != nil {
-		id, found := part.shard.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema(columns), key), part.tx, true)
+		if exclude != nil && part.shard.uuid == exclude.shard.uuid && part.shard != exclude.shard {
+			panic(uniqueReadRetry{})
+		}
+		access := exactScanAccess(newExactScanAccessSchema(columns), key)
+		access.columnInput = part.columnInput
+		id, found := part.shard.GetRecordidForUnique(access, part.tx, true, exclude)
 		values := make([]scm.Scmer, len(projection))
 		if found {
 			for i, column := range projection {
 				if column == "$update" || strings.HasPrefix(column, "$set:") || strings.HasPrefix(column, "NEW.") {
 					continue
 				}
-				reader := part.shard.ColumnReaderTx(part.tx, column, false, ReadAuto)
+				reader := part.shard.ColumnReaderTx(part.tx, column, false, ReadAuto, part.columnInput)
 				values[i] = reader.GetValue(id)
 				ReleaseColumnReader(reader)
 			}
 		}
 		return id, found, values
 	}
-	value := set.call(shard, "probe", uniqueStringArray(columns), scm.NewSlice(key), uniqueStringArray(projection)).Slice()
+	arguments := []scm.Scmer{uniqueStringArray(columns), scm.NewSlice(key), uniqueStringArray(projection)}
+	// Preserve the old strict four-field probe for every unrelated shard.
+	// Only the actual source's native resource receives a physical exclusion.
+	if exclude != nil && shard.uuid == exclude.shard.uuid {
+		arguments = append(arguments, scm.NewSlice([]scm.Scmer{scm.NewString(exclude.shard.t.RuntimeIdentity), scm.NewString(exclude.shard.uuid.String()), scm.NewInt(int64(exclude.recid))}))
+	}
+	value := set.call(shard, "probe", arguments...).Slice()
 	return uint32(value[1].Int()), value[0].Bool(), value[2].Slice()
+}
+
+// The native reservation already owns this exact part and original writer.
+// Wire coordinates select a row within that retained input; they never create
+// writer authority or permit a row ID to be interpreted on a successor.
+func (set *uniqueReservationSet) decodeProbeExclusion(part *uniqueNativeShard, value scm.Scmer) (*recMapTarget, error) {
+	if part == nil || part.shard == nil || part.guard == nil || part.guard != set.guard || set.closed.Load() ||
+		part.shard.t != set.table || set.nativeShard(part.shard) != part {
+		return nil, fmt.Errorf("UNIQUE exclusion requires its reserved native mutation source")
+	}
+	sameOwner := part.tx == nil && part.guard.tx == nil || part.tx != nil && part.guard.tx != nil && part.tx.transactionState == part.guard.tx.transactionState
+	if !sameOwner || !value.IsSlice() || len(value.Slice()) != 3 {
+		return nil, fmt.Errorf("invalid UNIQUE exclusion owner or coordinates")
+	}
+	fields := value.Slice()
+	if !fields[0].IsString() || !fields[1].IsString() || !fields[2].IsInt() || fields[2].Int() < 0 || uint64(fields[2].Int()) > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("invalid UNIQUE exclusion coordinates")
+	}
+	identity, identityError := uuid.Parse(fields[0].String())
+	shardID, shardError := uuid.Parse(fields[1].String())
+	if identityError != nil || shardError != nil || identity == uuid.Nil || shardID == uuid.Nil ||
+		fields[0].String() != part.shard.t.RuntimeIdentity || shardID != part.shard.uuid {
+		return nil, fmt.Errorf("UNIQUE exclusion lost its exact reserved generation")
+	}
+	// GetRecordidForUnique validates the bound under its existing shard read
+	// lock before visiting any candidate or allowing an absence result.
+	return &recMapTarget{shard: part.shard, recid: uint32(fields[2].Int())}, nil
 }
 
 func (set *uniqueReservationSet) update(shard *storageShard, id uint32, changes scm.Scmer) scm.Scmer {
@@ -388,7 +431,7 @@ func (set *uniqueReservationSet) setValue(shard *storageShard, id uint32, column
 }
 
 func (s *storageShard) setCollisionValue(id uint32, column string, value scm.Scmer, tx *TxContext, guard *uniqueWriteGuard) scm.Scmer {
-	if proxy, computed := s.getColumnStorageOrPanic(column, false, tx).(*StorageComputeProxy); computed {
+	if proxy, computed := s.getColumnStorageInput(column, false, s.initializedColumnInput(s.t.bindColumnInput(tx)), tx).(*StorageComputeProxy); computed {
 		proxy.SetValue(id, value)
 	} else {
 		s.UpdateFunction(id, true, false, tx, guard)(scm.NewSlice([]scm.Scmer{scm.NewString(column), value}))
@@ -513,7 +556,7 @@ func (t *table) uniqueProbeDomain(topology *tableShardTopology, columns []string
 		}
 	}
 	add(targets)
-	for index := t.nextUniqueConstraint(columns, 0); index < len(t.Unique); index = t.nextUniqueConstraint(columns, index+1) {
+	for index := t.nextUniqueConstraint(columns, 0, nil); index < len(t.Unique); index = t.nextUniqueConstraint(columns, index+1, nil) {
 		for _, row := range rows {
 			if key, comparable := uniqueKeyValues(columns, row, t.Unique[index], mergeNull); comparable {
 				add(t.uniqueProbeShards(topology, t.Unique[index].Cols, key))
@@ -561,14 +604,14 @@ func (t *table) reserveUniqueDomain(columns []string, rows [][]scm.Scmer, mergeN
 		}
 		for _, shard := range domain {
 			if owned != nil && activeReplication(t.schema).shardCell(shard) == owned {
-				set.bindNativeShard(shard.uuid.String(), &uniqueNativeShard{shard: borrowed.ownedShard, guard: borrowed, tx: tx})
+				set.bindNativeShard(shard.uuid.String(), &uniqueNativeShard{shard: borrowed.ownedShard, guard: borrowed, tx: tx, columnInput: borrowed.ownedShard.t.bindColumnInput(tx)})
 			} else {
 				pending = append(pending, shard)
 			}
 		}
 		set.nativeWrites = getShardWrites(pending, tx)
 		for index, access := range set.nativeWrites {
-			set.bindNativeShard(pending[index].uuid.String(), &uniqueNativeShard{shard: access.shard, guard: borrowed, tx: tx})
+			set.bindNativeShard(pending[index].uuid.String(), &uniqueNativeShard{shard: access.shard, guard: borrowed, tx: tx, columnInput: access.shard.t.bindColumnInput(tx)})
 		}
 		borrowed.lock()
 		set.nativeGuardHeld = true
@@ -582,7 +625,7 @@ func (t *table) reserveUniqueDomain(columns []string, rows [][]scm.Scmer, mergeN
 			current := shard
 			admitted := true
 			if borrowed.ownedShard == nil || cluster.manager.shardCell(borrowed.ownedShard) != cell.resolved() {
-				set.singleWrite, admitted = shard.getWrite(tx, false)
+				set.singleWrite, admitted = shard.getWrite(tx, false, nil)
 				if admitted {
 					set.hasSingleWrite = true
 					current = set.singleWrite.shard
@@ -591,7 +634,7 @@ func (t *table) reserveUniqueDomain(columns []string, rows [][]scm.Scmer, mergeN
 				current = borrowed.ownedShard
 			}
 			if admitted {
-				set.singleSource, set.singleNative = shard, uniqueNativeShard{shard: current, guard: borrowed, tx: tx}
+				set.singleSource, set.singleNative = shard, uniqueNativeShard{shard: current, guard: borrowed, tx: tx, columnInput: current.t.bindColumnInput(tx)}
 				if !borrowed.held {
 					if !borrowed.tryLock() {
 						panic(uniqueReservationBusy{shard: remoteScanShard{Resource: cluster.manager.shardResource(shard)}, retry: true})
@@ -718,7 +761,7 @@ func (set *uniqueReservationSet) reserveLocalUniqueGroup(shards []*storageShard,
 		if native == nil {
 			current := shard
 			if set.guard.ownedShard == nil || cluster.manager.shardCell(set.guard.ownedShard) != cell {
-				access, admitted := shard.getWrite(tx, false)
+				access, admitted := shard.getWrite(tx, false, nil)
 				if !admitted {
 					panic(uniqueReservationBusy{shard: remoteScanShard{Resource: cluster.manager.shardResource(shard)}, owner: cluster.self.ID})
 				}
@@ -727,7 +770,7 @@ func (set *uniqueReservationSet) reserveLocalUniqueGroup(shards []*storageShard,
 			} else {
 				current = set.guard.ownedShard
 			}
-			native = &uniqueNativeShard{shard: current, guard: set.guard, tx: tx}
+			native = &uniqueNativeShard{shard: current, guard: set.guard, tx: tx, columnInput: current.t.bindColumnInput(tx)}
 		}
 		set.bindNativeShard(shard.uuid.String(), native)
 	}
@@ -885,7 +928,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 		// native nil-TX mutation keeps its immediate publication semantics.
 		tx = nil
 	}
-	guard := s.t.guardUniqueWrites(columns, rows, parameters[3].Bool(), 0, tx)
+	guard := s.t.guardUniqueWrites(columns, rows, parameters[3].Bool(), 0, tx, nil)
 	guardPointer := &guard
 	if input.uniqueGuard != nil {
 		guardPointer = input.uniqueGuard
@@ -917,7 +960,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 		}
 	}
 	if input.uniqueGuard == nil {
-		firstWrite, admitted := s.getWrite(tx, false)
+		firstWrite, admitted := s.getWrite(tx, false, nil)
 		if !admitted {
 			return false, uniqueReservationBusy{shard: remoteScanShard{Resource: mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: ids[0]}}}
 		}
@@ -925,7 +968,7 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 		s = firstWrite.shard
 	}
 	scope := &uniqueReservationSet{ctx: ctx, table: s.t, guard: guardPointer, topology: s.t.activeTopology(), local: make(map[string]*uniqueNativeShard), clients: make(map[string]*uniqueReservationClient)}
-	scope.bindNativeShard(ids[0], &uniqueNativeShard{shard: s, guard: guardPointer, tx: tx})
+	scope.bindNativeShard(ids[0], &uniqueNativeShard{shard: s, guard: guardPointer, tx: tx, columnInput: s.t.bindColumnInput(tx)})
 	guardPointer.reservations = scope
 	for _, id := range ids[1:] {
 		resource := mosiResource{Database: s.t.schema.Name, Table: s.t.Name, Shard: id}
@@ -952,12 +995,12 @@ func (s *storageShard) serveUniqueScan(ctx context.Context, input shardScanInvoc
 			scope.bindNativeShard(id, existing)
 			continue
 		}
-		access, admitted := part.getWrite(tx, false)
+		access, admitted := part.getWrite(tx, false, nil)
 		if !admitted {
 			return false, uniqueReservationBusy{shard: remoteScanShard{Resource: resource}}
 		}
 		defer access.Release()
-		scope.bindNativeShard(id, &uniqueNativeShard{shard: access.shard, guard: guardPointer, tx: tx})
+		scope.bindNativeShard(id, &uniqueNativeShard{shard: access.shard, guard: guardPointer, tx: tx, columnInput: access.shard.t.bindColumnInput(tx)})
 	}
 	if !guardPointer.held {
 		if !guardPointer.tryLock() {
@@ -1005,7 +1048,7 @@ func (set *uniqueReservationSet) dispatchUniqueCommand(_ context.Context, comman
 	command = append([]scm.Scmer{command[0]}, command[2:]...)
 	switch scm.String(command[0]) {
 	case "probe":
-		if len(command) != 4 || !command[2].IsSlice() {
+		if (len(command) != 4 && len(command) != 5) || !command[2].IsSlice() {
 			return scm.NewNil(), fmt.Errorf("invalid UNIQUE probe command")
 		}
 		keyColumns, err := uniqueStrings(command[1])
@@ -1016,14 +1059,24 @@ func (set *uniqueReservationSet) dispatchUniqueCommand(_ context.Context, comman
 		if err != nil {
 			return scm.NewNil(), err
 		}
-		id, found := s.GetRecordidForUnique(exactScanAccess(newExactScanAccessSchema(keyColumns), command[2].Slice()), part.tx, true)
+		var exclude *recMapTarget
+		if len(command) == 5 {
+			var err error
+			exclude, err = set.decodeProbeExclusion(part, command[4])
+			if err != nil {
+				return scm.NewNil(), err
+			}
+		}
+		access := exactScanAccess(newExactScanAccessSchema(keyColumns), command[2].Slice())
+		access.columnInput = part.columnInput
+		id, found := s.GetRecordidForUnique(access, part.tx, true, exclude)
 		values := make([]scm.Scmer, len(projection))
 		if found {
 			for i, column := range projection {
 				if column == "$update" || strings.HasPrefix(column, "$set:") || strings.HasPrefix(column, "NEW.") {
 					continue // invocation-owned inputs/handles are bound by the caller
 				}
-				reader := s.ColumnReaderTx(part.tx, column, false, ReadAuto)
+				reader := s.ColumnReaderTx(part.tx, column, false, ReadAuto, part.columnInput)
 				values[i] = reader.GetValue(id)
 				ReleaseColumnReader(reader)
 			}

@@ -1,0 +1,135 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Concurrent rebuild and DDL snapshots preserve one complete durable database catalog
+setup:
+- sql: CREATE TABLE snapshot_first(id INT PRIMARY KEY,note TEXT) ENGINE=SAFE
+- sql: CREATE TABLE snapshot_second(id INT PRIMARY KEY,note TEXT) ENGINE=SAFE
+- sql: CREATE TABLE snapshot_third(id INT PRIMARY KEY,note TEXT) ENGINE=SAFE
+- scm: |
+    (map '("snapshot_first" "snapshot_second" "snapshot_third") (lambda (name)
+      (insert (table "memcp-tests" false name false nil) '("id" "note")
+        (map (produceN 400) (lambda (i) (list i (concat "payload-" i)))))))
+- sql: DROP TABLE IF EXISTS snapshot_default_inflight
+- sql: DROP TABLE IF EXISTS snapshot_required_inflight
+- sql: CREATE TABLE snapshot_default_inflight(id INT AUTO_INCREMENT PRIMARY KEY,payload INT) ENGINE=SAFE
+- sql: CREATE TABLE snapshot_required_inflight(id INT PRIMARY KEY,payload INT) ENGINE=SAFE
+cleanup:
+- sql: DROP TABLE IF EXISTS snapshot_first
+- sql: DROP TABLE IF EXISTS snapshot_second
+- sql: DROP TABLE IF EXISTS snapshot_third
+- sql: DROP TABLE IF EXISTS snapshot_default_inflight
+- sql: DROP TABLE IF EXISTS snapshot_required_inflight
+test_cases:
+- name: Publish initial native generations before concurrent replacement
+  scm: |
+    (begin
+      (map '("snapshot_first" "snapshot_second" "snapshot_third") (lambda (name)
+        (rebuild (table "memcp-tests" false name false nil) true false))) true)
+  expect: {result: true}
+- name: Schema readers observe complete concurrent snapshot publications
+  parallel: snapshot_publication
+  action: observe_atomic_schema
+  duration: 1.0
+- name: Concurrent rebuilds and DDL share the actual database publication owner
+  parallel: snapshot_publication
+  start_delay_ms: 50
+  scm: |
+    (begin
+      (parallel
+        (rebuild (table "memcp-tests" false "snapshot_first" false nil) true false)
+        (rebuild (table "memcp-tests" false "snapshot_second" false nil) true false)
+        (rebuild (table "memcp-tests" false "snapshot_third" false nil) true false)
+        (eval (parse_sql "memcp-tests" "ALTER TABLE snapshot_first ADD COLUMN flag INT DEFAULT 7" nil))
+        (eval (parse_sql "memcp-tests" "ALTER TABLE snapshot_second ADD COLUMN peer_flag INT DEFAULT -3" nil))
+        (eval (parse_sql "memcp-tests" "ALTER TABLE snapshot_third ADD COLUMN peer_flag INT DEFAULT 11" nil))) true)
+  expect: {result: true}
+- name: Concurrent maintenance preserves rows and the new column declaration
+  sql: SELECT COUNT(*) AS total,SUM(id) AS checksum,SUM(flag) AS flags FROM snapshot_first
+  expect: {data: [{total: 400,checksum: 79800,flags: 2800}]}
+- name: Every concurrently acknowledged declaration retains its initialized values
+  sql: SELECT COUNT(*) AS total,SUM(id) AS checksum,SUM(peer_flag) AS flags FROM snapshot_second UNION ALL SELECT COUNT(*) AS total,SUM(id) AS checksum,SUM(peer_flag) AS flags FROM snapshot_third
+  expect: {data: [{total: 400,checksum: 79800,flags: -1200},{total: 400,checksum: 79800,flags: 4400}]}
+- name: Acknowledged concurrent checkpoints survive an immediate process crash
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart the acknowledged durable schema without a shutdown checkpoint
+  action: restart
+- name: Crash recovery retains the first acknowledged declaration and all rows
+  sql: SELECT COUNT(*) AS total,SUM(id) AS checksum,SUM(flag) AS flags FROM snapshot_first
+  expect: {data: [{total: 400,checksum: 79800,flags: 2800}]}
+- name: Crash recovery retains both peer declarations and their initialized rows
+  sql: SELECT COUNT(*) AS total,SUM(id) AS checksum,SUM(peer_flag) AS flags FROM snapshot_second UNION ALL SELECT COUNT(*) AS total,SUM(id) AS checksum,SUM(peer_flag) AS flags FROM snapshot_third
+  expect: {data: [{total: 400,checksum: 79800,flags: -1200},{total: 400,checksum: 79800,flags: 4400}]}
+- name: Checkpoint all three table generations and the latest DDL
+  sql: SHUTDOWN
+- name: Recovered snapshot retains the new declaration and initialized rows
+  sql: SELECT COUNT(*) AS total,SUM(id) AS checksum,SUM(flag) AS flags FROM snapshot_first
+  expect: {data: [{total: 400,checksum: 79800,flags: 2800}]}
+- name: Recovered peer generations retain their complete rows
+  sql: SELECT COUNT(*) AS total,SUM(id) AS checksum FROM snapshot_second UNION ALL SELECT COUNT(*) AS total,SUM(id) AS checksum FROM snapshot_third
+  expect: {data: [{total: 400,checksum: 79800},{total: 400,checksum: 79800}]}
+- name: A generated identity INSERT includes a default published while its BEFORE is in flight
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "snapshot_default_inflight" false nil))
+      (define entered (newpromise))
+      (define released (newpromise))
+      (define note (newsession)) (note "calls" 0)
+      (createtrigger target "snapshot_default_before" "before_insert" "" ""
+        (lambda (OLD NEW session tx) (begin
+          (note "calls" (+ (note "calls") 1))
+          (entered "once" true)
+          (parallel
+            (begin
+              (if (entered "value") true (error "BEFORE entry was not published"))
+              (define added (createcolumn target "flag" "INT" '() '("default" 2) nil nil nil))
+              (released "once" added)))
+          NEW)) true)
+      (define inserted (try
+        (lambda () (insert target '("payload") (list (list 17)) '() nil false nil nil))
+        (lambda (cause) (begin
+          (droptrigger "memcp-tests" "snapshot_default_before" false)
+          (error cause)))))
+      (droptrigger "memcp-tests" "snapshot_default_before" false)
+      (list inserted (note "calls") (entered "value") (released "value")
+        (scan nil target '() '() '() (lambda () true) '("id" "payload" "flag")
+          (lambda (rows id payload flag) (merge rows (list (list id payload flag)))) '() merge)))
+  expect: {result: [1,1,true,true,[[1,17,2]]]}
+- name: An omitted new required column rejects the in-flight INSERT before any row is published
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "snapshot_required_inflight" false nil))
+      (define entered (newpromise))
+      (define released (newpromise))
+      (define note (newsession)) (note "calls" 0)
+      (createtrigger target "snapshot_required_before" "before_insert" "" ""
+        (lambda (OLD NEW session tx) (begin
+          (note "calls" (+ (note "calls") 1))
+          (entered "once" true)
+          (parallel
+            (begin
+              (if (entered "value") true (error "BEFORE entry was not published"))
+              (define added (createcolumn target "required" "INT" '() '("null" false) nil nil nil))
+              (released "once" added)))
+          NEW)) true)
+      (define rejected (try (lambda () (begin
+        (insert target '("id" "payload") (list (list 1 17)) '() nil false nil nil)
+        false)) (lambda (cause) (equal? (failure_value cause) "column required cannot be NULL"))))
+      (droptrigger "memcp-tests" "snapshot_required_before" false)
+      (define before (scan nil target '() '() '() (lambda () true) '("id" "payload" "required")
+        (lambda (rows id payload required) (merge rows (list (list id payload required)))) '() merge))
+      (define inserted (insert target '("id" "payload" "required") (list (list 2 22 4)) '() nil false nil nil))
+      (list rejected (note "calls") (entered "value") (released "value") before inserted
+        (scan nil target '() '() '() (lambda () true) '("id" "payload" "required")
+          (lambda (rows id payload required) (merge rows (list (list id payload required)))) '() merge)))
+  expect: {result: [true,1,true,true,[],1,[[2,22,4]]]}
+- name: Restart after the in-flight declaration and row decisions
+  action: restart
+- name: Recovery retains the complete generated identity row and new default
+  sql: SELECT id,payload,flag FROM snapshot_default_inflight ORDER BY id
+  expect: {rows: 1,data: [{id: 1,payload: 17,flag: 2}]}
+- name: Recovery retains only the valid required-column row
+  sql: SELECT id,payload,required FROM snapshot_required_inflight ORDER BY id
+  expect: {rows: 1,data: [{id: 2,payload: 22,required: 4}]}

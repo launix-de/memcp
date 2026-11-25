@@ -1,0 +1,97 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Frozen before A/B: 512 SAFE tables, three integer declarations and one row
+# each; one forced global rebuild, no repartition, no warmup, one sample.
+# Do not rebuild or restart during setup: the regression requires a whole
+# dirty-table wave, rather than repeatedly checkpointing only a few new tables.
+metadata:
+  isolated: true
+  perf_ci: true
+  performance_shard_weight: 4
+  max_regression_pct: 20
+  description: A broad dirty-table wave coalesces durable schema capture without losing table contents
+setup:
+- scm: |
+    (begin
+      /* Use the ordinary SQL pipeline on both revisions. Handwritten native
+         table/column ABI differences must not make the baseline unsupported. */
+      (globalvars "__checkpoint_wave_sql" (lambda (text row_fn) (begin
+        (define session (newsession))
+        (session "schema" "memcp-tests") (session "username" "root")
+        (with_autocommit session nil nil text (lambda (tx)
+          (sql_execute_formula session tx
+            (sql_queryplan_compile_formula tx (parse_sql "memcp-tests" text nil session tx))
+            row_fn (lambda (_fields) true))))
+        true)))
+      (globalvars "__checkpoint_wave_name" (lambda (index) (concat "checkpoint_wave_" index)))
+      true)
+- scm: |
+    (begin
+      (define execute (globalvars "__checkpoint_wave_sql"))
+      (define table_name (globalvars "__checkpoint_wave_name"))
+      (define no_rows (lambda (_row) (error "checkpoint fixture emitted an unexpected row")))
+      /* Populate sequentially, leaving all 512 native generations dirty until
+         the measured wave. Data volume is only 512 rows; the catalog is wide. */
+      (reduce (produceN 512) (lambda (_done index) (begin
+        (execute (concat "CREATE TABLE " (table_name index)
+          "(id INT PRIMARY KEY,payload INT,marker INT) ENGINE=SAFE") no_rows)
+        (execute (concat "INSERT INTO " (table_name index) " VALUES("
+          index "," (+ (* 3 index) 7) "," (if (equal? (mod index 2) 0) "NULL" 7) ")") no_rows)
+        true)) true)
+      /* Eight ordinary table sources per query keep planning bounded; final
+         row callbacks verify every table instead of checking a few sentinels. */
+      (globalvars "__checkpoint_wave_reads" (map (produceN 64) (lambda (chunk)
+        (concat (reduce (produceN 8) (lambda (sql offset)
+          (concat sql (if (equal? offset 0) "" " UNION ALL ")
+            "SELECT id,payload,marker FROM " (table_name (+ (* chunk 8) offset)))) "")
+          " ORDER BY id"))))
+      (globalvars "__checkpoint_wave_verify" (lambda () (begin
+        (define observed (newsession))
+        (observed "next" 0) (observed "ids" 0)
+        (observed "payloads" 0) (observed "nulls" 0)
+        (define accept (lambda (row) (begin
+          (define id (row "id")) (define payload (row "payload"))
+          (define marker (row "marker"))
+          (if (and (equal? id (observed "next"))
+              (equal? payload (+ (* 3 id) 7))
+              (equal? marker (if (equal? (mod id 2) 0) nil 7))) true
+            (error "checkpoint wave changed a table row or its NULL value"))
+          (observed "next" (+ (observed "next") 1))
+          (observed "ids" (+ (observed "ids") id))
+          (observed "payloads" (+ (observed "payloads") payload))
+          (observed "nulls" (+ (observed "nulls") (if (nil? marker) 1 0)))
+          true)))
+        (reduce (globalvars "__checkpoint_wave_reads") (lambda (_done text)
+          (execute text accept)) true)
+        (list (observed "next") (observed "ids")
+          (observed "payloads") (observed "nulls")))))
+      true)
+test_cases:
+- name: One broad checkpoint wave preserves all acknowledged rows and NULLs
+  scm: |
+    (begin
+      (rebuild true false)
+      ((globalvars "__checkpoint_wave_verify")))
+  expect: {data: [[512,130816,396032,256]]}
+  performance_rows: 512
+  threshold_ms: 10000
+  timeout: 120
+  warmup: 0
+  timing_samples: 1
+  timing_aggregation: total
+- name: Ordinary execution retains every table row after the checkpoint
+  scm: ((globalvars "__checkpoint_wave_verify"))
+  expect: {data: [[512,130816,396032,256]]}
+cleanup:
+- scm: |
+    (begin
+      (define execute (globalvars "__checkpoint_wave_sql"))
+      (define table_name (globalvars "__checkpoint_wave_name"))
+      (reduce (produceN 512) (lambda (_done index)
+        (execute (concat "DROP TABLE IF EXISTS " (table_name index))
+          (lambda (_row) (error "checkpoint fixture cleanup emitted a row")))) true)
+      (globalvars "__checkpoint_wave_verify" nil)
+      (globalvars "__checkpoint_wave_reads" nil)
+      (globalvars "__checkpoint_wave_sql" nil)
+      (globalvars "__checkpoint_wave_name" nil)
+      true)

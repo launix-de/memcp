@@ -1,0 +1,400 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Native self references use the current UNIQUE tuple and RESTRICT without recursive cascades
+setup:
+- sql: CREATE TABLE self_fk_before_values(id INT AUTO_INCREMENT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+- sql: CREATE TABLE self_fk_before_abort(id INT AUTO_INCREMENT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+- sql: CREATE TABLE self_fk_ignore_values(id INT AUTO_INCREMENT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+- sql: CREATE TABLE self_fk_ignore_empty(id INT AUTO_INCREMENT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+- sql: CREATE TABLE self_fk_strict_values(id INT AUTO_INCREMENT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+- sql: CREATE TABLE self_fk_before_return(id INT AUTO_INCREMENT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+- sql: CREATE TABLE self_fk_legacy_parent(id INT PRIMARY KEY) ENGINE=SAFE
+- sql: CREATE TABLE self_fk_legacy_child(id INT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+- sql: INSERT INTO self_fk_legacy_parent VALUES(1)
+- sql: CREATE TABLE self_fk_identity(id INT AUTO_INCREMENT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+- sql: CREATE TABLE self_fk_rows(id INT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+- sql: CREATE TABLE self_fk_savepoint(id INT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+- sql: CREATE TABLE self_fk_history(id INT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+- sql: INSERT INTO self_fk_history VALUES(4,4),(6,4),(7,NULL)
+- sql: CREATE TABLE self_fk_orphan(id INT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+- sql: INSERT INTO self_fk_orphan VALUES(8,999)
+- sql: CREATE TABLE self_fk_modes(id INT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+- sql: CREATE TABLE self_fk_composite(a INT NOT NULL,b VARCHAR(16) COLLATE utf8mb4_general_ci NOT NULL,pa INT,pb VARCHAR(16) COLLATE utf8mb4_general_ci,PRIMARY KEY(a,b)) ENGINE=SAFE
+- sql: CREATE TABLE self_fk_cycle_a(id INT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+- sql: CREATE TABLE self_fk_cycle_b(id INT PRIMARY KEY,parent_id INT) ENGINE=SAFE
+cleanup:
+- sql: DROP TABLE IF EXISTS self_fk_before_values
+- sql: DROP TABLE IF EXISTS self_fk_before_abort
+- sql: DROP TABLE IF EXISTS self_fk_ignore_values
+- sql: DROP TABLE IF EXISTS self_fk_ignore_empty
+- sql: DROP TABLE IF EXISTS self_fk_strict_values
+- sql: DROP TABLE IF EXISTS self_fk_before_return
+- sql: DROP TABLE IF EXISTS self_fk_legacy_child
+- sql: DROP TABLE IF EXISTS self_fk_legacy_parent
+- sql: DROP TABLE IF EXISTS self_fk_inline_rejected
+- sql: DROP TABLE IF EXISTS self_fk_identity
+- sql: DROP TABLE IF EXISTS self_fk_cycle_a
+- sql: DROP TABLE IF EXISTS self_fk_cycle_b
+- sql: DROP TABLE IF EXISTS self_fk_composite
+- sql: DROP TABLE IF EXISTS self_fk_modes
+- sql: DROP TABLE IF EXISTS self_fk_orphan
+- sql: DROP TABLE IF EXISTS self_fk_history
+- sql: DROP TABLE IF EXISTS self_fk_savepoint
+- sql: DROP TABLE IF EXISTS self_fk_rows
+test_cases:
+- name: User BEFORE rewrites the reference before final generated self validation
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define target (table "memcp-tests" false "self_fk_before_values" false nil))
+      (createforeignkey target "FK_self_before_values" '("parent_id") target '("id") "restrict" "restrict" (owner "__memcp_tx"))
+      (tx_commit owner)
+      (createtrigger target "self_before_rewrite" "before_insert" "" ""
+        (lambda (OLD NEW session tx) (set_assoc NEW "parent_id" 1)) true)
+      (define inserted (insert target '("parent_id") (list (list 999)) '() nil false nil nil))
+      (droptrigger "memcp-tests" "self_before_rewrite" false)
+      (define actual (scan nil target '() '() '() (lambda () true) '("id" "parent_id")
+        (lambda (n id parent_id) (+ n (if (and (equal? id 1) (equal? parent_id 1)) 1 100))) 0 +))
+      (and (equal? inserted 1) (equal? actual 1)))
+  expect: {result: true}
+- name: A failing user BEFORE callback does not reserve or report generated identities
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define target (table "memcp-tests" false "self_fk_before_abort" false nil))
+      (createforeignkey target "FK_self_before_abort" '("parent_id") target '("id") "restrict" "restrict" (owner "__memcp_tx"))
+      (tx_commit owner)
+      (define note (newsession)) (note "calls" 0)
+      (define notify (lambda (id) (begin (note "calls" (+ (note "calls") 1)) (note "id" id))))
+      (createtrigger target "self_before_abort" "before_insert" "" ""
+        (lambda (OLD NEW session tx) (error "self before refuses input")) true)
+      (define rejected (try (lambda () (begin
+        (insert target '("parent_id") (list (list 1)) '() nil false notify nil) false))
+        (lambda (failure) (strlike (concat failure) "%self before refuses input%"))))
+      (define quiet (and (equal? (note "calls") 0)
+        (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (n) (+ n 1)) 0 +) 0)))
+      (droptrigger "memcp-tests" "self_before_abort" false)
+      (define inserted (insert target '("parent_id") (list (list 1)) '() nil false notify nil))
+      (define actual (scan nil target '() '() '() (lambda () true) '("id" "parent_id")
+        (lambda (n id parent_id) (+ n (if (and (equal? id 1) (equal? parent_id 1)) 1 100))) 0 +))
+      (and rejected quiet (equal? inserted 1) (equal? actual 1)
+        (equal? (note "calls") 1) (equal? (note "id") 1)))
+  expect: {result: true}
+- name: Final IGNORE validation preserves allocated gaps and first-assigned notification including all-invalid input
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define target (table "memcp-tests" false "self_fk_ignore_values" false nil))
+      (define empty (table "memcp-tests" false "self_fk_ignore_empty" false nil))
+      (createforeignkey target "FK_self_ignore_values" '("parent_id") target '("id") "restrict" "restrict" (owner "__memcp_tx"))
+      (createforeignkey empty "FK_self_ignore_empty" '("parent_id") empty '("id") "restrict" "restrict" (owner "__memcp_tx"))
+      (tx_commit owner)
+      (define note (newsession)) (note "calls" 0)
+      (define inserted (insert target '("parent_id") (list (list 999) (list 2)) '() (lambda () 0) false
+        (lambda (id) (begin (note "calls" (+ (note "calls") 1)) (note "id" id))) nil))
+      (define actual (scan nil target '() '() '() (lambda () true) '("id" "parent_id")
+        (lambda (n id parent_id) (+ n (if (and (equal? id 2) (equal? parent_id 2)) 1 100))) 0 +))
+      (define empty_note (newsession)) (empty_note "calls" 0)
+      (define skipped (insert empty '("parent_id") (list (list 999) (list 999)) '() (lambda () 0) false
+        (lambda (id) (begin (empty_note "calls" (+ (empty_note "calls") 1)) (empty_note "id" id))) nil))
+      (and (equal? inserted 1) (equal? actual 1) (equal? (note "calls") 1) (equal? (note "id") 1)
+        (equal? skipped 0) (equal? (empty_note "calls") 1) (equal? (empty_note "id") 1)
+        (equal? (scan nil empty '() '() '() (lambda () true) '() (lambda (n) (+ n 1)) 0 +) 0)))
+  expect: {result: true}
+- name: Final non-IGNORE failure publishes no row and the next statement uses the next assigned identity
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define target (table "memcp-tests" false "self_fk_strict_values" false nil))
+      (createforeignkey target "FK_self_strict_values" '("parent_id") target '("id") "restrict" "restrict" (owner "__memcp_tx"))
+      (tx_commit owner)
+      (define note (newsession)) (note "calls" 0)
+      (define notify (lambda (id) (begin (note "calls" (+ (note "calls") 1)) (note "id" id))))
+      (define rejected (try (lambda () (begin
+        (insert target '("parent_id") (list (list 999)) '() nil false notify nil) false))
+        (lambda (failure) (strlike (concat failure) "%foreign key constraint%"))))
+      (define empty (and (equal? (note "calls") 1) (equal? (note "id") 1)
+        (equal? (scan nil target '() '() '() (lambda () true) '() (lambda (n) (+ n 1)) 0 +) 0)))
+      (define inserted (insert target '("parent_id") (list (list 2)) '() nil false notify nil))
+      (define actual (scan nil target '() '() '() (lambda () true) '("id" "parent_id")
+        (lambda (n id parent_id) (+ n (if (and (equal? id 2) (equal? parent_id 2)) 1 100))) 0 +))
+      (and rejected empty (equal? inserted 1) (equal? actual 1)
+        (equal? (note "calls") 2) (equal? (note "id") 2)))
+  expect: {result: true}
+- name: User BEFORE still sees omitted identity and its returned values are sanitized before validation
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define target (table "memcp-tests" false "self_fk_before_return" false nil))
+      (createforeignkey target "FK_self_before_return" '("parent_id") target '("id") "restrict" "restrict" (owner "__memcp_tx"))
+      (tx_commit owner)
+      (createtrigger target "self_before_return" "before_insert" "" ""
+        (lambda (OLD NEW session tx) (if (nil? (get_assoc NEW "id"))
+          (set_assoc (set_assoc NEW "id" "7") "parent_id" "7") (error "identity allocated before user BEFORE"))) true)
+      (define note (newsession)) (note "calls" 0)
+      (define inserted (insert target '("parent_id") (list (list 999)) '() nil false
+        (lambda (id) (note "calls" (+ (note "calls") 1))) nil))
+      (droptrigger "memcp-tests" "self_before_return" false)
+      (define actual (scan nil target '() '() '() (lambda () true) '("id" "parent_id")
+        (lambda (n id parent_id) (+ n (if (and (equal? id 7) (equal? parent_id 7)) 1 100))) 0 +))
+      (and (equal? inserted 1) (equal? actual 1) (equal? (note "calls") 0)))
+  expect: {result: true}
+- name: Existing non-self native7 declaration retains its computed temporary lookup profile
+  scm: |
+    (begin
+      (define parent (table "memcp-tests" false "self_fk_legacy_parent" false nil))
+      (define child (table "memcp-tests" false "self_fk_legacy_child" false nil))
+      (createcolumn parent "legacy_key" "INT" '() '("temp" true) '("id") (lambda (id) (+ id 10)))
+      (createforeignkey child "FK_legacy_computed" '("parent_id") parent '("legacy_key") "restrict" "restrict"))
+  expect: {result: true}
+- name: Existing non-self lookup accepts the actual computed parent value
+  sql: INSERT INTO self_fk_legacy_child VALUES(1,11)
+  expect: {affected_rows: 1}
+- name: Existing non-self lookup still rejects an absent computed parent value
+  sql: INSERT INTO self_fk_legacy_child VALUES(2,12)
+  expect: {error: true, contains: foreign key constraint}
+- name: Existing non-self computed lookup retains only the actual valid child
+  sql: SELECT id,parent_id FROM self_fk_legacy_child ORDER BY id
+  expect: {rows: 1, data: [{id: 1, parent_id: 11}]}
+- name: Existing non-self compatibility rows can be removed normally
+  sql: DELETE FROM self_fk_legacy_child WHERE id=1
+  expect: {affected_rows: 1}
+- name: Immediate native self creation rejects before metadata or row changes
+  scm: |
+    (begin
+      (define target (table "memcp-tests" false "self_fk_orphan" false nil))
+      (define rejected (try (lambda () (begin
+        (createforeignkey target "FK_self_unsafe_immediate" '("parent_id") target '("id") "restrict" "restrict") false))
+        (lambda (failure) (strlike (concat failure) "%requires an explicit native transaction%"))))
+      (and rejected (equal? (count ((show target "constraints") "ForeignKeys")) 0)))
+  expect: {result: true}
+- name: Rejected immediate self creation preserves the actual orphan row
+  sql: SELECT id,parent_id FROM self_fk_orphan
+  expect: {rows: 1, data: [{id: 8, parent_id: 999}]}
+- name: Inline native self creation rejects before publishing a table
+  scm: |
+    (begin
+      (define rejected (try (lambda () (begin
+        (createtable "memcp-tests" "self_fk_inline_rejected"
+          (list (list "column" "id" "INT" '() '())
+            (list "foreign" "FK_self_inline" '("id") "self_fk_inline_rejected" '("id") "restrict" "restrict"))
+          (list "engine" "safe")) false))
+        (lambda (failure) (strlike (concat failure) "%inline self foreign declarations require%"))))
+      (and rejected (nil? (table "memcp-tests" false "self_fk_inline_rejected" false nil))))
+  expect: {result: true}
+- name: Generated identity self declaration uses the same transactional owner
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define target (table "memcp-tests" false "self_fk_identity" false nil))
+      (createforeignkey target "FK_self_identity" '("parent_id") target '("id") "restrict" "restrict" (owner "__memcp_tx"))
+      (tx_commit owner) true)
+  expect: {result: true}
+- name: A generated referenced key is present in the actual NEW self candidate
+  sql: INSERT INTO self_fk_identity(parent_id) VALUES(1)
+  expect: {affected_rows: 1}
+- name: Self checking retains the actual allocated identity and referencing value
+  sql: SELECT id,parent_id FROM self_fk_identity
+  expect: {rows: 1, data: [{id: 1, parent_id: 1}]}
+- name: Sole generated self identity can be deleted through RESTRICT
+  sql: DELETE FROM self_fk_identity WHERE id=1
+  expect: {affected_rows: 1}
+- name: Sole generated self delete removes the actual row
+  sql: SELECT id,parent_id FROM self_fk_identity
+  expect: {rows: 0}
+- name: Self declaration savepoints restore one endpoint and release its exact program names
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "self_fk_savepoint" false nil))
+      (define boundary (tx_savepoint tx))
+      (createforeignkey target "FK_self_retired" '("parent_id") target '("id") "restrict" "restrict" tx)
+      (define private (and (equal? (count ((show target "constraints" tx) "ForeignKeys")) 1)
+        (equal? (count ((show target "constraints") "ForeignKeys")) 0)))
+      (tx_rollback_to_savepoint tx boundary)
+      (define retired (equal? (count ((show target "constraints" tx) "ForeignKeys")) 0))
+      (createforeignkey target "FK_self_retired" '("parent_id") target '("id") "restrict" "restrict" tx)
+      (define reused (equal? (count ((show target "constraints" tx) "ForeignKeys")) 1))
+      (tx_rollback owner)
+      (and private retired reused (equal? (count ((show target "constraints") "ForeignKeys")) 0)))
+  expect: {result: true}
+- name: Rolled-back self programs leave no enforcement residue
+  sql: INSERT INTO self_fk_savepoint VALUES(1,999)
+  expect: {affected_rows: 1}
+- name: Self admission checks both raw endpoint fact vectors and preserves the original native handle
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define target (table "memcp-tests" false "self_fk_rows" false nil))
+      (define identity (show target "identity" nil))
+      (define facts (lambda (name) (begin
+        (define c (show target "column" name false))
+        (list (c "Field") (c "RawType") (c "Dimensions") (c "Collation") (c "Null") (c "Computed")))))
+      (define child (facts "parent_id")) (define parent (facts "id"))
+      (define wrong (cons "parent_id" (cdr parent)))
+      (define rejected (try (lambda () (begin
+        (createforeignkey target "FK_self_bad_facts" '("parent_id") target '("id") "restrict" "restrict" tx
+          (list "expected_child" (list child) "expected_parent" (list wrong))) false))
+        (lambda (failure) (strlike (concat failure) "%foreign%"))))
+      (define absent (equal? (count ((show target "constraints" tx) "ForeignKeys")) 0))
+      (createforeignkey target "FK_self_rows" '("parent_id") target '("id") "restrict" "restrict" tx
+        (list "expected_child" (list child) "expected_parent" (list parent)))
+      (define pending (and (equal? (count ((show target "constraints" tx) "ForeignKeys")) 1)
+        (equal? (count ((show target "constraints") "ForeignKeys")) 0)))
+      (tx_commit owner)
+      (insert target '("id" "parent_id") (list (list 4 4)) '() nil false nil nil)
+      (and rejected absent pending (string? identity) (not (equal? identity ""))
+        (equal? identity (show target "identity" nil))
+        (equal? identity (show (table "memcp-tests" false "self_fk_rows" false nil) "identity" nil))))
+  expect: {result: true}
+- name: A new row can reference its own not-yet-published UNIQUE value
+  sql: SELECT id,parent_id FROM self_fk_rows
+  expect: {rows: 1, data: [{id: 4, parent_id: 4}]}
+- name: A self declaration persists one raw native record and four generated role programs
+  scm: |
+    (begin
+      (define stored (((json_decode (readfile (concat (arg "data" "data" "data") "/memcp-tests/schema.json"))) "tables") "self_fk_rows"))
+      (define target (table "memcp-tests" false "self_fk_rows" false nil))
+      (and (equal? (count (stored "Foreign")) 1)
+        (equal? (count ((show target "constraints") "ForeignKeys")) 1)
+        (equal? (count ((show "memcp-tests" "self_fk_rows" true) "triggers")) 4)))
+  expect: {result: true}
+- name: An unchanged parent key does not skip the child NEW-reference check
+  sql: UPDATE self_fk_rows SET parent_id=999 WHERE id=4
+  expect: {error: true, contains: foreign key constraint}
+- name: A reference to the disappearing OLD key cannot satisfy an updated row
+  sql: UPDATE self_fk_rows SET id=5,parent_id=4 WHERE id=4
+  expect: {error: true, contains: foreign key constraint}
+- name: Failed self updates preserve the original complete row
+  sql: SELECT id,parent_id FROM self_fk_rows
+  expect: {rows: 1, data: [{id: 4, parent_id: 4}]}
+- name: Another row can reference the existing self row
+  sql: INSERT INTO self_fk_rows VALUES(6,4)
+  expect: {affected_rows: 1}
+- name: A parent update cannot exempt another referencing row
+  sql: UPDATE self_fk_rows SET id=5,parent_id=5 WHERE id=4
+  expect: {error: true, contains: foreign key constraint}
+- name: A parent delete cannot exempt another referencing row
+  sql: DELETE FROM self_fk_rows WHERE id=4
+  expect: {error: true, contains: foreign key constraint}
+- name: An unrelated referenced UNIQUE identity can be deleted
+  sql: DELETE FROM self_fk_rows WHERE id=6
+  expect: {affected_rows: 1}
+- name: A lone self row can replace its parent and reference together
+  sql: UPDATE self_fk_rows SET id=5,parent_id=5 WHERE id=4
+  expect: {affected_rows: 1}
+- name: The self replacement retains its actual typed row
+  sql: SELECT id,parent_id FROM self_fk_rows
+  expect: {rows: 1, data: [{id: 5, parent_id: 5}]}
+- name: A nullable self reference does not turn NULL into a zero parent
+  sql: INSERT INTO self_fk_rows VALUES(0,NULL)
+  expect: {affected_rows: 1}
+- name: Recovered self programs retain the same row and declaration profile
+  action: restart
+- name: Restart preserves the persisted self references
+  sql: SELECT id,parent_id FROM self_fk_rows ORDER BY id
+  expect: {rows: 2, data: [{id: 0, parent_id: null}, {id: 5, parent_id: 5}]}
+- name: A self orphan remains rejected after native loader regeneration
+  sql: INSERT INTO self_fk_rows VALUES(7,999)
+  expect: {error: true, contains: foreign key constraint}
+- name: A sole self reference does not prevent deleting its own row
+  sql: DELETE FROM self_fk_rows WHERE id=5
+  expect: {affected_rows: 1}
+- name: Self deletion preserves the unrelated nullable row
+  sql: SELECT id,parent_id FROM self_fk_rows
+  expect: {rows: 1, data: [{id: 0, parent_id: null}]}
+- name: Historical self references are validated through the existing same-table scan callback
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define target (table "memcp-tests" false "self_fk_history" false nil))
+      (createforeignkey target "FK_self_history" '("parent_id") target '("id") "restrict" "restrict" (owner "__memcp_tx"))
+      (tx_commit owner)
+      (equal? (count ((show target "constraints") "ForeignKeys")) 1))
+  expect: {result: true}
+- name: A preexisting external self-table reference retains parent RESTRICT
+  sql: DELETE FROM self_fk_history WHERE id=4
+  expect: {error: true, contains: foreign key constraint}
+- name: Historical validation preserves every admitted row
+  sql: SELECT id,parent_id FROM self_fk_history ORDER BY id
+  expect: {rows: 3, data: [{id: 4, parent_id: 4}, {id: 6, parent_id: 4}, {id: 7, parent_id: null}]}
+- name: A preexisting orphan rejects self publication without altering its native rows
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define target (table "memcp-tests" false "self_fk_orphan" false nil))
+      (define rejected (try (lambda () (begin
+        (createforeignkey target "FK_self_orphan" '("parent_id") target '("id") "restrict" "restrict" (owner "__memcp_tx")) false))
+        (lambda (failure) (strlike (concat failure) "%existing child row has no parent%"))))
+      (tx_rollback owner)
+      (and rejected (equal? (count ((show target "constraints") "ForeignKeys")) 0)))
+  expect: {result: true}
+- name: Failed historical self validation leaves its real offending row intact
+  sql: SELECT id,parent_id FROM self_fk_orphan
+  expect: {rows: 1, data: [{id: 8, parent_id: 999}]}
+- name: Self cascades and SET NULL reject before declaration effects
+  scm: |
+    (reduce (list (list "cascade" "restrict") (list "restrict" "cascade")
+      (list "set null" "restrict") (list "restrict" "set null"))
+      (lambda (valid modes) (begin
+        (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+        (define target (table "memcp-tests" false "self_fk_modes" false nil))
+        (define rejected (try (lambda () (begin
+          (createforeignkey target "FK_self_mode" '("parent_id") target '("id") (car modes) (cadr modes) (owner "__memcp_tx")) false))
+          (lambda (failure) (strlike (concat failure) "%require RESTRICT for both actions%"))))
+        (tx_rollback owner)
+        (and valid rejected (equal? (count ((show target "constraints") "ForeignKeys")) 0)))) true)
+  expect: {result: true}
+- name: Composite self references use the native declared case-insensitive UNIQUE relation
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define target (table "memcp-tests" false "self_fk_composite" false nil))
+      (createforeignkey target "FK_self_composite" '("pa" "pb") target '("a" "b") "restrict" "restrict" (owner "__memcp_tx"))
+      (tx_commit owner) true)
+  expect: {result: true}
+- name: Composite NEW candidate equality preserves case-insensitive self matching
+  sql: INSERT INTO self_fk_composite VALUES(1,'Alpha',1,'alpha'),(2,'Beta',NULL,'absent')
+  expect: {affected_rows: 2}
+- name: Composite self UPDATE accepts a newly matching declared UNIQUE tuple
+  sql: UPDATE self_fk_composite SET a=3,b='Gamma',pa=3,pb='gamma' WHERE a=1
+  expect: {affected_rows: 1}
+- name: Composite OLD exclusion cannot supply a disappearing parent value
+  sql: UPDATE self_fk_composite SET a=4,b='Delta',pa=3,pb='GAMMA' WHERE a=3
+  expect: {error: true, contains: foreign key constraint}
+- name: An external composite reference uses the same actual case-insensitive key relation
+  sql: INSERT INTO self_fk_composite VALUES(9,'External',3,'GAMMA')
+  expect: {affected_rows: 1}
+- name: Composite RESTRICT excludes only the OLD row and retains external children
+  sql: DELETE FROM self_fk_composite WHERE a=3
+  expect: {error: true, contains: foreign key constraint}
+- name: Composite partial NULL references and failed replacements retain their exact rows
+  sql: SELECT a,b,pa,pb FROM self_fk_composite ORDER BY a
+  expect:
+    rows: 3
+    data:
+    - {a: 2, b: Beta, pa: null, pb: absent}
+    - {a: 3, b: Gamma, pa: 3, pb: gamma}
+    - {a: 9, b: External, pa: 3, pb: GAMMA}
+- name: Admitting a RESTRICT self edge does not admit a multi-table cycle
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define a (table "memcp-tests" false "self_fk_cycle_a" false nil))
+      (define b (table "memcp-tests" false "self_fk_cycle_b" false nil))
+      (createforeignkey a "FK_cycle_ab" '("parent_id") b '("id") "restrict" "restrict" tx)
+      (createforeignkey a "FK_cycle_aa" '("id") a '("id") "restrict" "restrict" tx)
+      (define rejected (try (lambda () (begin
+        (createforeignkey b "FK_cycle_ba" '("parent_id") a '("id") "restrict" "restrict" tx) false))
+        (lambda (failure) (strlike (concat failure) "%cyclic%"))))
+      (define private (and (equal? (count ((show a "constraints" tx) "ForeignKeys")) 2)
+        (equal? (count ((show b "constraints" tx) "ForeignKeys")) 1)))
+      (tx_rollback owner)
+      (and rejected private (equal? (count ((show a "constraints") "ForeignKeys")) 0)
+        (equal? (count ((show b "constraints") "ForeignKeys")) 0)))
+  expect: {result: true}

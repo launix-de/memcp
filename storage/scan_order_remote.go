@@ -182,7 +182,7 @@ func (s *storageShard) prepareOrderedRun(input shardScanInvocation) *orderedScan
 		return run
 	} // an eliminated shard need not load projection columns
 	identity := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return scm.NewSlice(append([]scm.Scmer(nil), values...)) })
-	mapper := s.OpenMapper(order.projected, identity, false, input.tx)
+	mapper := s.OpenMapper(order.projected, identity, false, input.tx, input.access.columnInput)
 	defer mapper.Close()
 	for i, id := range queue.items {
 		row := make([]scm.Scmer, 1+run.keys+len(order.projected))

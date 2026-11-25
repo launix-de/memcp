@@ -1,0 +1,196 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: UNION coercions compile each original expression in its declared producing scope
+setup:
+- sql: CREATE TABLE union_parts(id INT PRIMARY KEY,person INT,first_field SMALLINT,second_field SMALLINT,year_field SMALLINT,units FLOAT)
+- sql: CREATE TABLE union_intervals(id INT PRIMARY KEY,person INT,began SMALLDATETIME NOT NULL,ended DATETIME)
+- sql: CREATE TABLE union_labels(person INT PRIMARY KEY,label NVARCHAR(20))
+- sql: INSERT union_parts VALUES(1,10,1,1,2026,1.5),(2,10,1,2,2026,2.5),(3,11,NULL,NULL,NULL,NULL)
+- sql: INSERT union_intervals VALUES(4,20,'2026-01-03','2026-01-05'),(5,21,'2026-01-01',NULL)
+- sql: INSERT union_labels VALUES(10,N'parts'),(11,N'null parts'),(20,N'interval'),(21,N'open')
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.union_scope_report
+- sql: DROP VIEW IF EXISTS dbo.union_scope_input
+- sql: DROP TABLE IF EXISTS union_labels
+- sql: DROP TABLE IF EXISTS union_intervals
+- sql: DROP TABLE IF EXISTS union_parts
+test_cases:
+- name: Numeric widening compiles nested CASE and calendar arguments in the second branch scope
+  sql: |
+    SELECT person,SUM(units) AS quantity FROM union_parts GROUP BY person
+    UNION ALL SELECT person,CASE WHEN ended IS NULL THEN NULL ELSE DATEDIFF(day,began,ended) END
+      FROM union_intervals ORDER BY person
+  expect: {rows: 4,data: [{person: 10,quantity: 4},{person: 11,quantity: null},
+      {person: 20,quantity: 2},{person: 21,quantity: null}]}
+- name: Reversing UNION branches retains the same declared FLOAT target
+  sql: |
+    SELECT person,CASE WHEN ended IS NULL THEN NULL ELSE DATEDIFF(day,began,ended) END AS quantity FROM union_intervals
+    UNION ALL SELECT person,SUM(units) FROM union_parts GROUP BY person ORDER BY person
+  expect: {rows: 4,data: [{person: 10,quantity: 4},{person: 11,quantity: null},
+      {person: 20,quantity: 2},{person: 21,quantity: null}]}
+- name: Aggregate calendar conversions and branch-local calendar CASE retain their distinct scopes
+  sql: |
+    SELECT person,MIN(CONVERT(DATETIME,STR(first_field)+'.'+STR(second_field)+'.'+STR(year_field))) AS began,
+      MAX(CONVERT(DATETIME,STR(first_field)+'.'+STR(second_field)+'.'+STR(year_field))) AS ended,
+      SUM(units) AS quantity FROM union_parts GROUP BY person
+    UNION SELECT person,began,ended,CASE WHEN ended IS NULL THEN NULL ELSE DATEDIFF(day,began,ended) END
+      FROM union_intervals ORDER BY person
+  expect:
+    rows: 4
+    data: [{person: 10,began: '2026-01-01 00:00:00',ended: '2026-01-02 00:00:00',quantity: 4},
+      {person: 11,began: null,ended: null,quantity: null},
+      {person: 20,began: '2026-01-03 00:00:00',ended: '2026-01-05 00:00:00',quantity: 2},
+      {person: 21,began: '2026-01-01 00:00:00',ended: null,quantity: null}]
+- name: Scalar subqueries retain their original branch correlation while adjacent outputs are widened
+  sql: |
+    SELECT person,SUM(units) AS quantity,(SELECT label FROM union_labels l WHERE l.person=p.person) AS label
+      FROM union_parts p GROUP BY person
+    UNION ALL SELECT person,CASE WHEN ended IS NULL THEN NULL ELSE DATEDIFF(day,began,ended) END,
+      (SELECT label FROM union_labels l WHERE l.person=i.person) FROM union_intervals i ORDER BY person
+  expect: {rows: 4,data: [{person: 10,quantity: 4,label: parts},{person: 11,quantity: null,label: null parts},
+      {person: 20,quantity: 2,label: interval},{person: 21,quantity: null,label: open}]}
+- name: Temporal widening compiles an entire CASE from its own column declarations
+  sql: |
+    SELECT id,CAST(began AS DATETIME2(6)) AS stamp FROM union_intervals WHERE id=4
+    UNION ALL SELECT id,CASE WHEN ended IS NULL THEN began ELSE ended END FROM union_intervals WHERE id=5
+    ORDER BY id
+  expect: {rows: 2,data: [{id: 4,stamp: '2026-01-03 00:00:00'},{id: 5,stamp: '2026-01-01 00:00:00'}]}
+- name: A nested UNION output retains its producer declaration through another coercion
+  sql: |
+    SELECT person,quantity FROM (
+      SELECT person,SUM(units) AS quantity FROM union_parts GROUP BY person
+      UNION ALL SELECT person,CASE WHEN ended IS NULL THEN NULL ELSE DATEDIFF(day,began,ended) END FROM union_intervals
+    ) q UNION ALL SELECT 30,CAST(3 AS FLOAT) ORDER BY person
+  expect: {rows: 5,data: [{person: 10,quantity: 4},{person: 11,quantity: null},
+      {person: 20,quantity: 2},{person: 21,quantity: null},{person: 30,quantity: 3}]}
+- name: A stored input view remains a source rather than leaking its expanded aliases
+  sql: CREATE VIEW dbo.union_scope_input AS SELECT id,person,began,ended FROM union_intervals
+- name: UNION conversion resolves expressions through the original stored view source
+  sql: |
+    SELECT person,SUM(units) AS quantity FROM union_parts GROUP BY person
+    UNION ALL SELECT person,CASE WHEN ended IS NULL THEN NULL ELSE DATEDIFF(day,began,ended) END
+      FROM dbo.union_scope_input ORDER BY person
+  expect: {rows: 4,data: [{person: 10,quantity: 4},{person: 11,quantity: null},
+      {person: 20,quantity: 2},{person: 21,quantity: null}]}
+- name: Stored UNION views preserve deferred branch coercion recipes
+  sql: |
+    CREATE VIEW dbo.union_scope_report AS SELECT person,SUM(units) AS quantity FROM union_parts GROUP BY person
+    UNION ALL SELECT person,CASE WHEN ended IS NULL THEN NULL ELSE DATEDIFF(day,began,ended) END FROM dbo.union_scope_input
+- name: HTTP consumes the common numeric contract of the stored UNION view
+  sql: SELECT person,quantity FROM dbo.union_scope_report ORDER BY person
+  expect: {rows: 4,data: [{person: 10,quantity: 4},{person: 11,quantity: null},
+      {person: 20,quantity: 2},{person: 21,quantity: null}]}
+- name: Empty stored UNION view results retain numeric types and explicit NULL widths
+  tds:
+    statements:
+    - sql: >-
+        SELECT CAST(NULL AS NVARCHAR(12)) AS caption,CAST(NULL AS DATETIME2(6)) AS stamp,person,quantity
+        FROM dbo.union_scope_report WHERE 1=0
+      expect:
+        rows: 0
+        column_types: [{name: caption,type: NVARCHAR,length: 12},{name: stamp,type: DATETIME2},{name: person,type: INT},{name: quantity,type: FLOAT}]
+- name: Empty stored UNION view emits scale six in the real stamp TYPEINFO
+  # go-mssqldb v0.12.3 returns DecimalSize known=false for DATETIME2.
+  # Match the actual DATETIME2 TYPEINFO (0x2a, scale 6) followed immediately
+  # by the B_VARCHAR column name stamp in a zero-row result.
+  # The ordinary probe checks all types/data.
+  tds:
+    rpc_packets:
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000530045004c004500430054002000430041005300540028004e0055004c004c0020004100530020004e005600410052004300480041005200280031003200290029002000410053002000630061007000740069006f006e002c00430041005300540028004e0055004c004c0020004100530020004400410054004500540049004d0045003200280036002900290020004100530020007300740061006d0070002c0070006500720073006f006e002c007100750061006e0074006900740079002000460052004f004d002000640062006f002e0075006e0069006f006e005f00730063006f00700065005f007200650070006f0072007400200057004800450052004500200031003d003000
+      contains_hex: ['2a06057300740061006d007000']
+      done_rows: 0
+- name: A CTE over a stored UNION view retains its producer contract without output rows
+  tds:
+    statements:
+    - sql: >-
+        WITH report AS (SELECT person,quantity FROM dbo.union_scope_report)
+        SELECT person,quantity+CAST(0 AS FLOAT) AS quantity FROM report WHERE 1=0
+      expect:
+        rows: 0
+        column_types: [{name: person,type: INT},{name: quantity,type: FLOAT}]
+- name: Wire metadata exposes the common numeric contract through a stored UNION view
+  tds:
+    statements:
+    - sql: SELECT person,quantity FROM dbo.union_scope_report ORDER BY person
+      expect:
+        rows: 4
+        data: [{person: 10,quantity: 4},{person: 11,quantity: null},{person: 20,quantity: 2},{person: 21,quantity: null}]
+        column_types: [{name: person,type: INT},{name: quantity,type: FLOAT}]
+    - sql: |
+        SELECT id,CAST(began AS DATETIME2(6)) AS stamp FROM union_intervals WHERE id=4
+        UNION ALL SELECT id,CASE WHEN ended IS NULL THEN began ELSE ended END FROM union_intervals WHERE id=5 ORDER BY id
+      expect:
+        rows: 2
+        data: [{id: 4,stamp: {temporal_type: datetime2,value: '2026-01-03T00:00:00Z'}},
+          {id: 5,stamp: {temporal_type: datetime2,value: '2026-01-01T00:00:00Z'}}]
+        column_types: [{name: id,type: INT},{name: stamp,type: DATETIME2}]
+- name: Temporal UNION emits scale six in the real stamp TYPEINFO
+  # go-mssqldb v0.12.3 returns DecimalSize known=false for DATETIME2.
+  # Match the actual DATETIME2 TYPEINFO (0x2a, scale 6) followed immediately
+  # by the B_VARCHAR column name stamp in a zero-row result.
+  # The ordinary probe checks all types/data.
+  tds:
+    rpc_packets:
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000530045004c004500430054002000690064002c004300410053005400280062006500670061006e0020004100530020004400410054004500540049004d0045003200280036002900290020004100530020007300740061006d0070002000460052004f004d00200075006e0069006f006e005f0069006e00740065007200760061006c0073002000570048004500520045002000690064003d003400200041004e004400200031003d003000200055004e0049004f004e00200041004c004c002000530045004c004500430054002000690064002c00430041005300450020005700480045004e00200065006e0064006500640020004900530020004e0055004c004c0020005400480045004e00200062006500670061006e00200045004c0053004500200065006e00640065006400200045004e0044002000460052004f004d00200075006e0069006f006e005f0069006e00740065007200760061006c0073002000570048004500520045002000690064003d003500200041004e004400200031003d00300020004f005200440045005200200042005900200069006400
+      contains_hex: ['2a06057300740061006d007000']
+      done_rows: 0
+- name: Invalid branch-local columns remain binding errors despite a known UNION target
+  sql: |
+    SELECT SUM(units) AS quantity FROM union_parts
+    UNION ALL SELECT CASE WHEN ended IS NULL THEN NULL ELSE DATEDIFF(day,missing_column,ended) END FROM union_intervals
+  expect: {error: true}
+- name: UNION metadata cannot invent a numeric contract for an unsupported SQL type
+  sql: |
+    SELECT CAST(1 AS FLOAT) AS quantity
+    UNION ALL SELECT DATEDIFF(day,CAST(0x01 AS VARBINARY(1)),CAST(N'2026-01-01' AS DATETIME))
+  expect: {error: true,contains: calendar input requires a declared date}
+- name: DISTINCT deduplication occurs after the common numeric conversion
+  sql: |
+    SELECT CAST(2 AS FLOAT) AS quantity UNION
+    SELECT CASE WHEN ended IS NULL THEN NULL ELSE DATEDIFF(day,began,ended) END FROM union_intervals ORDER BY quantity
+  expect: {rows: 2,data: [{quantity: null},{quantity: 2}]}
+- name: An empty widened branch contributes no rows and retains the same declaration
+  sql: |
+    SELECT person,SUM(units) AS quantity FROM union_parts WHERE 1=0 GROUP BY person
+    UNION ALL SELECT person,CASE WHEN ended IS NULL THEN NULL ELSE DATEDIFF(day,began,ended) END FROM union_intervals ORDER BY person
+  expect: {rows: 2,data: [{person: 20,quantity: 2},{person: 21,quantity: null}]}
+- name: Calendar arguments reject binary declarations even when their bytes spell a valid date
+  sql: SELECT DATEDIFF(day,CAST(0x323032362D30312D3031 AS VARBINARY(10)),CAST(N'2026-01-03' AS DATETIME)) AS quantity
+  expect: {error: true,contains: calendar input requires a declared date}
+- name: NULL binary operands cannot select calendar text semantics
+  sql: SELECT DATEDIFF(day,CAST(NULL AS BINARY(10)),CAST(N'2026-01-03' AS DATETIME)) AS quantity
+  expect: {error: true,contains: calendar input requires a declared date}
+- name: Equivalent national character declarations retain valid calendar text semantics
+  sql: SELECT DATEDIFF(day,CAST(N'2026-01-01' AS NVARCHAR(10)),CAST(N'2026-01-03' AS DATETIME)) AS quantity
+  expect: {rows: 1,data: [{quantity: 2}]}
+- name: Restart restores protected NULL literals without relying on bootstrap callable identity
+  action: restart
+- name: Stored UNION NULL branches retain values after restart
+  sql: SELECT person,quantity FROM dbo.union_scope_report ORDER BY person
+  expect: {rows: 4,data: [{person: 10,quantity: 4},{person: 11,quantity: null},
+      {person: 20,quantity: 2},{person: 21,quantity: null}]}
+- name: Restarted stored UNION descriptors retain declared NULL conversions without rows
+  tds:
+    statements:
+    - sql: >-
+        SELECT CAST(NULL AS NVARCHAR(12)) AS caption,CAST(NULL AS DATETIME2(6)) AS stamp,person,quantity
+        FROM dbo.union_scope_report WHERE 1=0
+      expect:
+        rows: 0
+        column_types: [{name: caption,type: NVARCHAR,length: 12},{name: stamp,type: DATETIME2},{name: person,type: INT},{name: quantity,type: FLOAT}]
+- name: Restarted stored UNION view emits scale six in the real stamp TYPEINFO
+  # go-mssqldb v0.12.3 returns DecimalSize known=false for DATETIME2.
+  # Match the actual DATETIME2 TYPEINFO (0x2a, scale 6) followed immediately
+  # by the B_VARCHAR column name stamp in a zero-row result.
+  # The ordinary probe checks all types/data.
+  tds:
+    rpc_packets:
+    - packet_type: 1
+      payload_hex: 16000000120000000200000000000000000001000000530045004c004500430054002000430041005300540028004e0055004c004c0020004100530020004e005600410052004300480041005200280031003200290029002000410053002000630061007000740069006f006e002c00430041005300540028004e0055004c004c0020004100530020004400410054004500540049004d0045003200280036002900290020004100530020007300740061006d0070002c0070006500720073006f006e002c007100750061006e0074006900740079002000460052004f004d002000640062006f002e0075006e0069006f006e005f00730063006f00700065005f007200650070006f0072007400200057004800450052004500200031003d003000
+      contains_hex: ['2a06057300740061006d007000']
+      done_rows: 0

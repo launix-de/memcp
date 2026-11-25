@@ -1,0 +1,175 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/statements/alter-function-transact-sql
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: ALTER FUNCTION retains native must-exist source updates and scalar or table result kinds
+setup:
+- sql: CREATE FUNCTION alter_scalar(@first AS INT,@second INT,@third AS INT,@fourth INT) RETURNS INT AS BEGIN RETURN @first+@second+@third+@fourth; END
+- sql: CREATE FUNCTION alter_rows(@value AS INT) RETURNS @result TABLE(item INT) AS BEGIN INSERT @result(item) SELECT @value; RETURN; END
+- sql: CREATE PROCEDURE alter_kept_procedure @value AS INT=7 AS SELECT @value AS value
+- sql: CREATE FUNCTION alter_inline(@value INT) RETURNS TABLE AS RETURN SELECT @value AS item
+cleanup:
+- sql: DROP FUNCTION IF EXISTS alter_scalar,alter_rows,alter_absent,alter_absent_rows
+- sql: DROP PROCEDURE IF EXISTS alter_kept_procedure
+- sql: DROP FUNCTION IF EXISTS alter_inline
+- sql: DROP VIEW IF EXISTS alter_unrelated_view
+- sql: DROP VIEW IF EXISTS alter_name_collision
+test_cases:
+- name: Existing scalar headers already accept optional AS without changing parameter order
+  sql: SELECT dbo.alter_scalar(1,2,3,4) AS value
+  expect: {rows: 1,data: [{value: 10}]}
+- name: ALTER replaces an existing scalar function with its new parameter and return declarations
+  sql: ALTER FUNCTION alter_scalar(@first AS INT,@second INT,@third AS INT,@fourth INT) RETURNS VARCHAR(8) AS BEGIN DECLARE @answer VARCHAR(8); SET @answer=CONVERT(VARCHAR(8),2*(@first+@second+@third+@fourth)); RETURN @answer; END
+- name: The same cached call uses the replacement source and VARCHAR result
+  sql: SELECT dbo.alter_scalar(1,2,3,4) AS value
+  expect: {rows: 1,data: [{value: '20'}]}
+- name: Empty callers retain the replacement wire type and width
+  tds:
+    statements:
+    - sql: SELECT dbo.alter_scalar(1,2,3,4) AS value WHERE 1=0
+      expect: {rows: 0,column_types: [{name: value,type: VARCHAR,length: 8}]}
+- name: Existing table function headers also accept optional AS
+  sql: SELECT item FROM dbo.alter_rows(3)
+  expect: {rows: 1,data: [{item: 3}]}
+- name: ALTER replaces the existing multistatement table function body
+  sql: ALTER FUNCTION alter_rows(@value AS INT) RETURNS @result TABLE(item INT) AS BEGIN INSERT @result(item) SELECT @value+10; INSERT @result(item) SELECT @value+20; RETURN; END
+- name: The new table function source retains its complete row multiset
+  sql: SELECT item FROM dbo.alter_rows(3) ORDER BY item
+  expect: {rows: 2,data: [{item: 13},{item: 23}]}
+- name: The same optional AS parameter grammar remains valid for procedure alteration
+  sql: ALTER PROCEDURE alter_kept_procedure @value AS INT=9 AS SELECT @value AS value
+- name: Existing procedure execution consumes the altered default
+  sql: EXEC alter_kept_procedure
+  expect: {rows: 1,data: [{value: 9}]}
+- name: ALTER cannot create an absent scalar function
+  sql: ALTER FUNCTION alter_absent(@value AS INT) RETURNS INT AS BEGIN RETURN @value; END
+  expect: {error: true,contains: does not exist}
+- name: ALTER cannot create an absent table function
+  sql: ALTER FUNCTION alter_absent_rows(@value AS INT) RETURNS @result TABLE(item INT) AS BEGIN INSERT @result(item) SELECT @value; RETURN; END
+  expect: {error: true,contains: does not exist}
+- name: Failed must-exist updates publish no function declarations
+  sql: SELECT OBJECT_ID(N'alter_absent',N'FN') AS scalar_id,OBJECT_ID(N'alter_absent_rows',N'TF') AS table_id
+  expect: {rows: 1,data: [{scalar_id: null,table_id: null}]}
+- name: A scalar alteration cannot replace a stored procedure
+  sql: ALTER FUNCTION alter_kept_procedure(@value AS INT) RETURNS INT AS BEGIN RETURN @value; END
+  expect: {error: true,contains: existing object kind}
+- name: Rejected function replacement preserves the existing procedure
+  sql: EXEC alter_kept_procedure
+  expect: {rows: 1,data: [{value: 9}]}
+- name: A table alteration cannot change a scalar function kind
+  sql: ALTER FUNCTION alter_scalar(@value INT) RETURNS @result TABLE(item INT) AS BEGIN INSERT @result(item) SELECT @value; RETURN; END
+  expect: {error: true,contains: existing object kind}
+- name: A scalar alteration cannot change a table function kind
+  sql: ALTER FUNCTION alter_rows(@value INT) RETURNS INT AS BEGIN RETURN @value; END
+  expect: {error: true,contains: existing object kind}
+- name: Rejected kind changes preserve both original function results
+  sql: SELECT dbo.alter_scalar(1,2,3,4) AS value,item FROM dbo.alter_rows(3) ORDER BY item
+  expect: {rows: 2,data: [{value: '20',item: 13},{value: '20',item: 23}]}
+- name: CREATE still rejects an existing function instead of becoming an upsert
+  sql: CREATE FUNCTION alter_scalar() RETURNS INT AS BEGIN RETURN 99; END
+  expect: {error: true,contains: already exists}
+- name: Compile-only scalar and table alterations bind parameters and return tables without replacing source
+  tds:
+    statements:
+    - sql: SET NOEXEC ON
+    - sql: ALTER FUNCTION alter_scalar(@value AS INT) RETURNS INT AS BEGIN RETURN @value+999; END
+    - sql: ALTER FUNCTION alter_rows(@value AS INT) RETURNS @result TABLE(item INT) AS BEGIN INSERT @result(item) SELECT @value+999; RETURN; END
+    - sql: SET NOEXEC OFF; SELECT dbo.alter_scalar(1,2,3,4) AS value,item FROM dbo.alter_rows(3) ORDER BY item
+      expect: {rows: 2,data: [{value: '20',item: 13},{value: '20',item: 23}]}
+- name: A pending scalar alteration is private and whole rollback restores its source
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: "ALTER FUNCTION alter_scalar(@first INT,@second INT,@third INT,@fourth INT) RETURNS VARCHAR(8) AS BEGIN RETURN 'private'; END"}
+    - connection: owner
+      sql: SELECT dbo.alter_scalar(1,2,3,4) AS value
+      expect: {rows: 1,data: [{value: private}]}
+    - connection: observer
+      sql: SELECT dbo.alter_scalar(1,2,3,4) AS value
+      expect: {rows: 1,data: [{value: '20'}]}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: observer
+      sql: SELECT dbo.alter_scalar(1,2,3,4) AS value
+      expect: {rows: 1,data: [{value: '20'}]}
+- name: A scalar alteration commits through the existing source catalog owner
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: "ALTER FUNCTION alter_scalar(@first INT,@second INT,@third INT,@fourth INT) RETURNS VARCHAR(8) AS BEGIN RETURN 'committed'; END"}
+    - {connection: owner,sql: COMMIT TRANSACTION}
+    - connection: observer
+      sql: SELECT dbo.alter_scalar(1,2,3,4) AS value
+      expect: {rows: 1,data: [{value: committe}]}
+- name: Updated native function source survives a real process restart
+  action: restart
+- name: Reload retains the committed scalar result declaration and table source
+  sql: SELECT dbo.alter_scalar(1,2,3,4) AS value,item FROM dbo.alter_rows(3) ORDER BY item
+  expect: {rows: 2,data: [{value: committe,item: 13},{value: committe,item: 23}]}
+- name: Existing scalar and table replacements retain their namespace owner across unrelated private views
+  tds:
+    statements:
+    - connection: view-owner
+      sql: BEGIN TRANSACTION
+    - connection: view-owner
+      sql: CREATE VIEW alter_unrelated_view AS SELECT 17 AS value
+    - connection: replacer
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: replacer
+      sql: BEGIN TRANSACTION
+    - connection: replacer
+      sql: ALTER FUNCTION alter_scalar(@first INT,@second INT,@third INT,@fourth INT) RETURNS VARCHAR(8) AS BEGIN RETURN 'scoped'; END
+    - connection: replacer
+      sql: ALTER FUNCTION alter_rows(@value INT) RETURNS @result TABLE(item INT) AS BEGIN INSERT @result(item) SELECT @value+30; RETURN; END
+    - connection: replacer
+      sql: ALTER FUNCTION alter_inline(@value INT) RETURNS TABLE AS RETURN SELECT @value+40 AS item
+    - connection: replacer
+      sql: COMMIT TRANSACTION
+    - connection: view-owner
+      sql: ROLLBACK TRANSACTION
+    - sql: SELECT dbo.alter_scalar(1,2,3,4) AS value
+      expect:
+        rows: 1
+        data:
+        - value: scoped
+    - sql: SELECT item FROM dbo.alter_rows(3)
+      expect:
+        rows: 1
+        data:
+        - item: 33
+    - sql: SELECT item FROM dbo.alter_inline(3)
+      expect:
+        rows: 1
+        data:
+        - item: 43
+    - sql: SELECT OBJECT_ID(N'alter_unrelated_view',N'V') AS absent_view
+      expect:
+        rows: 1
+        data:
+        - absent_view: null
+- name: Fresh scalar and table functions still reject an existing view namespace
+  tds:
+    statements:
+    - sql: CREATE VIEW alter_name_collision AS SELECT 19 AS value
+    - sql: CREATE FUNCTION alter_name_collision() RETURNS INT AS BEGIN RETURN 1; END
+      expect:
+        error: true
+        contains:
+        - already owns
+    - sql: CREATE FUNCTION alter_name_collision() RETURNS TABLE AS RETURN SELECT 1 AS item
+      expect:
+        error: true
+        contains:
+        - already owns
+    - sql: CREATE FUNCTION alter_name_collision() RETURNS @result TABLE(item INT) AS BEGIN INSERT @result VALUES(1); RETURN; END
+      expect:
+        error: true
+        contains:
+        - already owns
+    - sql: SELECT value FROM alter_name_collision
+      expect:
+        rows: 1
+        data:
+        - value: 19

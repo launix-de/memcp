@@ -312,14 +312,17 @@ func benchmarkGetRecordIDForUnique(b *testing.B, value int64) {
 	columns := []string{"id"}
 	values := []scm.Scmer{scm.NewInt(value)}
 	access := exactScanAccess(newExactScanAccessSchema(columns), values)
+	_, columnInputUnique, finishInputUnique := shard.t.readDataContext(nil)
+	defer finishInputUnique.release()
+	access.columnInput = columnInputUnique
 	// Cross the adaptive threshold before measuring the steady-state lookup.
-	shard.GetRecordidForUnique(access, nil, false)
-	shard.GetRecordidForUnique(access, nil, false)
+	shard.GetRecordidForUnique(access, nil, false, nil)
+	shard.GetRecordidForUnique(access, nil, false, nil)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		shard.GetRecordidForUnique(access, nil, false)
+		shard.GetRecordidForUnique(access, nil, false, nil)
 	}
 }
 
@@ -345,13 +348,13 @@ func TestOpenMapReducerAllocatesMutationMetadataLazily(t *testing.T) {
 	shard := tbl.Shards[0]
 	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })
 
-	readMapper := shard.OpenMapReducer([]string{"id"}, mapReduceFn, false, 0, nil, nil)
+	readMapper := shard.OpenMapReducer([]string{"id"}, mapReduceFn, false, 0, nil, nil, shard.t.bindColumnInput(nil))
 	defer readMapper.Close()
 	if readMapper.isUpdate != nil || readMapper.isIncrement != nil || readMapper.setClosureFn != nil {
 		t.Fatal("read mapper allocated mutation-only metadata")
 	}
 
-	mutationMapper := shard.OpenMapReducer([]string{"$update"}, mapReduceFn, false, 0, nil, nil)
+	mutationMapper := shard.OpenMapReducer([]string{"$update"}, mapReduceFn, false, 0, nil, nil, shard.t.bindColumnInput(nil))
 	defer mutationMapper.Close()
 	if len(mutationMapper.isUpdate) != 1 || !mutationMapper.isUpdate[0] || len(mutationMapper.setClosureFn) != 1 {
 		t.Fatal("mutation mapper did not initialize mutation metadata")
@@ -391,7 +394,7 @@ func TestReadMapReducerWorkspaceMainDeltaAndWideProjection(t *testing.T) {
 	var inlineMapper ShardMapReducer
 	var inlineWorkspace shardMapReducerWorkspace
 	prepareReadMapReducerStorage(&inlineMapper, &inlineWorkspace, 2)
-	shard.initReadMapReducer(&inlineMapper, columns[:2], mapReduceLast, false, nil)
+	shard.initReadMapReducer(&inlineMapper, columns[:2], mapReduceLast, false, nil, shard.t.bindColumnInput(nil))
 	inlineMapper.mapProgram = scm.PrepareSerialProc(mapLast)
 	inlineMapper.Stream(scm.NewNil(), []uint32{0}, nil)
 	if got := inlineMapper.MapOne(1).Int(); got != mainRows[1][1].Int() {
@@ -403,7 +406,7 @@ func TestReadMapReducerWorkspaceMainDeltaAndWideProjection(t *testing.T) {
 	var mapper ShardMapReducer
 	var workspace shardMapReducerWorkspace
 	prepareReadMapReducerStorage(&mapper, &workspace, len(columns))
-	shard.initReadMapReducer(&mapper, columns, mapReduceLast, false, nil)
+	shard.initReadMapReducer(&mapper, columns, mapReduceLast, false, nil, shard.t.bindColumnInput(nil))
 	mapper.mapProgram = scm.PrepareSerialProc(mapLast)
 	if got := mapper.Stream(scm.NewNil(), []uint32{0}, nil).Int(); got != mainRows[0][len(columns)-1].Int() {
 		t.Fatalf("wide main-row projection = %d, want %d", got, mainRows[0][len(columns)-1].Int())
@@ -531,7 +534,7 @@ func TestScanOrderFirstReusesReadBuffers(t *testing.T) {
 					}
 				}()
 				result := tbl.scan_order(nil, access, values, nil, condition, nil, nil,
-					0, 0, 1, columns, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+					0, 0, 1, columns, callback, scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), nil)
 				if panics {
 					t.Fatal("callback panic was lost")
 				}

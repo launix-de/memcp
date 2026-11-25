@@ -1,0 +1,461 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Pending FK enforcement state is durable independent of trust and retained dependencies in one original transaction
+setup:
+- sql: DROP TABLE IF EXISTS disabled_row_child
+- sql: DROP TABLE IF EXISTS disabled_row_probe
+- sql: DROP TABLE IF EXISTS disabled_row_standard_parent
+- sql: DROP TABLE IF EXISTS disabled_row_report_parent
+- sql: DROP TABLE IF EXISTS disabled_row_marker
+- sql: CREATE TABLE disabled_row_standard_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE disabled_row_report_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE disabled_row_child(id INT PRIMARY KEY,standard_id INT,report_id INT)
+- sql: CREATE TABLE disabled_row_probe(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE disabled_row_marker(id INT PRIMARY KEY,value INT)
+- sql: INSERT disabled_row_standard_parent VALUES(1),(2)
+- sql: INSERT disabled_row_report_parent VALUES(10),(11)
+- sql: INSERT disabled_row_child VALUES(1,99,10),(2,1,10),(3,NULL,NULL)
+- sql: INSERT disabled_row_probe VALUES(1,99),(2,1)
+- sql: INSERT disabled_row_marker VALUES(1,0)
+cleanup:
+- sql: DROP TABLE IF EXISTS disabled_row_child
+- sql: DROP TABLE IF EXISTS disabled_row_probe
+- sql: DROP TABLE IF EXISTS disabled_row_standard_parent
+- sql: DROP TABLE IF EXISTS disabled_row_report_parent
+- sql: DROP TABLE IF EXISTS disabled_row_marker
+test_cases:
+- name: One original decision freezes disabled untrusted and enabled trusted cascade FKs after row work
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE disabled_row_marker SET value=1 WHERE id=1
+    - connection: owner
+      sql: UPDATE disabled_row_child SET report_id=11 WHERE id=2
+    - connection: owner
+      sql: ALTER TABLE disabled_row_child WITH NOCHECK ADD CONSTRAINT disabled_row_standard FOREIGN KEY(standard_id) REFERENCES disabled_row_standard_parent(id)
+        ON UPDATE CASCADE ON DELETE CASCADE
+    - connection: owner
+      sql: UPDATE disabled_row_marker SET value=2 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE disabled_row_child ADD CONSTRAINT disabled_row_report FOREIGN KEY(report_id) REFERENCES disabled_row_report_parent(id)
+        ON UPDATE CASCADE ON DELETE CASCADE
+    - connection: owner
+      sql: UPDATE disabled_row_marker SET value=3 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE disabled_row_child NOCHECK CONSTRAINT disabled_row_standard
+    - connection: owner
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name IN ('disabled_row_standard','disabled_row_report')
+        ORDER BY name
+      expect:
+        rows: 2
+        data:
+        - name: disabled_row_report
+          disabled: 0
+          untrusted: 0
+        - name: disabled_row_standard
+          disabled: 1
+          untrusted: 1
+    - connection: owner
+      sql: SELECT id,standard_id,report_id FROM disabled_row_child ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          standard_id: 99
+          report_id: 10
+        - id: 2
+          standard_id: 1
+          report_id: 11
+        - id: 3
+          standard_id: null
+          report_id: null
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM disabled_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 3
+          depth: 1
+    - connection: observer
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name IN ('disabled_row_standard','disabled_row_report')
+        ORDER BY name
+      expect:
+        rows: 0
+        data: []
+    - connection: observer
+      sql: SELECT id,standard_id,report_id FROM disabled_row_child ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          standard_id: 99
+          report_id: 10
+        - id: 2
+          standard_id: 1
+          report_id: 10
+        - id: 3
+          standard_id: null
+          report_id: null
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name IN ('disabled_row_standard','disabled_row_report')
+        ORDER BY name
+      expect:
+        rows: 2
+        data:
+        - name: disabled_row_report
+          disabled: 0
+          untrusted: 0
+        - name: disabled_row_standard
+          disabled: 1
+          untrusted: 1
+    - connection: observer
+      sql: SELECT id,standard_id,report_id FROM disabled_row_child ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          standard_id: 99
+          report_id: 10
+        - id: 2
+          standard_id: 1
+          report_id: 11
+        - id: 3
+          standard_id: null
+          report_id: null
+- name: Disabled FK omits all four enforcement roles while the trusted FK still cascades
+  tds:
+    statements:
+    - connection: owner
+      sql: INSERT disabled_row_child VALUES(4,888,11)
+    - connection: owner
+      sql: DELETE FROM disabled_row_standard_parent WHERE id=1
+    - connection: owner
+      sql: UPDATE disabled_row_child SET standard_id=777 WHERE id=2
+    - connection: owner
+      sql: UPDATE disabled_row_child SET standard_id=2 WHERE id=4
+    - connection: owner
+      sql: UPDATE disabled_row_standard_parent SET id=3 WHERE id=2
+    - connection: owner
+      sql: UPDATE disabled_row_report_parent SET id=12 WHERE id=11
+    - connection: owner
+      sql: DELETE FROM disabled_row_report_parent WHERE id=10
+    - connection: owner
+      sql: SELECT id,standard_id,report_id FROM disabled_row_child ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 2
+          standard_id: 777
+          report_id: 12
+        - id: 3
+          standard_id: null
+          report_id: null
+        - id: 4
+          standard_id: 2
+          report_id: 12
+    - connection: owner
+      sql: SELECT id FROM disabled_row_standard_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 3
+    - connection: owner
+      sql: SELECT id FROM disabled_row_report_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 12
+    - connection: owner
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name IN ('disabled_row_standard','disabled_row_report')
+        ORDER BY name
+      expect:
+        rows: 2
+        data:
+        - name: disabled_row_report
+          disabled: 0
+          untrusted: 0
+        - name: disabled_row_standard
+          disabled: 1
+          untrusted: 1
+- name: Enabled sibling FK still rejects future invalid references
+  sql: INSERT disabled_row_child VALUES(5,999,999)
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Disabled declaration retains its referenced table dependency
+  sql: DROP TABLE disabled_row_standard_parent
+  expect:
+    error: true
+    contains: foreign
+- name: Disabled declaration retains its physical column dependency
+  sql: ALTER TABLE disabled_row_child DROP COLUMN standard_id
+  expect:
+    error: true
+    contains: foreign
+- name: Committed disabled descriptors survive a real process crash
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart the native descriptor and accepted decision recovery owners
+  action: restart
+- name: Recovered metadata data and derived enforcement have the same independent states
+  tds:
+    statements:
+    - connection: owner
+      sql: SELECT id,standard_id,report_id FROM disabled_row_child ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 2
+          standard_id: 777
+          report_id: 12
+        - id: 3
+          standard_id: null
+          report_id: null
+        - id: 4
+          standard_id: 2
+          report_id: 12
+    - connection: owner
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name IN ('disabled_row_standard','disabled_row_report')
+        ORDER BY name
+      expect:
+        rows: 2
+        data:
+        - name: disabled_row_report
+          disabled: 0
+          untrusted: 0
+        - name: disabled_row_standard
+          disabled: 1
+          untrusted: 1
+    - connection: owner
+      sql: SELECT id FROM disabled_row_standard_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 3
+    - connection: owner
+      sql: SELECT id FROM disabled_row_report_parent ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 12
+    - connection: owner
+      sql: INSERT disabled_row_child VALUES(5,999,12)
+    - connection: owner
+      sql: DELETE FROM disabled_row_child WHERE id=5
+    - connection: owner
+      sql: INSERT disabled_row_child VALUES(5,999,999)
+      expect:
+        error: true
+        contains:
+        - foreign key constraint
+    - connection: owner
+      sql: SELECT id,standard_id,report_id FROM disabled_row_child ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 2
+          standard_id: 777
+          report_id: 12
+        - id: 3
+          standard_id: null
+          report_id: null
+        - id: 4
+          standard_id: 2
+          report_id: 12
+- name: Rollback removes disabled descriptors together with original row and heartbeat overlays
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE disabled_row_marker SET value=7 WHERE id=1
+    - connection: owner
+      sql: INSERT disabled_row_probe VALUES(3,999)
+    - connection: owner
+      sql: ALTER TABLE disabled_row_probe WITH NOCHECK ADD CONSTRAINT disabled_row_abort FOREIGN KEY(parent_id) REFERENCES disabled_row_standard_parent(id)
+    - connection: owner
+      sql: ALTER TABLE disabled_row_probe NOCHECK CONSTRAINT disabled_row_abort
+    - connection: owner
+      sql: UPDATE disabled_row_marker SET value=8 WHERE id=1
+    - connection: owner
+      sql: SELECT CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name='disabled_row_abort'
+      expect:
+        rows: 1
+        data:
+        - disabled: 1
+          untrusted: 1
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: observer
+      sql: SELECT id,parent_id FROM disabled_row_probe ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          parent_id: 99
+        - id: 2
+          parent_id: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='disabled_row_abort'
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: observer
+      sql: SELECT value FROM disabled_row_marker
+      expect:
+        rows: 1
+        data:
+        - value: 3
+- name: Savepoints restore exact disabled enabled and absent states without trusting orphans or admitting endpoint DML
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+      (define tx (owner "__memcp_tx"))
+      (try (lambda () (begin
+        (define child (table "memcp-tests" false "disabled_row_probe" false tx))
+        (define parent (table "memcp-tests" false "disabled_row_standard_parent" false tx))
+        (define state (lambda () (begin
+          (define entry (car ((show child "constraints" tx) "ForeignKeys")))
+          (list (entry "Enabled") (entry "Trusted")))))
+        (insert child '("id" "parent_id") (list (list 3 999)) '() nil false nil tx)
+        (define before_add (tx_savepoint tx))
+        (createforeignkey child "disabled_row_native" '("parent_id") parent '("id") "restrict" "restrict" tx (list "validate_existing" false))
+        (define enabled (tx_savepoint tx))
+        (constraint_state child true false false tx owner)
+        (define disabled (state))
+        (define rejected (try (lambda () (begin (constraint_state child true true true tx owner) false))
+          (lambda (failure) (if (strlike (concat failure) "%existing child row has no parent%") true (error failure)))))
+        (define after_failed_check (state))
+        (tx_rollback_to_savepoint tx enabled)
+        (define after_enabled (state))
+        (constraint_state child true false false tx owner)
+        (define denied (try (lambda () (begin
+          (insert child '("id" "parent_id") (list (list 4 3)) '() nil false nil tx) false))
+          (lambda (failure) (if (strlike (concat failure) "%metadata-only%") true (error failure)))))
+        (tx_rollback_to_savepoint tx before_add)
+        (insert child '("id" "parent_id") (list (list 4 888)) '() nil false nil tx)
+        (define rows (lambda (input) (sort (scan input child '() '() '() (lambda () true) '("id" "parent_id")
+          (lambda (acc id value) (append acc (list id value))) '() (lambda (left right) (merge (list left right))) false)
+          (lambda (left right) (< (car left) (car right))))))
+        (define before (list disabled rejected after_failed_check after_enabled denied (tx_state tx) (equal? tx (owner "__memcp_tx"))
+          (count ((show child "constraints" tx) "ForeignKeys")) (rows tx) (rows nil)))
+        (tx_rollback owner)
+        (list before (rows nil))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - - - false
+        - false
+      - true
+      - - false
+        - false
+      - - true
+        - false
+      - true
+      - active
+      - true
+      - 0
+      - - - 1
+          - 99
+        - - 2
+          - 1
+        - - 3
+          - 999
+        - - 4
+          - 888
+      - - - 1
+          - 99
+        - - 2
+          - 1
+    - - - 1
+        - 99
+      - - 2
+        - 1
+- name: Checkpoint stores native disabled discriminator and omits only its generated programs
+  scm: |-
+    (begin
+      (define schema (json_decode (readfile (concat (arg "data" "data" "data") "/memcp-tests/schema.json"))))
+      (define stored ((schema "tables") "disabled_row_child"))
+      (define standard (find (stored "Foreign") (lambda (entry) (equal? (entry "Id") "disabled_row_standard"))))
+      (define report (find (stored "Foreign") (lambda (entry) (equal? (entry "Id") "disabled_row_report"))))
+      (define triggers ((show "memcp-tests" "disabled_row_child" true) "triggers"))
+      (list (standard "Disabled") (standard "Untrusted") (standard "Updatemode")
+        (coalesceNil (report "Disabled") false) (report "Updatemode")
+        (count (filter triggers (lambda (entry) (strlike (entry "name") "__fk_disabled_row_standard_%"))))))
+  expect:
+    result:
+    - true
+    - true
+    - disabled-v1/1
+    - false
+    - 1
+    - 0
+- name: The native CHECK state profile still rejects a disabled durable decision without leaking metadata
+  scm: |-
+    (begin
+      (define owner (newsession)) (owner "username" "root") (tx_begin owner)
+      (define tx (owner "__memcp_tx"))
+      (define child (table "memcp-tests" false "disabled_row_probe" false tx))
+      (try (lambda () (begin
+        (createcheck child "disabled_row_check" "tsql-check" "id >= 0" '("id") tx owner)
+        (constraint_state child '("disabled_row_check") false false tx owner)
+        (define pending (car ((show child "constraints" tx) "Checks")))
+        (define rejected (try (lambda () (begin (tx_commit owner) false))
+          (lambda (failure) (if (strlike (concat failure) "%pending check declaration must be enabled and validated%") true (error failure)))))
+        (tx_rollback owner)
+        (list rejected (pending "Enabled") (pending "Trusted")
+          (count (coalesceNil ((show child "constraints") "Checks") '()))
+          (sort (scan nil child '() '() '() (lambda () true) '("id" "parent_id")
+            (lambda (acc id value) (append acc (list id value))) '() (lambda (left right) (merge (list left right))) false)
+            (lambda (left right) (< (car left) (car right)))))))
+        (lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result:
+    - true
+    - false
+    - false
+    - 0
+    - - - 1
+        - 99
+      - - 2
+        - 1
+- name: A disabled declaration can be dropped without reserved enforcement programs
+  tds:
+    statements:
+    - connection: owner
+      sql: ALTER TABLE disabled_row_child DROP CONSTRAINT disabled_row_standard
+    - connection: owner
+      sql: SELECT name,CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name IN ('disabled_row_standard','disabled_row_report')
+        ORDER BY name
+      expect:
+        rows: 1
+        data:
+        - name: disabled_row_report
+          disabled: 0
+          untrusted: 0
+    - connection: owner
+      sql: DROP TABLE disabled_row_standard_parent
+    - connection: owner
+      sql: SELECT id,standard_id,report_id FROM disabled_row_child ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 2
+          standard_id: 777
+          report_id: 12
+        - id: 3
+          standard_id: null
+          report_id: null
+        - id: 4
+          standard_id: 2
+          report_id: 12

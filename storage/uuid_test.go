@@ -5,7 +5,6 @@ SPDX-License-Identifier: GPL-3.0-or-later
 package storage
 
 import "testing"
-import "strings"
 import "github.com/launix-de/memcp/scm"
 
 func TestUUIDBinaryDefaultSurvivesWALAndRebuild(t *testing.T) {
@@ -24,7 +23,7 @@ func TestUUIDBinaryDefaultSurvivesWALAndRebuild(t *testing.T) {
 			tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 			tbl.publishShowColumnsSnapshot(true)
 			tbl.schema.save()
-			cols, rows := tbl.prepareInsertDefaults([]string{"payload"}, [][]scm.Scmer{{scm.NewString("one")}, {scm.NewString("two")}, {scm.NewString("three")}})
+			cols, rows := tbl.prepareInsertDefaults([]string{"payload"}, [][]scm.Scmer{{scm.NewString("one")}, {scm.NewString("two")}, {scm.NewString("three")}}, tbl.columnDeclarations())
 			for _, row := range rows {
 				if len(row[1].String()) != 16 {
 					t.Fatal("binary default not sixteen bytes")
@@ -32,7 +31,7 @@ func TestUUIDBinaryDefaultSurvivesWALAndRebuild(t *testing.T) {
 			}
 			tbl.Insert(cols, rows, nil, scm.NewNil(), false, nil)
 			if rebuilt {
-				if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+				if result := RebuildTable(tbl, true, false, nil); result.err != nil {
 					t.Fatal(result)
 				}
 			}
@@ -41,7 +40,7 @@ func TestUUIDBinaryDefaultSurvivesWALAndRebuild(t *testing.T) {
 				t.Fatal("lost binary default recipe")
 			}
 			accepted, collisions := 0, 0
-			restored.ProcessUniqueCollision(cols, rows, false, func(rows [][]scm.Scmer, _ *uniqueWriteGuard) { accepted += len(rows) }, nil, func(string, []scm.Scmer) { collisions++ }, 0, nil, nil, nil)
+			restored.ProcessUniqueCollision(cols, rows, false, func(rows [][]scm.Scmer, _ *uniqueWriteGuard) { accepted += len(rows) }, nil, func(string, []scm.Scmer) { collisions++ }, 0, nil, nil, nil, nil, nil)
 			if accepted != 0 || collisions != 3 {
 				t.Fatalf("binary keys changed across reload: accepted=%d collisions=%d", accepted, collisions)
 			}
@@ -62,7 +61,7 @@ func TestUUIDDefaultsArePerRowAndExplicitBeforeInsert(t *testing.T) {
 	c.UpdateSanitizer()
 	tbl.publishShowColumnsSnapshot(true)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
-	cols, rows := tbl.prepareInsertDefaults(nil, [][]scm.Scmer{{}, {}, {}})
+	cols, rows := tbl.prepareInsertDefaults(nil, [][]scm.Scmer{{}, {}, {}}, tbl.columnDeclarations())
 	if len(cols) != 1 || len(rows) != 3 {
 		t.Fatal("default expansion")
 	}
@@ -80,7 +79,7 @@ func TestUUIDDefaultsArePerRowAndExplicitBeforeInsert(t *testing.T) {
 	if got := len(tbl.ActiveShards()[0].deltaRows()); got != 3 {
 		t.Fatalf("inserted %d", got)
 	}
-	_, explicit := tbl.prepareInsertDefaults([]string{"id"}, [][]scm.Scmer{{scm.NewNil()}})
+	_, explicit := tbl.prepareInsertDefaults([]string{"id"}, [][]scm.Scmer{{scm.NewNil()}}, tbl.columnDeclarations())
 	if !explicit[0][0].IsNil() {
 		t.Fatal("explicit NULL replaced by UUID default")
 	}

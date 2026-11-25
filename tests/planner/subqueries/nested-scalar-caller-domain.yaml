@@ -1,0 +1,357 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Nested scalar dependencies bind their complete driver domain before preparation
+setup:
+- sql: DROP TABLE IF EXISTS nsl_driver
+- sql: DROP TABLE IF EXISTS nsl_middle
+- sql: DROP TABLE IF EXISTS nsl_target
+- sql: DROP TABLE IF EXISTS nsl_final
+- sql: CREATE TABLE nsl_driver (id INT, middle_id INT, tenant_id INT)
+- sql: CREATE TABLE nsl_middle (id INT, tenant_id INT, target_id INT, PRIMARY KEY (id, tenant_id))
+- sql: CREATE TABLE nsl_target (id INT PRIMARY KEY, tenant_id INT, final_id INT)
+- sql: CREATE TABLE nsl_final (id INT PRIMARY KEY, tenant_id INT, value INT)
+- sql: INSERT INTO nsl_driver VALUES (0,10,1),(1,10,1),(2,10,2),(3,11,1),(4,12,1),(5,NULL,1),(6,10,NULL),(7,99,1),(8,13,1)
+- sql: INSERT INTO nsl_middle VALUES (10,1,100),(10,2,200),(11,1,101),(12,1,102),(13,1,103)
+- sql: INSERT INTO nsl_target VALUES (100,1,1000),(101,1,1001),(102,1,1099),(103,1,1003),(200,2,2000)
+- sql: INSERT INTO nsl_final VALUES (1000,1,4),(1001,1,NULL),(1003,1,5),(2000,2,5)
+cleanup:
+- sql: DROP TABLE IF EXISTS nsl_driver
+- sql: DROP TABLE IF EXISTS nsl_middle
+- sql: DROP TABLE IF EXISTS nsl_target
+- sql: DROP TABLE IF EXISTS nsl_final
+test_cases:
+- name: Nested scalar rows preserve duplicate callers NULL payloads and absent matches
+  sql: |
+    SELECT d.id, (SELECT f.value FROM nsl_final f
+      WHERE f.tenant_id = 1 AND f.id = (
+        SELECT t.final_id FROM nsl_target t
+        WHERE t.tenant_id = 1 AND t.id = (
+          SELECT m.target_id FROM nsl_middle m
+          WHERE m.tenant_id = 1 AND m.id = d.middle_id LIMIT 1
+        ) LIMIT 1
+      ) LIMIT 1) AS value FROM nsl_driver d ORDER BY d.id
+  expect:
+    rows: 9
+    data:
+    - id: 0
+      value: 4
+    - id: 1
+      value: 4
+    - id: 2
+      value: 4
+    - id: 3
+      value: null
+    - id: 4
+      value: null
+    - id: 5
+      value: null
+    - id: 6
+      value: 4
+    - id: 7
+      value: null
+    - id: 8
+      value: 5
+- name: Aggregate predicate binds each driver coordinate before nested carrier preparation
+  sql: |
+    SELECT bounds.lo, category.val, COALESCE((
+      SELECT COUNT(*) FROM nsl_driver d
+      WHERE d.id BETWEEN bounds.lo AND bounds.lo + 3
+        AND (SELECT f.value FROM nsl_final f
+      WHERE f.tenant_id = 1 AND f.id = (
+        SELECT t.final_id FROM nsl_target t
+        WHERE t.tenant_id = 1 AND t.id = (
+          SELECT m.target_id FROM nsl_middle m
+          WHERE m.tenant_id = 1 AND m.id = d.middle_id LIMIT 1
+        ) LIMIT 1
+      ) LIMIT 1) = category.val
+    ), 0) AS matched
+    FROM (SELECT 0 AS lo UNION ALL SELECT 4 AS lo UNION ALL SELECT 8 AS lo) bounds CROSS JOIN (SELECT 4 AS val UNION ALL SELECT 5 AS val UNION ALL SELECT NULL AS val) category
+    ORDER BY bounds.lo, category.val
+  expect:
+    rows: 9
+    data:
+    - lo: 0
+      val: null
+      matched: 0
+    - lo: 0
+      val: 4
+      matched: 3
+    - lo: 0
+      val: 5
+      matched: 0
+    - lo: 4
+      val: null
+      matched: 0
+    - lo: 4
+      val: 4
+      matched: 1
+    - lo: 4
+      val: 5
+      matched: 0
+    - lo: 8
+      val: null
+      matched: 0
+    - lo: 8
+      val: 4
+      matched: 0
+    - lo: 8
+      val: 5
+      matched: 1
+- name: NULL scalar payload and missing nested rows are both visible to aggregate predicates
+  sql: |
+    SELECT bounds.lo, (
+      SELECT COUNT(*) FROM nsl_driver d
+      WHERE d.id BETWEEN bounds.lo AND bounds.lo + 3 AND (SELECT f.value FROM nsl_final f
+      WHERE f.tenant_id = 1 AND f.id = (
+        SELECT t.final_id FROM nsl_target t
+        WHERE t.tenant_id = 1 AND t.id = (
+          SELECT m.target_id FROM nsl_middle m
+          WHERE m.tenant_id = 1 AND m.id = d.middle_id LIMIT 1
+        ) LIMIT 1
+      ) LIMIT 1) IS NULL
+    ) AS missing
+    FROM (SELECT 0 AS lo UNION ALL SELECT 4 AS lo UNION ALL SELECT 8 AS lo) bounds ORDER BY bounds.lo
+  expect:
+    rows: 3
+    data:
+    - lo: 0
+      missing: 1
+    - lo: 4
+      missing: 3
+    - lo: 8
+      missing: 0
+- name: An empty driver still returns the complete neutral count result
+  sql: |
+    SELECT category.val, (
+      SELECT COUNT(*) FROM nsl_driver d WHERE d.id < 0 AND (SELECT f.value FROM nsl_final f
+      WHERE f.tenant_id = 1 AND f.id = (
+        SELECT t.final_id FROM nsl_target t
+        WHERE t.tenant_id = 1 AND t.id = (
+          SELECT m.target_id FROM nsl_middle m
+          WHERE m.tenant_id = 1 AND m.id = d.middle_id LIMIT 1
+        ) LIMIT 1
+      ) LIMIT 1) = category.val
+    ) AS matched
+    FROM (SELECT 4 AS val UNION ALL SELECT 5 AS val UNION ALL SELECT NULL AS val) category ORDER BY category.val
+  expect:
+    rows: 3
+    data:
+    - val: null
+      matched: 0
+    - val: 4
+      matched: 0
+    - val: 5
+      matched: 0
+- name: Two caller coordinates remain aligned through all three scalar stages
+  sql: |
+    SELECT bounds.lo, category.val, (
+      SELECT COUNT(*) FROM nsl_driver d
+      WHERE d.id BETWEEN bounds.lo AND bounds.lo + 3 AND (SELECT f.value FROM nsl_final f
+      WHERE f.tenant_id = d.tenant_id AND f.id = (
+        SELECT t.final_id FROM nsl_target t
+        WHERE t.tenant_id = d.tenant_id AND t.id = (
+          SELECT m.target_id FROM nsl_middle m
+          WHERE m.tenant_id = d.tenant_id AND m.id = d.middle_id LIMIT 1
+        ) LIMIT 1
+      ) LIMIT 1) = category.val
+    ) AS matched
+    FROM (SELECT 0 AS lo UNION ALL SELECT 4 AS lo UNION ALL SELECT 8 AS lo) bounds CROSS JOIN (SELECT 4 AS val UNION ALL SELECT 5 AS val UNION ALL SELECT NULL AS val) category
+    ORDER BY bounds.lo, category.val
+  expect:
+    rows: 9
+    data:
+    - lo: 0
+      val: null
+      matched: 0
+    - lo: 0
+      val: 4
+      matched: 2
+    - lo: 0
+      val: 5
+      matched: 1
+    - lo: 4
+      val: null
+      matched: 0
+    - lo: 4
+      val: 4
+      matched: 0
+    - lo: 4
+      val: 5
+      matched: 0
+    - lo: 8
+      val: null
+      matched: 0
+    - lo: 8
+      val: 4
+      matched: 0
+    - lo: 8
+      val: 5
+      matched: 1
+- name: Nested caller tuples preserve weighted aggregation and NULL tenant rejection
+  sql: |
+    SELECT bounds.lo, COALESCE((
+      SELECT SUM(d.id + 1) FROM nsl_driver d
+      WHERE d.id BETWEEN bounds.lo AND bounds.lo + 3 AND (SELECT f.value FROM nsl_final f
+      WHERE f.tenant_id = d.tenant_id AND f.id = (
+        SELECT t.final_id FROM nsl_target t
+        WHERE t.tenant_id = d.tenant_id AND t.id = (
+          SELECT m.target_id FROM nsl_middle m
+          WHERE m.tenant_id = d.tenant_id AND m.id = d.middle_id LIMIT 1
+        ) LIMIT 1
+      ) LIMIT 1) = 5
+    ), 0) AS weighted
+    FROM (SELECT 0 AS lo UNION ALL SELECT 4 AS lo UNION ALL SELECT 8 AS lo) bounds ORDER BY bounds.lo
+  expect:
+    rows: 3
+    data:
+    - lo: 0
+      weighted: 3
+    - lo: 4
+      weighted: 0
+    - lo: 8
+      weighted: 9
+- name: Consumed ancestor coordinates remain complete after parameter substitution
+  scm: "(begin\n\t(define local_source (list \"local\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define\
+    \ caller_source (list \"caller\" \"memcp-tests\" \"nsl_driver\" false true nil))\n\t(define middle (list 'get_column\
+    \ \"caller\" false \"middle_id\" false))\n\t(define tenant (list 'get_column \"caller\" false \"tenant_id\"\
+    \ false))\n\t(define value (list 'get_column \"local\" false \"final_id\" false))\n\t(define stage (make_group_stage\
+    \ \"binding-proof\" local_source (list middle) (list middle)\n\t\t(list (list value (scalar_once_reduce_first)\
+    \ nil)) nil '() '() nil nil\n\t\t(list (list 'condition (list 'equal?? value middle)) (list 'lookup-keys (list\
+    \ middle))\n\t\t\t(list 'btw2025_domain (list middle)) (list 'btw2025_accessing_after_simple '(\"caller\")))))\n\
+    \t(define bound (rewrite_scalar_query_probe_params\n\t\t(scalar_query_probe_param_index (list middle) (list\
+    \ middle) (list 'bound_middle)) stage))\n\t(and (scalar_probe_bindings_complete? stage (list caller_source))\n\
+    \t\t(not (scalar_probe_bindings_complete? stage (list local_source)))\n\t\t(scalar_probe_bindings_complete?\
+    \ bound (list local_source))\n\t\t(empty_list? (scalar_probe_free_column_refs bound)))\n)\n"
+  expect:
+    result: true
+- name: Unknown executable caller columns cannot vanish from a supplied-source walk
+  scm: "(begin\n\t(define local_source (list \"local\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define\
+    \ caller_source (list \"caller\" \"memcp-tests\" \"nsl_driver\" false true nil))\n\t(define middle (list 'get_column\
+    \ \"caller\" false \"middle_id\" false))\n\t(define tenant (list 'get_column \"caller\" false \"tenant_id\"\
+    \ false))\n\t(define value (list 'get_column \"local\" false \"final_id\" false))\n\t(define unknown (list 'get_column\
+    \ \"unknown_caller\" false \"middle_id\" false))\n\t(define stage (make_group_stage \"binding-proof\" local_source\
+    \ (list unknown) (list unknown)\n\t\t(list (list value (scalar_once_reduce_first) nil)) nil '() '() nil nil\n\
+    \t\t(list (list 'condition (list 'equal?? value unknown)) (list 'lookup-keys (list unknown))\n\t\t\t(list 'btw2025_domain\
+    \ (list unknown)) (list 'btw2025_accessing_after_simple '()))))\n\t(not (scalar_probe_bindings_complete? stage\
+    \ (list caller_source)))\n)\n"
+  expect:
+    result: true
+- name: A declared caller source still requires every live coordinate in D and lookup
+  scm: "(begin\n\t(define local_source (list \"local\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define\
+    \ caller_source (list \"caller\" \"memcp-tests\" \"nsl_driver\" false true nil))\n\t(define middle (list 'get_column\
+    \ \"caller\" false \"middle_id\" false))\n\t(define tenant (list 'get_column \"caller\" false \"tenant_id\"\
+    \ false))\n\t(define value (list 'get_column \"local\" false \"final_id\" false))\n\t(define stage (make_group_stage\
+    \ \"binding-proof\" local_source (list middle) (list middle)\n\t\t(list (list value (scalar_once_reduce_first)\
+    \ nil)) nil '() '() nil nil\n\t\t(list (list 'condition (list 'equal?? value tenant)) (list 'lookup-keys (list\
+    \ middle))\n\t\t\t(list 'btw2025_domain (list middle)) (list 'btw2025_accessing_after_simple '()))))\n\t(not\
+    \ (scalar_probe_bindings_complete? stage (list caller_source)))\n)\n"
+  expect:
+    result: true
+- name: Lookup coverage cannot substitute for the stages published caller domain
+  scm: "(begin\n\t(define local_source (list \"local\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define\
+    \ caller_source (list \"caller\" \"memcp-tests\" \"nsl_driver\" false true nil))\n\t(define middle (list 'get_column\
+    \ \"caller\" false \"middle_id\" false))\n\t(define tenant (list 'get_column \"caller\" false \"tenant_id\"\
+    \ false))\n\t(define value (list 'get_column \"local\" false \"final_id\" false))\n\t(define stage (make_group_stage\
+    \ \"binding-proof\" local_source (list middle) (list middle)\n\t\t(list (list value (scalar_once_reduce_first)\
+    \ nil)) nil '() '() nil nil\n\t\t(list (list 'condition (list 'equal?? value tenant)) (list 'lookup-keys (list\
+    \ middle tenant))\n\t\t\t(list 'btw2025_domain (list middle)) (list 'btw2025_accessing_after_simple '()))))\n\
+    \t(not (scalar_probe_bindings_complete? stage (list caller_source)))\n)\n"
+  expect:
+    result: true
+- name: The producer input shadows an ancestor alias with the same spelling
+  scm: "(begin\n\t(define local_source (list \"local\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define\
+    \ caller_source (list \"caller\" \"memcp-tests\" \"nsl_driver\" false true nil))\n\t(define middle (list 'get_column\
+    \ \"caller\" false \"middle_id\" false))\n\t(define tenant (list 'get_column \"caller\" false \"tenant_id\"\
+    \ false))\n\t(define value (list 'get_column \"local\" false \"final_id\" false))\n\t(define local_source (list\
+    \ \"caller\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define value (list 'get_column \"caller\" false\
+    \ \"final_id\" false))\n\t(define stage (make_group_stage \"binding-proof\" local_source '() '()\n\t\t(list\
+    \ (list value (scalar_once_reduce_first) nil)) nil '() '() nil nil\n\t\t(list (list 'condition (list 'equal??\
+    \ value 100)) (list 'lookup-keys '())\n\t\t\t(list 'btw2025_domain '()) (list 'btw2025_accessing_after_simple\
+    \ '(\"caller\")))))\n\t(and (empty_list? (scalar_probe_free_column_refs stage))\n\t\t(scalar_probe_bindings_complete?\
+    \ stage (list (list \"other\" \"memcp-tests\" \"nsl_final\" false true nil))))\n)\n"
+  expect:
+    result: true
+- name: A retained nested producer still exposes its unbound caller domain
+  scm: "(begin\n\t(define local_source (list \"local\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define\
+    \ caller_source (list \"caller\" \"memcp-tests\" \"nsl_driver\" false true nil))\n\t(define middle (list 'get_column\
+    \ \"caller\" false \"middle_id\" false))\n\t(define tenant (list 'get_column \"caller\" false \"tenant_id\"\
+    \ false))\n\t(define value (list 'get_column \"local\" false \"final_id\" false))\n\t(define unknown (list 'get_column\
+    \ \"unknown_caller\" false \"middle_id\" false))\n\t(define nested (make_group_stage \"nested-binding-proof\"\
+    \ local_source\n\t\t(list unknown) (list unknown) (list (list value (scalar_once_reduce_first) nil))\n\t\tnil\
+    \ '() '() nil nil '()))\n\t(define local_source (make_query_block \"memcp-tests\" (list local_source)\n\t\t\
+    '() true '() nil '() nil nil '() (list nested) '()))\n\t(define stage (make_group_stage \"binding-proof\" local_source\
+    \ '() '()\n\t\t(list (list value (scalar_once_reduce_first) nil)) nil '() '() nil nil\n\t\t(list (list 'condition\
+    \ true) (list 'lookup-keys '())\n\t\t\t(list 'btw2025_domain '()) (list 'btw2025_accessing_after_simple '()))))\n\
+    \t(not (scalar_probe_bindings_complete? stage (list caller_source)))\n)\n"
+  expect:
+    result: true
+- name: A live lookup coordinate must resolve even when the producer does not read it
+  scm: "(begin\n\t(define local_source (list \"local\" \"memcp-tests\" \"nsl_target\" false true nil))\n\t(define\
+    \ caller_source (list \"caller\" \"memcp-tests\" \"nsl_driver\" false true nil))\n\t(define middle (list 'get_column\
+    \ \"caller\" false \"middle_id\" false))\n\t(define tenant (list 'get_column \"caller\" false \"tenant_id\"\
+    \ false))\n\t(define value (list 'get_column \"local\" false \"final_id\" false))\n\t(define unknown (list 'get_column\
+    \ \"unknown_caller\" false \"middle_id\" false))\n\t(define stage (make_group_stage \"binding-proof\" local_source\
+    \ (list unknown) (list unknown)\n\t\t(list (list value (scalar_once_reduce_first) nil)) nil '() '() nil nil\n\
+    \t\t(list (list 'condition true) (list 'lookup-keys (list unknown))\n\t\t\t(list 'btw2025_domain (list unknown))\
+    \ (list 'btw2025_accessing_after_simple '()))))\n\t(not (scalar_probe_bindings_complete? stage (list caller_source)))\n\
+    )\n"
+  expect:
+    result: true
+- name: Stale aliases do not make a closed keyed producer require a driver row
+  scm: |
+    (begin
+      (define local (list "local" "memcp-tests" "nsl_target" false true nil))
+      (define caller (list "caller" "memcp-tests" "nsl_driver" false true nil))
+      (define coordinate (list 'get_column "caller" false "middle_id" false))
+      (define local_key (list 'get_column "local" false "id" false))
+      (define bound (list relational_iteration_parameter 'bound_coordinate))
+      (define domain (list coordinate bound))
+      (define aggregate (list (list (list 'get_column "local" false "final_id" false)
+        (scalar_once_reduce_first) nil)))
+      (define facts (list (list 'condition true) (list 'lookup-keys domain)
+        (list 'btw2025_domain domain) (list 'btw2025_accessing_after_simple '("old_period"))
+        (list 'null_semantics 'scalar) (list 'result_max_rows_per_partition 1)
+        (list 'partition_limit 1) (list 'on_overflow 'ignore)))
+      (define closed (make_group_stage "closed-keyed-input" local domain (list local_key bound)
+        aggregate nil '() '() nil nil facts))
+      (define input (make_query_block "memcp-tests" (list local) '()
+        (list 'equal?? local_key coordinate) '() nil '() nil nil '() '() '()))
+      (define child (make_group_stage "free-query-input" input domain domain
+        aggregate nil '() '() nil nil facts))
+      (define closed_reads (scalar_probe_free_column_refs closed))
+      (define child_reads (scalar_probe_free_column_refs child))
+      (and (scalar_first_probe_supported? closed) (scalar_first_probe_supported? child)
+        (scalar_probe_bindings_complete? closed (list caller))
+        (scalar_probe_bindings_complete? child (list caller))
+        (empty_list? closed_reads)
+        (not (empty_list? child_reads))
+        (reduce child_reads (lambda (valid ref) (and valid (expression_equal? ref coordinate))) true)))
+  expect:
+    result: true
+- name: Ordinary callers preserve reuse while contribution and guarded cache producers own fresh input
+  scm: |
+    (begin
+      (define source (list "local" "memcp-tests" "nsl_target" false true nil))
+      (define coordinate (list 'get_column "caller" false "middle_id" false))
+      (define facts (list (list 'lookup-keys (list coordinate)) (list 'retained-contract 17)))
+      (define plain (make_group_stage "ordinary-caller" source (list coordinate) (list coordinate)
+        '() nil '() '() nil nil facts))
+      (define inherited (group_stage_with_facts plain
+        (qassoc_set facts 'contribution_probe true)))
+      (define stages (list plain inherited))
+      (define ordinary (scalar_aggregate_probe_catalog stages nil nil))
+      (define owned (lambda (catalog)
+        (reduce catalog (lambda (valid stage)
+          (and valid (qassoc_get (gs_facts stage) 'contribution_probe false)
+            (equal? (qassoc_get (gs_facts stage) 'retained-contract nil) 17)
+            (expression_equal? (gs_domain stage) (list coordinate)))) true)))
+      (and (expression_equal? ordinary stages)
+        (not (qassoc_get (gs_facts (car ordinary)) 'contribution_probe false))
+        (qassoc_get (gs_facts (cadr ordinary)) 'contribution_probe false)
+        (reduce (list 'full 'delta 'direct 'fresh 'point-cached) (lambda (valid mode)
+          (and valid (not (nil? mode)) (owned (scalar_aggregate_probe_catalog stages mode nil)))) true)
+        (owned (scalar_aggregate_probe_catalog stages nil (list 'property-witness)))))
+  expect:
+    result: true

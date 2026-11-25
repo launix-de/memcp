@@ -1,0 +1,66 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# APPLY scope: https://learn.microsoft.com/sql/t-sql/queries/from-transact-sql
+# Aggregate INT result and COUNT metadata nullability:
+# https://learn.microsoft.com/sql/t-sql/functions/sum-transact-sql
+# https://learn.microsoft.com/sql/t-sql/functions/count-transact-sql
+metadata:
+  description: Lateral result metadata retains the declared producer scope before execution
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+test_cases:
+- name: Aggregate metadata retains the preceding literal source and actual result rows
+  tds:
+    statements:
+    - sql: >-
+        SELECT q.id,s.total FROM (VALUES(2),(3)) q(id)
+        CROSS APPLY (SELECT SUM(v.unit)+q.id AS total FROM (VALUES(1)) v(unit)) s
+        ORDER BY q.id
+      expect:
+        rows: 2
+        data: [{id: 2,total: 3},{id: 3,total: 4}]
+        column_types: &aggregate_types
+        - {name: id,type: INT,nullable: true}
+        - {name: total,type: INT,nullable: true}
+- name: An empty result exposes the same declarations without sampling rows
+  tds:
+    statements:
+    - sql: >-
+        SELECT TOP(0) q.id,s.total FROM (VALUES(2),(3)) q(id)
+        CROSS APPLY (SELECT SUM(v.unit)+q.id AS total FROM (VALUES(1)) v(unit)) s
+      expect:
+        rows: 0
+        data: []
+        column_types: *aggregate_types
+- name: NULL outer values retain aggregate nullability and counting semantics
+  tds:
+    statements:
+    - sql: >-
+        SELECT q.id,s.total,s.present FROM (VALUES(CAST(NULL AS INT)),(2)) q(id)
+        CROSS APPLY (SELECT SUM(v.unit)+q.id AS total,CASE WHEN q.id IS NULL THEN 0 ELSE COUNT(v.unit) END AS present
+          FROM (VALUES(1)) v(unit)) s ORDER BY q.id
+      expect:
+        rows: 2
+        data: [{id: null,total: null,present: 0},{id: 2,total: 3,present: 1}]
+        column_types:
+        - {name: id,type: INT,nullable: true}
+        - {name: total,type: INT,nullable: true}
+        - {name: present,type: INT,nullable: true}
+- name: Preparation describes lateral aggregate declarations without execution
+  scm: |
+    (map (tds_describe "memcp-tests"
+      "SELECT q.id,s.total FROM (VALUES(2),(3)) q(id) CROSS APPLY (SELECT SUM(v.unit)+q.id AS total FROM (VALUES(1)) v(unit)) s"
+      "" (newsession))
+      (lambda (column) (list (column "name") (column "sql_type") (mod (column "flags") 2))))
+  expect: {result: [[id,INT,1],[total,INT,1]]}
+- name: A second lateral producer can read the preceding aggregate declaration
+  sql: >-
+    SELECT q.id,t.total FROM (VALUES(2),(3)) q(id)
+    CROSS APPLY (SELECT SUM(v.unit)+q.id AS total FROM (VALUES(1)) v(unit)) s
+    CROSS APPLY (SELECT SUM(v.unit)+s.total AS total FROM (VALUES(10)) v(unit)) t
+    ORDER BY q.id
+  expect: {rows: 2,data: [{id: 2,total: 13},{id: 3,total: 14}]}
+- name: A closed derived source cannot read a preceding sibling
+  sql: SELECT s.id FROM (VALUES(2)) q(id) CROSS JOIN (SELECT q.id AS id) s
+  expect: {error: true,contains: q}

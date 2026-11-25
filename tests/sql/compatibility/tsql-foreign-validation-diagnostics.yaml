@@ -1,0 +1,75 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Actual historical foreign-key violations retain native statement restoration and T-SQL error policy
+setup:
+  - sql: CREATE TABLE foreign_diagnostic_parent(id INT PRIMARY KEY)
+  - sql: CREATE TABLE foreign_diagnostic_child(id INT PRIMARY KEY,parent_id INT)
+  - sql: CREATE TABLE foreign_diagnostic_marker(id INT PRIMARY KEY,value INT)
+  - sql: INSERT foreign_diagnostic_parent VALUES(1)
+  - sql: INSERT foreign_diagnostic_child VALUES(10,999)
+  - sql: INSERT foreign_diagnostic_marker VALUES(1,0)
+cleanup:
+  - sql: DROP TABLE IF EXISTS foreign_diagnostic_child
+  - sql: DROP TABLE IF EXISTS foreign_diagnostic_parent
+  - sql: DROP TABLE IF EXISTS foreign_diagnostic_marker
+test_cases:
+  - name: A real orphan reports 547 and preserves prior work with XACT_ABORT off
+    tds:
+      statements:
+        - sql: SET XACT_ABORT OFF
+        - sql: BEGIN TRANSACTION
+        - sql: UPDATE foreign_diagnostic_marker SET value=7 WHERE id=1
+        - sql: |
+            BEGIN TRY
+              ALTER TABLE foreign_diagnostic_child WITH CHECK ADD CONSTRAINT FK_foreign_diagnostic_off
+                FOREIGN KEY(parent_id) REFERENCES foreign_diagnostic_parent(id);
+            END TRY
+            BEGIN CATCH
+              SELECT ERROR_NUMBER() AS number,@@TRANCOUNT AS depth,XACT_STATE() AS state,
+                (SELECT value FROM foreign_diagnostic_marker WHERE id=1) AS value,
+                (SELECT COUNT(*) FROM sys.foreign_keys WHERE name=N'FK_foreign_diagnostic_off') AS declarations;
+            END CATCH
+          expect: {rows: 1, data: [{number: 547, depth: 1, state: 1, value: 7, declarations: 0}]}
+        - sql: ROLLBACK TRANSACTION
+        - sql: SELECT id,value FROM foreign_diagnostic_marker
+          expect: {rows: 1, data: [{id: 1, value: 0}]}
+  - name: XACT_ABORT on retains the existing rollback-only policy for a real orphan
+    tds:
+      statements:
+        - sql: SET XACT_ABORT ON
+        - sql: BEGIN TRANSACTION
+        - sql: UPDATE foreign_diagnostic_marker SET value=9 WHERE id=1
+        - sql: SELECT id,value FROM foreign_diagnostic_marker
+          expect: {rows: 1, data: [{id: 1, value: 9}]}
+        - sql: |
+            DECLARE @number INT,@depth INT,@state INT,@value INT,@declarations INT;
+            BEGIN TRY
+              ALTER TABLE foreign_diagnostic_child WITH CHECK ADD CONSTRAINT FK_foreign_diagnostic_on
+                FOREIGN KEY(parent_id) REFERENCES foreign_diagnostic_parent(id);
+            END TRY
+            BEGIN CATCH
+              SELECT @number=ERROR_NUMBER(),@depth=@@TRANCOUNT,@state=XACT_STATE(),
+                @value=(SELECT value FROM foreign_diagnostic_marker WHERE id=1),
+                @declarations=(SELECT COUNT(*) FROM sys.foreign_keys WHERE name=N'FK_foreign_diagnostic_on');
+              SELECT @number AS number,@depth AS depth,@state AS state,@value AS assigned_value,
+                @declarations AS declarations,@@TRANCOUNT AS visible_depth,XACT_STATE() AS visible_state,
+                (SELECT value FROM foreign_diagnostic_marker WHERE id=1) AS visible_value;
+              ROLLBACK TRANSACTION;
+            END CATCH
+            SELECT @number AS number,@depth AS depth,@state AS state,@value AS value,@declarations AS declarations,
+              @@TRANCOUNT AS after_depth,XACT_STATE() AS after_state,
+              (SELECT value FROM foreign_diagnostic_marker WHERE id=1) AS after_value,
+              (SELECT COUNT(*) FROM sys.foreign_keys WHERE name=N'FK_foreign_diagnostic_on') AS after_declarations;
+          expect:
+            result_sets:
+              - rows: 1
+                data: [{number: 547, depth: 1, state: -1, assigned_value: 9, declarations: 0, visible_depth: 1, visible_state: -1, visible_value: 9}]
+              - rows: 1
+                data: [{number: 547, depth: 1, state: -1, value: 9, declarations: 0, after_depth: 0, after_state: 0, after_value: 0, after_declarations: 0}]
+        - sql: SET XACT_ABORT OFF
+        - sql: SELECT id,value FROM foreign_diagnostic_marker
+          expect: {rows: 1, data: [{id: 1, value: 0}]}

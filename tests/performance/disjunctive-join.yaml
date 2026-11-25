@@ -15,16 +15,16 @@ setup:
     VARCHAR(32)) ENGINE=memory
 - scm: |-
     (begin
-     (insert (table "memcp-tests" false "qa_part" false) '("p_partkey" "p_brand" "p_container" "p_size")
+     (insert (table "memcp-tests" false "qa_part" false nil) '("p_partkey" "p_brand" "p_container" "p_size")
       (map (produceN 128) (lambda (i) (list (+ i 1) (nth '("Brand#12" "Brand#23" "Brand#34") (mod i 3))
        (nth '("SM CASE" "MED BAG" "LG CASE") (mod i 3)) (+ 1 (mod i 16))))))
-     (insert (table "memcp-tests" false "qa_lineitem" false) '("l_partkey" "l_quantity" "l_extendedprice" "l_discount" "l_shipmode" "l_shipinstruct")
+     (insert (table "memcp-tests" false "qa_lineitem" false nil) '("l_partkey" "l_quantity" "l_extendedprice" "l_discount" "l_shipmode" "l_shipinstruct")
       (map (produceN 1024) (lambda (i) (list (+ 1 (mod i 128)) (mod i 35) (+ 100 (mod i 10)) 0
        (if (equal? (mod i 5) 0) "AIR" "SHIP") (if (equal? (mod i 7) 0) "OTHER" "DELIVER IN PERSON")))))
      (rebuild true false) true)
 test_cases:
 - name: Q19 original OR
-  sql: "select\n\tsum(l_extendedprice* (1 - l_discount)) as revenue\nfrom\n\tqa_lineitem,\n\tqa_part\nwhere\n\t\
+  sql: &q19_original_or "select\n\tsum(l_extendedprice* (1 - l_discount)) as revenue\nfrom\n\tqa_lineitem,\n\tqa_part\nwhere\n\t\
     (\n\t\tp_partkey = l_partkey\n\t\tand p_brand = 'Brand#12'\n\t\tand p_container in ('SM CASE', 'SM BOX', 'SM\
     \ PACK', 'SM PKG')\n\t\tand l_quantity >= 1 and l_quantity <= 1 + 10\n\t\tand p_size between 1 and 5\n\t\tand\
     \ l_shipmode in ('AIR', 'AIR REG')\n\t\tand l_shipinstruct = 'DELIVER IN PERSON'\n\t)\n\tor\n\t(\n\t\tp_partkey\
@@ -87,6 +87,14 @@ test_cases:
     rows: 1
     data:
     - revenue: 5195
+- name: TSQL disjunctive joins retain branch association after local necessary filters
+  syntax: tsql
+  sql: *q19_original_or
+  expect: {rows: 1, data: [{revenue: 5195}]}
+- name: PostgreSQL disjunctive joins retain branch association after local necessary filters
+  syntax: postgresql
+  sql: *q19_original_or
+  expect: {rows: 1, data: [{revenue: 5195}]}
 cleanup:
 - sql: DROP TABLE IF EXISTS qa_lineitem
 - sql: DROP TABLE IF EXISTS qa_part

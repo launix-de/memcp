@@ -1,0 +1,98 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Native local temporary targets capture typed procedure results and feed metadata projections
+  requires_tds: true
+  isolated: true
+test_cases:
+  - name: Native temporary target captures the complete virtual profile
+    session_id: temporary-capture
+    sql: |
+      CREATE TABLE #profile(id INT,name SYSNAME,internal_value INT,value NVARCHAR(512));
+      INSERT #profile EXEC master.dbo.xp_msver;
+    expect: {affected_rows: 7}
+  - name: Captured profile retains native row and assignment contracts
+    session_id: temporary-capture
+    sql: "SELECT id,name,internal_value,value FROM #profile WHERE name=N'ProductName'"
+    expect: {rows: 1,data: [{id: 1,name: ProductName,internal_value: null,value: MemCP}]}
+  - name: Captured profile is a common relational scalar subquery source
+    session_id: temporary-capture
+    sql: "SELECT (SELECT value FROM #profile WHERE name=N'ProductName') AS product,(SELECT internal_value FROM #profile WHERE name=N'ProcessorCount') AS processors"
+    expect: {rows: 1,data: [{product: MemCP,processors: 1}]}
+  - name: Captured temporary profile is explicitly retired
+    session_id: temporary-capture
+    sql: "DROP TABLE #profile"
+    expect: {rows: 0, result_not_contains: '"affected_rows"'}
+  - name: Complete virtual server metadata batch composes capture registry scalar subqueries variants and teardown
+    session_id: temporary-profile-flow
+    sql: &profile_sql |
+      CREATE TABLE #server_profile(id INT,name SYSNAME,internal_value INT,value NVARCHAR(512));
+      INSERT #server_profile EXEC master.dbo.xp_msver;
+      DECLARE @installation_root NVARCHAR(512);
+      EXEC master.dbo.xp_instance_regread N'HKEY_LOCAL_MACHINE',N'SOFTWARE\Microsoft\MSSQLServer\Setup',N'SQLPath',@installation_root OUTPUT;
+      SELECT
+        (SELECT value FROM #server_profile WHERE name=N'ProductName') AS product,
+        SERVERPROPERTY(N'ProductVersion') AS version_string,
+        (SELECT value FROM #server_profile WHERE name=N'Language') AS language,
+        (SELECT value FROM #server_profile WHERE name=N'Platform') AS platform,
+        CAST(SERVERPROPERTY(N'Edition') AS SYSNAME) AS edition,
+        (SELECT internal_value FROM #server_profile WHERE name=N'ProcessorCount') AS processors,
+        (SELECT value FROM #server_profile WHERE name=N'WindowsVersion') AS os_version,
+        (SELECT internal_value FROM #server_profile WHERE name=N'PhysicalMemory') AS physical_memory,
+        CAST(SERVERPROPERTY(N'IsClustered') AS BIT) AS is_clustered,
+        @installation_root AS root_directory,
+        CONVERT(SYSNAME,SERVERPROPERTY(N'Collation')) AS collation;
+      DROP TABLE #server_profile;
+    expect: &profile_result
+      rows: 1
+      data:
+        - product: MemCP
+          version_string: 16.0.0.1
+          language: English
+          platform: Windows
+          edition: MemCP
+          processors: 1
+          os_version: '10.0'
+          physical_memory: null
+          is_clustered: false
+          root_directory: C:\MemCP\
+          collation: utf8mb4_general_ci
+  - name: Complete metadata batch leaves no connection-local table
+    session_id: temporary-profile-flow
+    sql: "SELECT id FROM #server_profile"
+    expect: {error: true}
+  - name: Real TDS metadata batch retains the variant and declared scalar result contracts
+    tds:
+      statements:
+        - sql: *profile_sql
+          expect:
+            <<: *profile_result
+            column_types:
+              - {name: product,type: NVARCHAR,size: 1024}
+              - {name: version_string,type: SQL_VARIANT}
+              - {name: language,type: NVARCHAR,size: 1024}
+              - {name: platform,type: NVARCHAR,size: 1024}
+              - {name: edition,type: NVARCHAR,size: 256}
+              - {name: processors,type: INT}
+              - {name: os_version,type: NVARCHAR,size: 1024}
+              - {name: physical_memory,type: INT}
+              - {name: is_clustered,type: BIT}
+              - {name: root_directory,type: NVARCHAR,size: 1024}
+              - {name: collation,type: NVARCHAR,size: 256}
+  - name: Captured procedure leaves inherit caller temporary relation capabilities
+    session_id: temporary-source-capture
+    sql: |
+      CREATE TABLE #source(id INT,name SYSNAME);
+      CREATE TABLE #destination(id INT,name SYSNAME);
+      INSERT #source VALUES(5,N'inherited');
+      GO
+      CREATE PROCEDURE temporary_capture_source AS SELECT id,name FROM #source;
+      GO
+      INSERT #destination EXEC temporary_capture_source;
+      SELECT id,name FROM #destination;
+      DROP TABLE #destination;
+      DROP TABLE #source;
+    expect: {rows: 1,data: [{id: 5,name: inherited}]}
+cleanup:
+  - sql: DROP PROCEDURE IF EXISTS temporary_capture_source

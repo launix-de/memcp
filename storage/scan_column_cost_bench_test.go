@@ -51,7 +51,7 @@ func scanColumnCostTable(b testing.TB, name string, rows int) (*table, []string)
 		}
 	}
 	tbl.Insert(cols, values, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	return tbl, cols
 }
 
@@ -65,7 +65,7 @@ func TestEstimateFilteredRowsReportsExaminedSample(t *testing.T) {
 		t.Fatalf("active shards = %d, want 1", len(shards))
 	}
 	accessSchema, accessValues := newScanAccessSchema(scanAccessConsumerScan, nil, -1), []scm.Scmer(nil)
-	estimate := shards[0].EstimateFilteredRows(cols[:1], condition, 3, nil, accessSchema, accessValues)
+	estimate := shards[0].EstimateFilteredRows(cols[:1], condition, 3, nil, accessSchema, accessValues, shards[0].t.bindColumnInput(nil))
 	if estimate.rows != 3 || !estimate.capped || estimate.examined != 5 ||
 		estimate.population != "table_rows" || estimate.coverage != "sampled" {
 		t.Fatalf("estimate = %+v; want 3 sampled matches after 5 table rows", estimate)
@@ -86,13 +86,17 @@ func TestEstimateFilteredRowsRecognizesCompleteCappedIndexRange(t *testing.T) {
 	var buf [16]uint32
 	for range 2 {
 		shard.mu.RLock()
-		shard.iterateIndex(nil, runtimeScanAccess(bounds), len(shard.deltaRows()), buf[:], 1, nil,
+		_, columnInput1, finishColumnInput1 := shard.t.readDataContext(nil)
+		defer finishColumnInput1.release()
+		columnAccess1 := runtimeScanAccess(bounds)
+		columnAccess1.columnInput = columnInput1
+		shard.iterateIndex(nil, columnAccess1, len(shard.deltaRows()), buf[:], 1, nil,
 			func([]uint32) bool { return true })
 		shard.mu.RUnlock()
 	}
 
 	accessSchema, accessValues := testEqualScanAccess("c0", scm.NewInt(4))
-	estimate := shard.EstimateFilteredRows(cols[:1], condition, 1, nil, accessSchema, accessValues)
+	estimate := shard.EstimateFilteredRows(cols[:1], condition, 1, nil, accessSchema, accessValues, shard.t.bindColumnInput(nil))
 	if estimate.rows != 1 || estimate.capped || estimate.examined != 1 ||
 		estimate.population != "index_candidates" || estimate.coverage != "exact" {
 		t.Fatalf("estimate = %+v; want complete one-row index range", estimate)
@@ -113,7 +117,7 @@ func TestScanSelectivityEstimateScalesIndexCandidatesByShardPopulation(t *testin
 		values[row] = []scm.Scmer{scm.NewInt(int64(row % 10))}
 	}
 	tbl.Insert([]string{"tenant"}, values, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 
 	condition := scm.NewProcStruct(scm.Proc{
 		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("tenant")}),
@@ -127,16 +131,20 @@ func TestScanSelectivityEstimateScalesIndexCandidatesByShardPopulation(t *testin
 		bounds := extractBoundaries([]string{"tenant"}, condition)
 		var buf [128]uint32
 		shard.mu.RLock()
-		shard.iterateIndex(nil, runtimeScanAccess(bounds), len(shard.deltaRows()), buf[:], 100, nil,
+		_, columnInput2, finishColumnInput2 := shard.t.readDataContext(nil)
+		defer finishColumnInput2.release()
+		columnAccess2 := runtimeScanAccess(bounds)
+		columnAccess2.columnInput = columnInput2
+		shard.iterateIndex(nil, columnAccess2, len(shard.deltaRows()), buf[:], 100, nil,
 			func([]uint32) bool { return true })
 		shard.mu.RUnlock()
 	}
 	accessSchema, accessValues := testEqualScanAccess("tenant", scm.NewInt(4))
-	shardEstimate := shard.EstimateFilteredRows([]string{"tenant"}, condition, 512, nil, accessSchema, accessValues)
+	shardEstimate := shard.EstimateFilteredRows([]string{"tenant"}, condition, 512, nil, accessSchema, accessValues, shard.t.bindColumnInput(nil))
 	if shardEstimate.population != "index_candidates" || shardEstimate.examined != 100 {
 		t.Fatalf("shard estimate = %+v, want 100 index candidates", shardEstimate)
 	}
-	boundedEstimate := shard.EstimateFilteredRows([]string{"tenant"}, condition, 50, nil, accessSchema, accessValues)
+	boundedEstimate := shard.EstimateFilteredRows([]string{"tenant"}, condition, 50, nil, accessSchema, accessValues, shard.t.bindColumnInput(nil))
 	if boundedEstimate.rows != 100 || boundedEstimate.capped ||
 		boundedEstimate.population != "index_candidates" || boundedEstimate.coverage != "upper_bound" {
 		t.Fatalf("bounded shard estimate = %+v, want 100-row index upper bound", boundedEstimate)
@@ -168,7 +176,7 @@ func TestScanSelectivityEstimateScalesIndexCandidatesByShardPopulation(t *testin
 func TestScanSelectivityEstimateLoadsColdPersistentShard(t *testing.T) {
 	Init(scm.Globalenv)
 	tbl, persistence := createDurabilityTestTable(t, "test_selectivity_cold_shard", 100)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 
 	db := newDatabase()
 	db.Name = "test_selectivity_cold_shard"
@@ -304,7 +312,7 @@ func scanTypedColumnCostTable(b *testing.B, name string, typ string, rows int, v
 		}
 	}
 	tbl.Insert(cols, values, nil, scm.NewNil(), false, nil)
-	RebuildTable(tbl, true, false)
+	RebuildTable(tbl, true, false, nil)
 	return tbl, cols
 }
 
@@ -525,7 +533,7 @@ func BenchmarkFilterBufferLocalScan(b *testing.B) {
 			values[row] = scm.NewInt(int64(row + i))
 		}
 		storage := buildStorageInt(values)
-		readers[i] = newCachedColumnReaderTx(storage, nil, false, ReadAuto)
+		readers[i] = newCachedColumnReaderTx(storage, nil, false, ReadAuto, nil, nativeTableInput{})
 		emitters[i] = storage.JITEmit
 		valueTypes[i] = storage.JITValueType()
 	}
@@ -713,8 +721,8 @@ func TestTypedFilterMixedMainDelta(t *testing.T) {
 	shard.deltaColumns["amount"] = 0
 	shard.publishDeltaRows([][]scm.Scmer{{scm.NewFloat(3.5)}, {scm.NewNil()}})
 	shard.mu.Unlock()
-	column := shard.getColumnStorageOrPanic("amount", false, nil)
-	readers := []ColumnReader{newCachedColumnReaderTx(column, nil, false, ReadAuto)}
+	column := shard.getColumnStorageInput("amount", false, shard.initializedColumnInput(shard.t.bindColumnInput(nil)), nil)
+	readers := []ColumnReader{newCachedColumnReaderTx(column, nil, false, ReadAuto, nil, nativeTableInput{})}
 	predicate := benchmarkMapReduceFusionProc(t, "(lambda (a) (> a 2))")
 	kernel := scm.CompileJITFilterBuffer(predicate.Proc(), []uint8{column.JITValueType()})
 	if kernel == nil {

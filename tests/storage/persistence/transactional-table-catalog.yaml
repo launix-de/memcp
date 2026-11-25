@@ -1,0 +1,162 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  syntax: tsql
+  description: Native transactional catalog declarations share the ACID row decision
+setup: []
+cleanup:
+- scm: (dropdatabase "native_catalog_replaced" true)
+- sql: DROP TABLE IF EXISTS native_committed_probe
+- sql: DROP TABLE IF EXISTS native_rollback_probe
+- sql: DROP TABLE IF EXISTS native_savepoint_kept
+- sql: DROP TABLE IF EXISTS native_savepoint_retired
+- sql: DROP TABLE IF EXISTS native_overflow_committed
+- sql: DROP TABLE IF EXISTS native_overflow_aborted
+- sql: DROP TABLE IF EXISTS native_scratch_commit
+test_cases:
+- name: Native creator sees its unpublished declaration and commits it
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "native_committed_probe" (list (list "column" "id" "INT" (list) (list)))
+        (list "engine" "safe") false tx)
+      (define private (and (not (nil? (table "memcp-tests" false "native_committed_probe" false tx)))
+        (nil? (table "memcp-tests" false "native_committed_probe" false nil))))
+      (define target (table "memcp-tests" false "native_committed_probe" false tx))
+      (insert target '("id") (list (list 1) (list 2)) '() nil false nil tx)
+      (define own_rows (scan tx target '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +))
+      (tx_commit s)
+      (and private (equal? own_rows 3) (not (nil? (table "memcp-tests" false "native_committed_probe" false nil)))))
+  expect: {result: true}
+- name: A committed empty declaration is a real native table
+  sql: SELECT COUNT(*) AS n FROM native_committed_probe
+  expect: {rows: 1,data: [{n: 2}]}
+- name: Native rollback retires only its unpublished declaration
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (createtable "memcp-tests" "native_rollback_probe" (list (list "column" "id" "INT" (list) (list)))
+        (list "engine" "safe") false tx)
+      (insert (table "memcp-tests" false "native_rollback_probe" false tx) '("id") (list (list 9)) '() nil false nil tx)
+      (tx_rollback s)
+      (nil? (table "memcp-tests" false "native_rollback_probe" false nil)))
+  expect: {result: true}
+- name: Savepoint retirement removes only declarations created after its boundary
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (s "schema" "memcp-tests") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define columns (list (list "column" "id" "INT" (list) (list))))
+      (createtable "memcp-tests" "native_savepoint_kept" columns (list "engine" "safe") false tx)
+      (define boundary (tx_savepoint tx))
+      (createtable "memcp-tests" "native_savepoint_retired" columns (list "engine" "safe") false tx)
+      (insert (table "memcp-tests" false "native_savepoint_retired" false tx) '("id") (list (list 17)) '() nil false nil tx)
+      (tx_rollback_to_savepoint tx boundary)
+      (define retired (nil? (table "memcp-tests" false "native_savepoint_retired" false tx)))
+      (insert (table "memcp-tests" false "native_savepoint_kept" false tx) '("id") (list (list 19)) '() nil false nil tx)
+      (tx_commit s)
+      (and retired (not (nil? (table "memcp-tests" false "native_savepoint_kept" false nil)))))
+  expect: {result: true}
+- name: A savepoint cannot retire another native transaction's declarations
+  scm: |
+    (begin
+      (define a (newsession)) (define b (newsession)) (a "username" "root") (b "username" "root")
+      (tx_begin a) (tx_begin b)
+      (define boundary (tx_savepoint (a "__memcp_tx")))
+      (define denied (try (lambda () (begin (tx_rollback_to_savepoint (b "__memcp_tx") boundary) false))
+        (lambda (failure) (strlike (concat failure) "%another native transaction%"))))
+      (tx_rollback a) (tx_rollback b) denied)
+  expect: {result: true}
+- name: Catalog transactions retain native scoped memory scratch semantics
+  scm: |
+    (begin
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define cols (list (list "column" "id" "INT" (list) (list))))
+      (createtable "memcp-tests" "native_scratch_commit" cols (list "engine" "safe") false tx)
+      (define scope (new_relation_scope s))
+      (createtable "memcp-tests" ".native_catalog_scratch" cols (list "engine" "memory" "ephemeral" true "scope" scope) false tx)
+      (define scratch (table "memcp-tests" false ".native_catalog_scratch" false tx))
+      (insert scratch '("id") (list (list 23) (list 29)) '() nil false nil tx)
+      (define total (scan tx scratch '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +))
+      (close_relation_scope scope)
+      (tx_commit s)
+      (and (equal? total 52) (nil? (table "memcp-tests" false ".native_catalog_scratch" false nil))))
+  expect: {result: true}
+- name: Private overflow lanes commit and rollback through their native catalog owner
+  scm: |
+    (begin
+      (define old_size (settings "ShardSize"))
+      (define result (try (lambda () (begin
+        (settings "ShardSize" 2)
+        (define cols (list (list "column" "id" "INT" (list) (list)) (list "column" "payload" "TEXT" (list) (list))))
+        (define payload (string_repeat "x" 4096))
+        (define rows (map '(1 2 3 4 5 6) (lambda (id) (list id payload))))
+        (define a (newsession)) (a "username" "root") (tx_begin a)
+        (define tx (a "__memcp_tx"))
+        (createtable "memcp-tests" "native_overflow_committed" cols (list "engine" "safe") false tx)
+        (insert (table "memcp-tests" false "native_overflow_committed" false tx) '("id" "payload") rows '() nil false nil tx)
+        (tx_commit a)
+        (define b (newsession)) (b "username" "root") (tx_begin b)
+        (define bx (b "__memcp_tx"))
+        (createtable "memcp-tests" "native_overflow_aborted" cols (list "engine" "safe") false bx)
+        (insert (table "memcp-tests" false "native_overflow_aborted" false bx) '("id" "payload") rows '() nil false nil bx)
+        (tx_rollback b)
+        (nil? (table "memcp-tests" false "native_overflow_aborted" false nil))))
+        (lambda (failure) (begin (settings "ShardSize" old_size) (error failure)))))
+      (settings "ShardSize" old_size) result)
+  expect: {result: true}
+- name: Replacing a database cannot transfer an old transaction catalog authority
+  scm: |
+    (begin
+      (createdatabase "native_catalog_replaced" false)
+      (define s (newsession)) (s "username" "root") (tx_begin s)
+      (define tx (s "__memcp_tx"))
+      (define cols (list (list "column" "id" "INT" (list) (list))))
+      (createtable "native_catalog_replaced" "old_private" cols (list "engine" "safe") false tx)
+      (dropdatabase "native_catalog_replaced" false)
+      (createdatabase "native_catalog_replaced" false)
+      (createtable "native_catalog_replaced" "replacement" cols (list "engine" "safe") false nil)
+      (insert (table "native_catalog_replaced" false "replacement" false nil) '("id") (list (list 43)) '() nil false nil nil)
+      (define denied (try (lambda () (begin (tx_commit s) false))
+        (lambda (failure) (strlike (concat failure) "%replaced%"))))
+      (tx_rollback s)
+      (and denied (nil? (table "native_catalog_replaced" false "old_private" false nil))
+        (equal? (scan nil (table "native_catalog_replaced" false "replacement" false nil)
+          '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +) 43)))
+  expect: {result: true}
+- name: Restart retains only the committed declaration
+  syntax: mysql
+  sql: SHUTDOWN
+  restart_timeout: 60
+  expect: {rows: 0}
+- name: Native committed schema survives restart
+  sql: SELECT COUNT(*) AS n FROM native_committed_probe
+  expect: {rows: 1,data: [{n: 2}]}
+- name: Rolled back schema stays absent after restart
+  sql: SELECT name FROM sys.objects WHERE name=N'native_rollback_probe'
+  expect: {rows: 0}
+
+- name: Savepoint prefix and its rows survive restart
+  sql: SELECT id FROM native_savepoint_kept
+  expect: {rows: 1,data: [{id: 19}]}
+- name: Retired savepoint suffix cannot be recovered as a table
+  sql: SELECT name FROM sys.objects WHERE name=N'native_savepoint_retired'
+  expect: {rows: 0}
+
+- name: Every private overflow lane survives the catalog commit and restart
+  sql: SELECT COUNT(*) AS n, SUM(id) AS total, MIN(LEN(CAST(payload AS NVARCHAR(MAX)))) AS width FROM native_overflow_committed
+  expect: {rows: 1,data: [{n: 6,total: 21,width: 4096}]}
+- name: Aborted overflow declarations remain absent after restart
+  sql: SELECT name FROM sys.objects WHERE name=N'native_overflow_aborted'
+  expect: {rows: 0}
+
+- name: Database replacement remains authoritative after restart
+  scm: |
+    (and (nil? (table "native_catalog_replaced" false "old_private" false nil))
+      (equal? (scan nil (table "native_catalog_replaced" false "replacement" false nil)
+        '() '() '() (lambda () true) '("id") (lambda (acc id) (+ acc id)) 0 +) 43))
+  expect: {result: true}

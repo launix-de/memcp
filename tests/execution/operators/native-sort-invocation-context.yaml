@@ -1,0 +1,45 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Native computed sort callbacks with invocation transaction inputs retain ordinary per-scan readers instead
+    of persistent row-index prerequisites
+  isolated: true
+setup:
+- sql: CREATE TABLE sort_context_values(id INT PRIMARY KEY,rank INT)
+- sql: INSERT INTO sort_context_values VALUES(1,30),(2,10),(3,20)
+test_cases:
+- name: Transaction-dependent sort keys remain invocation-local across repeated scans
+  scm: "(begin (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"memcp-tests\") (define order (lambda (rank\
+    \ $tx) (if (nil? $tx) (- 0 rank) rank)))\n (define parked (scan_order nil (table \"memcp-tests\" false \"sort_context_values\"\
+    \ false nil)\n (list (compiled_scan_access_header 0 \"scan_order\" 0 -1)) (list) (list) (lambda () true)\n (list order)\
+    \ (list (collate \"bin\" false)) 0 0 -1 (list \"id\")\n (lambda (acc id) (concat acc id \";\")) \"\" false))\n (define\
+    \ active (sql_with_statement s nil 0 \"native sort context\" (lambda (tx) (scan_order tx (table \"memcp-tests\" false\
+    \ \"sort_context_values\" false tx)\n (list (compiled_scan_access_header 0 \"scan_order\" 0 -1)) (list) (list) (lambda\
+    \ () true)\n (list order) (list (collate \"bin\" false)) 0 0 -1 (list \"id\")\n (lambda (acc id) (concat acc id \";\"\
+    )) \"\" false))))\n (define parked_again (scan_order nil (table \"memcp-tests\" false \"sort_context_values\" false\
+    \ nil)\n (list (compiled_scan_access_header 0 \"scan_order\" 0 -1)) (list) (list) (lambda () true)\n (list order) (list\
+    \ (collate \"bin\" false)) 0 0 -1 (list \"id\")\n (lambda (acc id) (concat acc id \";\")) \"\" false)) (list parked\
+    \ active parked_again))"
+  expect:
+    result:
+    - 1;3;2;
+    - 2;3;1;
+    - 1;3;2;
+- name: An unused reserved context formal is not a persistent table column
+  scm: "(begin (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"memcp-tests\")\n (sql_with_statement s\
+    \ nil 0 \"unused native sort context\" (lambda (tx)\n (scan_order tx (table \"memcp-tests\" false \"sort_context_values\"\
+    \ false tx)\n (list (compiled_scan_access_header 0 \"scan_order\" 0 -1)) (list) (list) (lambda () true)\n (list (lambda\
+    \ (rank $tx) (+ rank 0))) (list (collate \"bin\" false)) 0 0 -1 (list \"id\")\n (lambda (acc id) (concat acc id \";\"\
+    )) \"\" false))))"
+  expect:
+    result: 2;3;1;
+- name: Context-bound ordering retains the original filter and window
+  scm: "(begin (define s (newsession)) (s \"username\" \"root\") (s \"schema\" \"memcp-tests\")\n (sql_with_statement s\
+    \ nil 0 \"windowed native sort context\" (lambda (tx)\n (scan_order tx (table \"memcp-tests\" false \"sort_context_values\"\
+    \ false tx)\n (list (compiled_scan_access_header 0 \"scan_order\" 0 -1)) (list) (list \"rank\") (lambda (rank) (> rank\
+    \ 10))\n (list (lambda (rank $tx) (if (nil? $tx) (- 0 rank) rank))) (list (collate \"bin\" false)) 0 1 1 (list \"id\"\
+    )\n (lambda (acc id) (concat acc id \";\")) \"\" false))))"
+  expect:
+    result: 1;
+cleanup:
+- sql: DROP TABLE IF EXISTS sort_context_values

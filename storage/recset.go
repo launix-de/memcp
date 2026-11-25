@@ -484,10 +484,14 @@ type recSetKeyResult struct {
 }
 
 func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer) *recSet {
+	currentTx, columnInput, finishData := t.readDataContext(currentTx)
+	defer finishData.release()
+
 	atomic.StoreUint64(&t.lastAccessed, uint64(time.Now().UnixNano()))
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	access, compiled := scanAccessFromScheme(accessSchema, accessValues, nil)
+	access.columnInput = columnInput
 	if !compiled {
 		panic("scan_recset received an invalid compiled access schema")
 	}
@@ -563,6 +567,7 @@ func (t *table) scanRecSet(currentTx *TxContext, accessSchema scm.Scmer, accessV
 }
 
 func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
+	initializedColumns := t.initializedColumnInput(access.columnInput)
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := scanAccessCoversResidual(access) ||
 		conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
@@ -597,8 +602,8 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 				conditionGetters[i] = getter
 				continue
 			}
-			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned)
+			ccols[i] = t.getColumnStorageInput(k, skipShardReadLock, initializedColumns, currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, filterColumnReadHints(ccols[i], access, k, t.main_count)|readOperatorOwned, t.t, access.columnInput)
 			defer ReleaseColumnReader(cReaders[i])
 			cNeedsCachedReader[i] = columnReaderRequiresBinding(ccols[i], cReaders[i])
 			// This existing physical carrier contract marks readers whose batch
@@ -673,7 +678,7 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 					cdataset[i] = cReaders[i].GetValue(idx)
 				} else {
-					cdataset[i] = t.getDelta(int(idx-t.main_count), col)
+					cdataset[i] = t.getDeltaInput(int(idx-t.main_count), col, initializedColumns)
 				}
 			}
 		}
@@ -763,7 +768,60 @@ func (r *recSet) projectJoin(currentTx *TxContext, sourceKeyCols []string, targe
 	return target.projectJoinKeysToRecSet(currentTx, targetKeyCols, keys, ss)
 }
 
+// recSetKeyIdentity is an immutable declaration snapshot for NULL-safe native
+// relation membership. Join projection retains its original key semantics.
+// No source cursor, table handle or frontend session escapes into the index.
+type recSetKeyIdentity struct {
+	orders []func(scm.Scmer, scm.Scmer) bool
+}
+
+func newRecSetKeyIdentity(t *table, columns []string, tx *TxContext) *recSetKeyIdentity {
+	identity := &recSetKeyIdentity{orders: make([]func(scm.Scmer, scm.Scmer) bool, len(columns))}
+	for i, name := range columns {
+		declaration := t.ShowColumn(name, false, tx)
+		if declaration.IsNil() {
+			panic("recset_key_index: unknown or invisible key column")
+		}
+		collation := "bin"
+		fields := declaration.Slice()
+		for j := 0; j+1 < len(fields); j += 2 {
+			if scm.String(fields[j]) == "Collation" && !fields[j+1].IsNil() && scm.String(fields[j+1]) != "" {
+				collation = scm.String(fields[j+1])
+				break
+			}
+		}
+		relation := scm.Collate(scm.NewString(collation), scm.NewBool(false))
+		identity.orders[i] = scm.OrderRelationLess(relation.Func())
+	}
+	return identity
+}
+
+func (k *recSetProjectKeys) compare(left, right []scm.Scmer) int {
+	if k.identity == nil {
+		return compareProjectKey(left, right)
+	}
+	for i, order := range k.identity.orders {
+		if left[i].IsNil() {
+			if right[i].IsNil() {
+				continue
+			}
+			return -1
+		}
+		if right[i].IsNil() {
+			return 1
+		}
+		if order(left[i], right[i]) {
+			return -1
+		}
+		if order(right[i], left[i]) {
+			return 1
+		}
+	}
+	return 0
+}
+
 type recSetProjectKeys struct {
+	identity      *recSetKeyIdentity
 	width         int
 	values        []scm.Scmer
 	numericValues map[int64]struct{}
@@ -784,15 +842,24 @@ func (k *recSetProjectKeys) tuple(index int) []scm.Scmer {
 }
 
 func (k *recSetProjectKeys) contains(key []scm.Scmer) bool {
+	if k.identity == nil {
+		// Join membership excludes NULL on both sides. A generic expression
+		// comparator must not coerce a NULL probe into a stored zero key.
+		for _, value := range key {
+			if value.IsNil() {
+				return false
+			}
+		}
+	}
 	if (k.numericValues != nil || k.numericSpan != 0) && len(key) == 1 {
 		if integer, ok := projectNumericInteger(key[0]); ok {
 			return k.containsInteger(integer)
 		}
 	}
 	position := sort.Search(k.count(), func(i int) bool {
-		return compareProjectKey(k.tuple(i), key) >= 0
+		return k.compare(k.tuple(i), key) >= 0
 	})
-	return position < k.count() && compareProjectKey(k.tuple(position), key) == 0
+	return position < k.count() && k.compare(k.tuple(position), key) == 0
 }
 
 // Both execution and frequency costing use the same numeric membership.
@@ -909,7 +976,7 @@ func (k *recSetProjectKeys) sortAndDeduplicate() {
 	sort.Sort(makeProjectKeyIndices(k))
 	write := 1
 	for read := 1; read < count; read++ {
-		if compareProjectKey(k.tuple(write-1), k.tuple(read)) == 0 {
+		if k.compare(k.tuple(write-1), k.tuple(read)) == 0 {
 			continue
 		}
 		if write != read {
@@ -930,7 +997,7 @@ func makeProjectKeyIndices(keys *recSetProjectKeys) *projectKeyIndices {
 
 func (p *projectKeyIndices) Len() int { return p.keys.count() }
 func (p *projectKeyIndices) Less(i, j int) bool {
-	return compareProjectKey(p.keys.tuple(i), p.keys.tuple(j)) < 0
+	return p.keys.compare(p.keys.tuple(i), p.keys.tuple(j)) < 0
 }
 func (p *projectKeyIndices) Swap(i, j int) {
 	left := p.keys.tuple(i)
@@ -941,11 +1008,17 @@ func (p *projectKeyIndices) Swap(i, j int) {
 }
 
 func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []string, ss *scm.SessionState) recSetProjectKeys {
+	return r.collectKeys(currentTx, sourceKeyCols, ss, nil)
+}
+
+func (r *recSet) collectKeys(currentTx *TxContext, sourceKeyCols []string, ss *scm.SessionState, identity *recSetKeyIdentity) recSetProjectKeys {
+	currentTx, columnInput, finishData := r.table.readDataContext(currentTx)
+	defer finishData.release()
 	atomic.StoreUint64(&r.table.lastAccessed, uint64(time.Now().UnixNano()))
 	querySeq := querySeqFromTx(currentTx)
 	values := make(chan recSetKeyResult, len(r.shards))
 	width := len(sourceKeyCols)
-	keys := recSetProjectKeys{width: width, values: make([]scm.Scmer, int(r.count)*width)}
+	keys := recSetProjectKeys{identity: identity, width: width, values: make([]scm.Scmer, int(r.count)*width)}
 	offsets := make([]int, len(r.shards)+1)
 	for i := range r.shards {
 		offsets[i+1] = offsets[i] + int(r.shards[i].count)*width
@@ -971,7 +1044,7 @@ func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []st
 				panic("query killed")
 			}
 			dst := keys.values[offsets[partIndex]:offsets[partIndex+1]]
-			used := part.shard.collectProjectJoinKeys(&part, sourceKeyCols, currentTx, ss, dst)
+			used := part.shard.collectKeys(&part, sourceKeyCols, currentTx, ss, dst, identity != nil, columnInput)
 			values <- recSetKeyResult{part: partIndex, used: used}
 			return scm.NewNil()
 		})
@@ -1008,14 +1081,15 @@ func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []st
 	return keys
 }
 
-func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols []string, currentTx *TxContext, ss *scm.SessionState, dst []scm.Scmer) int {
+func (t *storageShard) collectKeys(part *recSetShard, sourceKeyCols []string, currentTx *TxContext, ss *scm.SessionState, dst []scm.Scmer, includeNull bool, columnInput nativeTableInput) int {
+	initializedColumns := t.initializedColumnInput(columnInput)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock, currentTx)
 
 	cols := make([]ColumnStorage, len(sourceKeyCols))
 	for i, col := range sourceKeyCols {
-		cols[i] = t.getColumnStorageOrPanic(col, skipShardReadLock, currentTx)
+		cols[i] = t.getColumnStorageInput(col, skipShardReadLock, initializedColumns, currentTx)
 	}
 
 	locked := false
@@ -1071,7 +1145,7 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 				for i := range sourceKeyCols {
 					v := colBufs[i][row]
 					dst[write+i] = v
-					if v.IsNil() {
+					if !includeNull && v.IsNil() {
 						skip = true
 					}
 				}
@@ -1088,9 +1162,9 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 				if _, isProxy := cols[i].(*StorageComputeProxy); isProxy {
 					dst[write+i] = cols[i].GetValue(idx)
 				} else {
-					dst[write+i] = t.getDelta(int(idx-mainCount), col)
+					dst[write+i] = t.getDeltaInput(int(idx-mainCount), col, initializedColumns)
 				}
-				if dst[write+i].IsNil() {
+				if !includeNull && dst[write+i].IsNil() {
 					skip = true
 				}
 			}
@@ -1104,6 +1178,9 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 }
 
 func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState) *recSet {
+	currentTx, columnInput, finishData := t.readDataContext(currentTx)
+	defer finishData.release()
+
 	atomic.StoreUint64(&t.lastAccessed, uint64(time.Now().UnixNano()))
 	result := &recSet{table: t}
 	if keys.count() == 0 {
@@ -1116,7 +1193,7 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 		err  scanError
 	}
 	var values chan targetPartResult
-	done := t.iterateShardsParallel(currentTx, scanAccess{}, func(shards int) {
+	done := t.iterateShardsParallel(currentTx, scanAccess{columnInput: columnInput}, func(shards int) {
 		values = make(chan targetPartResult, shards)
 	}, func(shard *storageShard, solo bool, acquisitionFailure any) {
 		withTxSession(currentTx, func() scm.Scmer {
@@ -1133,7 +1210,7 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 			if ss != nil && ss.IsKilledSeq(querySeq) {
 				panic("query killed")
 			}
-			values <- targetPartResult{part: shard.projectJoinKeysPart(currentTx, targetKeyCols, keys, ss, numeric, false)}
+			values <- targetPartResult{part: shard.projectJoinKeysPart(currentTx, targetKeyCols, keys, ss, numeric, false, columnInput)}
 			return scm.NewNil()
 		})
 	})
@@ -1208,7 +1285,8 @@ func (t *storageShard) hasEqualityIndexPrefix(currentTx *TxContext, cols []strin
 // With alreadyLocked, the caller owns shard concurrency rights and a read or
 // write lock and has loaded the key columns. No lazy load or lock wait is safe
 // inside that critical section.
-func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState, numeric bool, alreadyLocked bool) recSetShard {
+func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState, numeric bool, alreadyLocked bool, columnInput nativeTableInput) recSetShard {
+	initializedColumns := t.initializedColumnInput(columnInput)
 	if !alreadyLocked {
 		t.ensureLoaded()
 	}
@@ -1219,9 +1297,9 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 	targetCols := make([]ColumnStorage, len(targetKeyCols))
 	for i, col := range targetKeyCols {
 		if alreadyLocked {
-			targetCols[i] = t.getColumnStorageRLocked(col)
+			targetCols[i] = t.getColumnStorageRLocked(col, initializedColumns)
 		} else {
-			targetCols[i] = t.getColumnStorageOrPanic(col, skipShardReadLock, currentTx)
+			targetCols[i] = t.getColumnStorageInput(col, skipShardReadLock, initializedColumns, currentTx)
 		}
 	}
 
@@ -1268,7 +1346,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 				} else if _, proxy := targetCols[col].(*StorageComputeProxy); proxy {
 					actual[col] = targetCols[col].GetValue(idx)
 				} else {
-					actual[col] = t.getDelta(int(idx-t.main_count), targetKeyCols[col])
+					actual[col] = t.getDeltaInput(int(idx-t.main_count), targetKeyCols[col], initializedColumns)
 				}
 			}
 			return keys.contains(actual)
@@ -1310,7 +1388,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 				if _, ok := seen[idx]; ok {
 					continue
 				}
-				if !t.projectJoinTargetMatches(idx, key, targetKeyCols, targetCols) {
+				if !t.projectJoinTargetMatches(idx, key, targetKeyCols, targetCols, initializedColumns) {
 					continue
 				}
 				seen[idx] = struct{}{}
@@ -1323,7 +1401,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 	return newRecSetShardFromSortedIDs(t, visibleUpper, recids)
 }
 
-func (t *storageShard) projectJoinTargetMatches(idx uint32, key []scm.Scmer, targetKeyCols []string, targetCols []ColumnStorage) bool {
+func (t *storageShard) projectJoinTargetMatches(idx uint32, key []scm.Scmer, targetKeyCols []string, targetCols []ColumnStorage, input *nativeColumnInitialInput) bool {
 	for i, expected := range key {
 		var actual scm.Scmer
 		if idx < t.main_count {
@@ -1331,7 +1409,7 @@ func (t *storageShard) projectJoinTargetMatches(idx uint32, key []scm.Scmer, tar
 		} else if _, isProxy := targetCols[i].(*StorageComputeProxy); isProxy {
 			actual = targetCols[i].GetValue(idx)
 		} else {
-			actual = t.getDelta(int(idx-t.main_count), targetKeyCols[i])
+			actual = t.getDeltaInput(int(idx-t.main_count), targetKeyCols[i], input)
 		}
 		if !scm.Equal(actual, expected) {
 			return false
@@ -1340,18 +1418,24 @@ func (t *storageShard) projectJoinTargetMatches(idx uint32, key []scm.Scmer, tar
 	return true
 }
 
-func (r *recSet) scan(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool) scm.Scmer {
+func (r *recSet) scan(currentTx *TxContext, accessSchema scm.Scmer, accessValues []scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool, producerInput *nativeMutationInput) scm.Scmer {
 	if r == nil || r.table == nil {
 		return neutral
 	}
+	mutation := false
 	for _, col := range callbackCols {
-		if col == "$update" || (len(col) > 11 && col[:11] == "$increment:") ||
+		mutation = mutation || col == "$update"
+		if (len(col) > 11 && col[:11] == "$increment:") ||
 			(len(col) > 5 && col[:5] == "$set:") ||
 			(len(col) > 12 && col[:12] == "$invalidate:") {
 			panic("recset scan mutation callbacks are not implemented")
 		}
 	}
-	return r.table.scanWithBatchFrom(currentTx, r, accessSchema, accessValues, scanAccess{}, conditionCols, condition,
+	if mutation {
+		return r.scanMutation(currentTx, accessSchema, accessValues, conditionCols, condition,
+			callbackCols, mapReduce, neutral, combine, isOuter, producerInput)
+	}
+	return r.table.scanWithBatchFrom(currentTx, r, accessSchema, accessValues, scanAccess{producerInput: producerInput}, conditionCols, condition,
 		callbackCols, mapReduce, neutral, combine, isOuter, 0, nil)
 }
 
@@ -1362,7 +1446,8 @@ func (r *recSet) scanExists(currentTx *TxContext, accessSchema scm.Scmer, access
 	return r.table.scanExistsFrom(currentTx, r, accessSchema, accessValues, conditionCols, condition)
 }
 
-func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {
+func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool, columnInput nativeTableInput) bool {
+	initializedColumns := t.initializedColumnInput(columnInput)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock, currentTx)
@@ -1379,8 +1464,8 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 			conditionGetters[i] = getter
 			continue
 		}
-		ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
+		ccols[i] = t.getColumnStorageInput(k, skipShardReadLock, initializedColumns, currentTx)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto, t.t, columnInput)
 		defer ReleaseColumnReader(cReaders[i])
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
@@ -1436,7 +1521,7 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 					cdataset[i] = cReaders[i].GetValue(idx)
 				} else {
-					cdataset[i] = t.getDelta(int(idx-mainCount), col)
+					cdataset[i] = t.getDeltaInput(int(idx-mainCount), col, initializedColumns)
 				}
 			}
 		}
@@ -1449,7 +1534,8 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 	return found
 }
 
-func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64) {
+func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, currentTx *TxContext, ss *scm.SessionState, columnInput nativeTableInput) (scm.Scmer, int64) {
+	initializedColumns := t.initializedColumnInput(columnInput)
 	conditionFn := scm.PrepareSerialProc(condition)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
@@ -1467,8 +1553,8 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 			conditionGetters[i] = getter
 			continue
 		}
-		ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
+		ccols[i] = t.getColumnStorageInput(k, skipShardReadLock, initializedColumns, currentTx)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto, t.t, columnInput)
 		defer ReleaseColumnReader(cReaders[i])
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
@@ -1478,9 +1564,9 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 		mapperWorkspace := acquireShardMapReducerWorkspace()
 		defer releaseShardMapReducerWorkspace(mapperWorkspace)
 		prepareReadMapReducerStorage(&mapperStorage, mapperWorkspace, len(callbackCols))
-		t.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, skipShardReadLock, currentTx)
+		t.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, skipShardReadLock, currentTx, columnInput)
 	} else {
-		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, 0, nil, currentTx)
+		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, 0, nil, currentTx, columnInput)
 	}
 	defer mapper.Close()
 
@@ -1580,7 +1666,7 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 					cdataset[i] = cReaders[i].GetValue(idx)
 				} else {
-					cdataset[i] = t.getDelta(int(idx-mainCount), col)
+					cdataset[i] = t.getDeltaInput(int(idx-mainCount), col, initializedColumns)
 				}
 			}
 			if !scm.ToBool(conditionFn.Call(cdataset)) {
@@ -1613,6 +1699,7 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 // e.g. evaluating an expensive correlated ACL check only over the ~30k rows a
 // mandant filter already narrowed a table down to, not the full table.
 func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, access scanAccess, currentTx *TxContext, ss *scm.SessionState) recSetShard {
+	initializedColumns := t.initializedColumnInput(access.columnInput)
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := scanAccessCoversResidual(access) ||
 		conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
@@ -1643,8 +1730,8 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 				conditionGetters[i] = getter
 				continue
 			}
-			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
-			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto)
+			ccols[i] = t.getColumnStorageInput(k, skipShardReadLock, initializedColumns, currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx, false, ReadAuto, t.t, access.columnInput)
 			defer ReleaseColumnReader(cReaders[i])
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
@@ -1702,7 +1789,7 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 					cdataset[i] = cReaders[i].GetValue(idx)
 				} else {
-					cdataset[i] = t.getDelta(int(idx-mainCount), col)
+					cdataset[i] = t.getDeltaInput(int(idx-mainCount), col, initializedColumns)
 				}
 			}
 		}
@@ -1742,10 +1829,13 @@ func (r *recSet) filterToRecSet(currentTx *TxContext, conditionCols []string, co
 	if r == nil {
 		return nil
 	}
+	currentTx, columnInput, finishData := r.table.readDataContext(currentTx)
+	defer finishData.release()
 	atomic.StoreUint64(&r.table.lastAccessed, uint64(time.Now().UnixNano()))
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	access := recSetScanAccess(r, accessSchema, accessValues)
+	access.columnInput = columnInput
 	result := &recSet{table: r.table}
 	values := make(chan recSetBuildResult, len(r.shards))
 	activeParts := make([]int, 0, len(r.shards))

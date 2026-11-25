@@ -1,0 +1,53 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  description: Literal scalar calls and finite conditional values retain complete SQL results
+setup:
+- sql: CREATE TABLE literal_call_rows(id INT PRIMARY KEY,kind VARCHAR(5),amount INT)
+- sql: INSERT INTO literal_call_rows VALUES(1,'U',10),(2,'V',20),(3,NULL,30),(4,'U',NULL)
+test_cases:
+- name: Typed literal comparator excludes an impossible union branch
+  sql: SELECT id FROM (SELECT id,'C' AS kind FROM literal_call_rows UNION ALL SELECT id,'F' AS kind FROM literal_call_rows) d WHERE kind='U'
+  expect: {rows: 0}
+- name: Finite conditional comparator excludes both impossible arms
+  sql: SELECT id FROM literal_call_rows WHERE CASE WHEN id>2 THEN 'C' ELSE 'F' END='U'
+  expect: {rows: 0}
+- name: Conditional branch values remain complete projected values
+  sql: SELECT id,CASE WHEN id>2 THEN 'C' ELSE 'F' END AS kind FROM literal_call_rows ORDER BY id
+  expect:
+    rows: 4
+    data: [{id: 1,kind: F},{id: 2,kind: F},{id: 3,kind: C},{id: 4,kind: C}]
+- name: TSQL comparator retains its case and padding contract
+  sql: SELECT id FROM literal_call_rows WHERE 'F '='f' ORDER BY id
+  expect:
+    rows: 4
+    data: [{id: 1},{id: 2},{id: 3},{id: 4}]
+- name: NULL comparison remains UNKNOWN and rejects the row
+  sql: SELECT id FROM literal_call_rows WHERE NULL='F'
+  expect: {rows: 0}
+- name: Impossible input still supplies the scalar aggregate empty result
+  sql: SELECT COUNT(*) AS n,SUM(amount) AS total FROM literal_call_rows WHERE 'C'='F'
+  expect: {rows: 1,data: [{n: 0,total: null}]}
+- name: Literal union filtering preserves duplicate source rows
+  sql: SELECT id FROM (SELECT id,'C' AS kind FROM literal_call_rows UNION ALL SELECT id,'C' AS kind FROM literal_call_rows) d WHERE kind='C' AND id=1 ORDER BY id
+  expect: {rows: 2,data: [{id: 1},{id: 1}]}
+- name: Folded literal vectors remain data in a string membership predicate
+  sql: SELECT id,kind FROM literal_call_rows WHERE kind IN(N'U',N'V') ORDER BY id
+  expect: {rows: 3, data: [{id: 1,kind: U},{id: 2,kind: V},{id: 4,kind: U}]}
+- name: Folded literal vectors retain NULL membership semantics
+  sql: SELECT id,CASE WHEN kind IN(N'U',NULL) THEN 1 WHEN kind NOT IN(N'U',NULL) THEN 0 ELSE -1 END AS matched FROM literal_call_rows ORDER BY id
+  expect: {rows: 4, data: [{id: 1,matched: 1},{id: 2,matched: -1},{id: 3,matched: -1},{id: 4,matched: 1}]}
+- name: Impossible predicate does not conceal an invalid column
+  sql: SELECT missing_column FROM literal_call_rows WHERE 'C'='F'
+  expect: {error: true}
+- name: MySQL finite conditional comparator retains the same result
+  syntax: mysql
+  sql: SELECT id FROM literal_call_rows WHERE CASE WHEN id>2 THEN 'C' ELSE 'F' END='U'
+  expect: {rows: 0}
+- name: PostgreSQL finite conditional comparator retains the same result
+  syntax: postgresql
+  sql: SELECT id FROM literal_call_rows WHERE CASE WHEN id>2 THEN 'C' ELSE 'F' END='U'
+  expect: {rows: 0}
+cleanup:
+- sql: DROP TABLE IF EXISTS literal_call_rows

@@ -1,0 +1,463 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Positive result references: https://dbfiddle.uk/Revj6xsK
+# https://learn.microsoft.com/sql/t-sql/statements/insert-transact-sql/
+# SQL Server 2022 dynamic capture reference: https://dbfiddle.uk/sWXgfEvS
+metadata:
+  description: T-SQL procedure result streams enter native INSERT with declared assignment contracts
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+setup:
+- sql: CREATE TABLE capture_source (id INT PRIMARY KEY, label NVARCHAR(20))
+- sql: INSERT capture_source VALUES (1,N'alpha'),(2,N'beta'),(3,NULL)
+- sql: CREATE TABLE capture_target (id INT PRIMARY KEY, label NVARCHAR(3), marker INT DEFAULT 8)
+- sql: CREATE TABLE capture_audit (id INT)
+- sql: CREATE PROCEDURE capture_rows @minimum INT=1 AS SELECT id,label FROM capture_source WHERE id>=@minimum ORDER BY id
+- sql: CREATE PROCEDURE capture_multiple AS BEGIN SELECT 11 AS first,N'one' AS second; SELECT 12 AS other,N'two' AS another END
+- sql: CREATE PROCEDURE capture_bad_shape AS BEGIN SELECT 21 AS first,N'ok' AS second; SELECT 22 AS first END
+- sql: CREATE PROCEDURE capture_failure AS BEGIN INSERT capture_audit VALUES(1); SELECT 31 AS first,N'ok' AS second; THROW 50001,N'capture failed',1 END
+- sql: CREATE PROCEDURE capture_output @value INT OUTPUT AS BEGIN SET @value=9; SELECT @value AS first,N'out' AS second END
+- sql: CREATE PROCEDURE capture_commit AS BEGIN SELECT 41 AS first,N'ok' AS second; COMMIT END
+- sql: CREATE PROCEDURE capture_nested AS INSERT capture_target(id,label) EXEC capture_rows
+- sql: CREATE PROCEDURE capture_reordered AS SELECT N'order' AS unrelated,61 AS another
+- sql: CREATE PROCEDURE capture_caught_shape AS BEGIN TRY SELECT 51 AS first,N'ok' AS second; SELECT 52 AS first END TRY BEGIN CATCH SELECT 53 AS first,N'end' AS second END CATCH
+- sql: CREATE PROCEDURE capture_caught_conversion AS BEGIN TRY SELECT 54 AS first,N'ok' AS second; SELECT N'not integer' AS first,N'end' AS second END TRY BEGIN CATCH SELECT 55 AS first,N'end' AS second END CATCH
+- sql: CREATE PROCEDURE capture_empty_bad AS SELECT id FROM capture_source WHERE id=999
+- sql: CREATE PROCEDURE capture_decimal AS SELECT CAST(12.345 AS DECIMAL(10,3)) AS original
+- sql: CREATE TABLE capture_amount (amount DECIMAL(7,2))
+- sql: CREATE PROCEDURE capture_ddl AS BEGIN SELECT 56 AS first,N'ok' AS second; /* guarded */ CREATE TABLE capture_forbidden(id INT) END
+- sql: CREATE TABLE capture_bulk (value INT PRIMARY KEY)
+- sql: CREATE TABLE capture_identity (id INT IDENTITY PRIMARY KEY, amount DECIMAL(7,2))
+- sql: CREATE PROCEDURE capture_many AS SELECT a.id+3*b.id+9*c.id+27*d.id+81*e.id+243*f.id AS source_name FROM capture_source a CROSS JOIN capture_source b CROSS JOIN capture_source c CROSS JOIN capture_source d CROSS JOIN capture_source e CROSS JOIN capture_source f
+- sql: CREATE TABLE capture_dynamic_target(id INT PRIMARY KEY,label NVARCHAR(20),marker INT DEFAULT 8)
+- sql: CREATE TABLE capture_dynamic_audit(id INT)
+- sql: CREATE TABLE capture_dynamic_large(value INT PRIMARY KEY)
+- sql: CREATE TABLE qualified_insert_target(id INT PRIMARY KEY,label NVARCHAR(12),[literal.with.dot] INT,marker INT DEFAULT 9)
+- sql: |
+    CREATE PROCEDURE qualified_insert_module AS
+    BEGIN
+      CREATE TABLE #qualified_insert_rows(id INT,label NVARCHAR(12));
+      INSERT #qualified_insert_rows(other.id,unused.label) SELECT 2,N'module';
+      SELECT id,label FROM #qualified_insert_rows;
+    END
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER qualified_insert_denied IDENTIFIED BY 'column-test'" nil))
+cleanup:
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS qualified_insert_denied" nil))
+- sql: DROP PROCEDURE IF EXISTS qualified_insert_module
+- sql: DROP TABLE IF EXISTS qualified_insert_target
+- sql: DROP PROCEDURE IF EXISTS capture_dynamic_scope
+- sql: DROP TABLE capture_dynamic_large
+- sql: DROP TABLE capture_dynamic_audit
+- sql: DROP TABLE capture_dynamic_target
+- sql: DROP PROCEDURE capture_many
+- sql: DROP TABLE capture_bulk
+- sql: DROP TABLE capture_identity
+- sql: DROP PROCEDURE capture_reordered
+- sql: DROP PROCEDURE capture_caught_shape
+- sql: DROP PROCEDURE capture_caught_conversion
+- sql: DROP PROCEDURE capture_empty_bad
+- sql: DROP PROCEDURE capture_decimal
+- sql: DROP PROCEDURE capture_ddl
+- sql: DROP TABLE capture_amount
+- sql: DROP PROCEDURE capture_rows
+- sql: DROP PROCEDURE capture_multiple
+- sql: DROP PROCEDURE capture_bad_shape
+- sql: DROP PROCEDURE capture_failure
+- sql: DROP PROCEDURE capture_output
+- sql: DROP PROCEDURE capture_commit
+- sql: DROP PROCEDURE capture_nested
+- sql: DROP TABLE capture_source
+- sql: DROP TABLE capture_target
+- sql: DROP TABLE capture_audit
+test_cases:
+- name: Ordinal binding rejects text assigned to an integer target
+  sql: INSERT INTO capture_target(label,id) EXEC capture_rows @minimum=2
+  expect: {error: true}
+- name: Incompatible source values roll back all admitted rows
+  sql: SELECT COUNT(*) AS total FROM capture_target
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Enabled warnings reject overlong procedure output
+  session_id: capture_assignment_profile
+  setup:
+  - sql: SET ANSI_WARNINGS ON
+  sql: INSERT capture_target(id,label) EXECUTE capture_rows 2
+  expect: {error: true, contains: truncated}
+- name: Rejected overlong procedure output leaves no captured prefix
+  sql: SELECT COUNT(*) AS total FROM capture_target
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Explicit target list applies ordinary narrowing and defaults
+  session_id: capture_assignment_profile
+  setup:
+  - sql: SET ANSI_WARNINGS OFF
+  sql: INSERT capture_target(id,label) EXECUTE capture_rows 2
+  expect: {affected_rows: 2}
+  cleanup:
+  - sql: SET ANSI_WARNINGS ON
+- name: Captured values preserve null and native defaults
+  sql: SELECT id,label,marker FROM capture_target ORDER BY id
+  expect: {rows: 2, data: [{id: 2, label: bet, marker: 8}, {id: 3, label: null, marker: 8}]}
+- name: Matching multiple result sets are all inserted by ordinal
+  sql: INSERT capture_target(id,label) EXEC capture_multiple
+  expect: {affected_rows: 2}
+- name: Multiple result names do not affect target binding
+  sql: SELECT id,label FROM capture_target WHERE id>10 ORDER BY id
+  expect: {rows: 2, data: [{id: 11, label: one}, {id: 12, label: two}]}
+- name: A later incompatible result shape rejects the whole statement
+  sql: INSERT capture_target(id,label) EXEC capture_bad_shape
+  expect: {error: true}
+- name: Shape errors leave no prefix rows
+  sql: SELECT COUNT(*) AS total FROM capture_target WHERE id>=20
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Procedure errors abort captured rows and procedure writes together
+  sql: INSERT capture_target(id,label) EXEC capture_failure
+  expect: {error: true}
+- name: Failed procedure writes roll back
+  sql: SELECT COUNT(*) AS total FROM capture_audit
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Failed procedure rows roll back
+  sql: SELECT COUNT(*) AS total FROM capture_target WHERE id>=30
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Procedure output parameters retain ordinary binding
+  sql: DECLARE @value INT=1; INSERT capture_target(id,label) EXEC capture_output @value OUTPUT; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 9}]}
+- name: Source cannot commit the enclosing statement
+  sql: INSERT capture_target(id,label) EXEC capture_commit
+  expect: {error: true}
+- name: Rejected source transaction boundary leaves no prefix row
+  sql: SELECT COUNT(*) AS total FROM capture_target WHERE id=41
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Nested capture is rejected
+  sql: INSERT capture_target(id,label) EXEC capture_nested
+  expect: {error: true}
+- name: Output clause is invalid for an execute source
+  sql: INSERT capture_target(id,label) OUTPUT inserted.id EXEC capture_rows
+  expect: {error: true}
+- name: Duplicate target names fail before procedure execution
+  sql: INSERT capture_target(id,id) EXEC capture_rows
+  expect: {error: true}
+- name: Implicit writable target list also validates result arity
+  sql: INSERT capture_target EXEC capture_rows
+  expect: {error: true}
+- name: Source names are irrelevant and explicit reordered targets bind by ordinal
+  session_id: capture_assignment_profile
+  setup:
+  - sql: SET ANSI_WARNINGS OFF
+  sql: INSERT capture_target(label,id) EXEC capture_reordered
+  expect: {affected_rows: 1}
+  cleanup:
+  - sql: SET ANSI_WARNINGS ON
+- name: Reordered insertion uses target assignment contract
+  sql: SELECT id,label FROM capture_target WHERE id=61
+  expect: {rows: 1, data: [{id: 61, label: ord}]}
+- name: Source CATCH cannot hide incompatible result shape
+  sql: INSERT capture_target(id,label) EXEC capture_caught_shape
+  expect: {error: true}
+- name: Source CATCH cannot hide target conversion failure
+  sql: INSERT capture_target(id,label) EXEC capture_caught_conversion
+  expect: {error: true}
+- name: Caught target failures roll back every prefix row
+  sql: SELECT COUNT(*) AS total FROM capture_target WHERE id BETWEEN 50 AND 59
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Empty results still validate declared arity
+  sql: INSERT capture_target(id,label) EXEC capture_empty_bad
+  expect: {error: true}
+- name: Source decimal dimensions select ordinary destination rounding
+  sql: INSERT capture_amount EXEC capture_decimal
+  expect: {affected_rows: 1}
+- name: Decimal result retains destination declaration
+  sql: SELECT amount FROM capture_amount
+  expect: {rows: 1, data: [{amount: 12.35}]}
+- name: Capture participates in the caller transaction without inner commit
+  sql: BEGIN TRAN; INSERT capture_amount EXEC capture_decimal; ROLLBACK; SELECT COUNT(*) AS total FROM capture_amount
+  expect: {rows: 1, data: [{total: 1}]}
+- name: INSERT EXEC preserves a valid source DDL completion and its captured row
+  sql: INSERT capture_target(id,label) EXEC capture_ddl; SELECT t.id,t.label,t.marker,o.name AS created_table FROM capture_target
+    t CROSS JOIN sys.objects o WHERE t.id=56 AND o.name=N'capture_forbidden'
+  expect:
+    rows: 1
+    data:
+    - id: 56
+      label: ok
+      marker: 8
+      created_table: capture_forbidden
+  noncritical: true
+  cleanup:
+  - sql: DELETE FROM capture_target WHERE id=56
+  - sql: DROP TABLE IF EXISTS capture_forbidden
+- name: Source DDL witness cleanup leaves no row for later capture cases
+  sql: SELECT COUNT(*) AS total FROM capture_target WHERE id=56
+  expect:
+    rows: 1
+    data:
+    - total: 0
+- name: Native uniqueness errors roll back rows admitted before the conflict
+  sql: INSERT capture_target(id,label) EXEC capture_rows 1
+  expect: {error: true}
+- name: Constraint failure leaves no prefix insertion
+  sql: SELECT COUNT(*) AS total FROM capture_target WHERE id=1
+  expect: {rows: 1, data: [{total: 0}]}
+- name: Streaming capture shares the native identity allocator
+  sql: INSERT capture_identity EXEC capture_decimal
+  expect: {affected_rows: 1}
+- name: Generated identity and assigned decimal retain native values
+  sql: SELECT id,amount FROM capture_identity
+  expect: {rows: 1, data: [{id: 1, amount: 12.35}]}
+- name: Parallel procedure scans stream every row without a relation list
+  sql: INSERT capture_bulk EXEC capture_many
+  expect: {affected_rows: 729}
+- name: Parallel capture retains exact cardinality and unique native rows
+  sql: SELECT COUNT(*) AS total,MIN(value) AS lowest,MAX(value) AS highest FROM capture_bulk
+  expect: {rows: 1, data: [{total: 729, lowest: 364, highest: 1092}]}
+
+- name: A dynamic literal streams results through the existing INSERT owner
+  sql: INSERT capture_dynamic_target(id,label) EXEC(N'SELECT id,label FROM capture_source ORDER BY id')
+  expect:
+    affected_rows: 3
+- name: Dynamic literal rows retain NULL and native destination defaults
+  sql: SELECT id,label,marker FROM capture_dynamic_target ORDER BY id
+  expect:
+    rows: 3
+    data: [{id: 1, label: alpha, marker: 8}, {id: 2, label: beta, marker: 8}, {id: 3, label: null, marker: 8}]
+- name: An NVARCHAR variable supplies dynamic execution text
+  sql: DECLARE @sql NVARCHAR(MAX)=N'SELECT id,label FROM capture_source WHERE id>=2'; INSERT INTO capture_dynamic_target(id,label)
+    EXECUTE(@sql)
+  setup:
+  - sql: DELETE FROM capture_dynamic_target
+  expect:
+    affected_rows: 2
+- name: Variable driven dynamic execution preserves its rows
+  sql: SELECT id,label FROM capture_dynamic_target ORDER BY id
+  expect:
+    rows: 2
+    data: [{id: 2, label: beta}, {id: 3, label: null}]
+- name: Dynamic matching result sets bind destination columns by ordinal
+  sql: INSERT capture_dynamic_target(label,id) EXEC(N'SELECT N''first'' AS a,11 AS b; SELECT N''second'' AS x,12
+    AS y')
+  setup:
+  - sql: DELETE FROM capture_dynamic_target
+  expect:
+    affected_rows: 2
+- name: Dynamic result aliases do not replace destination column names
+  sql: SELECT id,label FROM capture_dynamic_target ORDER BY id
+  expect:
+    rows: 2
+    data: [{id: 11, label: first}, {id: 12, label: second}]
+- name: An incompatible later dynamic result shape aborts the complete INSERT
+  sql: INSERT capture_dynamic_target(id,label) EXEC(N'SELECT 21 AS id,N''prefix'' AS label; SELECT 22 AS id')
+  setup:
+  - sql: DELETE FROM capture_dynamic_target
+  expect:
+    error: true
+- name: Dynamic shape failure leaves no inserted prefix
+  sql: SELECT COUNT(*) AS total FROM capture_dynamic_target
+  expect:
+    rows: 1
+    data: [{total: 0}]
+- name: An invalid dynamic assignment cannot be hidden by source CATCH
+  sql: INSERT capture_dynamic_target(id,label) EXEC(N'BEGIN TRY SELECT 31 AS id,N''prefix'' AS label; SELECT N''not
+    integer'' AS id,N''invalid'' AS label; END TRY BEGIN CATCH SELECT 32 AS id,N''caught'' AS label; END CATCH')
+  expect:
+    error: true
+- name: A caught destination failure still rolls back every dynamic prefix
+  sql: SELECT COUNT(*) AS total FROM capture_dynamic_target
+  expect:
+    rows: 1
+    data: [{total: 0}]
+- name: A dynamic source error rolls back target rows and source writes
+  sql: INSERT capture_dynamic_target(id,label) EXEC(N'INSERT capture_dynamic_audit VALUES(1); SELECT 41 AS id,N''prefix''
+    AS label; THROW 50001,N''source failure'',1')
+  expect:
+    error: true
+- name: A failed dynamic source leaves no target row
+  sql: SELECT COUNT(*) AS total FROM capture_dynamic_target
+  expect:
+    rows: 1
+    data: [{total: 0}]
+- name: A failed dynamic source leaves no source side effect
+  sql: SELECT COUNT(*) AS total FROM capture_dynamic_audit
+  expect:
+    rows: 1
+    data: [{total: 0}]
+- name: Dynamic capture participates in the caller transaction
+  sql: BEGIN TRAN; INSERT capture_dynamic_target(id,label) EXEC(N'SELECT 51 AS id,N''temporary'' AS label'); ROLLBACK;
+    SELECT COUNT(*) AS total FROM capture_dynamic_target
+  expect:
+    rows: 1
+    data: [{total: 0}]
+- name: A native uniqueness failure rolls back the complete dynamic stream
+  sql: INSERT capture_dynamic_target(id,label) EXEC(N'SELECT 61 AS id,N''first'' AS label; SELECT 61 AS id,N''duplicate''
+    AS label')
+  expect:
+    error: true
+- name: A dynamic uniqueness failure leaves no prefix row
+  sql: SELECT COUNT(*) AS total FROM capture_dynamic_target
+  expect:
+    rows: 1
+    data: [{total: 0}]
+- name: Dynamic execution cannot reference an undeclared outer local
+  sql: DECLARE @outside INT=71; INSERT capture_dynamic_target(id,label) EXEC(N'SELECT @outside AS id,N''outside''
+    AS label')
+  expect:
+    error: true
+- name: A stored module can capture dynamic reads of its own temporary source
+  sql: 'CREATE PROCEDURE capture_dynamic_scope @minimum INT AS BEGIN
+
+    CREATE TABLE #dynamic_source(id INT,label NVARCHAR(20));
+
+    INSERT #dynamic_source VALUES(1,N''one''),(2,N''two''),(3,NULL);
+
+    CREATE TABLE #dynamic_target(id INT,label NVARCHAR(20),marker INT DEFAULT 8);
+
+    DECLARE @sql NVARCHAR(MAX)=N''SELECT id,label FROM #dynamic_source WHERE id>=''+CAST(@minimum AS NVARCHAR(10));
+
+    INSERT INTO #dynamic_target(id,label) EXEC(@sql);
+
+    SELECT id,label,marker FROM #dynamic_target ORDER BY id;
+
+    END'
+- name: Dynamic capture sees a caller temporary table and native defaults
+  sql: EXEC capture_dynamic_scope 2
+  expect:
+    rows: 2
+    data: [{id: 2, label: two, marker: 8}, {id: 3, label: null, marker: 8}]
+- name: A later module invocation owns fresh temporary capture state
+  sql: EXEC capture_dynamic_scope 3
+  expect:
+    rows: 1
+    data: [{id: 3, label: null, marker: 8}]
+- name: Dynamic execution can forward a procedure result stream
+  sql: INSERT capture_dynamic_large EXEC(N'EXEC capture_many')
+  expect:
+    affected_rows: 729
+- name: Forwarded dynamic scans preserve exact cardinality and range
+  sql: SELECT COUNT(*) AS total,MIN(value) AS lowest,MAX(value) AS highest FROM capture_dynamic_large
+  expect:
+    rows: 1
+    data: [{total: 729, lowest: 364, highest: 1092}]
+- name: Native TDS dynamic capture preserves notices and destination values
+  tds:
+    statements:
+    - sql: INSERT capture_dynamic_target(id,label) EXEC(N'PRINT N''capturing''; SELECT 81 AS first,N''wire'' AS
+        second'); SELECT id,label,marker FROM capture_dynamic_target
+      expect:
+        rows: 1
+        data:
+        - id: 81
+          label: wire
+          marker: 8
+        messages:
+        - text: capturing
+
+- name: Nested dynamic INSERT EXEC remains invalid
+  sql: INSERT capture_dynamic_target(id,label) EXEC(N'SELECT 91 AS id,N''prefix'' AS label; INSERT capture_dynamic_audit
+    EXEC(N''SELECT 92 AS id'')')
+  setup:
+  - sql: DELETE FROM capture_dynamic_target
+  expect:
+    error: true
+- name: Rejected nested dynamic capture rolls back its outer prefix
+  sql: SELECT COUNT(*) AS total FROM capture_dynamic_target
+  expect:
+    rows: 1
+    data:
+    - total: 0
+- name: Rejected nested dynamic capture leaves no inner target row
+  sql: SELECT COUNT(*) AS total FROM capture_dynamic_audit
+  expect:
+    rows: 1
+    data:
+    - total: 0
+- name: An empty dynamic result still validates destination arity
+  sql: INSERT capture_dynamic_target(id,label) EXEC(N'SELECT id FROM capture_source WHERE id=999')
+  expect:
+    error: true
+
+# Real SQL Server target-name semantics: https://dbfiddle.uk/TAsX31Uh
+# Component/length boundaries: https://dbfiddle.uk/afS-c4pk
+- name: Qualified VALUES targets ignore prefixes and retain native defaults
+  sql: |
+    INSERT qualified_insert_target(missing_database.unused.id,other.label,..[literal.with.dot])
+      VALUES(101,N'values',7);
+    SELECT id,label,[literal.with.dot],marker FROM qualified_insert_target WHERE id=101;
+  expect: {rows: 1,data: [{id: 101,label: values,literal.with.dot: 7,marker: 9}]}
+- name: Qualified INSERT SELECT targets retain the native source row stream
+  sql: |
+    INSERT qualified_insert_target(other.id,unrelated.label)
+      SELECT id+200,label FROM capture_source WHERE id<=2;
+    SELECT id,label,marker FROM qualified_insert_target WHERE id>=201 AND id<=202 ORDER BY id;
+  expect: {rows: 2,data: [{id: 201,label: alpha,marker: 9},{id: 202,label: beta,marker: 9}]}
+- name: Prefix component counts and empty components do not change the final column
+  sql: |
+    INSERT qualified_insert_target(a.b.c.d.e.f.g.id,x....label,.marker) VALUES(301,N'parts',4);
+    SELECT id,label,marker FROM qualified_insert_target WHERE id=301;
+  expect: {rows: 1,data: [{id: 301,label: parts,marker: 4}]}
+- name: Delimited dots are one column token and preserve literal metadata aliases
+  tds:
+    statements:
+    - sql: |
+        INSERT qualified_insert_target([.ignored.prefix].id,[other].label,x.[literal.with.dot]) VALUES(401,N'delimited',44);
+        SELECT id,label,[literal.with.dot] AS [alias.with.dot] FROM qualified_insert_target WHERE id=401;
+      expect:
+        rows: 1
+        data: [{id: 401,label: delimited,alias.with.dot: 44}]
+        column_types: [{name: id,type: INT,nullable: false},{name: label,type: NVARCHAR,length: 12,nullable: true},{name: alias.with.dot,type: INT,nullable: true}]
+- name: Local VALUES target lists use the same qualified-column grammar
+  sql: |
+    DECLARE @rows TABLE(id INT,label NVARCHAR(12),[literal.with.dot] INT);
+    INSERT @rows(.id,other.label,x.[literal.with.dot]) VALUES(1,N'local',5);
+    SELECT id,label,[literal.with.dot] FROM @rows;
+  expect: {rows: 1,data: [{id: 1,label: local,literal.with.dot: 5}]}
+- name: Local SELECT target lists bind only the final declared identifier
+  sql: |
+    DECLARE @rows TABLE(id INT,label NVARCHAR(12));
+    INSERT @rows(other.id,a..label) SELECT id,label FROM capture_source WHERE id=2;
+    SELECT id,label FROM @rows;
+  expect: {rows: 1,data: [{id: 2,label: beta}]}
+- name: Named INSERT EXEC preserves target ordering after prefix normalization
+  sql: |
+    INSERT qualified_insert_target(unused.label,other.id) EXEC capture_reordered;
+    SELECT id,label,marker FROM qualified_insert_target WHERE id=61;
+  expect: {rows: 1,data: [{id: 61,label: order,marker: 9}]}
+- name: Dynamic INSERT EXEC shares the qualified native target-column contract
+  sql: |
+    INSERT qualified_insert_target(a..id,b.label) EXEC(N'SELECT 501 AS source_id,N''dynamic'' AS source_label');
+    SELECT id,label,marker FROM qualified_insert_target WHERE id=501;
+  expect: {rows: 1,data: [{id: 501,label: dynamic,marker: 9}]}
+- name: A stored module admits and executes qualified targets on its local temporary table
+  sql: EXEC qualified_insert_module
+  expect: {rows: 1,data: [{id: 2,label: module}]}
+- name: Distinct prefixes cannot hide duplicate native destination columns
+  sql: INSERT qualified_insert_target(first.id,second.ID) VALUES(701,702)
+  expect: {error: true,contains: duplicate INSERT column}
+- name: Ignoring prefixes does not invent a missing destination column
+  sql: INSERT qualified_insert_target(other.missing_column) VALUES(701)
+  expect: {error: true,contains: unknown INSERT column}
+- name: Qualified VALUES lists retain their destination arity checks
+  sql: INSERT qualified_insert_target(other.id,other.label) VALUES(701)
+  expect: {error: true}
+- name: Qualified INSERT EXEC retains result shape admission
+  sql: INSERT qualified_insert_target(other.id,other.label,other.marker) EXEC capture_reordered
+  expect: {error: true}
+- name: A trailing dot cannot replace the mandatory final target name
+  sql: INSERT qualified_insert_target(other.) VALUES(701)
+  expect: {error: true}
+- name: A target made only of empty parts has no final column
+  sql: INSERT qualified_insert_target(..) VALUES(701)
+  expect: {error: true}
+- name: Ignored prefixes cannot grant access to the actual destination database
+  username: qualified_insert_denied
+  password: column-test
+  sql: INSERT qualified_insert_target([system].[user].id) VALUES(701)
+  expect: {error: true}
+- name: An ignored 128-character prefix remains a valid identifier token
+  sql: |
+    INSERT qualified_insert_target(pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp.id) VALUES(601);
+    SELECT id,marker FROM qualified_insert_target WHERE id=601;
+  expect: {rows: 1,data: [{id: 601,marker: 9}]}
+- name: An ignored prefix still obeys the 128-character identifier boundary
+  sql: INSERT qualified_insert_target([ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp].id) VALUES(701)
+  expect: {error: true,contains: identifier exceeds 128 characters}
+- name: Invalid qualified destinations publish no additional target row
+  sql: SELECT COUNT(*) AS total FROM qualified_insert_target
+  expect: {rows: 1,data: [{total: 8}]}

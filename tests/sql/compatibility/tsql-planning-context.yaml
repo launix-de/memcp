@@ -1,0 +1,119 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Frontend option ownership remains separate from optional planning handles
+setup:
+- sql: CREATE TABLE planning_context_rows(id INT PRIMARY KEY,value INT)
+- sql: INSERT planning_context_rows VALUES(1,5),(2,7),(3,9)
+- sql: CREATE TABLE planning_context_calculations(id INT PRIMARY KEY,denominator INT,ratio AS (100/denominator))
+- sql: INSERT planning_context_calculations(id,denominator) VALUES(1,0)
+test_cases:
+- name: Standalone SELECT compilation keeps the default frontend profile without a planning handle
+  scm: |
+    (begin
+      (define runtime (newsession)) (runtime "username" "root") (runtime "schema" "memcp-tests")
+
+      (define output (newsession))
+      (define query "SELECT 42 AS value")
+      (sql_with_statement runtime nil 0 query
+        (lambda (tx)
+          ((sql_queryplan_compile_formula tx
+              (parse_tsql "memcp-tests" query nil nil tx))
+            runtime tx (lambda (row) (output "row" row)) (lambda (_fields _descriptors) true))))
+      (equal? (output "row") (list "value" 42)))
+  expect:
+    result: true
+- name: Standalone EXPLAIN retains the same logical contract with query hints
+  scm: |
+    (expression_equal?
+      (parse_tsql "memcp-tests" "EXPLAIN IR SELECT 1 AS value" nil nil nil)
+      (parse_tsql "memcp-tests" "EXPLAIN IR SELECT 1 AS value OPTION(MAXDOP 1,RECOMPILE)" nil nil nil))
+  expect:
+    result: true
+- name: Standalone UPDATE compilation retains its real statement transaction
+  scm: |
+    (begin
+      (define runtime (newsession)) (runtime "username" "root") (runtime "schema" "memcp-tests")
+
+      (define output (newsession))
+      (define query "UPDATE planning_context_rows SET value=value+1 WHERE id=1")
+      (equal? (sql_with_statement runtime nil 0 query
+        (lambda (tx)
+          ((sql_queryplan_compile_formula tx
+              (parse_tsql "memcp-tests" query nil nil tx))
+            runtime tx (lambda (row) (output "row" row)) (lambda (_fields _descriptors) true)))) 1))
+  expect:
+    result: true
+- name: Standalone DELETE compilation retains its real statement transaction
+  scm: |
+    (begin
+      (define runtime (newsession)) (runtime "username" "root") (runtime "schema" "memcp-tests")
+
+      (define output (newsession))
+      (define query "DELETE FROM planning_context_rows WHERE id=2")
+      (equal? (sql_with_statement runtime nil 0 query
+        (lambda (tx)
+          ((sql_queryplan_compile_formula tx
+              (parse_tsql "memcp-tests" query nil nil tx))
+            runtime tx (lambda (row) (output "row" row)) (lambda (_fields _descriptors) true)))) 1))
+  expect:
+    result: true
+- name: Standalone mutations publish only their exact target effects
+  sql: SELECT id,value FROM planning_context_rows ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - id: 1
+      value: 6
+    - id: 3
+      value: 9
+- name: A supplied OFF frontend profile evaluates computed arithmetic at its existing policy boundary
+  scm: |
+    (begin
+      (define runtime (newsession)) (runtime "username" "root") (runtime "schema" "memcp-tests")
+      (runtime "__tsql_ansi_warnings" false)
+      (define output (newsession))
+      (define query "SELECT ratio FROM planning_context_calculations WHERE id=1")
+      (sql_with_statement runtime nil 0 query
+        (lambda (tx)
+          ((sql_queryplan_compile_formula tx
+              (parse_tsql "memcp-tests" query nil runtime tx))
+            runtime tx (lambda (row) (output "row" row)) (lambda (_fields _descriptors) true))))
+      (equal? (output "row") (list "ratio" nil)))
+  expect:
+    result: true
+- name: A supplied ON frontend profile retains the actual computed arithmetic error
+  scm: |
+    (begin
+      (define runtime (newsession)) (runtime "username" "root") (runtime "schema" "memcp-tests")
+      (runtime "__tsql_ansi_warnings" true)
+      (define output (newsession))
+      (define query "SELECT ratio FROM planning_context_calculations WHERE id=1")
+      (try (lambda () (begin (sql_with_statement runtime nil 0 query
+        (lambda (tx)
+          ((sql_queryplan_compile_formula tx
+              (parse_tsql "memcp-tests" query nil runtime tx))
+            runtime tx (lambda (row) (output "row" row)) (lambda (_fields _descriptors) true)))) false))
+        (lambda (cause) (equal? ((tsql_error_context cause) "number") 8134))))
+  expect:
+    result: true
+- name: Standalone default profile retains the same strict computed arithmetic error
+  scm: |
+    (begin
+      (define runtime (newsession)) (runtime "username" "root") (runtime "schema" "memcp-tests")
+      (runtime "__tsql_ansi_warnings" true)
+      (define output (newsession))
+      (define query "SELECT ratio FROM planning_context_calculations WHERE id=1")
+      (try (lambda () (begin (sql_with_statement runtime nil 0 query
+        (lambda (tx)
+          ((sql_queryplan_compile_formula tx
+              (parse_tsql "memcp-tests" query nil nil tx))
+            runtime tx (lambda (row) (output "row" row)) (lambda (_fields _descriptors) true)))) false))
+        (lambda (cause) (equal? ((tsql_error_context cause) "number") 8134))))
+  expect:
+    result: true
+cleanup:
+- sql: DROP TABLE IF EXISTS planning_context_calculations
+- sql: DROP TABLE IF EXISTS planning_context_rows

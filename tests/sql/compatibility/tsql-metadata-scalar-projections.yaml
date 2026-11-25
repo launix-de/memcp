@@ -1,0 +1,208 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SQL Server 2022 names, padding, NULL and intrinsic types: https://dbfiddle.uk/SmQdMKPu
+# The collation value is the existing native default profile, also reported by
+# SERVERPROPERTY, rather than a fabricated SQL Server installation collation.
+metadata:
+  version: '1.0'
+  description: Existing schema namespaces and database collation scalar projections
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+setup:
+- sql: CREATE DATABASE metadata_projection_visible
+- sql: CREATE DATABASE metadata_projection_hidden
+- sql: CREATE TABLE metadata_projection_object (id INT)
+- sql: INSERT metadata_projection_object VALUES(245000),(245001)
+- sql: CREATE TABLE metadata_projection_inputs (bucket INT, target NVARCHAR(128), property VARCHAR(128))
+- sql: INSERT metadata_projection_inputs VALUES(1,N'metadata_projection_visible','Collation'),(1,N'metadata_projection_visible','Collation'),(2,N'metadata_projection_visible',NULL)
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS metadata_projection_reader" nil (newsession) nil))
+- scm: (eval (parse_sql "memcp-tests" "CREATE USER metadata_projection_reader IDENTIFIED BY 'pw'" nil (newsession) nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON `memcp-tests`.* TO metadata_projection_reader" nil))
+- scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON metadata_projection_visible.* TO metadata_projection_reader" nil))
+cleanup:
+- sql: DROP TABLE IF EXISTS metadata_projection_object
+- sql: DROP TABLE IF EXISTS metadata_projection_inputs
+- sql: DROP DATABASE IF EXISTS metadata_projection_visible
+- sql: DROP DATABASE IF EXISTS metadata_projection_hidden
+- scm: (eval (parse_sql "memcp-tests" "DROP USER IF EXISTS metadata_projection_reader" nil (newsession) nil))
+test_cases:
+- name: Omitted schema identifies the existing default namespace
+  sql: SELECT SCHEMA_ID() AS implicit_id,SCHEMA_ID(N'dbo') AS explicit_id
+  expect: {rows: 1, data: [{implicit_id: 1, explicit_id: 1}]}
+- name: Both virtual metadata namespaces have stable schema identities
+  sql: SELECT SCHEMA_ID(N'sys') AS system_id,SCHEMA_ID(N'INFORMATION_SCHEMA') AS information_id,SCHEMA_NAME(4) AS system_name,SCHEMA_NAME(3) AS information_name
+  expect: {rows: 1, data: [{system_id: 4, information_id: 3, system_name: sys, information_name: INFORMATION_SCHEMA}]}
+- name: NULL and absent schema names remain absent
+  sql: SELECT SCHEMA_ID(NULL) AS null_id,SCHEMA_ID(N'absent_namespace') AS missing_id,SCHEMA_ID(N'') AS empty_id
+  expect: {rows: 1, data: [{null_id: null, missing_id: null, empty_id: null}]}
+- name: Literal NULL object names retain caller CASE values
+  sql: SELECT id,CASE WHEN id=245000 THEN OBJECT_NAME(NULL) ELSE N'kept' END AS value FROM metadata_projection_object ORDER BY id
+  expect: {rows: 2, data: [{id: 245000, value: null}, {id: 245001, value: kept}]}
+- name: Literal NULL object names retain UNION values
+  sql: SELECT OBJECT_NAME(NULL) AS value UNION ALL SELECT N'kept'
+  expect: {rows: 2, data: [{value: null}, {value: kept}]}
+- name: Empty literal NULL object names retain their sysname wire contract
+  tds:
+    statements:
+    - sql: SELECT OBJECT_NAME(NULL) AS value FROM metadata_projection_object WHERE 1=0
+      expect: {rows: 0, column_types: [{name: value, type: NVARCHAR, length: 128}]}
+- name: Object name NULL input does not bypass an invalid cast declaration
+  sql: SELECT OBJECT_NAME(CAST(NULL AS missing_metadata_type)) AS value
+  expect: {error: true}
+- name: Schema metadata names pad trailing spaces and retain leading or quoted characters
+  sql: SELECT SCHEMA_ID(N'DBO ') AS padded,SCHEMA_ID(N' dbo') AS leading,SCHEMA_ID(N'[dbo]') AS bracketed,SCHEMA_ID(N'"dbo"') AS quoted
+  expect: {rows: 1, data: [{padded: 1, leading: null, bracketed: null, quoted: null}]}
+- name: Runtime schema arguments do not retain a previous namespace
+  sql: |
+    DECLARE @name NVARCHAR(128)=N'dbo',@first INT,@second INT,@missing INT;
+    SET @first=SCHEMA_ID(@name);
+    SET @name=N'sys'; SET @second=SCHEMA_ID(@name);
+    SET @name=NULL; SET @missing=SCHEMA_ID(@name);
+    SELECT @first AS first_id,@second AS second_id,@missing AS missing_id;
+  expect: {rows: 1, data: [{first_id: 1, second_id: 4, missing_id: null}]}
+- name: Absent schema checks select the ordinary false control flow
+  sql: DECLARE @value INT=7; IF SCHEMA_ID(N'absent_namespace') IS NOT NULL SET @value=9; SELECT @value AS value
+  expect: {rows: 1, data: [{value: 7}]}
+- name: Schema catalog and both intrinsic directions share declarations
+  sql: SELECT name,schema_id,SCHEMA_ID(name) AS lookup_id,SCHEMA_NAME(schema_id) AS lookup_name FROM sys.schemas ORDER BY schema_id
+  expect:
+    rows: 3
+    data:
+    - {name: dbo, schema_id: 1, lookup_id: 1, lookup_name: dbo}
+    - {name: INFORMATION_SCHEMA, schema_id: 3, lookup_id: 3, lookup_name: INFORMATION_SCHEMA}
+    - {name: sys, schema_id: 4, lookup_id: 4, lookup_name: sys}
+- name: User object schema identities join the same namespace catalog
+  sql: SELECT o.name,s.name AS owner FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id WHERE o.name=N'metadata_projection_object'
+  expect: {rows: 1, data: [{name: metadata_projection_object, owner: dbo}]}
+- name: Information schema user relations retain the shared dbo namespace
+  sql: SELECT TABLE_SCHEMA AS owner FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME=N'metadata_projection_object'
+  expect: {rows: 1, data: [{owner: dbo}]}
+- name: Schema catalog columns are actual virtual catalog declarations
+  sql: SELECT name,column_id FROM sys.all_columns WHERE object_id=OBJECT_ID(N'sys.schemas') ORDER BY column_id
+  expect: {rows: 2, data: [{name: name, column_id: 1}, {name: schema_id, column_id: 2}]}
+- name: Current database reports its actual supported default comparison profile
+  sql: SELECT CONVERT(NVARCHAR(50),DATABASEPROPERTYEX(DB_NAME(),'Collation')) AS collation
+  expect: {rows: 1, data: [{collation: utf8mb4_general_ci}]}
+- name: Database and server default collation profiles agree
+  sql: SELECT CASE WHEN CONVERT(NVARCHAR(128),DATABASEPROPERTYEX(DB_NAME(),'Collation'))=CONVERT(NVARCHAR(128),SERVERPROPERTY('Collation')) THEN 1 ELSE 0 END AS same_profile
+  expect: {rows: 1, data: [{same_profile: 1}]}
+- name: Property metadata names are case insensitive and pad trailing spaces only
+  sql: SELECT CONVERT(NVARCHAR(128),DATABASEPROPERTYEX(DB_NAME(),'cOlLaTiOn ')) AS padded,DATABASEPROPERTYEX(DB_NAME(),' Collation') AS leading
+  expect: {rows: 1, data: [{padded: utf8mb4_general_ci, leading: null}]}
+- name: NULL and missing database names have no property value
+  sql: SELECT DATABASEPROPERTYEX(NULL,'Collation') AS null_db,DATABASEPROPERTYEX(N'absent_metadata_database','Collation') AS missing_db,DATABASEPROPERTYEX(DB_NAME(),NULL) AS null_property
+  expect: {rows: 1, data: [{null_db: null, missing_db: null, null_property: null}]}
+- name: Invalid property names return documented SQL NULL
+  sql: SELECT DATABASEPROPERTYEX(DB_NAME(),'not_a_property') AS missing
+  expect: {rows: 1, data: [{missing: null}]}
+- name: Dynamic property expressions retain value and NULL contracts
+  sql: |
+    DECLARE @property VARCHAR(128)='Collation';
+    SELECT CONVERT(NVARCHAR(50),DATABASEPROPERTYEX(DB_NAME(),@property)) AS value;
+    SET @property='not_a_property';
+    SELECT CONVERT(NVARCHAR(50),DATABASEPROPERTYEX(DB_NAME(),@property)) AS value;
+    SET @property=NULL;
+    SELECT CONVERT(NVARCHAR(50),DATABASEPROPERTYEX(DB_NAME(),@property)) AS value;
+  expect: {rows: 3, data: [{value: utf8mb4_general_ci}, {value: null}, {value: null}]}
+- name: Repeated relational inputs retain duplicate and NULL schema values
+  sql: SELECT SCHEMA_ID(v.name) AS id FROM (VALUES (N'dbo'),(N'dbo'),(CAST(NULL AS NVARCHAR(128))),(N'sys')) v(name)
+  expect: {rows: 4, data: [{id: 1}, {id: 1}, {id: null}, {id: 4}]}
+- name: Caller-lifted schema and property values retain their execution scope
+  sql: |
+    SELECT id,SCHEMA_ID(CASE WHEN id%2=0 THEN N'dbo' ELSE N'sys' END) AS schema_id,
+      CONVERT(NVARCHAR(128),DATABASEPROPERTYEX(DB_NAME(),CASE WHEN id%2=0 THEN 'Collation' ELSE NULL END)) AS collation
+    FROM metadata_projection_object WHERE id IN(245000,245001) ORDER BY id
+  expect:
+    rows: 2
+    data:
+    - {id: 245000,schema_id: 1,collation: utf8mb4_general_ci}
+    - {id: 245001,schema_id: 4,collation: null}
+- name: Direct property query starts with the current native grant
+  session_id: metadata-projection-direct
+  username: metadata_projection_reader
+  password: pw
+  sql: SELECT DATABASEPROPERTYEX(N'metadata_projection_visible','Collation') AS value
+  expect: {rows: 1, data: [{value: utf8mb4_general_ci}]}
+- name: Grouped property values consume current grants with duplicate and NULL inputs
+  session_id: metadata-projection-grouped
+  username: metadata_projection_reader
+  password: pw
+  sql: SELECT bucket,COUNT(*) AS total,COUNT(CONVERT(NVARCHAR(128),DATABASEPROPERTYEX(target,property))) AS visible_values,MAX(CONVERT(NVARCHAR(128),DATABASEPROPERTYEX(target,property))) AS value FROM metadata_projection_inputs GROUP BY bucket ORDER BY bucket
+  expect: {rows: 2, data: [{bucket: 1, total: 2, visible_values: 2, value: utf8mb4_general_ci}, {bucket: 2, total: 1, visible_values: 0, value: null}]}
+- name: Database property visibility follows actual native database grants
+  username: metadata_projection_reader
+  password: pw
+  sql: SELECT CONVERT(NVARCHAR(128),DATABASEPROPERTYEX(N'metadata_projection_visible','Collation')) AS granted,DATABASEPROPERTYEX(N'metadata_projection_hidden','Collation') AS hidden
+  expect: {rows: 1, data: [{granted: utf8mb4_general_ci, hidden: null}]}
+- name: Revoke property visibility using the native membership owner
+  scm: (eval (parse_sql "memcp-tests" "REVOKE ALL ON metadata_projection_visible.* FROM metadata_projection_reader" nil))
+- name: A previously visible property observes revoked membership
+  session_id: metadata-projection-direct
+  username: metadata_projection_reader
+  password: pw
+  sql: SELECT DATABASEPROPERTYEX(N'metadata_projection_visible','Collation') AS value
+  expect: {rows: 1, data: [{value: null}]}
+- name: The same grouped property query observes REVOKE without changing its input rows
+  session_id: metadata-projection-grouped
+  username: metadata_projection_reader
+  password: pw
+  sql: SELECT bucket,COUNT(*) AS total,COUNT(CONVERT(NVARCHAR(128),DATABASEPROPERTYEX(target,property))) AS visible_values,MAX(CONVERT(NVARCHAR(128),DATABASEPROPERTYEX(target,property))) AS value FROM metadata_projection_inputs GROUP BY bucket ORDER BY bucket
+  expect: {rows: 2, data: [{bucket: 1, total: 2, visible_values: 0, value: null}, {bucket: 2, total: 1, visible_values: 0, value: null}]}
+- name: Restore the grant using the native membership owner
+  scm: (eval (parse_sql "memcp-tests" "GRANT ALL ON metadata_projection_visible.* TO metadata_projection_reader" nil))
+- name: The same grouped property query observes GRANT on the unchanged actor incarnation
+  session_id: metadata-projection-grouped
+  username: metadata_projection_reader
+  password: pw
+  sql: SELECT bucket,COUNT(*) AS total,COUNT(CONVERT(NVARCHAR(128),DATABASEPROPERTYEX(target,property))) AS visible_values,MAX(CONVERT(NVARCHAR(128),DATABASEPROPERTYEX(target,property))) AS value FROM metadata_projection_inputs GROUP BY bucket ORDER BY bucket
+  expect: {rows: 2, data: [{bucket: 1, total: 2, visible_values: 2, value: utf8mb4_general_ci}, {bucket: 2, total: 1, visible_values: 0, value: null}]}
+- name: Restored direct property visibility returns the actual profile again
+  session_id: metadata-projection-direct
+  username: metadata_projection_reader
+  password: pw
+  sql: SELECT DATABASEPROPERTYEX(N'metadata_projection_visible','Collation') AS value
+  expect: {rows: 1, data: [{value: utf8mb4_general_ci}]}
+- name: TDS declares INT and SQL_VARIANT for values and NULL
+  tds:
+    statements:
+    - sql: SELECT SCHEMA_ID(N'dbo') AS id,DATABASEPROPERTYEX(DB_NAME(),'Collation') AS collation
+      expect: {rows: 1, data: [{id: 1, collation: utf8mb4_general_ci}], column_types: [{name: id, type: INT}, {name: collation, type: SQL_VARIANT}]}
+    - sql: SELECT SCHEMA_ID(NULL) AS id,DATABASEPROPERTYEX(NULL,'Collation') AS collation
+      expect: {rows: 1, data: [{id: null, collation: null}], column_types: [{name: id, type: INT}, {name: collation, type: SQL_VARIANT}]}
+    - sql: SELECT SCHEMA_ID() AS id,DATABASEPROPERTYEX(DB_NAME(),'Collation') AS collation WHERE 1=0
+      expect: {rows: 0, column_types: [{name: id, type: INT}, {name: collation, type: SQL_VARIANT}]}
+- name: Property scalar retains the declared intrinsic text-variant contract
+  scm: |
+    (begin
+      (define actor (tsql_actor_value "root" nil))
+      (define property (tsql_databasepropertyex "memcp-tests" "Collation" actor))
+      (and (equal? (property "value") "utf8mb4_general_ci")
+        (equal? ((property "variant") "kind") 231)
+        (equal? ((property "variant") "size") 256)
+        (equal? ((property "variant") "collation") (hex2bin "0904d00034"))))
+  expect: {result: true}
+- name: Prepared property arguments remain scalar SQL inputs
+  tds:
+    statements:
+    - sql: SELECT DATABASEPROPERTYEX(@database,@property) AS value
+      prepare: true
+      parameters: [{name: database, value: memcp-tests}, {name: property, value: Collation}]
+      expect: {rows: 1, data: [{value: utf8mb4_general_ci}], column_types: [{name: value, type: SQL_VARIANT}]}
+- name: Schema ID rejects an extra argument
+  sql: SELECT SCHEMA_ID(N'dbo',N'sys')
+  expect: {error: true}
+- name: Database property requires both arguments
+  sql: SELECT DATABASEPROPERTYEX(DB_NAME())
+  expect: {error: true}
+- name: Database property rejects extra arguments
+  sql: SELECT DATABASEPROPERTYEX(DB_NAME(),'Collation','extra')
+  expect: {error: true}
+- name: Other valid database properties require their own metadata projections
+  noncritical: true
+  sql: SELECT CONVERT(NVARCHAR(128),DATABASEPROPERTYEX(DB_NAME(),'Recovery')) AS recovery
+  expect: {rows: 1, data: [{recovery: SIMPLE}]}
+- name: Schema owner principals require a separate catalog projection
+  noncritical: true
+  sql: SELECT principal_id FROM sys.schemas WHERE name=N'dbo'
+  expect: {rows: 1, data: [{principal_id: 1}]}

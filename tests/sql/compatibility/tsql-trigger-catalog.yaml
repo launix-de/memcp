@@ -1,0 +1,107 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/relational-databases/system-catalog-views/sys-triggers-transact-sql
+metadata:
+  syntax: tsql
+  requires_tds: true
+  isolated: true
+  description: SQL trigger catalogs reflect native user declarations and transaction-visible enabled state
+setup:
+- sql: CREATE TABLE trigger_catalog_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE trigger_catalog_input(id INT PRIMARY KEY,parent_id INT,CONSTRAINT trigger_catalog_fk FOREIGN KEY(parent_id) REFERENCES trigger_catalog_parent(id))
+- sql: CREATE TABLE trigger_catalog_log(id INT)
+- sql: CREATE TRIGGER trigger_catalog_after ON trigger_catalog_input AFTER INSERT AS INSERT trigger_catalog_log SELECT id FROM inserted
+- sql: CREATE TRIGGER trigger_catalog_replace ON trigger_catalog_input INSTEAD OF DELETE AS PRINT N'kept'
+cleanup:
+- sql: DROP TABLE IF EXISTS trigger_catalog_input
+- sql: DROP TABLE IF EXISTS trigger_catalog_parent
+- sql: DROP TABLE IF EXISTS trigger_catalog_log
+test_cases:
+- name: Empty trigger results retain the declared TDS metadata
+  tds:
+    statements:
+    - sql: SELECT TOP(0) name,object_id,parent_class,parent_id,type,is_disabled,is_instead_of_trigger FROM sys.triggers
+      expect:
+        rows: 0
+        column_types:
+        - {name: name,type: NVARCHAR,length: 128,nullable: false}
+        - {name: object_id,type: INT,nullable: false}
+        - {name: parent_class,type: TINYINT,nullable: false}
+        - {name: parent_id,type: INT,nullable: false}
+        - {name: type,type: CHAR,length: 2,nullable: false}
+        - {name: is_disabled,type: BIT,nullable: false}
+        - {name: is_instead_of_trigger,type: BIT,nullable: false}
+- name: User statement declarations expose actual kind timing state and parent identity
+  sql: SELECT name,parent_class,parent_class_desc,RTRIM(type) AS kind,type_desc,is_ms_shipped,is_disabled,is_instead_of_trigger,CASE WHEN parent_id=OBJECT_ID(N'trigger_catalog_input',N'U') THEN 1 ELSE 0 END AS same_parent FROM sys.triggers ORDER BY name
+  expect:
+    rows: 2
+    data:
+    - {name: trigger_catalog_after,parent_class: 1,parent_class_desc: OBJECT_OR_COLUMN,kind: TR,type_desc: SQL_TRIGGER,is_ms_shipped: false,is_disabled: false,is_instead_of_trigger: false,same_parent: 1}
+    - {name: trigger_catalog_replace,parent_class: 1,parent_class_desc: OBJECT_OR_COLUMN,kind: TR,type_desc: SQL_TRIGGER,is_ms_shipped: false,is_disabled: false,is_instead_of_trigger: true,same_parent: 1}
+- name: Trigger OBJECT_ID shares the current sys.objects declaration identity
+  sql: SELECT t.name,CASE WHEN t.object_id=o.object_id AND t.object_id=OBJECT_ID(N'dbo.'+t.name,N'TR') AND t.object_id=OBJECT_ID(N'dbo.'+t.name) AND t.parent_id=o.parent_object_id THEN 1 ELSE 0 END AS same_identity FROM sys.triggers t INNER JOIN sys.objects o ON t.object_id=o.object_id ORDER BY t.name
+  expect: {rows: 2,data: [{name: trigger_catalog_after,same_identity: 1},{name: trigger_catalog_replace,same_identity: 1}]}
+- name: Trigger kinds never resolve a table or a missing declaration
+  sql: SELECT OBJECT_ID(N'trigger_catalog_input',N'TR') AS wrong_kind,OBJECT_ID(N'trigger_catalog_missing',N'TR') AS missing_trigger,OBJECT_ID(N'trigger_catalog_after',N'U') AS wrong_table
+  expect: {rows: 1,data: [{wrong_kind: null,missing_trigger: null,wrong_table: null}]}
+- name: Trigger kind classification accepts lowercase and mixed case
+  sql: SELECT CASE WHEN OBJECT_ID(N'trigger_catalog_after',N'tr')=OBJECT_ID(N'trigger_catalog_after',N'Tr') AND OBJECT_ID(N'trigger_catalog_after',N'Tr')=OBJECT_ID(N'trigger_catalog_after',N'TR') THEN 1 ELSE 0 END AS same_identity
+  expect: {rows: 1,data: [{same_identity: 1}]}
+- name: An actor without database access receives no trigger declarations
+  scm: |
+    (empty_list? (tsql_catalog_runtime_rows "memcp-tests" "triggers"
+      "trigger_catalog_unknown_actor" nil nil))
+  expect: {result: true}
+- name: Pending trigger declaration visibility follows its native transaction
+  tds:
+    statements:
+    - {connection: owner,sql: BEGIN TRANSACTION}
+    - {connection: owner,sql: 'CREATE TRIGGER trigger_catalog_pending ON trigger_catalog_log AFTER INSERT AS PRINT N''pending'''}
+    - connection: owner
+      sql: SELECT name,CASE WHEN object_id=OBJECT_ID(N'trigger_catalog_pending',N'TR') THEN 1 ELSE 0 END AS same_identity FROM sys.triggers WHERE name=N'trigger_catalog_pending'
+      expect: {rows: 1,data: [{name: trigger_catalog_pending,same_identity: 1}]}
+    - connection: observer
+      sql: SELECT name FROM sys.triggers WHERE name=N'trigger_catalog_pending'
+      expect: {rows: 0,data: []}
+    - {connection: owner,sql: ROLLBACK TRANSACTION}
+    - connection: owner
+      sql: SELECT OBJECT_ID(N'trigger_catalog_pending',N'TR') AS removed
+      expect: {rows: 1,data: [{removed: null}]}
+- name: Existing trigger probes control real disable operations
+  sql: IF EXISTS(SELECT 1 FROM sys.triggers WHERE name=N'trigger_catalog_after') DISABLE TRIGGER trigger_catalog_after ON trigger_catalog_input
+- name: A disabled user trigger remains discoverable
+  sql: SELECT name,is_disabled FROM sys.triggers WHERE name=N'trigger_catalog_after'
+  expect: {rows: 1,data: [{name: trigger_catalog_after,is_disabled: true}]}
+- name: Disabled catalog state agrees with the absence of its actual effect
+  sql: INSERT trigger_catalog_input(id) VALUES(1)
+- name: Disabled source did not publish an audit row
+  sql: SELECT id FROM trigger_catalog_log
+  expect: {rows: 0,data: []}
+- name: Enable state is private to the owner and savepoint rollback restores it
+  tds:
+    statements:
+    - {connection: owner,sql: 'BEGIN TRANSACTION; SAVE TRANSACTION before_enable; ENABLE TRIGGER trigger_catalog_after ON trigger_catalog_input'}
+    - connection: owner
+      sql: SELECT name,is_disabled FROM sys.triggers WHERE name=N'trigger_catalog_after'
+      expect: {rows: 1,data: [{name: trigger_catalog_after,is_disabled: false}]}
+    - connection: observer
+      sql: SELECT name,is_disabled FROM sys.triggers WHERE name=N'trigger_catalog_after'
+      expect: {rows: 1,data: [{name: trigger_catalog_after,is_disabled: true}]}
+    - {connection: owner,sql: 'ROLLBACK TRANSACTION before_enable'}
+    - connection: owner
+      sql: SELECT name,is_disabled FROM sys.triggers WHERE name=N'trigger_catalog_after'
+      expect: {rows: 1,data: [{name: trigger_catalog_after,is_disabled: true}]}
+    - {connection: owner,sql: 'ENABLE TRIGGER trigger_catalog_after ON trigger_catalog_input; COMMIT TRANSACTION'}
+    - connection: observer
+      sql: SELECT name,is_disabled FROM sys.triggers WHERE name=N'trigger_catalog_after'
+      expect: {rows: 1,data: [{name: trigger_catalog_after,is_disabled: false}]}
+- name: Enabled catalog state agrees with execution of its retained source
+  sql: INSERT trigger_catalog_input(id) VALUES(2)
+- name: Only the enabled insertion was audited
+  sql: SELECT id FROM trigger_catalog_log
+  expect: {rows: 1,data: [{id: 2}]}
+- name: Restart preserves trigger identities and enabled state
+  action: restart
+- name: Reloaded declaration still agrees with its parent and object identity
+  sql: SELECT name,is_disabled,CASE WHEN object_id=OBJECT_ID(N'trigger_catalog_after',N'TR') AND parent_id=OBJECT_ID(N'trigger_catalog_input',N'U') THEN 1 ELSE 0 END AS same_identity FROM sys.triggers WHERE name=N'trigger_catalog_after'
+  expect: {rows: 1,data: [{name: trigger_catalog_after,is_disabled: false,same_identity: 1}]}

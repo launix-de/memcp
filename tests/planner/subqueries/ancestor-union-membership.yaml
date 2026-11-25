@@ -1,0 +1,727 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Closed UNION candidates preserve all distant caller and session bindings
+setup:
+- sql: CREATE TABLE aum_callers(id INT PRIMARY KEY,owner_id INT,tenant_id INT)
+- sql: CREATE TABLE aum_items(id INT PRIMARY KEY,parent_id INT,reference_id INT)
+- sql: CREATE TABLE aum_references(id INT PRIMARY KEY,label VARCHAR(32))
+- sql: CREATE TABLE aum_assignments(id INT PRIMARY KEY,actor_id INT,tenant_id INT,reference_id INT,allowed BOOL)
+- sql: CREATE TABLE aum_bridge(item_id INT PRIMARY KEY,reference_id INT)
+- sql: INSERT INTO aum_callers VALUES(1,10,100),(2,20,200),(3,30,NULL),(4,40,100),(5,50,300),(6,10,100),(7,NULL,100),(8,10,NULL),(9,8,999),(10,7,100)
+- sql: INSERT INTO aum_items VALUES(11,1,1000),(12,1,1001),(21,2,2000),(31,3,3000),(41,4,NULL),(61,6,1000),(71,7,1000),(81,8,1000),(91,9,2000),(101,10,1000)
+- sql: INSERT INTO aum_references VALUES(1000,'alpha'),(1001,'beta'),(2000,'gamma'),(3000,'delta')
+- sql: INSERT INTO aum_assignments VALUES(1,7,100,1000,TRUE),(2,7,100,1001,FALSE),(3,8,200,2000,TRUE),(4,7,NULL,NULL,TRUE),(5,9,300,NULL,NULL),(6,7,NULL,3000,TRUE)
+- sql: INSERT INTO aum_bridge SELECT id,reference_id FROM aum_items
+test_cases:
+- name: Skip-level UNION membership retains all ancestor bindings and duplicate caller domains
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=7 AND a.tenant_id=p.tenant_id
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      visible_label: alpha
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: null
+    - id: 9
+      visible_label: gamma
+    - id: 10
+      visible_label: alpha
+- name: A further scalar scope does not erase a distant caller domain
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT
+          (SELECT r.label FROM aum_references r
+           WHERE r.id=b.reference_id AND r.id IN (
+             SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+             UNION ALL
+             SELECT a.reference_id FROM aum_assignments a
+             WHERE a.actor_id=7 AND a.tenant_id=p.tenant_id
+           ) LIMIT 1)
+         FROM aum_bridge b WHERE b.item_id=i.id LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      visible_label: alpha
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: null
+    - id: 9
+      visible_label: gamma
+    - id: 10
+      visible_label: alpha
+- name: A user nullable OR branch retains SQL truth and each caller reference
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=7 AND (a.tenant_id IS NULL OR a.tenant_id=p.tenant_id)
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      visible_label: alpha
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: delta
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: null
+    - id: 9
+      visible_label: gamma
+    - id: 10
+      visible_label: alpha
+- name: A user branch filter is not replaced by mere UNION presence
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id AND a.allowed=TRUE
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=7 AND a.tenant_id=p.tenant_id AND a.allowed=TRUE
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id DESC LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      visible_label: null
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: null
+    - id: 9
+      visible_label: gamma
+    - id: 10
+      visible_label: alpha
+- name: Local aliases shadow callers inside a genuinely closed UNION producer
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT p.reference_id FROM aum_assignments p WHERE p.actor_id=7 AND p.tenant_id=100
+           UNION ALL
+           SELECT p.reference_id FROM aum_assignments p
+           WHERE p.actor_id=8 AND p.tenant_id=200
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      visible_label: alpha
+    - id: 2
+      visible_label: gamma
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: alpha
+    - id: 9
+      visible_label: gamma
+    - id: 10
+      visible_label: alpha
+- name: Current session actor 7 preserves every caller tuple
+  session_id: aum_actor_session
+  setup:
+  - sql: SET @aum_actor=7
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=@aum_actor AND a.tenant_id=p.tenant_id
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      visible_label: alpha
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: null
+    - id: 9
+      visible_label: gamma
+    - id: 10
+      visible_label: alpha
+- name: Current session actor 8 preserves every caller tuple
+  session_id: aum_actor_session
+  setup:
+  - sql: SET @aum_actor=8
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=@aum_actor AND a.tenant_id=p.tenant_id
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      visible_label: null
+    - id: 2
+      visible_label: gamma
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: null
+    - id: 7
+      visible_label: null
+    - id: 8
+      visible_label: null
+    - id: 9
+      visible_label: gamma
+    - id: 10
+      visible_label: alpha
+- name: Current session actor NULL preserves every caller tuple
+  session_id: aum_actor_session
+  setup:
+  - sql: SET @aum_actor=NULL
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=@aum_actor AND a.tenant_id=p.tenant_id
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      visible_label: null
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: null
+    - id: 7
+      visible_label: null
+    - id: 8
+      visible_label: null
+    - id: 9
+      visible_label: gamma
+    - id: 10
+      visible_label: alpha
+- name: Scalar membership and anti-membership retain UNKNOWN from NULL RHS rows
+  sql: |-
+    SELECT p.id,
+      p.tenant_id IN (SELECT a.tenant_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+        UNION ALL SELECT a.tenant_id FROM aum_assignments a WHERE a.actor_id=7) AS member,
+      p.tenant_id NOT IN (SELECT a.tenant_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+        UNION ALL SELECT a.tenant_id FROM aum_assignments a WHERE a.actor_id=7) AS nonmember
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      member: true
+      nonmember: false
+    - id: 2
+      member: null
+      nonmember: null
+    - id: 3
+      member: null
+      nonmember: null
+    - id: 4
+      member: true
+      nonmember: false
+    - id: 5
+      member: null
+      nonmember: null
+    - id: 6
+      member: true
+      nonmember: false
+    - id: 7
+      member: true
+      nonmember: false
+    - id: 8
+      member: null
+      nonmember: null
+    - id: 9
+      member: null
+      nonmember: null
+    - id: 10
+      member: true
+      nonmember: false
+- name: PostgreSQL retains distant UNION alternatives through its shared planner
+  sql: |-
+    SELECT p.id,
+      (SELECT
+        (SELECT r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=7 AND a.tenant_id=p.tenant_id
+         ) LIMIT 1)
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id LIMIT 1) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      visible_label: alpha
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: null
+    - id: 9
+      visible_label: gamma
+    - id: 10
+      visible_label: alpha
+  syntax: postgresql
+- name: TSQL retains distant UNION alternatives through its shared planner
+  sql: |-
+    SELECT p.id,
+      (SELECT TOP (1)
+        (SELECT TOP (1) r.label FROM aum_references r
+         WHERE r.id=i.reference_id AND r.id IN (
+           SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=p.owner_id
+           UNION ALL
+           SELECT a.reference_id FROM aum_assignments a
+           WHERE a.actor_id=7 AND a.tenant_id=p.tenant_id
+         ))
+       FROM aum_items i WHERE i.parent_id=p.id ORDER BY i.id) AS visible_label
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      visible_label: alpha
+    - id: 2
+      visible_label: null
+    - id: 3
+      visible_label: null
+    - id: 4
+      visible_label: null
+    - id: 5
+      visible_label: null
+    - id: 6
+      visible_label: alpha
+    - id: 7
+      visible_label: alpha
+    - id: 8
+      visible_label: null
+    - id: 9
+      visible_label: gamma
+    - id: 10
+      visible_label: alpha
+  syntax: tsql
+- name: A lexical closure check detects an unknown caller without any outer catalog
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        (list "columns" (list (list "Field" "id")))))
+      (define ref (list 'get_column "local" false "id" false))
+      (define input (make_query_block "unused" (list source)
+        (list "value" (list 'get_column "unknown_caller" false "id" false)) true '() nil '() nil nil '() '() '()))
+      (empty_list? (logical_relation_free_column_refs input)))
+  expect:
+    result: false
+- name: Quoted user data never becomes an executable free caller read
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        (list "columns" (list (list "Field" "id")))))
+      (define ref (list 'get_column "local" false "id" false))
+      (define input (make_query_block "unused" (list source)
+        (list "value" (list 'quote (list 'get_column "unknown_caller" false "id" false))) true '() nil '() nil nil '() '() '()))
+      (empty_list? (logical_relation_free_column_refs input)))
+  expect:
+    result: true
+- name: Unqualified columns resolve through producer-owned declarations
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        (list "columns" (list (list "Field" "id")))))
+      (define ref (list 'get_column "local" false "id" false))
+      (define input (make_query_block "unused" (list source)
+        (list "value" (list 'get_column nil false "id" false)) true '() nil '() nil nil '() '() '()))
+      (empty_list? (logical_relation_free_column_refs input)))
+  expect:
+    result: true
+- name: The first retained stage domain coordinate still belongs to its caller
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        (list "columns" (list (list "Field" "id")))))
+      (define ref (list 'get_column "local" false "id" false))
+      (define stage (make_group_stage "scoped" source
+        (list (list 'get_column "unknown_caller" false "id" false) ref)
+        (list ref) (list '(1 + 0)) true '() '() nil nil '()))
+      (define input (make_query_block "unused" (list source) (list "value" ref)
+        true '() nil '() nil nil '() (list stage) '()))
+      (empty_list? (logical_relation_free_column_refs input)))
+  expect:
+    result: false
+- name: An internally bound stage domain does not invent an external caller
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        (list "columns" (list (list "Field" "id")))))
+      (define ref (list 'get_column "local" false "id" false))
+      (define stage (make_group_stage "scoped" source (list ref)
+        (list ref) (list '(1 + 0)) true '() '() nil nil '()))
+      (define input (make_query_block "unused" (list source) (list "value" ref)
+        true '() nil '() nil nil '() (list stage) '()))
+      (empty_list? (logical_relation_free_column_refs input)))
+  expect:
+    result: true
+- name: Window prefilters retain caller dependencies
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        (list "columns" (list (list "Field" "id")))))
+      (define ref (list 'get_column "unknown_caller" false "id" false))
+      (empty_list? (logical_relation_free_column_refs (make_window_stage "window" source "value" '("id") '(false) 0
+        '("id") (lambda (x) x) '+ 0 (list (list 'condition ref))))))
+  expect:
+    result: false
+- name: Window ordering retains caller dependencies
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        (list "columns" (list (list "Field" "id")))))
+      (define ref (list 'get_column "unknown_caller" false "id" false))
+      (empty_list? (logical_relation_free_column_refs (make_window_stage "window" source "value" (list ref) '(false) 0
+        '("id") (lambda (x) x) '+ 0 '()))))
+  expect:
+    result: false
+- name: ORC mapping retains caller dependencies
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        (list "columns" (list (list "Field" "id")))))
+      (define ref (list 'get_column "unknown_caller" false "id" false))
+      (empty_list? (logical_relation_free_column_refs (make_orc_stage "orc" source "value" '("id") '(false) 0
+        '("id") ref '+ 0))))
+  expect:
+    result: false
+- name: Table function arguments retain caller dependencies
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        (list "columns" (list (list "Field" "id")))))
+      (define ref (list 'get_column "unknown_caller" false "id" false))
+      (empty_list? (logical_relation_free_column_refs (list 'table-function "array" (list ref) '("value")))))
+  expect:
+    result: false
+- name: Callable table function producers retain caller dependencies
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        (list "columns" (list (list "Field" "id")))))
+      (define ref (list 'get_column "unknown_caller" false "id" false))
+      (empty_list? (logical_relation_free_column_refs (list 'table-function ref '() '("value")))))
+  expect:
+    result: false
+- name: Membership truth reads retain the nullable carrier owner
+  scm: |-
+    (empty_list? (logical_relation_free_column_refs
+      (list 'membership_truth 7 "unknown_caller" "value")))
+  expect:
+    result: false
+- name: A producer-owned membership truth carrier is lexically closed
+  scm: |-
+    (begin
+      (define source (list "local" "unused" "unused" false nil
+        (list "columns" (list (list "Field" "id")))))
+      (define input (make_query_block "unused" (list source)
+        (list "value" (list 'membership_truth 7 "local" "id"))
+        true '() nil '() nil nil '() '() '()))
+      (empty_list? (logical_relation_free_column_refs input)))
+  expect:
+    result: true
+- name: Session-only UNION membership observes actor 7 without any caller column
+  session_id: aum_global_actor_session
+  setup:
+  - sql: SET @aum_global_actor=7
+  sql: |-
+    SELECT r.id, r.id IN (
+      SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=@aum_global_actor
+      UNION
+      SELECT a.reference_id FROM aum_assignments a
+      WHERE a.actor_id=@aum_global_actor AND a.allowed=TRUE
+    ) AS matches FROM aum_references r ORDER BY r.id
+  expect:
+    rows: 4
+    data:
+    - id: 1000
+      matches: true
+    - id: 1001
+      matches: true
+    - id: 2000
+      matches: null
+    - id: 3000
+      matches: true
+- name: Session-only UNION membership observes actor 8 without any caller column
+  session_id: aum_global_actor_session
+  setup:
+  - sql: SET @aum_global_actor=8
+  sql: |-
+    SELECT r.id, r.id IN (
+      SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=@aum_global_actor
+      UNION
+      SELECT a.reference_id FROM aum_assignments a
+      WHERE a.actor_id=@aum_global_actor AND a.allowed=TRUE
+    ) AS matches FROM aum_references r ORDER BY r.id
+  expect:
+    rows: 4
+    data:
+    - id: 1000
+      matches: false
+    - id: 1001
+      matches: false
+    - id: 2000
+      matches: true
+    - id: 3000
+      matches: false
+- name: Session-only UNION membership observes actor NULL without any caller column
+  session_id: aum_global_actor_session
+  setup:
+  - sql: SET @aum_global_actor=NULL
+  sql: |-
+    SELECT r.id, r.id IN (
+      SELECT a.reference_id FROM aum_assignments a WHERE a.actor_id=@aum_global_actor
+      UNION
+      SELECT a.reference_id FROM aum_assignments a
+      WHERE a.actor_id=@aum_global_actor AND a.allowed=TRUE
+    ) AS matches FROM aum_references r ORDER BY r.id
+  expect:
+    rows: 4
+    data:
+    - id: 1000
+      matches: false
+    - id: 1001
+      matches: false
+    - id: 2000
+      matches: false
+    - id: 3000
+      matches: false
+- name: A session-only producer cannot certify an empty candidate domain
+  scm: |-
+    (in_union_candidate_scope_closed?
+      (make_query_block "unused" '() (list "value" (list 'session "actor"))
+        true '() nil '() nil nil '() '() '()) nil)
+  expect:
+    result: false
+- name: The transaction capability is not a semantic session coordinate
+  scm: |-
+    (in_union_candidate_scope_closed?
+      (make_query_block "unused" '() (list "value" (list 'session "__memcp_tx"))
+        true '() nil '() nil nil '() '() '()) nil)
+  expect:
+    result: true
+- name: A nullable source ON match cannot replace a scalar caller domain
+  sql: |-
+    SELECT p.id,
+      (SELECT COUNT(*) FROM aum_items i
+       LEFT JOIN aum_assignments a ON a.actor_id=p.owner_id
+       WHERE i.parent_id=p.id) AS preserved_rows,
+      (SELECT COUNT(a.id) FROM aum_items i
+       LEFT JOIN aum_assignments a ON a.actor_id=p.owner_id
+       WHERE i.parent_id=p.id) AS matching_rows,
+      (SELECT COALESCE(SUM(a.reference_id),-1) FROM aum_items i
+       LEFT JOIN aum_assignments a ON a.actor_id=p.owner_id
+       WHERE i.parent_id=p.id) AS matched_total
+    FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      preserved_rows: 2
+      matching_rows: 0
+      matched_total: -1
+    - id: 2
+      preserved_rows: 1
+      matching_rows: 0
+      matched_total: -1
+    - id: 3
+      preserved_rows: 1
+      matching_rows: 0
+      matched_total: -1
+    - id: 4
+      preserved_rows: 1
+      matching_rows: 0
+      matched_total: -1
+    - id: 5
+      preserved_rows: 0
+      matching_rows: 0
+      matched_total: -1
+    - id: 6
+      preserved_rows: 1
+      matching_rows: 0
+      matched_total: -1
+    - id: 7
+      preserved_rows: 1
+      matching_rows: 0
+      matched_total: -1
+    - id: 8
+      preserved_rows: 1
+      matching_rows: 0
+      matched_total: -1
+    - id: 9
+      preserved_rows: 1
+      matching_rows: 1
+      matched_total: 2000
+    - id: 10
+      preserved_rows: 4
+      matching_rows: 4
+      matched_total: 5001
+- name: A FROM-less nested presence projection keeps its implicit row without inventing
+    a source alias
+  sql: |-
+    SELECT p.id, COALESCE((SELECT EXISTS(
+      SELECT TRUE FROM aum_assignments a WHERE a.actor_id=999 LIMIT 1
+    )),FALSE) AS global_can_view FROM aum_callers p ORDER BY p.id
+  expect:
+    rows: 10
+    data:
+    - id: 1
+      global_can_view: false
+    - id: 2
+      global_can_view: false
+    - id: 3
+      global_can_view: false
+    - id: 4
+      global_can_view: false
+    - id: 5
+      global_can_view: false
+    - id: 6
+      global_can_view: false
+    - id: 7
+      global_can_view: false
+    - id: 8
+      global_can_view: false
+    - id: 9
+      global_can_view: false
+    - id: 10
+      global_can_view: false
+cleanup:
+- sql: DROP TABLE aum_bridge
+- sql: DROP TABLE aum_assignments
+- sql: DROP TABLE aum_references
+- sql: DROP TABLE aum_items
+- sql: DROP TABLE aum_callers

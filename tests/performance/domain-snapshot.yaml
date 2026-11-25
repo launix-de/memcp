@@ -16,31 +16,31 @@ setup:
   - sql: "INSERT INTO ds_kind VALUES ('P',1),('T',0)"
   - scm: |
       (begin
-        (insert (table "memcp-tests" false "ds_entity" false) '("id" "category")
+        (insert (table "memcp-tests" false "ds_entity" false nil) '("id" "category")
           (map (produceN 4000) (lambda (i) (list (+ i 1) (mod (+ i 1) 2)))))
-        (insert (table "memcp-tests" false "ds_history" false) '("id" "entity_id" "coordinate" "quantity" "end_value" "kind")
+        (insert (table "memcp-tests" false "ds_history" false nil) '("id" "entity_id" "coordinate" "quantity" "end_value" "kind")
           (map (produceN 4000) (lambda (i) (list (+ i 1) (+ i 1) 0 1 nil "P"))))
-        (insert (table "memcp-tests" false "ds_history" false) '("id" "entity_id" "coordinate" "quantity" "end_value" "kind")
+        (insert (table "memcp-tests" false "ds_history" false nil) '("id" "entity_id" "coordinate" "quantity" "end_value" "kind")
           (map (produceN 200) (lambda (i) (list (+ i 4001) (* (+ i 1) 20) 20 3 50 "P"))))
-        (rebuild (table "memcp-tests" false "ds_entity" false))
-        (rebuild (table "memcp-tests" false "ds_history" false))
-        (rebuild (table "memcp-tests" false "ds_kind" false))
+        (rebuild (table "memcp-tests" false "ds_entity" false nil))
+        (rebuild (table "memcp-tests" false "ds_history" false nil))
+        (rebuild (table "memcp-tests" false "ds_kind" false nil))
         true)
   - sql: "DROP TABLE IF EXISTS ds_conversion_history"
   - sql: "CREATE TABLE ds_conversion_history (id INT PRIMARY KEY, entity_id INT, coordinate INT, quantity INT, end_value INT, kind VARCHAR(10), UNIQUE KEY entity_coordinate (entity_id, coordinate)) ENGINE=memory"
   - scm: |
       (begin
-        (insert (table "memcp-tests" false "ds_conversion_history" false) '("id" "entity_id" "coordinate" "quantity" "kind")
+        (insert (table "memcp-tests" false "ds_conversion_history" false nil) '("id" "entity_id" "coordinate" "quantity" "kind")
           (map (produceN 4000) (lambda (i)
             (list (+ i 1) (+ i 1) 0 1 (if (equal? (mod i 4) 0) "T" "F")))))
-        (insert (table "memcp-tests" false "ds_conversion_history" false) '("id" "entity_id" "coordinate" "quantity" "kind")
+        (insert (table "memcp-tests" false "ds_conversion_history" false nil) '("id" "entity_id" "coordinate" "quantity" "kind")
           (map (produceN 4000) (lambda (i)
             (list (+ i 4001) (+ i 1) (+ i 10) (+ 2 (mod i 3)) "P"))))
-        (insert (table "memcp-tests" false "ds_conversion_history" false) '("id" "entity_id" "coordinate" "quantity" "kind")
+        (insert (table "memcp-tests" false "ds_conversion_history" false nil) '("id" "entity_id" "coordinate" "quantity" "kind")
           (map (produceN 1000) (lambda (j) (begin
             (define i (+ 1 (* j 4)))
             (list (+ i 8001) (+ i 1) (+ i 12) 5 "T")))))
-        (rebuild (table "memcp-tests" false "ds_conversion_history" false)) true)
+        (rebuild (table "memcp-tests" false "ds_conversion_history" false nil)) true)
   - scm: |
       (globalvars "__test_group_cache_cells" (lambda (query binding)
         (begin
@@ -58,15 +58,15 @@ setup:
           (define caches (merge_unique (list (collect plan))))
           (sort (map caches (lambda (cache)
             (list (group_cache_relation cache)
-              (if (nil? (table (group_cache_schema cache) false (group_cache_relation cache) false)) 0
-                (scan_estimate (table (group_cache_schema cache) false (group_cache_relation cache) false))))))
+              (if (nil? (table (group_cache_schema cache) false (group_cache_relation cache) false nil)) 0
+                (scan_estimate (table (group_cache_schema cache) false (group_cache_relation cache) false nil))))))
             (lambda (a b) (< (car a) (car b)))))))
   - scm: |
       (globalvars "__test_group_cache_warm" (lambda (query binding)
         (begin
           (define request (newsession))
           (request (car binding) (cadr binding))
-          (define formula (cached_parse (newcachemap) (list parse_sql) "memcp-tests" query nil "root" request true nil))
+          (define formula (cached_parse (newcachemap) "sql" (list parse_sql) "memcp-tests" query nil "root" request true nil))
           (define warm (lambda (remaining)
             (begin
               (define cells ((globalvars "__test_group_cache_cells") query binding))
@@ -116,7 +116,7 @@ test_cases:
         (define query (regexp_replace "SELECT driver.x, (SELECT SUM((SELECT h.quantity FROM ds_history h WHERE h.entity_id=e.id AND h.coordinate<=driver.x ORDER BY h.coordinate DESC LIMIT 1)) FROM ds_entity e) AS total FROM (SELECT 10 AS x UNION ALL SELECT 20 UNION ALL SELECT 30) driver" "driver" (concat "period_" n)))
         (define request (newsession))
         (define rows (newsession))
-        (define formula (cached_parse (newcachemap) (list parse_sql)
+        (define formula (cached_parse (newcachemap) "sql" (list parse_sql)
           "memcp-tests" query nil "root" request true nil))
         (with_autocommit request nil 0 query (lambda (tx)
           (sql_execute_formula request tx formula
@@ -275,6 +275,351 @@ test_cases:
         - '{"x": 51, "category": 0, "total": 1800}'
         - '{"x": 70, "category": null, "total": 3800}'
         - '{"x": 70, "category": 3, "total": 0}'
+        - '{"x": 1, "category": 0, "total": 2000}'
+        - '{"x": 1, "category": 1, "total": 2000}'
+        - '{"x": 1, "category": 2, "total": 0}'
+        - '{"x": 1, "category": 3, "total": 0}'
+        - '{"x": 2, "category": null, "total": 4000}'
+        - '{"x": 2, "category": 0, "total": 2000}'
+        - '{"x": 2, "category": 1, "total": 2000}'
+        - '{"x": 2, "category": 2, "total": 0}'
+        - '{"x": 2, "category": 3, "total": 0}'
+        - '{"x": 3, "category": null, "total": 4000}'
+        - '{"x": 3, "category": 0, "total": 2000}'
+        - '{"x": 3, "category": 1, "total": 2000}'
+        - '{"x": 3, "category": 2, "total": 0}'
+        - '{"x": 3, "category": 3, "total": 0}'
+        - '{"x": 4, "category": null, "total": 4000}'
+        - '{"x": 4, "category": 0, "total": 2000}'
+        - '{"x": 4, "category": 1, "total": 2000}'
+        - '{"x": 4, "category": 2, "total": 0}'
+        - '{"x": 4, "category": 3, "total": 0}'
+        - '{"x": 5, "category": null, "total": 4000}'
+        - '{"x": 5, "category": 0, "total": 2000}'
+        - '{"x": 5, "category": 1, "total": 2000}'
+        - '{"x": 5, "category": 2, "total": 0}'
+        - '{"x": 5, "category": 3, "total": 0}'
+        - '{"x": 6, "category": null, "total": 4000}'
+        - '{"x": 6, "category": 0, "total": 2000}'
+        - '{"x": 6, "category": 1, "total": 2000}'
+        - '{"x": 6, "category": 2, "total": 0}'
+        - '{"x": 6, "category": 3, "total": 0}'
+        - '{"x": 7, "category": null, "total": 4000}'
+        - '{"x": 7, "category": 0, "total": 2000}'
+        - '{"x": 7, "category": 1, "total": 2000}'
+        - '{"x": 7, "category": 2, "total": 0}'
+        - '{"x": 7, "category": 3, "total": 0}'
+        - '{"x": 8, "category": null, "total": 4000}'
+        - '{"x": 8, "category": 0, "total": 2000}'
+        - '{"x": 8, "category": 1, "total": 2000}'
+        - '{"x": 8, "category": 2, "total": 0}'
+        - '{"x": 8, "category": 3, "total": 0}'
+        - '{"x": 9, "category": null, "total": 4000}'
+        - '{"x": 9, "category": 0, "total": 2000}'
+        - '{"x": 9, "category": 1, "total": 2000}'
+        - '{"x": 9, "category": 2, "total": 0}'
+        - '{"x": 9, "category": 3, "total": 0}'
+        - '{"x": 10, "category": null, "total": 4000}'
+        - '{"x": 10, "category": 0, "total": 2000}'
+        - '{"x": 10, "category": 1, "total": 2000}'
+        - '{"x": 10, "category": 2, "total": 0}'
+        - '{"x": 10, "category": 3, "total": 0}'
+        - '{"x": 11, "category": null, "total": 4000}'
+        - '{"x": 11, "category": 0, "total": 2000}'
+        - '{"x": 11, "category": 1, "total": 2000}'
+        - '{"x": 11, "category": 2, "total": 0}'
+        - '{"x": 11, "category": 3, "total": 0}'
+        - '{"x": 12, "category": null, "total": 4000}'
+        - '{"x": 12, "category": 0, "total": 2000}'
+        - '{"x": 12, "category": 1, "total": 2000}'
+        - '{"x": 12, "category": 2, "total": 0}'
+        - '{"x": 12, "category": 3, "total": 0}'
+        - '{"x": 13, "category": null, "total": 4000}'
+        - '{"x": 13, "category": 0, "total": 2000}'
+        - '{"x": 13, "category": 1, "total": 2000}'
+        - '{"x": 13, "category": 2, "total": 0}'
+        - '{"x": 13, "category": 3, "total": 0}'
+        - '{"x": 14, "category": null, "total": 4000}'
+        - '{"x": 14, "category": 0, "total": 2000}'
+        - '{"x": 14, "category": 1, "total": 2000}'
+        - '{"x": 14, "category": 2, "total": 0}'
+        - '{"x": 14, "category": 3, "total": 0}'
+        - '{"x": 15, "category": null, "total": 4000}'
+        - '{"x": 15, "category": 0, "total": 2000}'
+        - '{"x": 15, "category": 1, "total": 2000}'
+        - '{"x": 15, "category": 2, "total": 0}'
+        - '{"x": 15, "category": 3, "total": 0}'
+        - '{"x": 16, "category": null, "total": 4000}'
+        - '{"x": 16, "category": 0, "total": 2000}'
+        - '{"x": 16, "category": 1, "total": 2000}'
+        - '{"x": 16, "category": 2, "total": 0}'
+        - '{"x": 16, "category": 3, "total": 0}'
+        - '{"x": 17, "category": null, "total": 4000}'
+        - '{"x": 17, "category": 0, "total": 2000}'
+        - '{"x": 17, "category": 1, "total": 2000}'
+        - '{"x": 17, "category": 2, "total": 0}'
+        - '{"x": 17, "category": 3, "total": 0}'
+        - '{"x": 18, "category": null, "total": 4000}'
+        - '{"x": 18, "category": 0, "total": 2000}'
+        - '{"x": 18, "category": 1, "total": 2000}'
+        - '{"x": 18, "category": 2, "total": 0}'
+        - '{"x": 18, "category": 3, "total": 0}'
+        - '{"x": 19, "category": null, "total": 4000}'
+        - '{"x": 19, "category": 0, "total": 2000}'
+        - '{"x": 19, "category": 1, "total": 2000}'
+        - '{"x": 19, "category": 2, "total": 0}'
+        - '{"x": 19, "category": 3, "total": 0}'
+        - '{"x": 20, "category": null, "total": 4400}'
+        - '{"x": 20, "category": 1, "total": 2000}'
+        - '{"x": 20, "category": 2, "total": 0}'
+        - '{"x": 20, "category": 3, "total": 0}'
+        - '{"x": 21, "category": null, "total": 4400}'
+        - '{"x": 21, "category": 0, "total": 2400}'
+        - '{"x": 21, "category": 1, "total": 2000}'
+        - '{"x": 21, "category": 2, "total": 0}'
+        - '{"x": 21, "category": 3, "total": 0}'
+        - '{"x": 22, "category": null, "total": 4400}'
+        - '{"x": 22, "category": 0, "total": 2400}'
+        - '{"x": 22, "category": 1, "total": 2000}'
+        - '{"x": 22, "category": 2, "total": 0}'
+        - '{"x": 22, "category": 3, "total": 0}'
+        - '{"x": 23, "category": null, "total": 4400}'
+        - '{"x": 23, "category": 0, "total": 2400}'
+        - '{"x": 23, "category": 1, "total": 2000}'
+        - '{"x": 23, "category": 2, "total": 0}'
+        - '{"x": 23, "category": 3, "total": 0}'
+        - '{"x": 24, "category": null, "total": 4400}'
+        - '{"x": 24, "category": 0, "total": 2400}'
+        - '{"x": 24, "category": 1, "total": 2000}'
+        - '{"x": 24, "category": 2, "total": 0}'
+        - '{"x": 24, "category": 3, "total": 0}'
+        - '{"x": 25, "category": null, "total": 4400}'
+        - '{"x": 25, "category": 0, "total": 2400}'
+        - '{"x": 25, "category": 1, "total": 2000}'
+        - '{"x": 25, "category": 2, "total": 0}'
+        - '{"x": 25, "category": 3, "total": 0}'
+        - '{"x": 26, "category": null, "total": 4400}'
+        - '{"x": 26, "category": 0, "total": 2400}'
+        - '{"x": 26, "category": 1, "total": 2000}'
+        - '{"x": 26, "category": 2, "total": 0}'
+        - '{"x": 26, "category": 3, "total": 0}'
+        - '{"x": 27, "category": null, "total": 4400}'
+        - '{"x": 27, "category": 0, "total": 2400}'
+        - '{"x": 27, "category": 1, "total": 2000}'
+        - '{"x": 27, "category": 2, "total": 0}'
+        - '{"x": 27, "category": 3, "total": 0}'
+        - '{"x": 28, "category": null, "total": 4400}'
+        - '{"x": 28, "category": 0, "total": 2400}'
+        - '{"x": 28, "category": 1, "total": 2000}'
+        - '{"x": 28, "category": 2, "total": 0}'
+        - '{"x": 28, "category": 3, "total": 0}'
+        - '{"x": 29, "category": null, "total": 4400}'
+        - '{"x": 29, "category": 0, "total": 2400}'
+        - '{"x": 29, "category": 1, "total": 2000}'
+        - '{"x": 29, "category": 2, "total": 0}'
+        - '{"x": 29, "category": 3, "total": 0}'
+        - '{"x": 30, "category": null, "total": 4400}'
+        - '{"x": 30, "category": 0, "total": 2400}'
+        - '{"x": 30, "category": 1, "total": 2000}'
+        - '{"x": 30, "category": 2, "total": 0}'
+        - '{"x": 30, "category": 3, "total": 0}'
+        - '{"x": 31, "category": null, "total": 4400}'
+        - '{"x": 31, "category": 0, "total": 2400}'
+        - '{"x": 31, "category": 1, "total": 2000}'
+        - '{"x": 31, "category": 2, "total": 0}'
+        - '{"x": 31, "category": 3, "total": 0}'
+        - '{"x": 32, "category": null, "total": 4400}'
+        - '{"x": 32, "category": 0, "total": 2400}'
+        - '{"x": 32, "category": 1, "total": 2000}'
+        - '{"x": 32, "category": 2, "total": 0}'
+        - '{"x": 32, "category": 3, "total": 0}'
+        - '{"x": 33, "category": null, "total": 4400}'
+        - '{"x": 33, "category": 0, "total": 2400}'
+        - '{"x": 33, "category": 1, "total": 2000}'
+        - '{"x": 33, "category": 2, "total": 0}'
+        - '{"x": 33, "category": 3, "total": 0}'
+        - '{"x": 34, "category": null, "total": 4400}'
+        - '{"x": 34, "category": 0, "total": 2400}'
+        - '{"x": 34, "category": 1, "total": 2000}'
+        - '{"x": 34, "category": 2, "total": 0}'
+        - '{"x": 34, "category": 3, "total": 0}'
+        - '{"x": 35, "category": null, "total": 4400}'
+        - '{"x": 35, "category": 0, "total": 2400}'
+        - '{"x": 35, "category": 1, "total": 2000}'
+        - '{"x": 35, "category": 2, "total": 0}'
+        - '{"x": 35, "category": 3, "total": 0}'
+        - '{"x": 36, "category": null, "total": 4400}'
+        - '{"x": 36, "category": 0, "total": 2400}'
+        - '{"x": 36, "category": 1, "total": 2000}'
+        - '{"x": 36, "category": 2, "total": 0}'
+        - '{"x": 36, "category": 3, "total": 0}'
+        - '{"x": 37, "category": null, "total": 4400}'
+        - '{"x": 37, "category": 0, "total": 2400}'
+        - '{"x": 37, "category": 1, "total": 2000}'
+        - '{"x": 37, "category": 2, "total": 0}'
+        - '{"x": 37, "category": 3, "total": 0}'
+        - '{"x": 38, "category": null, "total": 4400}'
+        - '{"x": 38, "category": 0, "total": 2400}'
+        - '{"x": 38, "category": 1, "total": 2000}'
+        - '{"x": 38, "category": 2, "total": 0}'
+        - '{"x": 38, "category": 3, "total": 0}'
+        - '{"x": 39, "category": null, "total": 4400}'
+        - '{"x": 39, "category": 0, "total": 2400}'
+        - '{"x": 39, "category": 1, "total": 2000}'
+        - '{"x": 39, "category": 2, "total": 0}'
+        - '{"x": 39, "category": 3, "total": 0}'
+        - '{"x": 40, "category": null, "total": 4400}'
+        - '{"x": 40, "category": 0, "total": 2400}'
+        - '{"x": 40, "category": 1, "total": 2000}'
+        - '{"x": 40, "category": 2, "total": 0}'
+        - '{"x": 40, "category": 3, "total": 0}'
+        - '{"x": 41, "category": null, "total": 4400}'
+        - '{"x": 41, "category": 0, "total": 2400}'
+        - '{"x": 41, "category": 1, "total": 2000}'
+        - '{"x": 41, "category": 2, "total": 0}'
+        - '{"x": 41, "category": 3, "total": 0}'
+        - '{"x": 42, "category": null, "total": 4400}'
+        - '{"x": 42, "category": 0, "total": 2400}'
+        - '{"x": 42, "category": 1, "total": 2000}'
+        - '{"x": 42, "category": 2, "total": 0}'
+        - '{"x": 42, "category": 3, "total": 0}'
+        - '{"x": 43, "category": null, "total": 4400}'
+        - '{"x": 43, "category": 0, "total": 2400}'
+        - '{"x": 43, "category": 1, "total": 2000}'
+        - '{"x": 43, "category": 2, "total": 0}'
+        - '{"x": 43, "category": 3, "total": 0}'
+        - '{"x": 44, "category": null, "total": 4400}'
+        - '{"x": 44, "category": 0, "total": 2400}'
+        - '{"x": 44, "category": 1, "total": 2000}'
+        - '{"x": 44, "category": 2, "total": 0}'
+        - '{"x": 44, "category": 3, "total": 0}'
+        - '{"x": 45, "category": null, "total": 4400}'
+        - '{"x": 45, "category": 0, "total": 2400}'
+        - '{"x": 45, "category": 1, "total": 2000}'
+        - '{"x": 45, "category": 2, "total": 0}'
+        - '{"x": 45, "category": 3, "total": 0}'
+        - '{"x": 46, "category": null, "total": 4400}'
+        - '{"x": 46, "category": 0, "total": 2400}'
+        - '{"x": 46, "category": 1, "total": 2000}'
+        - '{"x": 46, "category": 2, "total": 0}'
+        - '{"x": 46, "category": 3, "total": 0}'
+        - '{"x": 47, "category": null, "total": 4400}'
+        - '{"x": 47, "category": 0, "total": 2400}'
+        - '{"x": 47, "category": 1, "total": 2000}'
+        - '{"x": 47, "category": 2, "total": 0}'
+        - '{"x": 47, "category": 3, "total": 0}'
+        - '{"x": 48, "category": null, "total": 4400}'
+        - '{"x": 48, "category": 0, "total": 2400}'
+        - '{"x": 48, "category": 1, "total": 2000}'
+        - '{"x": 48, "category": 2, "total": 0}'
+        - '{"x": 48, "category": 3, "total": 0}'
+        - '{"x": 49, "category": null, "total": 4400}'
+        - '{"x": 49, "category": 0, "total": 2400}'
+        - '{"x": 49, "category": 1, "total": 2000}'
+        - '{"x": 49, "category": 2, "total": 0}'
+        - '{"x": 49, "category": 3, "total": 0}'
+        - '{"x": 50, "category": null, "total": 4400}'
+        - '{"x": 50, "category": 0, "total": 2400}'
+        - '{"x": 50, "category": 1, "total": 2000}'
+        - '{"x": 50, "category": 2, "total": 0}'
+        - '{"x": 50, "category": 3, "total": 0}'
+        - '{"x": 51, "category": null, "total": 3800}'
+        - '{"x": 51, "category": 1, "total": 2000}'
+        - '{"x": 51, "category": 2, "total": 0}'
+        - '{"x": 51, "category": 3, "total": 0}'
+        - '{"x": 52, "category": null, "total": 3800}'
+        - '{"x": 52, "category": 0, "total": 1800}'
+        - '{"x": 52, "category": 1, "total": 2000}'
+        - '{"x": 52, "category": 2, "total": 0}'
+        - '{"x": 52, "category": 3, "total": 0}'
+        - '{"x": 53, "category": null, "total": 3800}'
+        - '{"x": 53, "category": 0, "total": 1800}'
+        - '{"x": 53, "category": 1, "total": 2000}'
+        - '{"x": 53, "category": 2, "total": 0}'
+        - '{"x": 53, "category": 3, "total": 0}'
+        - '{"x": 54, "category": null, "total": 3800}'
+        - '{"x": 54, "category": 0, "total": 1800}'
+        - '{"x": 54, "category": 1, "total": 2000}'
+        - '{"x": 54, "category": 2, "total": 0}'
+        - '{"x": 54, "category": 3, "total": 0}'
+        - '{"x": 55, "category": null, "total": 3800}'
+        - '{"x": 55, "category": 0, "total": 1800}'
+        - '{"x": 55, "category": 1, "total": 2000}'
+        - '{"x": 55, "category": 2, "total": 0}'
+        - '{"x": 55, "category": 3, "total": 0}'
+        - '{"x": 56, "category": null, "total": 3800}'
+        - '{"x": 56, "category": 0, "total": 1800}'
+        - '{"x": 56, "category": 1, "total": 2000}'
+        - '{"x": 56, "category": 2, "total": 0}'
+        - '{"x": 56, "category": 3, "total": 0}'
+        - '{"x": 57, "category": null, "total": 3800}'
+        - '{"x": 57, "category": 0, "total": 1800}'
+        - '{"x": 57, "category": 1, "total": 2000}'
+        - '{"x": 57, "category": 2, "total": 0}'
+        - '{"x": 57, "category": 3, "total": 0}'
+        - '{"x": 58, "category": null, "total": 3800}'
+        - '{"x": 58, "category": 0, "total": 1800}'
+        - '{"x": 58, "category": 1, "total": 2000}'
+        - '{"x": 58, "category": 2, "total": 0}'
+        - '{"x": 58, "category": 3, "total": 0}'
+        - '{"x": 59, "category": null, "total": 3800}'
+        - '{"x": 59, "category": 0, "total": 1800}'
+        - '{"x": 59, "category": 1, "total": 2000}'
+        - '{"x": 59, "category": 2, "total": 0}'
+        - '{"x": 59, "category": 3, "total": 0}'
+        - '{"x": 60, "category": null, "total": 3800}'
+        - '{"x": 60, "category": 0, "total": 1800}'
+        - '{"x": 60, "category": 1, "total": 2000}'
+        - '{"x": 60, "category": 2, "total": 0}'
+        - '{"x": 60, "category": 3, "total": 0}'
+        - '{"x": 61, "category": null, "total": 3800}'
+        - '{"x": 61, "category": 0, "total": 1800}'
+        - '{"x": 61, "category": 1, "total": 2000}'
+        - '{"x": 61, "category": 2, "total": 0}'
+        - '{"x": 61, "category": 3, "total": 0}'
+        - '{"x": 62, "category": null, "total": 3800}'
+        - '{"x": 62, "category": 0, "total": 1800}'
+        - '{"x": 62, "category": 1, "total": 2000}'
+        - '{"x": 62, "category": 2, "total": 0}'
+        - '{"x": 62, "category": 3, "total": 0}'
+        - '{"x": 63, "category": null, "total": 3800}'
+        - '{"x": 63, "category": 0, "total": 1800}'
+        - '{"x": 63, "category": 1, "total": 2000}'
+        - '{"x": 63, "category": 2, "total": 0}'
+        - '{"x": 63, "category": 3, "total": 0}'
+        - '{"x": 64, "category": null, "total": 3800}'
+        - '{"x": 64, "category": 0, "total": 1800}'
+        - '{"x": 64, "category": 1, "total": 2000}'
+        - '{"x": 64, "category": 2, "total": 0}'
+        - '{"x": 64, "category": 3, "total": 0}'
+        - '{"x": 65, "category": null, "total": 3800}'
+        - '{"x": 65, "category": 0, "total": 1800}'
+        - '{"x": 65, "category": 1, "total": 2000}'
+        - '{"x": 65, "category": 2, "total": 0}'
+        - '{"x": 65, "category": 3, "total": 0}'
+        - '{"x": 66, "category": null, "total": 3800}'
+        - '{"x": 66, "category": 0, "total": 1800}'
+        - '{"x": 66, "category": 1, "total": 2000}'
+        - '{"x": 66, "category": 2, "total": 0}'
+        - '{"x": 66, "category": 3, "total": 0}'
+        - '{"x": 67, "category": null, "total": 3800}'
+        - '{"x": 67, "category": 0, "total": 1800}'
+        - '{"x": 67, "category": 1, "total": 2000}'
+        - '{"x": 67, "category": 2, "total": 0}'
+        - '{"x": 67, "category": 3, "total": 0}'
+        - '{"x": 68, "category": null, "total": 3800}'
+        - '{"x": 68, "category": 0, "total": 1800}'
+        - '{"x": 68, "category": 1, "total": 2000}'
+        - '{"x": 68, "category": 2, "total": 0}'
+        - '{"x": 68, "category": 3, "total": 0}'
+        - '{"x": 69, "category": null, "total": 3800}'
+        - '{"x": 69, "category": 0, "total": 1800}'
+        - '{"x": 69, "category": 1, "total": 2000}'
+        - '{"x": 69, "category": 2, "total": 0}'
+        - '{"x": 69, "category": 3, "total": 0}'
+        - '{"x": 70, "category": 0, "total": 1800}'
+        - '{"x": 70, "category": 1, "total": 2000}'
+        - '{"x": 70, "category": 2, "total": 0}'
     timing_aggregation: total
     warmup: 0
     timing_samples: 6
@@ -288,7 +633,7 @@ test_cases:
           (define rows (newsession))
           (define sql (concat "SELECT d.x, p.category,\n  COALESCE((SELECT SUM((SELECT h.quantity FROM ds_history h\n    WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1))\n    FROM ds_entity e\n    WHERE (p.category IS NULL OR e.category=p.category)\n      AND (SELECT k.active FROM ds_kind k WHERE k.name=(SELECT h.kind FROM ds_history h\n        WHERE h.entity_id=e.id AND h.coordinate<=d.x ORDER BY h.coordinate DESC LIMIT 1) LIMIT 1)=1\n      AND COALESCE((SELECT h.end_value FROM ds_history h\n        WHERE h.entity_id=e.id AND h.coordinate<=60 ORDER BY h.coordinate DESC LIMIT 1),d.x)>=d.x),0) AS total\nFROM (SELECT 10 AS x UNION SELECT 20 UNION SELECT 30 UNION SELECT 50 UNION SELECT 51 UNION SELECT " x ") d\nCROSS JOIN (SELECT NULL AS category UNION SELECT 0 UNION SELECT 1) p\n"))
           (sql_execute_formula request nil
-            (cached_parse cache (list parse_sql) "memcp-tests" sql nil "root" request true nil)
+            (cached_parse cache "sql" (list parse_sql) "memcp-tests" sql nil "root" request true nil)
             (lambda (row) (rows (serialize (list (get_assoc row "x") (get_assoc row "category"))) row))
             (lambda (fields) true))
           (and (equal? (count (rows)) (if (or (equal? x 50) (equal? x 51)) 15 18))
@@ -803,8 +1148,8 @@ test_cases:
       (begin
         (define __snapshot_test_actual
           (begin
-            (define driver '("e" "memcp-tests" "ds_entity" false nil))
-            (define source '("h" "memcp-tests" "ds_history" false nil))
+            (define driver '("e" "memcp-tests" "ds_entity" false nil (sql_relation_declarations "memcp-tests" "ds_entity" nil)))
+            (define source '("h" "memcp-tests" "ds_history" false nil (sql_relation_declarations "memcp-tests" "ds_history" nil)))
             (define axis '('session "bound"))
             (define parent '('get_column "e" false "id" false))
             (define foreign '('get_column "h" false "entity_id" false))
@@ -818,11 +1163,11 @@ test_cases:
                 (list 'range-point-keys (list foreign)) (list 'range-point-domain (list parent))
                 (list 'lookup-keys (list parent axis)))))
             (define output (list "selected" "memcp-tests" (make_stage_output_relation (gs_id stage)) true
-              (make_exists_stage_join_condition "selected" (group_key_cols (gs_keys stage)) (gs_domain stage) false)))
+              (make_exists_stage_join_condition "selected" (group_key_cols (gs_keys stage)) (gs_domain stage) false) nil))
             (define raw_stage (make_group_stage "raw-cut" source (gs_domain stage)
               (list foreign coordinate) (gs_aggregates stage) nil '() '() 1 nil (gs_facts stage)))
             (define raw_output (list "selected" "memcp-tests" (make_stage_output_relation (gs_id raw_stage)) true
-              (make_exists_stage_join_condition "selected" (group_key_cols (gs_keys raw_stage)) (gs_domain raw_stage) false)))
+              (make_exists_stage_join_condition "selected" (group_key_cols (gs_keys raw_stage)) (gs_domain raw_stage) false) nil))
             (define proofs (ordered_binding_cuts (list stage) driver (list axis)))
             (define binding (lower_group_cache_binding driver axis proofs))
             (define read ((eval (list 'lambda (list 'tx 'session)

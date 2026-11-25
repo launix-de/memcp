@@ -1,0 +1,136 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Ownership-specialized procedures retain lexical numbered frames and inert quoted data
+setup: []
+cleanup: []
+test_cases:
+- name: Owned list specialization preserves both reducer parameters
+  scm: |-
+    (begin
+      (define helper (lambda (items)
+        (reduce (sort items <) (lambda (acc item) (+ acc item)) 0)))
+      (define caller (eval (optimize
+        (list 'lambda (list 'groups 'columns)
+          (list helper (list 'merge (list 'list 'groups 'columns)) )))))
+      (caller '(3 1) '(2)))
+  expect:
+    result: 6
+- name: A nested callback may have more parameters than its enclosing procedure
+  scm: |-
+    (begin
+      (define helper (lambda (items)
+        (cadr (reduce (sort items (collate "unicode-simple-fold" false))
+          (lambda (state name) (list name (and (cadr state)
+            (or (nil? (car state)) (not (equal?? (car state) name)))))) (list nil true)))))
+      (define caller (eval (optimize
+        (list 'lambda (list 'groups 'columns)
+          (list helper (list 'merge (list 'list 'groups 'columns)) )))))
+      (caller '("grp") '("grp")))
+  expect:
+    result: false
+- name: Nested locals use the callback frame rather than the wider outer arity
+  scm: |-
+    (begin
+      (define helper (lambda (items seed unused)
+        (reduce (sort items <) (lambda (acc item) (begin
+          (define delta (+ item 1)) (+ acc delta))) seed)))
+      (define caller (eval (optimize
+        (list 'lambda (list 'groups 'columns)
+          (list helper (list 'merge (list 'list 'groups 'columns)) 0 true)))))
+      (caller '(3 1) '(2)))
+  expect:
+    result: 9
+- name: A root local captured by a nested reducer survives specialization
+  scm: |-
+    (begin
+      (define helper (lambda (items) (begin
+        (define offset (apply (lambda () 7) '()))
+        (reduce (sort items <) (lambda (acc item) (+ acc item offset)) 0))))
+      (define caller (eval (optimize
+        (list 'lambda (list 'groups 'columns)
+          (list helper (list 'merge (list 'list 'groups 'columns)) )))))
+      (caller '(3 1) '(2)))
+  expect:
+    result: 27
+- name: Shared begin and match scopes retain the same captured owner
+  scm: |-
+    (begin
+      (define helper (lambda (items) (begin
+        (define offset (apply (lambda () 7) '()))
+        (reduce (sort items <) (lambda (acc item)
+          (match item 1 (+ acc offset) _ (+ acc item))) 0))))
+      (define caller (eval (optimize
+        (list 'lambda (list 'groups 'columns)
+          (list helper (list 'merge (list 'list 'groups 'columns)) )))))
+      (caller '(3 1) '(2)))
+  expect:
+    result: 12
+- name: Variadic callback locals keep their own single parameter slot
+  scm: |-
+    (begin
+      (define helper (lambda (items unused)
+        (map (sort items <) (lambda values (begin
+          (define value (car values)) (+ value 1))))))
+      (define caller (eval (optimize
+        (list 'lambda (list 'groups 'columns)
+          (list helper (list 'merge (list 'list 'groups 'columns)) true)))))
+      (caller '(3 1) '(2)))
+  expect:
+    result:
+    - 2
+    - 3
+    - 4
+- name: Quoted numbered-slot data is preserved exactly
+  scm: |-
+    (begin
+      (define marker (nth (optimize (list 'lambda (list 'left 'right) 'right)) 2))
+      (define data marker)
+      (define helper (eval (optimize (list 'lambda (list 'items)
+        (list 'begin (list 'sort 'items '<) (list 'quote data))))))
+      (define caller (eval (optimize (list 'lambda (list 'groups 'columns)
+        (list helper (list 'merge (list 'list 'groups 'columns)))))))
+      (expression_equal? (caller '(3 1) '(2)) data))
+  expect:
+    result: true
+- name: Quoted lambda AST remains inert through specialization
+  scm: |-
+    (begin
+      (define marker (nth (optimize (list 'lambda (list 'left 'right) 'right)) 2))
+      (define data (list 'lambda (list 'left 'right) marker 2))
+      (define helper (eval (optimize (list 'lambda (list 'items)
+        (list 'begin (list 'sort 'items '<) (list 'quote data))))))
+      (define caller (eval (optimize (list 'lambda (list 'groups 'columns)
+        (list helper (list 'merge (list 'list 'groups 'columns)))))))
+      (expression_equal? (caller '(3 1) '(2)) data))
+  expect:
+    result: true
+- name: References outside the rebuilt procedure keep their original capture
+  scm: |-
+    (begin
+      (define helper ((lambda (external)
+          (lambda (items) (begin (sort items <) (lambda () external)))) 11))
+      (define caller (eval (optimize
+        (list 'lambda (list 'groups 'columns)
+          (list helper (list 'merge (list 'list 'groups 'columns)) )))))
+      ((caller '(3 1) '(2))))
+  expect:
+    result: 11
+- name: An ownership-specialized mapper retains its actual callback effects
+  scm: |-
+    (begin
+      (define calls (newsession)) (calls "n" 0)
+      (define helper (lambda (items)
+        (map (sort items <) (lambda (item) (begin
+          (calls "n" (+ (calls "n") 1)) item)))))
+      (define caller (eval (optimize
+        (list 'lambda (list 'groups 'columns)
+          (list helper (list 'merge (list 'list 'groups 'columns)) )))))
+      (list (caller '(3 1) '(2)) (calls "n")))
+  expect:
+    result:
+    - - 1
+      - 2
+      - 3
+    - 3

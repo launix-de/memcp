@@ -41,7 +41,7 @@ test_cases:
 
   - name: "Materialize rank column via createcolumn ORC"
     scm: |
-      (createcolumn (table "memcp-tests" false "orc_rank" false) "rank" "INT" '()
+      (createcolumn (table "memcp-tests" false "orc_rank" false nil) "rank" "INT" '()
         (list
           "sortcols"  '("score")
           "sortdirs"  (list false)
@@ -94,7 +94,7 @@ test_cases:
 
   - name: "Materialize running_total column via createcolumn ORC"
     scm: |
-      (createcolumn (table "memcp-tests" false "orc_sales" false) "running_total" "INT" '()
+      (createcolumn (table "memcp-tests" false "orc_sales" false nil) "running_total" "INT" '()
         (list
           "sortcols"  '("day")
           "sortdirs"  (list false)
@@ -184,3 +184,70 @@ test_cases:
 
   - name: "Drop sales table"
     sql: "DROP TABLE IF EXISTS orc_sales"
+
+  # A reducer failure must release repair ownership. A later read must report
+  # the same failure, rather than waiting on the previous request's mutex;
+  # correcting the input must then recover the complete ordered result.
+  - name: "Drop leftover repair failure table"
+    sql: "DROP TABLE IF EXISTS orc_repair_failure"
+
+  - name: "Create repair failure table"
+    sql: "CREATE TABLE orc_repair_failure (id INT PRIMARY KEY, amount INT, running INT)"
+
+  - name: "Insert repair failure input"
+    sql: "INSERT INTO orc_repair_failure (id, amount) VALUES (1, 10), (2, -20), (3, 30)"
+
+  - name: "Declare an ordered reducer that rejects negative input"
+    scm: |
+      (createcolumn (table "memcp-tests" false "orc_repair_failure" false nil) "running" "INT" '()
+        (list
+          "sortcols" '("id")
+          "sortdirs" (list false)
+          "partitioncount" 0
+          "mapcols" '("amount")
+          "mapreducefn" (lambda (acc $set amount)
+            (if (< amount 0) (error "ordered-repair-negative-input")
+              (begin
+                (define value (+ acc amount))
+                ($set value)
+                value)))
+          "reduceinit" 0))
+
+  - name: "A failed ordered repair reports its original reducer error"
+    sql: "SELECT id, running FROM orc_repair_failure ORDER BY id"
+    expect:
+      error: true
+      contains: "ordered-repair-negative-input"
+
+  - name: "Another read after repair failure reports the error without hanging"
+    sql: "SELECT id, running FROM orc_repair_failure ORDER BY id"
+    timeout: 2
+    expect:
+      error: true
+      contains: "ordered-repair-negative-input"
+
+  - name: "Correct the failed reducer input"
+    sql: "UPDATE orc_repair_failure SET amount = 20 WHERE id = 2"
+
+  - name: "An ordered repair succeeds after its input is corrected"
+    sql: "SELECT id, amount, running FROM orc_repair_failure ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - {id: 1, amount: 10, running: 10}
+        - {id: 2, amount: 20, running: 30}
+        - {id: 3, amount: 30, running: 60}
+
+  - name: "Delete after recovered ordered repair"
+    sql: "DELETE FROM orc_repair_failure WHERE id = 1"
+
+  - name: "Ordered repair still recomputes after a later deletion"
+    sql: "SELECT id, amount, running FROM orc_repair_failure ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - {id: 2, amount: 20, running: 20}
+        - {id: 3, amount: 30, running: 50}
+
+  - name: "Drop repair failure table"
+    sql: "DROP TABLE orc_repair_failure"

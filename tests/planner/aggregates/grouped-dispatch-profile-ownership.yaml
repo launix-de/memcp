@@ -1,0 +1,694 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: sql
+  isolated: true
+  requires_tds: true
+  description: Guarded physical profile variants retain actual native cache owners
+    and full direct runtime contracts
+setup:
+- sql: DROP TABLE IF EXISTS dispatch_profile_marker
+- sql: CREATE TABLE dispatch_profile_marker(id INT PRIMARY KEY,value INT NULL)
+- sql: INSERT INTO dispatch_profile_marker VALUES(1,0),(2,NULL)
+cleanup:
+- syntax: tsql
+  sql: DROP FUNCTION IF EXISTS dbo.dispatch_profile_local
+- sql: DROP TABLE IF EXISTS dispatch_profile_marker
+test_cases:
+- name: Retained public and private dispatchers admit the actual map before all old
+    guards and preserve current parameters
+  scm: |-
+    (begin
+      (define schema "memcp-tests") (define session (newsession))
+      /* Execute through the ordinary compiled SQL interface: planning arguments
+      do not bind the emitted runtime session/tx symbols for a later raw EVAL. */
+      (define execute_fixture_write (lambda (actual_session actual_tx database command)
+        (sql_execute_formula actual_session actual_tx
+          (cached_parse (newcachemap) "sql" (list parse_sql) database command nil "root" actual_session false actual_tx)
+          (lambda (_row) (error "fixture write unexpectedly emitted a row"))
+          (lambda args true))))
+      (session "username" "root") (session "schema" schema)
+      (define base_cache (newcachemap))
+      (define query "SELECT (SELECT SUM(value) FROM dispatch_profile_marker WHERE id<=?) AS total,(SELECT COUNT(*) FROM dispatch_profile_marker WHERE id<=?) AS n")
+      (define parse_query query)
+      (define cache_key (sql_queryplan_cache_key "root" schema parse_query (fnv_hash parse_query)))
+      (define owner_context (list 'physical-dispatch-owner base_cache "sql"))
+      (define counters (newsession)) (counters "old_guards" 0) (counters "gate" true)
+      (define parameters (lambda (bound) (begin (session "v1" bound) (session "v2" bound))))
+      (define capture (lambda (kernel_fn actual_tx actual_session) (begin
+        (define output (newsession)) (output "rows" 0) (output "headers" 0)
+        (sql_execute_formula actual_session actual_tx kernel_fn
+          (lambda (row) (begin (output "rows" (+ (output "rows") 1))
+            (output "total" (get_assoc row "total")) (output "n" (get_assoc row "n"))))
+          (lambda args (output "headers" (+ (output "headers") 1))))
+        (list (output "rows") (output "headers") (output "total") (output "n")))))
+      (parameters 1)
+      (define public_formula (cached_parse base_cache "sql" (list parse_sql) schema query nil "root" session false nil))
+      (define public_one (capture public_formula nil session))
+      (parameters 2) (define public_two (capture public_formula nil session))
+      (define protect_entry (lambda (actual_cache actual_entry actual_tx) (begin
+        /* Test-owned conservative guards exercise the REAL entry/miss protocol.
+        They add no production cache/profile flag or source authority. */
+        (define wrapped (map (actual_entry "variants") (lambda (variant) (begin
+          (define previous_guard (sql_queryplan_guard_kernel variant))
+          (define previous_eligibility (sql_queryplan_eligibility_kernel variant))
+          (define guarded (lambda (actual_session actual_tx row fields context) (begin
+            (counters "old_guards" (+ (counters "old_guards") 1))
+            (and (counters "gate")
+              (if (expression_equal? previous_guard true) true
+                (expression_equal? previous_guard false) false
+                (sql_queryplan_apply_input previous_guard variant actual_session actual_tx row fields context))))))
+          (define eligible (lambda (actual_session actual_tx row fields context) (begin
+            (counters "old_guards" (+ (counters "old_guards") 1))
+            (if (expression_equal? previous_eligibility true) true
+              (expression_equal? previous_eligibility false) false
+              (sql_queryplan_apply_input previous_eligibility variant actual_session actual_tx row fields context)))))
+          (define info (qassoc_set (qassoc_set (nth variant 3) 'input_guard guarded) 'input_source_eligibility eligible))
+          (define public_guard (sql_queryplan_wrap_input_formula actual_tx guarded (qassoc_get info 'caller_lifetime false)))
+          (define public_eligibility (sql_queryplan_wrap_input_formula actual_tx eligible (qassoc_get info 'caller_lifetime false)))
+          (list public_guard (cadr variant) (nth variant 2) (qassoc_set info 'source_eligibility public_eligibility))))))
+        (define formula (sql_queryplan_install_variants actual_cache cache_key actual_entry (list parse_sql) schema parse_query nil wrapped actual_tx))
+        (actual_cache cache_key (list actual_entry formula)) formula)))
+      (try (lambda () (begin
+        (tx_begin_acid session) (define first_tx (session "__memcp_tx"))
+        (execute_fixture_write session first_tx schema "UPDATE dispatch_profile_marker SET value=9 WHERE id=1")
+        (execute_fixture_write session first_tx schema "UPDATE dispatch_profile_marker SET value=11 WHERE id=2")
+        (parameters 2) (define first_owned (capture public_formula first_tx session))
+        (define first_cache (car (sql_queryplan_cache_selection owner_context first_tx)))
+        (define first_entry (car (first_cache cache_key)))
+        (define guarded_first (protect_entry first_cache first_entry first_tx))
+        (define first_matching (capture guarded_first first_tx session))
+        (define guard_is_wired (> (counters "old_guards") 0))
+        /* A genuine negative guard must take the existing cold miss, with exactly
+        one successful final header/result and without resetting current params. */
+        (counters "gate" false)
+        (define first_miss (capture guarded_first first_tx session))
+        (counters "gate" true)
+        (define retained_private (protect_entry first_cache first_entry first_tx))
+        (counters "old_guards" 0)
+        (define observer (newsession)) (observer "username" "root")
+        (observer "v1" 1) (observer "v2" 1)
+        (define observed (capture (cached_parse (newcachemap) "sql" (list parse_sql) schema query nil "root" observer false nil) nil observer))
+        (tx_rollback session)
+        (parameters 2) (define private_to_public (capture retained_private nil session))
+        (tx_begin_acid session) (define second_tx (session "__memcp_tx"))
+        (execute_fixture_write session second_tx schema "UPDATE dispatch_profile_marker SET value=4 WHERE id=1")
+        (execute_fixture_write session second_tx schema "UPDATE dispatch_profile_marker SET value=5 WHERE id=2")
+        /* Both native profiles are true. The old private entry's guards must not
+        run at all before the actual T2 owner is selected. */
+        (parameters 1) (define second_one (capture retained_private second_tx session))
+        (parameters 2) (define second_two (capture public_formula second_tx session))
+        (define second_matching (capture retained_private second_tx session))
+        (define wrong_owner_guards (counters "old_guards"))
+        (tx_rollback session)
+        (define restored (capture retained_private nil session))
+        (list public_one public_two first_owned first_matching guard_is_wired first_miss observed
+          private_to_public second_one second_two second_matching wrong_owner_guards restored)))
+        (lambda (failure) (begin
+          (try (lambda () (tx_rollback session)) (lambda (_cleanup_failure) true))
+          (error failure)))))
+  expect:
+    result:
+    - - 1
+      - 1
+      - 0
+      - 1
+    - - 1
+      - 1
+      - 0
+      - 2
+    - - 1
+      - 1
+      - 20
+      - 2
+    - - 1
+      - 1
+      - 20
+      - 2
+    - true
+    - - 1
+      - 1
+      - 20
+      - 2
+    - - 1
+      - 1
+      - 0
+      - 1
+    - - 1
+      - 1
+      - 0
+      - 2
+    - - 1
+      - 1
+      - 4
+      - 1
+    - - 1
+      - 1
+      - 9
+      - 2
+    - - 1
+      - 1
+      - 9
+      - 2
+    - 0
+    - - 1
+      - 1
+      - 0
+      - 2
+- name: Ownerless raw and standalone compiled variants remain runtime complete across
+    public private and restored views
+  scm: |-
+    (begin
+      (define session (newsession))
+      /* Execute through the ordinary compiled SQL interface: planning arguments
+      do not bind the emitted runtime session/tx symbols for a later raw EVAL. */
+      (define execute_fixture_write (lambda (actual_session actual_tx database command)
+        (sql_execute_formula actual_session actual_tx
+          (cached_parse (newcachemap) "sql" (list parse_sql) database command nil "root" actual_session false actual_tx)
+          (lambda (_row) (error "fixture write unexpectedly emitted a row"))
+          (lambda args true)))) (session "username" "root")
+      (define query "SELECT (SELECT SUM(value) FROM dispatch_profile_marker) AS total,(SELECT COUNT(*) FROM dispatch_profile_marker) AS n")
+      (define raw (parse_sql "memcp-tests" query nil session nil))
+      (define direct (sql_queryplan_compile_formula nil (sql_queryplan_bind_execution_session raw)))
+      (define variant (sql_compile_queryplan_variant (list parse_sql) "memcp-tests" query nil session nil "specialized" nil nil))
+      (define compiled (cadr variant))
+      (define capture (lambda (kernel_fn actual_tx) (begin
+        (define output (newsession)) (output "rows" 0) (output "headers" 0)
+        (sql_execute_formula session actual_tx kernel_fn
+          (lambda (row) (begin (output "rows" (+ (output "rows") 1))
+            (output "total" (get_assoc row "total")) (output "n" (get_assoc row "n"))))
+          (lambda args (output "headers" (+ (output "headers") 1))))
+        (list (output "rows") (output "headers") (output "total") (output "n")))))
+      (define public (list (capture direct nil) (capture compiled nil)))
+      (tx_begin_acid session) (define tx (session "__memcp_tx"))
+      (try (lambda () (begin
+        (execute_fixture_write session tx "memcp-tests" "UPDATE dispatch_profile_marker SET value=9 WHERE id=1")
+        (define private (list (capture direct tx) (capture compiled tx)))
+        (tx_rollback session)
+        (list public private (list (capture direct nil) (capture compiled nil)))))
+        (lambda (failure) (begin
+          (try (lambda () (tx_rollback session)) (lambda (_cleanup_failure) true))
+          (error failure)))))
+  expect:
+    result:
+    - - - 1
+        - 1
+        - 0
+        - 2
+      - - 1
+        - 1
+        - 0
+        - 2
+    - - - 1
+        - 1
+        - 9
+        - 2
+      - - 1
+        - 1
+        - 9
+        - 2
+    - - - 1
+        - 1
+        - 0
+        - 2
+      - - 1
+        - 1
+        - 0
+        - 2
+- name: Guarded invocation-lifetime input with nil Tx stays in its existing shared
+    map and binds each fresh native scope
+  scm: |-
+    (begin
+      (define session (newsession)) (session "username" "root")
+      (define cache (newcachemap))
+      (define name (concat "." (uuid) "#dispatch-input"))
+      (define query (concat "SELECT (SELECT SUM(value) FROM `" name "`) AS total,(SELECT COUNT(*) FROM `" name "`) AS n"))
+      (define live (newsession))
+      (define create_input (lambda (value) (begin
+        (define scope (new_relation_scope session)) (live "scope" scope)
+        (createtable "memcp-tests" name (list (list "column" "value" "INT" (list) (list)))
+          (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+        (define input (table "memcp-tests" false name false nil))
+        (insert input (list "value") (list (list value))) input)))
+      (define capture (lambda (kernel_fn) (begin
+        (define output (newsession)) (output "rows" 0) (output "headers" 0)
+        (sql_execute_formula session nil kernel_fn
+          (lambda (row) (begin (output "rows" (+ (output "rows") 1))
+            (output "total" (get_assoc row "total")) (output "n" (get_assoc row "n"))))
+          (lambda args (output "headers" (+ (output "headers") 1))))
+        (list (output "rows") (output "headers") (output "total") (output "n")))))
+      (try (lambda () (begin
+        (define first (create_input 7)) (define first_address (table_address first nil))
+        (define declarations (show first "declarations" nil))
+        (define formula (cached_parse cache "sql" (list parse_sql) "memcp-tests" query nil "root" session false nil))
+        (define cold (capture formula)) (define warm (capture formula))
+        (close_relation_scope (live "scope")) (live "scope" nil)
+        (define second (create_input 13)) (define second_address (table_address second nil))
+        (define rebound (capture formula)) (define rebound_warm (capture formula))
+        (close_relation_scope (live "scope")) (live "scope" nil)
+        (list (tx_requires_query_local_cache nil)
+          (equal? (declarations "lifetime") "invocation")
+          (not (expression_equal? first_address second_address))
+          cold warm rebound rebound_warm
+          (nil? (table "memcp-tests" false name false nil)))))
+        (lambda (failure) (begin
+          (try (lambda () (if (nil? (live "scope")) true (close_relation_scope (live "scope"))))
+            (lambda (_cleanup_failure) true))
+          (error failure)))))
+  expect:
+    result:
+    - false
+    - true
+    - true
+    - - 1
+      - 1
+      - 7
+      - 1
+    - - 1
+      - 1
+      - 7
+      - 1
+    - - 1
+      - 1
+      - 13
+      - 1
+    - - 1
+      - 1
+      - 13
+      - 1
+    - true
+- name: A stale managed profile rejects all guard aliases before binding producers
+    headers or rows even with zero preparations
+  scm: |-
+    (begin
+      (define session (newsession))
+      /* Execute through the ordinary compiled SQL interface: planning arguments
+      do not bind the emitted runtime session/tx symbols for a later raw EVAL. */
+      (define execute_fixture_write (lambda (actual_session actual_tx database command)
+        (sql_execute_formula actual_session actual_tx
+          (cached_parse (newcachemap) "sql" (list parse_sql) database command nil "root" actual_session false actual_tx)
+          (lambda (_row) (error "fixture write unexpectedly emitted a row"))
+          (lambda args true)))) (session "username" "root")
+      (define effects (newsession)) (effects "bindings" 0) (effects "rows" 0) (effects "headers" 0)
+      (session "__fixture_profile_effect" (lambda () (effects "bindings" (+ (effects "bindings") 1))))
+      (define planning (sql_queryplan_compile_session session nil nil (list 'physical-dispatch-owner (newcachemap) "sql")))
+      (define tail (list 'begin (list (list 'session "__fixture_profile_effect")) true))
+      (sql_queryplan_register_input_alternatives planning false (list true (list) true)
+        (list tail (list) true) (list true (list) true) (list false))
+      (define records (sql_queryplan_input_alternatives planning))
+      (define guard (sql_queryplan_compile_formula nil (list 'physical-query-program (list '__physical_input_context)
+        (sql_queryplan_input_guard records true false))))
+      (define eligible (sql_queryplan_compile_formula nil (list 'physical-query-program (list '__physical_input_context)
+        (sql_queryplan_input_admission records))))
+      (define program (sql_queryplan_compile_formula nil (list 'physical-query-program (list '__physical_input_context)
+        (list 'begin (list 'resultfields (list 'quote (list "accepted")))
+          (list 'resultrow (list 'list "accepted" 7))))))
+      (define info (list (list 'physical_input_profile true) (list 'caller_lifetime false)
+        (list 'input_program program) (list 'input_guard guard) (list 'input_source_eligibility eligible)
+        (list 'source_eligibility (sql_queryplan_wrap_input_formula nil eligible false))))
+      (define variant (list (sql_queryplan_wrap_input_formula nil guard false)
+        (sql_queryplan_wrap_input_formula nil program false) (list) info))
+      (define dispatch (sql_queryplan_compile_formula nil
+        (list 'call_with_invocation_group_lifetime
+          (list 'lambda (list '__physical_input_scopes '__physical_input_initializers '__physical_input_observations)
+            (sql_queryplan_formula_dispatch (list variant) (make_structural_catalog 'ast) (list 'quote "not-admitted"))))))
+      (define run (lambda (actual_tx) (sql_execute_formula session actual_tx dispatch
+        (lambda (_row) (effects "rows" (+ (effects "rows") 1)))
+        (lambda args (effects "headers" (+ (effects "headers") 1))))))
+      (run nil)
+      (define public (list (effects "bindings") (effects "rows") (effects "headers")))
+      (effects "bindings" 0) (effects "rows" 0) (effects "headers" 0)
+      (tx_begin_acid session) (define tx (session "__memcp_tx"))
+      (try (lambda () (begin
+        (execute_fixture_write session tx "memcp-tests" "UPDATE dispatch_profile_marker SET value=9 WHERE id=1")
+        (define outcome (run tx))
+        (define aliases (call_with_invocation_group_lifetime (lambda (groups initializers observations) (begin
+          (define context (sql_queryplan_input_context variant tx (list groups initializers observations)))
+          (list ((car variant) session tx (lambda (_row) true) (lambda args true))
+            ((qassoc_get info 'source_eligibility nil) session tx (lambda (_row) true) (lambda args true))
+            (sql_queryplan_apply_input (sql_queryplan_guard_kernel variant) variant session tx (lambda (_row) true) (lambda args true) context)
+            (sql_queryplan_apply_input (sql_queryplan_eligibility_kernel variant) variant session tx (lambda (_row) true) (lambda args true) context))))))
+        (define source (table "memcp-tests" false "dispatch_profile_marker" false tx))
+        (define access (list 372734710317056 (scan_boundary "equal" "id" 0 0 true true "" false) "value"))
+        (define own (scan_lookup tx source access (list 1))) (define observer (scan_lookup nil source access (list 1)))
+        (tx_rollback session)
+        (list public outcome aliases (effects "bindings") (effects "rows") (effects "headers") own observer
+          (scan_lookup nil (table "memcp-tests" false "dispatch_profile_marker" false nil) access (list 1)))))
+        (lambda (failure) (begin
+          (try (lambda () (tx_rollback session)) (lambda (_cleanup_failure) true))
+          (error failure)))))
+  expect:
+    result:
+    - - 1
+      - 1
+      - 1
+    - not-admitted
+    - - false
+      - false
+      - false
+      - false
+    - 0
+    - 0
+    - 0
+    - 9
+    - 0
+    - 0
+- name: Managed DML retains its original native mutation boundary and applies each
+    scalar update exactly once
+  scm: |-
+    (begin
+      (define session (newsession))
+      /* Execute through the ordinary compiled SQL interface: planning arguments
+      do not bind the emitted runtime session/tx symbols for a later raw EVAL. */
+      (define execute_fixture_write (lambda (actual_session actual_tx database command)
+        (sql_execute_formula actual_session actual_tx
+          (cached_parse (newcachemap) "sql" (list parse_sql) database command nil "root" actual_session false actual_tx)
+          (lambda (_row) (error "fixture write unexpectedly emitted a row"))
+          (lambda args true)))) (session "username" "root")
+      (define query "UPDATE dispatch_profile_marker SET value=COALESCE(value,0)+(SELECT COUNT(*) FROM dispatch_profile_marker)")
+      (define formula (cached_parse (newcachemap) "sql" (list parse_sql) "memcp-tests" query nil "root" session false nil))
+      (define rows (lambda (actual_tx) (scan actual_tx (table "memcp-tests" false "dispatch_profile_marker" false actual_tx)
+        (list) (list) (list) (lambda () true) (list "value") (lambda (acc value) (+ acc (coalesceNil value 0))) 0 +)))
+      (tx_begin_acid session) (define tx (session "__memcp_tx"))
+      (try (lambda () (begin
+        (define changed (sql_execute_formula session tx formula (lambda (_row) (error "UPDATE emitted a row")) (lambda args true)))
+        (define private (rows tx)) (define observer (rows nil))
+        (tx_rollback session)
+        (define restored (rows nil))
+        (define committed (sql_execute_formula session nil formula (lambda (_row) (error "UPDATE emitted a row")) (lambda args true)))
+        (define committed_total (rows nil))
+        (execute_fixture_write session nil "memcp-tests" "UPDATE dispatch_profile_marker SET value=0 WHERE id=1")
+        (execute_fixture_write session nil "memcp-tests" "UPDATE dispatch_profile_marker SET value=NULL WHERE id=2")
+        (list changed private observer restored committed committed_total (rows nil))))
+        (lambda (failure) (begin
+          (try (lambda () (tx_rollback session)) (lambda (_cleanup_failure) true))
+          (error failure)))))
+  expect:
+    result:
+    - 2
+    - 4
+    - 0
+    - 0
+    - 2
+    - 4
+    - 0
+- name: A managed scoped scalar program binds and drains fresh local writes on every
+    invocation
+  tds:
+    statements:
+    - connection: owner
+      sql: DROP FUNCTION IF EXISTS dbo.dispatch_profile_local
+    - connection: owner
+      sql: CREATE FUNCTION dbo.dispatch_profile_local(@n INT) RETURNS INT AS BEGIN
+        DECLARE @rows TABLE(value INT); DECLARE @total INT; INSERT INTO @rows(value)
+        SELECT @n; INSERT INTO @rows(value) SELECT @n+1; SELECT @total=SUM(value)
+        FROM @rows; RETURN @total; END
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: SELECT dbo.dispatch_profile_local(4) AS value
+      expect:
+        columns:
+        - value
+        rows: 1
+        data:
+        - value: 9
+    - connection: owner
+      sql: SELECT dbo.dispatch_profile_local(7) AS value
+      expect:
+        columns:
+        - value
+        rows: 1
+        data:
+        - value: 15
+    - connection: owner
+      sql: SELECT dbo.dispatch_profile_local(4) AS value
+      expect:
+        columns:
+        - value
+        rows: 1
+        data:
+        - value: 9
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: owner
+      sql: SELECT @@TRANCOUNT AS depth,XACT_STATE() AS state
+      expect:
+        rows: 1
+        data:
+        - depth: 0
+          state: 0
+    - connection: owner
+      sql: DROP FUNCTION IF EXISTS dbo.dispatch_profile_local
+- name: A persistently false fresh compiler guard refuses after one cold attempt without
+    producer metadata or row effects
+  scm: |-
+    (begin
+      (define session (newsession))
+      /* Execute through the ordinary compiled SQL interface: planning arguments
+      do not bind the emitted runtime session/tx symbols for a later raw EVAL. */
+      (define execute_fixture_write (lambda (actual_session actual_tx database command)
+        (sql_execute_formula actual_session actual_tx
+          (cached_parse (newcachemap) "sql" (list parse_sql) database command nil "root" actual_session false actual_tx)
+          (lambda (_row) (error "fixture write unexpectedly emitted a row"))
+          (lambda args true)))) (session "username" "root")
+      (define state (newsession)) (state "compiled" 0) (state "produced" 0) (state "headers" 0) (state "rows" 0)
+      (define factory (lambda (schema text policy planning actual_tx) (begin
+        (state "compiled" (+ (state "compiled") 1))
+        (planner_record_guard_condition false planning)
+        (define plan (parse_sql schema text policy planning actual_tx))
+        (list '!begin (list (lambda () (state "produced" (+ (state "produced") 1)))) plan))))
+      (tx_begin_acid session) (define tx (session "__memcp_tx"))
+      (try (lambda () (begin
+        (execute_fixture_write session tx "memcp-tests" "UPDATE dispatch_profile_marker SET value=9 WHERE id=1")
+        (define formula (cached_parse (newcachemap) "sql" (list factory) "memcp-tests"
+          "SELECT (SELECT SUM(value) FROM dispatch_profile_marker) AS total" nil "root" session false tx))
+        (define failure (try (lambda () (begin
+          (sql_execute_formula session tx formula
+            (lambda (_row) (state "rows" (+ (state "rows") 1)))
+            (lambda args (state "headers" (+ (state "headers") 1))))
+          "unexpected successful execution")) (lambda (failure) failure)))
+        (define source (table "memcp-tests" false "dispatch_profile_marker" false tx))
+        (define access (list 372734710317056 (scan_boundary "equal" "id" 0 0 true true "" false) "value"))
+        (define own (scan_lookup tx source access (list 1))) (define observer (scan_lookup nil source access (list 1)))
+        (tx_rollback session)
+        (list failure (state "compiled") (state "produced") (state "headers") (state "rows") own observer
+          (scan_lookup nil (table "memcp-tests" false "dispatch_profile_marker" false nil) access (list 1)))))
+        (lambda (failure) (begin
+          (try (lambda () (tx_rollback session)) (lambda (_cleanup_failure) true))
+          (error failure)))))
+  expect:
+    result:
+    - query plan assumptions changed during compilation
+    - 2
+    - 0
+    - 0
+    - 0
+    - 9
+    - 0
+    - 0
+- name: Native cache owner is reselected on entering the real compile lock before
+    touching old entry guards
+  scm: |-
+    (begin
+      (define session (req "__session")) (session "username" "root")
+      (define state (newsession)) (state "old_guards" 0) (state "old_preparations" 0) (state "old_program" 0) (state "old_headers" 0) (state "entered" 0) (state "rows" 0) (state "headers" 0)
+      (define base_cache (newcachemap)) (define owner_context (list 'physical-dispatch-owner base_cache "sql"))
+      (define query "SELECT (SELECT SUM(value) FROM dispatch_profile_marker) AS total,(SELECT COUNT(*) FROM dispatch_profile_marker) AS n")
+      (define key (sql_queryplan_cache_key "root" "memcp-tests" query (fnv_hash query)))
+      (with_query_request session (req "__session_state") (req "__query_seq") "native profile changes during cache lock acquisition" "cursor-stability"
+        (lambda (statement) (statement "native profile changes during cache lock acquisition" false (lambda (tx)
+          (try (lambda () (begin
+            /* This is the actual HTTP request's native owner, not a new Session
+            map with nil connection state. Refuse before any effects if absent. */
+            (if (> (tx_connection_id tx) 0) true (error "acquisition control requires its native request session"))
+            (define before (tx_requires_query_local_cache tx))
+            (define formula (cached_parse base_cache "sql" (list parse_sql) "memcp-tests" query nil "root" session false tx))
+            (define entry (car (base_cache key)))
+            (define native_lock (entry "compile_lock"))
+            (define guarded (map (entry "variants") (lambda (variant) (begin
+              (define old_guard (sql_queryplan_guard_kernel variant))
+              (define old_eligible (sql_queryplan_eligibility_kernel variant))
+              (define old_program (sql_queryplan_program_kernel variant))
+              (define counted_program (lambda (session tx row fields context) (begin
+                (state "old_program" (+ (state "old_program") 1))
+                (sql_queryplan_apply_input old_program variant session tx row
+                  (lambda args (begin (state "old_headers" (+ (state "old_headers") 1)) (apply fields args))) context))))
+              (define old_preparations (append (nth variant 2)
+                (list "acquisition-old-preparation"
+                  (list (lambda () (begin (state "old_preparations" (+ (state "old_preparations") 1)) 1))) 1)))
+              (define count_guard (lambda (session tx row fields context) (begin
+                (state "old_guards" (+ (state "old_guards") 1))
+                (if (expression_equal? old_guard true) true
+                  (expression_equal? old_guard false) false
+                  (sql_queryplan_apply_input old_guard variant session tx row fields context)))))
+              (define count_eligible (lambda (session tx row fields context) (begin
+                (state "old_guards" (+ (state "old_guards") 1))
+                (if (expression_equal? old_eligible true) true
+                  (expression_equal? old_eligible false) false
+                  (sql_queryplan_apply_input old_eligible variant session tx row fields context)))))
+              (define info (qassoc_set (qassoc_set (qassoc_set (nth variant 3) 'input_guard count_guard)
+                'input_source_eligibility count_eligible) 'input_program counted_program))
+              (list (sql_queryplan_wrap_input_formula tx count_guard false)
+                (sql_queryplan_wrap_input_formula tx counted_program false) old_preparations
+                (qassoc_set info 'source_eligibility (sql_queryplan_wrap_input_formula tx count_eligible false)))))))
+            (sql_queryplan_install_variants base_cache key entry (list parse_sql) "memcp-tests" query nil guarded tx)
+            /* Real mutex, real native SessionState user lock, and real selector.
+            This deterministically changes the owner at the acquisition boundary;
+            it makes no claim that a competing thread has contended on the mutex. */
+            (entry "compile_lock" (lambda (actual_tx body)
+              (native_lock actual_tx (lambda () (begin
+                (state "entered" (+ (state "entered") 1))
+                (locktables (list (list "memcp-tests" "dispatch_profile_marker" false)) actual_tx)
+                (body))))))
+            (sql_queryplan_variant_miss base_cache key entry (list parse_sql) "memcp-tests" query nil session tx
+              (lambda (row) (begin (state "rows" (+ (state "rows") 1))
+                (state "total" (get_assoc row "total")) (state "n" (get_assoc row "n"))))
+              (lambda args (state "headers" (+ (state "headers") 1))) nil owner_context)
+            (define after (tx_requires_query_local_cache tx))
+            (define changed (not (identical? (car (sql_queryplan_cache_selection owner_context tx)) base_cache)))
+            (unlocktables tx)
+            (list before after changed (state "entered") (state "old_guards")
+              (state "old_preparations") (state "old_program") (state "old_headers")
+              (state "rows") (state "headers") (state "total") (state "n"))))
+            (lambda (failure) (begin
+              (try (lambda () (unlocktables tx)) (lambda (_cleanup_failure) true))
+              (error failure)))))))))
+  expect:
+    result:
+    - false
+    - true
+    - true
+    - 1
+    - 0
+    - 0
+    - 0
+    - 0
+    - 1
+    - 1
+    - 0
+    - 2
+- name: Opaque managed factories with mixed public and invocation sources retain complete
+    dual pipelines
+  scm: |-
+    (begin
+      (define session (newsession))
+      /* Execute through the ordinary compiled SQL interface: planning arguments
+      do not bind the emitted runtime session/tx symbols for a later raw EVAL. */
+      (define execute_fixture_write (lambda (actual_session actual_tx database command)
+        (sql_execute_formula actual_session actual_tx
+          (cached_parse (newcachemap) "sql" (list parse_sql) database command nil "root" actual_session false actual_tx)
+          (lambda (_row) (error "fixture write unexpectedly emitted a row"))
+          (lambda args true)))) (session "username" "root")
+      (define scope (new_relation_scope session)) (define name (concat "." (uuid) "#mixed-dispatch-input"))
+      (createtable "memcp-tests" name (list (list "column" "value" "INT" (list) (list)))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (insert (table "memcp-tests" false name false nil) (list "value") (list (list 7)))
+      (define query "SELECT (SELECT SUM(value) FROM dispatch_profile_marker) AS total")
+      (define scoped_query (concat "SELECT (SELECT SUM(value) FROM `" name "`) AS scoped"))
+      (define factory (lambda (schema text policy planning tx)
+        (list '!begin (parse_sql schema text policy planning tx) (parse_sql schema scoped_query policy planning tx))))
+      (define formula (cached_parse (newcachemap) "sql" (list factory) "memcp-tests" query nil "root" session false nil))
+      (define capture (lambda (tx) (begin
+        (define output (newsession)) (output "rows" 0) (output "headers" 0)
+        (sql_execute_formula session tx formula
+          (lambda (row) (begin (output "rows" (+ (output "rows") 1))
+            (if (has_assoc? row "total") (output "total" (get_assoc row "total"))
+              (output "scoped" (get_assoc row "scoped")))))
+          (lambda args (output "headers" (+ (output "headers") 1))))
+        (list (output "rows") (output "headers") (output "total") (output "scoped")))))
+      (try (lambda () (begin
+        (define public (capture nil))
+        (tx_begin_acid session) (define tx (session "__memcp_tx"))
+        (execute_fixture_write session tx "memcp-tests" "UPDATE dispatch_profile_marker SET value=9 WHERE id=1")
+        (define private (capture tx))
+        (tx_rollback session) (define restored (capture nil))
+        (close_relation_scope scope)
+        (list public private restored (nil? (table "memcp-tests" false name false nil)))))
+        (lambda (failure) (begin
+          (try (lambda () (tx_rollback session)) (lambda (_cleanup_failure) true))
+          (try (lambda () (close_relation_scope scope)) (lambda (_cleanup_failure) true))
+          (error failure)))))
+  expect:
+    result:
+    - - 2
+      - 2
+      - 0
+      - 7
+    - - 2
+      - 2
+      - 9
+      - 7
+    - - 2
+      - 2
+      - 0
+      - 7
+    - true
+- name: A second independent region cannot publish a partial single-profile read program
+  scm: |-
+    (begin
+      (define session (newsession)) (session "username" "root")
+      (define state (newsession)) (state "rows" 0) (state "headers" 0)
+      (define planning (sql_queryplan_compile_session session nil nil (list 'physical-dispatch-owner (newcachemap) "sql")))
+      ((planning "__memcp_queryplan_input_alternatives") "read_parser" parse_sql)
+      (define query "SELECT (SELECT SUM(value) FROM dispatch_profile_marker) AS total")
+      (define first (parse_sql "memcp-tests" query nil planning nil))
+      (define failure (try (lambda () (begin
+        (define second (parse_sql "memcp-tests" query nil planning nil))
+        (sql_execute_formula session nil (sql_queryplan_compile_formula nil (list '!begin first second))
+          (lambda (_row) (state "rows" (+ (state "rows") 1)))
+          (lambda args (state "headers" (+ (state "headers") 1))))
+        "unexpected mixed region publication")) (lambda (failure) failure)))
+      (list failure (state "rows") (state "headers")))
+  expect:
+    result:
+    - query plan requires one complete read dispatch region
+    - 0
+    - 0
+- name: Whole TSQL batches keep transaction changes and later scalar reads inside
+    their existing runtime owners
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRANSACTION; UPDATE dispatch_profile_marker SET value=9 WHERE id=1;
+        SELECT (SELECT SUM(value) FROM dispatch_profile_marker) AS total,(SELECT COUNT(*)
+        FROM dispatch_profile_marker) AS n,@@TRANCOUNT AS depth,XACT_STATE() AS state;
+        ROLLBACK TRANSACTION; SELECT (SELECT SUM(value) FROM dispatch_profile_marker)
+        AS total,(SELECT COUNT(*) FROM dispatch_profile_marker) AS n,@@TRANCOUNT AS
+        depth,XACT_STATE() AS state;
+      expect:
+        result_sets:
+        - columns:
+          - total
+          - n
+          - depth
+          - state
+          rows: 1
+          data:
+          - total: 9
+            n: 2
+            depth: 1
+            state: 1
+        - columns:
+          - total
+          - n
+          - depth
+          - state
+          rows: 1
+          data:
+          - total: 0
+            n: 2
+            depth: 0
+            state: 0
+    - connection: observer
+      sql: SELECT id,value FROM dispatch_profile_marker ORDER BY id
+      expect:
+        columns:
+        - id
+        - value
+        rows: 2
+        data:
+        - id: 1
+          value: 0
+        - id: 2
+          value: null

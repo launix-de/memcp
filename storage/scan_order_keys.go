@@ -91,7 +91,7 @@ func declareScanOrderKeys(en *scm.Env, ordinary *scm.Declaration) {
 		distinct := rows
 		integer := false
 		// Metadata only: no shard load, index build, or statistics traversal here.
-		for _, row := range target.ShowColumns().Slice() {
+		for _, row := range target.ShowColumns(tx).Slice() {
 			fields := row.Slice()
 			name, typ := "", ""
 			ndv := float64(0)
@@ -206,8 +206,10 @@ func orderedPrefixBounds(original scanAccess, prefix *orderedPrefixAccess) scanA
 		}
 	}
 	bounds := scanAccessFromAnalyzed(boundaries)
+	bounds.producerInput = original.producerInput
 	bounds.ensureRuntime().prefixMerge = prefix
 	bounds.feedback = original.feedback
+	bounds.columnInput = original.columnInput
 	return bounds
 }
 
@@ -418,7 +420,7 @@ func (s *StorageIndex) projectPrefixCandidates(tx *TxContext, bounds scanAccess,
 		return false
 	}
 	prefix := bounds.runtime.prefixMerge
-	part := s.t.projectJoinKeysPart(tx, []string{prefix.column}, prefix.keys, SessionStateFromTx(tx), true, true)
+	part := s.t.projectJoinKeysPart(tx, []string{prefix.column}, prefix.keys, SessionStateFromTx(tx), true, true, bounds.columnInput)
 	count := 0
 	stopped := false
 	part.forEachID(func(id uint32) bool {

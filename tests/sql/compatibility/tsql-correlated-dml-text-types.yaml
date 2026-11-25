@@ -1,0 +1,66 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Correlated DML predicates compile text operands in their declaring query scope
+setup:
+  - sql: DROP TABLE IF EXISTS correlated_text_people
+  - sql: DROP TABLE IF EXISTS correlated_text_entries
+  - sql: CREATE TABLE correlated_text_people (id INT PRIMARY KEY,last_name VARCHAR(35),first_name VARCHAR(35))
+  - sql: CREATE TABLE correlated_text_entries (id INT PRIMARY KEY,entity_id VARCHAR(255),main_key VARCHAR(100),type_id INT,marked INT)
+  - sql: INSERT INTO correlated_text_people VALUES (7,'Seven','Reader'),(8,'Other','User')
+  - sql: |
+      INSERT INTO correlated_text_entries VALUES
+        (1,'7','Seven, Reader',3000000,0),
+        (2,'7_suffix','Seven, Reader',3000000,0),
+        (3,'9','Missing, Reader',3000000,0),
+        (4,'8','Wrong name',3000000,0),
+        (5,NULL,NULL,3000000,0),
+        (6,'7','Wrong name',2000000,0),
+        (7,'8','Other, User',3999999,0)
+test_cases:
+  - name: SELECT keeps inner text declarations and outer numeric membership
+    sql: |
+      SELECT e.id FROM correlated_text_entries AS e
+      WHERE NOT EXISTS (SELECT 1 FROM correlated_text_people AS p
+        WHERE e.main_key=p.last_name+', '+p.first_name
+          AND LEFT(e.entity_id,CHARINDEX('_',e.entity_id+'_')-1)=p.id)
+      ORDER BY e.id
+    expect: {rows: 4, data: [{id: 3},{id: 4},{id: 5},{id: 6}]}
+  - name: UPDATE binds text operands of the nested EXISTS in its own scope
+    sql: |
+      UPDATE correlated_text_entries SET marked=1
+      WHERE NOT EXISTS (SELECT 1 FROM correlated_text_people AS p
+        WHERE correlated_text_entries.main_key=p.last_name+', '+p.first_name
+          AND LEFT(correlated_text_entries.entity_id,CHARINDEX('_',correlated_text_entries.entity_id+'_')-1)=p.id)
+    expect: {affected_rows: 4}
+  - name: UPDATE preserves every matched and unmatched row
+    sql: SELECT id,marked FROM correlated_text_entries ORDER BY id
+    expect: {rows: 7, data: [{id: 1,marked: 0},{id: 2,marked: 0},{id: 3,marked: 1},{id: 4,marked: 1},{id: 5,marked: 1},{id: 6,marked: 1},{id: 7,marked: 0}]}
+  - name: DELETE combines NOT IN and a correlated NOT EXISTS text expression
+    sql: |
+      DELETE FROM correlated_text_entries
+      WHERE type_id BETWEEN 3000000 AND 3999999 AND (
+        entity_id NOT IN (SELECT CONVERT(VARCHAR(255),id) FROM correlated_text_people)
+        OR LEFT(entity_id,CHARINDEX('_',entity_id+'_')-1) NOT IN (SELECT CONVERT(VARCHAR(255),id) FROM correlated_text_people)
+        OR NOT EXISTS (SELECT 1 FROM correlated_text_people AS p
+          WHERE correlated_text_entries.main_key=p.last_name+', '+p.first_name
+            AND LEFT(correlated_text_entries.entity_id,CHARINDEX('_',correlated_text_entries.entity_id+'_')-1)=p.id))
+    expect: {affected_rows: 4}
+  - name: DELETE preserves full values of surviving rows
+    sql: SELECT id,entity_id,main_key,type_id,marked FROM correlated_text_entries ORDER BY id
+    expect:
+      rows: 3
+      data:
+        - {id: 1,entity_id: '7',main_key: 'Seven, Reader',type_id: 3000000,marked: 0}
+        - {id: 6,entity_id: '7',main_key: 'Wrong name',type_id: 2000000,marked: 1}
+        - {id: 7,entity_id: '8',main_key: 'Other, User',type_id: 3999999,marked: 0}
+  - name: A missing inner column still fails actual SQL name binding
+    sql: |
+      DELETE FROM correlated_text_entries WHERE EXISTS
+        (SELECT 1 FROM correlated_text_people AS p WHERE correlated_text_entries.main_key=p.missing_name+', ')
+    expect: {error: true, contains: 'missing_name'}
+cleanup:
+  - sql: DROP TABLE IF EXISTS correlated_text_entries
+  - sql: DROP TABLE IF EXISTS correlated_text_people

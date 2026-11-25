@@ -1,0 +1,178 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: mysql
+  isolated: true
+  description: Native lexical retirement preserves the original public transaction and seals escaped inputs
+setup:
+- sql: DROP TABLE IF EXISTS scope_retirement_public
+- sql: CREATE TABLE scope_retirement_public(id INT PRIMARY KEY,value INT)
+cleanup:
+- sql: DROP TABLE IF EXISTS scope_retirement_public
+test_cases:
+- name: Retiring local journals preserves caller public rows and savepoints
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define scope (new_relation_scope owner))
+      (define name (concat ".scoped-caller:" (uuid)))
+      (define public (table "memcp-tests" false "scope_retirement_public" false nil))
+      (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+      (insert public '("id" "value") (list (list 1 9)) '() nil false nil tx)
+      (define saved (tx_savepoint tx))
+      (createtable "memcp-tests" name (list (list "column" "value" "INT" '() '()))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false tx)
+      (define local (table "memcp-tests" false name false tx))
+      (insert local '("value") (list (list 7) (list 8)) '() nil false nil tx)
+      (define local_sum (scan tx local '() '() '() (lambda () true) '("value") (lambda (total value) (+ total value)) 0 +))
+      (close_relation_scope scope tx)
+      (insert public '("id" "value") (list (list 2 11)) '() nil false nil tx)
+      (tx_rollback_to_savepoint tx saved)
+      (define retained (scan tx public '() '() '() (lambda () true) '("value") (lambda (total value) (+ total value)) 0 +))
+      (define foreign (scan nil public '() '() '() (lambda () true) '("value") (lambda (total value) (+ total value)) 0 +))
+      (define active (tx_state tx))
+      (tx_rollback owner)
+      (and (equal? local_sum 15) (equal? retained 9) (equal? foreign 0) (equal? active "active")
+        (nil? (table "memcp-tests" false name false nil))
+        (equal? (scan nil public '() '() '() (lambda () true) '("value") (lambda (total value) (+ total value)) 0 +) 0)))
+  expect: {result: true}
+- name: Closed native source capabilities reject later scans and batch inserts
+  scm: |
+    (begin
+      (define scope (new_relation_scope (newsession)))
+      (define name (concat ".scoped-closed:" (uuid)))
+      (createtable "memcp-tests" name (list (list "column" "value" "INT" '() '()))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (define source (table "memcp-tests" false name false nil))
+      (insert source '("value") (list (list 7)))
+      (close_relation_scope scope)
+      (define no_read (try (lambda () (begin (scan nil source '() '() '() (lambda () true) '("value") (lambda (total value) (+ total value)) 0 +) false)) (lambda (_cause) true)))
+      (define no_write (try (lambda () (begin (insert source '("value") (list (list 9))) false)) (lambda (_cause) true)))
+      (define no_reserve (try (lambda () (begin (reserve_ids source 1) false)) (lambda (_cause) true)))
+      (and no_read no_write no_reserve (nil? (table "memcp-tests" false name false nil))))
+  expect: {result: true}
+- name: A retained raw mutation grant prevents journal retirement before effects
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define scope (new_relation_scope owner))
+      (define name (concat ".scoped-callback:" (uuid)))
+      (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+      (createtable "memcp-tests" name (list (list "column" "value" "INT" '() '()))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false tx)
+      (define source (table "memcp-tests" false name false tx))
+      (insert source '("value") (list (list 7)) '() nil false nil tx)
+      (define callback (scan tx source '() '() '() (lambda () true) '("$update") (lambda (_ update) update) nil (lambda (_ value) value)))
+      (define rejected (try (lambda () (begin (close_relation_scope scope tx) false)) (lambda (_cause) true)))
+      (define still_active (equal? (tx_state tx) "active"))
+      (tx_rollback owner)
+      (close_relation_scope scope)
+      (define stale (try (lambda () (begin (callback) false)) (lambda (_cause) true)))
+      (and rejected still_active stale (nil? (table "memcp-tests" false name false nil))))
+  expect: {result: true}
+- name: Overflow rebuild retirement does not await the original caller decision
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define scope (new_relation_scope owner))
+      (define name (concat ".scoped-overflow:" (uuid)))
+      (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+      (createtable "memcp-tests" name (list (list "column" "value" "INT" '() '()))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false tx)
+      (define source (table "memcp-tests" false name false tx))
+      (insert source '("value") (map (produceN 60000) (lambda (value) (list value))) '() nil false nil tx)
+      (insert source '("value") (list (list 60000) (list 60001) (list 60002) (list 60003) (list 60004)) '() nil false nil tx)
+      (define total (scan tx source '() '() '() (lambda () true) '() (lambda (total) (+ total 1)) 0 +))
+      (close_relation_scope scope tx)
+      (define active (equal? (tx_state tx) "active"))
+      (tx_rollback owner)
+      (and active (equal? total 60005) (nil? (table "memcp-tests" false name false nil))))
+  expect: {result: true}
+- name: Concurrent partition retirement releases the same original local journal
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define scope (new_relation_scope owner))
+      (define name (concat ".scoped-partition:" (uuid)))
+      (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+      (createtable "memcp-tests" name (list (list "column" "value" "INT" '() '()))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false tx)
+      (define source (table "memcp-tests" false name false tx))
+      (insert source '("value") (map (produceN 128) (lambda (value) (list value))) '() nil false nil tx)
+      (parallel (partitiontable source (list (list "value" (list 64)))) (close_relation_scope scope tx))
+      (define active (equal? (tx_state tx) "active"))
+      (tx_rollback owner)
+      (and active (nil? (table "memcp-tests" false name false nil))))
+  expect: {result: true}
+- name: Closing the calling source from its own mapper rejects before sealing
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define scope (new_relation_scope owner))
+      (define name (concat ".scoped-self-close:" (uuid)))
+      (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+      (createtable "memcp-tests" name (list (list "column" "value" "INT" '() '()))
+        (list "engine" "memory" "ephemeral" true "scope" scope) false tx)
+      (define source (table "memcp-tests" false name false tx))
+      (insert source '("value") (list (list 7)) '() nil false nil tx)
+      (define rejected (scan tx source '() '() '() (lambda () true) '("value")
+        (lambda (_ value) (try (lambda () (begin (close_relation_scope scope tx) false)) (lambda (_cause) true)))
+        true (lambda (left right) (and left right))))
+      (define retained (scan tx source '() '() '() (lambda () true) '("value") (lambda (total value) (+ total value)) 0 +))
+      (close_relation_scope scope tx)
+      (define active (equal? (tx_state tx) "active"))
+      (tx_rollback owner)
+      (and rejected active (equal? retained 7) (nil? (table "memcp-tests" false name false nil))))
+  expect: {result: true}
+- name: A sealed scope joins an admitted producer and permits its sibling-source continuation
+  scm: |
+    (begin
+      (define owner (newsession)) (owner "username" "root")
+      (define scope (new_relation_scope owner))
+      (define first_name (concat ".scoped-admitted:" (uuid)))
+      (define second_name (concat ".scoped-sibling:" (uuid)))
+      (define columns (list (list "column" "value" "INT" '() '())))
+      (createtable "memcp-tests" first_name columns
+        (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (createtable "memcp-tests" second_name columns
+        (list "engine" "memory" "ephemeral" true "scope" scope) false nil)
+      (define first (table "memcp-tests" false first_name false nil))
+      (define second (table "memcp-tests" false second_name false nil))
+      (insert first '("value") (list (list 1))) (insert second '("value") (list (list 7)))
+      (define entered (newpromise)) (define released (newpromise))
+      (define sealed (newpromise)) (define result (newpromise))
+      (define reserved (newpromise))
+      (define completed (newpromise)) (define active (newpromise))
+      (define await (lambda (promise remaining)
+        (if (promise "state") true (> remaining 0)
+          (begin (sleep 0.001) (await promise (- remaining 1)))
+          true (error "native input coordination did not complete"))))
+      (define read_second (lambda (tx)
+        (scan tx second '() '() '() (lambda () true) '("value") (lambda (total value) (+ total value)) 0 +)))
+      (define await_seal (lambda (remaining)
+        (if (try (lambda () (begin (read_second nil) false))
+              (lambda (cause) (strlike (string (failure_value cause)) "%relation scope is closed%")))
+          (begin (sealed "once" true) true)
+          (> remaining 0) (begin (sleep 0.001) (await_seal (- remaining 1)))
+          true (error "new input was not sealed"))))
+      (tx_begin_acid owner) (define tx (owner "__memcp_tx"))
+      (parallel
+        (try (lambda () (begin
+          (with_table_mutation (list first) (list "insert" '()) tx owner
+            (lambda (bound) (begin
+              (entered "once" true)
+              (await released 2000)
+              (reserved "once" (reserve_ids second 2 bound))
+              (result "once" (read_second bound)))))
+          (active "once" (equal? (tx_state tx) "active"))
+          (completed "once" true)))
+          (lambda (cause) (begin (completed "once" true) (error cause))))
+        (begin (await entered 2000) (close_relation_scope scope))
+        (try (lambda () (begin (await entered 2000) (await_seal 2000) (released "once" true)))
+          (lambda (cause) (begin (released "once" true) (error cause))))
+        (begin (await completed 2000) (tx_rollback owner)))
+      (and (active "value") (sealed "value") (equal? (result "value") 7)
+        (expression_equal? (reserved "value") (list 1 2))
+        (nil? (table "memcp-tests" false first_name false nil))
+        (nil? (table "memcp-tests" false second_name false nil))))
+  expect: {result: true}

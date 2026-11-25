@@ -1,0 +1,90 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Native original writers retain fail-fast upgrades and fresh implicit statement triggers keep complete values
+setup:
+  - sql: DROP TABLE IF EXISTS statement_writer_target
+  - sql: DROP TABLE IF EXISTS statement_writer_audit
+  - sql: CREATE TABLE statement_writer_target(id INT PRIMARY KEY,value INT)
+  - sql: CREATE TABLE statement_writer_audit(id INT,old_value INT,new_value INT)
+  - sql: INSERT statement_writer_target VALUES(1,10),(2,20)
+  - sql: |
+      CREATE TRIGGER statement_writer_observe ON statement_writer_target AFTER UPDATE AS
+      BEGIN
+        SET NOCOUNT ON;
+        INSERT statement_writer_audit(id,old_value,new_value)
+        SELECT i.id,d.value,i.value FROM inserted i INNER JOIN deleted d ON i.id=d.id;
+      END
+cleanup:
+  - sql: DROP TABLE IF EXISTS statement_writer_target
+  - sql: DROP TABLE IF EXISTS statement_writer_audit
+test_cases:
+  - name: A rejected foreign writer ends only the competing transaction and preserves the original complete view
+    tds:
+      statements:
+        - {connection: original, sql: BEGIN TRANSACTION}
+        - {connection: original, sql: UPDATE statement_writer_target SET value=21 WHERE id=2}
+        - {connection: competing, sql: BEGIN TRANSACTION}
+        - connection: competing
+          sql: SELECT id,value,@@TRANCOUNT AS depth,XACT_STATE() AS state FROM statement_writer_target ORDER BY id
+          expect:
+            rows: 2
+            data: [{id: 1, value: 10, depth: 1, state: 1}, {id: 2, value: 20, depth: 1, state: 1}]
+        - connection: competing
+          sql: UPDATE statement_writer_target SET value=11 WHERE id=1
+          expect:
+            error: true
+            contains: [native statement conflicts with an active table writer]
+        - connection: original
+          sql: SELECT id,value,@@TRANCOUNT AS depth FROM statement_writer_target ORDER BY id
+          expect:
+            rows: 2
+            data: [{id: 1, value: 10, depth: 1}, {id: 2, value: 21, depth: 1}]
+        - connection: competing
+          # The existing native-origin/unrestored failure policy ends this
+          # competing original T, independently of the XACT_ABORT option.
+          sql: SELECT id,value,@@TRANCOUNT AS depth,XACT_STATE() AS state FROM statement_writer_target ORDER BY id
+          expect:
+            rows: 2
+            data: [{id: 1, value: 10, depth: 0, state: 0}, {id: 2, value: 20, depth: 0, state: 0}]
+        - connection: original
+          sql: SELECT id,old_value,new_value FROM statement_writer_audit ORDER BY id
+          expect: {rows: 1, data: [{id: 2, old_value: 20, new_value: 21}]}
+        - connection: competing
+          sql: SELECT id,old_value,new_value FROM statement_writer_audit ORDER BY id
+          expect: {rows: 0, data: []}
+        - {connection: original, sql: ROLLBACK TRANSACTION}
+        - connection: observer
+          sql: SELECT id,value,@@TRANCOUNT AS depth FROM statement_writer_target ORDER BY id
+          expect:
+            rows: 2
+            data: [{id: 1, value: 10, depth: 0}, {id: 2, value: 20, depth: 0}]
+        - connection: observer
+          sql: SELECT id,old_value,new_value FROM statement_writer_audit ORDER BY id
+          expect: {rows: 0, data: []}
+        - {connection: fresh, sql: UPDATE statement_writer_target SET value=11 WHERE id=1}
+        - connection: observer
+          sql: SELECT id,value,@@TRANCOUNT AS depth FROM statement_writer_target ORDER BY id
+          expect:
+            rows: 2
+            data: [{id: 1, value: 11, depth: 0}, {id: 2, value: 20, depth: 0}]
+        - connection: observer
+          sql: SELECT id,old_value,new_value FROM statement_writer_audit ORDER BY id
+          expect: {rows: 1, data: [{id: 1, old_value: 10, new_value: 11}]}
+  - name: A same-value implicit UPDATE still completes its fresh statement trigger once
+    tds:
+      statements:
+        - {connection: fresh, sql: UPDATE statement_writer_target SET value=value WHERE id=1}
+        - connection: observer
+          sql: SELECT id,value,@@TRANCOUNT AS depth FROM statement_writer_target ORDER BY id
+          expect:
+            rows: 2
+            data: [{id: 1, value: 11, depth: 0}, {id: 2, value: 20, depth: 0}]
+        - connection: observer
+          sql: SELECT id,old_value,new_value FROM statement_writer_audit ORDER BY id,old_value,new_value
+          expect:
+            rows: 2
+            data: [{id: 1, old_value: 10, new_value: 11}, {id: 1, old_value: 11, new_value: 11}]

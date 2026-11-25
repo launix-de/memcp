@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync/atomic"
 )
 
 var schemeStringUnescaper = strings.NewReplacer("\\\"", "\"", "\\\\", "\\", "\\n", "\n", "\\r", "\r", "\\t", "\t", "\\0", "\x00")
@@ -32,17 +31,19 @@ type SourceInfo struct {
 	line   int
 	col    int
 	value  Scmer
-	// Only evalWithSourceInfo may mark this flag. Static consumers such as the
-	// optimizer may inspect or unwrap SourceInfo, but that is not execution.
-	coverage uint32
+	// Only evalWithSourceInfo marks execution. Copies at identical coordinates
+	// share the report's point, whose permanent owner never retains this value.
+	coverage *sourceCoveragePoint
 }
 
 func (source_info *SourceInfo) markInterpreted() {
-	atomic.StoreUint32(&source_info.coverage, 1)
+	if source_info.coverage != nil && !source_info.coverage.wasInterpreted() {
+		source_info.coverage.interpreted.Store(1)
+	}
 }
 
 func (source_info *SourceInfo) wasInterpreted() bool {
-	return atomic.LoadUint32(&source_info.coverage) != 0
+	return source_info.coverage != nil && source_info.coverage.wasInterpreted()
 }
 
 func (source_info SourceInfo) String() string {
@@ -90,7 +91,10 @@ func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scme
 		code := readFrom(&tokens)
 		definitionSymbol, hasDefinition := topLevelDefinitionSymbol(code)
 		Validate(code, "any")
-		code = Optimize(code, en, nil)
+		// The loader owns this freshly parsed executable syntax until Eval
+		// publishes its procedures. Quoted and dynamically produced data are
+		// never covered by that ownership boundary.
+		code = optimizeWithSyntaxOwner(code, en, nil, compileProcedures)
 		expression = Eval(code, en)
 		// On a vanilla Go toolchain there is no native entry point to produce.
 		// Avoid walking every imported procedure for parser dependencies: besides

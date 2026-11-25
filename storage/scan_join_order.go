@@ -123,9 +123,12 @@ type scanJoinOrderColumn struct {
 // is the ORDER BY driver. Every later input joins targetKeyCols against values
 // taken from the already assembled tuple through sourceKeyCols.
 type scanJoinOrderInput struct {
-	table      *table
-	filterCols []string
-	filter     scm.Scmer
+	columnInput   nativeTableInput
+	dataTx        *TxContext
+	producerInput *nativeMutationInput
+	table         *table
+	filterCols    []string
+	filter        scm.Scmer
 	// Optional immutable semijoin filter; the complete join still runs below.
 	candidateCols  []string
 	candidate      scm.Scmer
@@ -142,7 +145,8 @@ type scanJoinOrderInput struct {
 }
 
 type scanJoinOrderSpec struct {
-	inputs []scanJoinOrderInput
+	producerInput *nativeMutationInput
+	inputs        []scanJoinOrderInput
 
 	orderCols          []scanJoinOrderColumn
 	orderDirs          []func(...scm.Scmer) scm.Scmer
@@ -270,7 +274,7 @@ func appendScanJoinColumn(cols []string, indexes map[string]int, col string) ([]
 	return cols, indexes
 }
 
-func prepareScanJoinOrderSpec(spec *scanJoinOrderSpec) {
+func prepareScanJoinOrderSpec(currentTx *TxContext, spec *scanJoinOrderSpec) {
 	if len(spec.inputs) == 0 {
 		panic("scan_join_order: at least one input table is required")
 	}
@@ -291,6 +295,8 @@ func prepareScanJoinOrderSpec(spec *scanJoinOrderSpec) {
 		if input.table == nil {
 			panic("scan_join_order: input table is nil")
 		}
+		input.table.enterPendingCatalogData(input.dataTx, nil)
+		input.table.recordSerializableRead(input.dataTx)
 		if input.filter.IsNil() {
 			input.filter = scanJoinTrue()
 		}
@@ -351,6 +357,8 @@ func prepareScanJoinOrderSpec(spec *scanJoinOrderSpec) {
 func collectScanJoinOrderRecords(currentTx *TxContext, input *scanJoinOrderInput, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, offset int, limit int, acceptCols []string, accept scm.Scmer) []orderedBatchRecord {
 	records := make([]orderedBatchRecord, 0)
 	source := scanOrderTableSpec{
+		producerInput: input.producerInput,
+		dataTx:        input.dataTx, dataBound: true, columnInput: input.columnInput,
 		projectionCols: append(append([]string(nil), input.readCols...), input.lateMapCols...),
 		table:          input.table,
 		accessSchema:   input.accessSchema,
@@ -376,6 +384,7 @@ func collectScanJoinOrderRecords(currentTx *TxContext, input *scanJoinOrderInput
 }
 
 func materializeScanJoinRecords(currentTx *TxContext, input *scanJoinOrderInput, refs []orderedBatchRecord) []*scanJoinOrderRecord {
+	currentTx = input.dataTx
 	result := make([]*scanJoinOrderRecord, 0, len(refs))
 	mappers := make(map[*storageShard]*ShardMapReducer)
 	identity := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
@@ -393,7 +402,8 @@ func materializeScanJoinRecords(currentTx *TxContext, input *scanJoinOrderInput,
 		}
 		mapper := mappers[ref.shard]
 		if mapper == nil {
-			mapper = ref.shard.OpenMapper(input.readCols, identity, false, currentTx)
+			mapper = ref.shard.OpenMapper(input.readCols, identity, false, currentTx, input.columnInput)
+			mapper.exactUpdate = mapper.exactUpdate || input.producerInput.exactUpdateFor(ref.shard.t, currentTx)
 			mappers[ref.shard] = mapper
 		}
 		values := mapper.MapOne(ref.recid)
@@ -529,7 +539,8 @@ func (readers *scanJoinOrderMapReaders) values(tuple *scanJoinOrderTuple, dst []
 			}
 			mapper := inputMappers[record.shard]
 			if mapper == nil {
-				mapper = record.shard.OpenMapper(input.lateMapCols, readers.identity, false, readers.currentTx)
+				mapper = record.shard.OpenMapper(input.lateMapCols, readers.identity, false, input.dataTx, input.columnInput)
+				mapper.exactUpdate = mapper.exactUpdate || readers.spec.producerInput.exactUpdateFor(record.shard.t, input.dataTx)
 				inputMappers[record.shard] = mapper
 			}
 			lateValues[ref.table] = mapper.MapOne(record.recid).Slice()
@@ -961,9 +972,11 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 	// including when some unrelated residual remains. Keep those bounds while
 	// merging the mandatory batch keys; dropping them silently admits rows that
 	// SQL rejects. Never infer predicate redundancy from key uniqueness alone.
-	rows := input.table.scanWithBatchFrom(currentTx, nil, input.accessSchema, input.accessValues, runtimeScanAccess(required), conditionCols, condition,
+	requiredAccess := runtimeScanAccess(required)
+	requiredAccess.producerInput = input.producerInput
+	rows := input.table.scanWithBatchInput(input.dataTx, nil, input.accessSchema, input.accessValues, requiredAccess, conditionCols, condition,
 		callbackCols, mapReduce, scm.NewSlice(nil), combine, false,
-		stride, batchdata).Slice()
+		stride, batchdata, input.columnInput).Slice()
 	hits := make([][]*scanJoinOrderRecord, len(tuples))
 	for _, rowValue := range rows {
 		row := rowValue.Slice()
@@ -1008,7 +1021,7 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 }
 
 func scanJoinOrderBatchedProbe(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
-	prepareScanJoinOrderSpec(&spec)
+	prepareScanJoinOrderSpec(currentTx, &spec)
 	if spec.limit == 0 {
 		return scm.ApplyOnce(spec.notFoundValue, nil)
 	}
@@ -1093,7 +1106,7 @@ func scanJoinOrderBatchedProbe(currentTx *TxContext, spec scanJoinOrderSpec) scm
 }
 
 func scanJoinOrderMaterialized(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
-	prepareScanJoinOrderSpec(&spec)
+	prepareScanJoinOrderSpec(currentTx, &spec)
 	if spec.limit == 0 {
 		return scm.ApplyOnce(spec.notFoundValue, nil)
 	}
@@ -1290,9 +1303,12 @@ func scanJoinOrderCandidateInput(spec *scanJoinOrderSpec, index int, streams [][
 }
 
 func collectScanJoinOrderShardStreams(currentTx *TxContext, input *scanJoinOrderInput, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) []*scanJoinOrderShardStream {
+	currentTx = input.dataTx
 	scratch := acquireScanAnalyzeScratch()
 	defer releaseScanAnalyzeScratch(scratch)
 	bounds, compiled := scanAccessFromScheme(input.accessSchema, input.accessValues, nil)
+	bounds.columnInput = input.columnInput
+	bounds.producerInput = input.producerInput
 	if !compiled {
 		panic("scan_join_order received an invalid compiled access schema")
 	}
@@ -1319,12 +1335,15 @@ func collectScanJoinOrderShardStreams(currentTx *TxContext, input *scanJoinOrder
 		}()
 		var queue *shardqueue
 		if acquisitionFailure != nil {
-			spec := scanOrderTableSpec{table: input.table, conditionCols: input.filterCols, condition: input.filter, acceptCols: input.candidateCols, accept: input.candidate, sortcols: sortcols, projectionCols: append(append([]string(nil), input.readCols...), input.lateMapCols...)}
+			spec := scanOrderTableSpec{producerInput: input.producerInput, table: input.table, conditionCols: input.filterCols, condition: input.filter, acceptCols: input.candidateCols, accept: input.candidate, sortcols: sortcols, projectionCols: append(append([]string(nil), input.readCols...), input.lateMapCols...)}
 			queue = delegateOrderedQueue(currentTx, shard, bounds, &spec, sortdirs, 0, 0, -1, acquisitionFailure)
 		} else {
 			queue = shard.scan_order(bounds, input.filterCols, input.filter, input.candidateCols, input.candidate, sortcols, sortdirs, 0, 0, -1, input.readCols, currentTx, ss)
 		}
 		defer queue.closeReaders()
+		if queue.remote == nil && len(queue.items) != 0 {
+			queue.shard.retainMutationSource(currentTx, input.producerInput, input.lateMapCols)
+		}
 		refs := make([]orderedBatchRecord, 0, len(queue.items))
 		for len(queue.items) > 0 {
 			for _, id := range queue.items {
@@ -1597,6 +1616,17 @@ func applyScanJoinOrderPartitionWindow(spec *scanJoinOrderSpec, tuples []*scanJo
 }
 
 func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
+	for i := range spec.inputs {
+		if spec.inputs[i].table == nil {
+			panic("scan_join_order: input table is nil")
+		}
+		var finish nativeTableReadRelease
+		spec.inputs[i].dataTx, spec.inputs[i].columnInput, finish = spec.inputs[i].table.readDataContext(currentTx)
+		defer finish.release()
+	}
+	for index := range spec.inputs {
+		spec.inputs[index].producerInput = spec.producerInput
+	}
 	for _, ref := range spec.mapCols {
 		if contributionMutationColumns([]string{ref.column}) {
 			t := spec.inputs[ref.table].table
@@ -1610,7 +1640,7 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 		}
 		return scanJoinOrderMaterialized(currentTx, spec)
 	}
-	prepareScanJoinOrderSpec(&spec)
+	prepareScanJoinOrderSpec(currentTx, &spec)
 	if spec.limit == 0 {
 		return scm.ApplyOnce(spec.notFoundValue, nil)
 	}
@@ -1797,6 +1827,7 @@ func declareScanJoinOrder(en *scm.Env) {
 			}
 			batchedProbe := len(a) > 20 && scm.ToBool(a[20])
 			return scanJoinOrder(scmerToTxContext(a[0]), scanJoinOrderSpec{
+				producerInput:      producerInputFromScmer(a[0]),
 				inputs:             decodeScanJoinOrderInputs(tables, a[4], a[5], a[6], accessSchemas, accessValues),
 				joinFilterCols:     decodeScanJoinOrderColumns(a[7], "joinFilterColumns"),
 				joinFilter:         a[8],

@@ -349,7 +349,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 (define planner_record_filter_feedback_guard (lambda (src columns callback planning_session)
 	(begin
 		(define planning_session (planner_effective_session planning_session))
-		(if (or (nil? planning_session)
+		(if (or (not (source_is_native_table? src)) (nil? planning_session)
 			(planner_symbolic_inputs? callback planning_session)
 			(nil? (planning_session "__memcp_queryplan_guard_conditions"))) nil
 			(begin
@@ -365,7 +365,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 						inequality has been derived; it is not permission to omit that input.
 						Budget zero is essential: guards never sample or run a filter. */
 						(define read_expr (list (quote scan_selectivity_estimate) nil
-							(list (quote table) (source_schema src) false (source_relation src) false)
+							(source_native_table_expr src (quote tx))
 							(list (quote quote) (car access)) (cons (quote list) (cadr access))
 							(list (quote quote) '()) (list (quote lambda) '() true) 0))
 						/* Provenance matters too: a prior from other LIKE words may be
@@ -389,7 +389,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 		(if (or (not (single_source? aliases)) (planner_symbolic_inputs? expr planning_session)) nil
 			(begin
 				(define src (join_optimizer_source_by_alias sources (car aliases)))
-				(if (not (source_is_base_table? src)) nil
+				(if (not (source_is_native_table? src)) nil
 					(try (lambda ()
 						(begin
 							(define cols (extract_columns_for_alias src expr))
@@ -400,7 +400,7 @@ bounded scalar metadata; this lookup never scans, loads columns or builds indexe
 								(planner_bind_session_values callback planning_session) true)))
 							(define values (nth access 1))
 							(planner_record_filter_feedback_guard src cols callback planning_session)
-							(scan_selectivity_estimate nil (table (source_schema src) false (source_relation src) false)
+							(scan_selectivity_estimate nil (table (source_schema src) false (source_storage_relation src) false nil)
 								(nth access 0) values
 								cols (eval callback) 0)))
 						(lambda (_e) nil))))))))
@@ -484,8 +484,10 @@ observed output cardinality. The physical producer stays outside logical IR. */
 							(not (stage_has_residual_outer_refs? stage))))))
 				(if singleton 1
 					(if (group_stage? stage)
-						(list (quote planner_stage_input_rows)
-							(planner_quoted_value (gs_input stage))) nil)))
+						(if (lowering_catalog_caller_input? stages)
+							(planner_stage_input_rows_expr (gs_input stage))
+							(list (quote planner_stage_input_rows)
+								(planner_quoted_value (gs_input stage)))) nil)))
 			(list (quote planner_source_row_count) (planner_quoted_value src))))
 		(define decision (join_group_observation_id stages src local_predicates))
 		(define fallback_rows
@@ -521,7 +523,7 @@ observed output cardinality. The physical producer stays outside logical IR. */
 		storage metadata call for a nonexistent handle (or materialize its rows
 		inside a guard). Semantic source validation still belongs to lowering. */
 		(if (or (not (source_is_base_table? src))
-			(nil? (planner_table_statistics (source_schema src) (source_relation src)))) fallback
+			(nil? (planner_table_statistics (source_schema src) (source_storage_relation src)))) fallback
 			(begin
 				(define cols (extract_columns_for_alias src predicate))
 				(define callback (list (quote lambda)
@@ -532,7 +534,7 @@ observed output cardinality. The physical producer stays outside logical IR. */
 					(planner_guard_runtime_binding
 						(list (quote qassoc_get)
 							(list (quote scan_selectivity_estimate) nil
-								(list (quote table) (source_schema src) false (source_relation src) false)
+								(source_native_table_expr src (quote tx))
 								(planner_quoted_value (car access)) (cons (quote list) (cadr access))
 								(planner_quoted_value '()) (list (quote lambda) '() true) 0)
 							(planner_quoted_value (quote value)) fallback) planning_session nil))))))))
@@ -1895,14 +1897,14 @@ particular star shape. */
 			(or (equal? (planning_session "__memcp_queryplan_parameter_mode") "generic")
 				(equal? (planning_session "__memcp_queryplan_parameter_mode") "parameterized"))))))
 
-(define planner_record_table_statistics_guards (lambda (sources planning_session)
+(define planner_record_table_statistics_guards (lambda (sources planning_session tx)
 	(if (planner_parameterized_costing? planning_session) nil
-		(reduce (filter sources source_is_base_table?) (lambda (_ src)
-			(begin
-				(define table_value (table (source_schema src) false (source_relation src) false))
-				(define table_expr
-					(list (quote table) (source_schema src) false (source_relation src) false))
-				(planner_record_statistics_dependency
+	(reduce (filter sources source_is_native_table?) (lambda (_ src)
+		(begin
+				(define table_value (table (source_schema src) false (source_storage_relation src) false tx))
+			(define table_expr
+					(source_native_table_expr src (quote tx)))
+			(planner_record_statistics_dependency
 					table_expr (table_planner_statistics table_value) planning_session))) nil))))
 
 /* Cardinality-only physical decisions must not depend on unrelated columns
@@ -1915,37 +1917,37 @@ same row domain; that publication does not change a scan multiplicity. */
 			rows) planning_session)))
 
 (define planner_table_statistics_aliases (lambda (sources)
-	(map (filter sources source_is_base_table?) source_alias)))
+	(map (filter sources source_is_native_table?) source_alias)))
 
 /* Table dependencies cover rebuild statistics; individual metadata reads guard
 their own bound filter estimates instead of invalidating on unrelated learning.
 Guard cost inputs, not the SQL values used only to obtain those inputs. Exact
 value guards remain necessary for sampled or executable specialization. */
-(define join_order_record_cost_dependencies (lambda (sources nodes predicates planning_session)
+(define join_order_record_cost_dependencies (lambda (sources nodes predicates planning_session tx)
 	/* Generic admission supplies a compilation break-even inequality over the
 	whole flat row domain. Exact input equalities would defeat that reusable
 	candidate. This does not suppress semantic or physical-choice guards. */
 	(if (planner_parameterized_costing? planning_session) nil
-		(begin
-			(planner_record_table_statistics_guards sources planning_session)
-			(define table_aliases (planner_table_statistics_aliases sources))
-			/* Derived and synthetic nodes have no table snapshot whose token can cover
-			their runtime cardinality. Preserve the exact guard for those nodes. */
-			(reduce nodes (lambda (_ node)
-				(if (contains? table_aliases (car node))
-					nil
-					(planner_record_guard_condition
-						(list (quote equal?)
-							(if (> (count node) 2) (nth node 2) (cadr node))
-							(cadr node)) planning_session))) nil)
-			(reduce predicates (lambda (_ predicate)
-				(begin
-					/* A changed SQL value is not itself a changed cost input. Keep the
-					chosen input regime using the compiled metadata expression. This is
-					still conservative where no crossover inequality is available, but
-					does not force recompilation for every clock tick/range threshold. */
-					(planner_record_guard_condition
-						(list (quote equal?) (join_order_pred_selectivity_expr predicate)
+	(begin
+		(planner_record_table_statistics_guards sources planning_session tx)
+		(define table_aliases (planner_table_statistics_aliases sources))
+		/* Derived and synthetic nodes have no table snapshot whose token can cover
+		their runtime cardinality. Preserve the exact guard for those nodes. */
+		(reduce nodes (lambda (_ node)
+			(if (contains? table_aliases (car node))
+				nil
+				(planner_record_guard_condition
+					(list (quote equal?)
+						(if (> (count node) 2) (nth node 2) (cadr node))
+						(cadr node)) planning_session))) nil)
+		(reduce predicates (lambda (_ predicate)
+			(begin
+				/* A changed SQL value is not itself a changed cost input. Keep the
+				chosen input regime using the compiled metadata expression. This is
+				still conservative where no crossover inequality is available, but
+				does not force recompilation for every clock tick/range threshold. */
+				(planner_record_guard_condition
+					(list (quote equal?) (join_order_pred_selectivity_expr predicate)
 							(join_order_pred_selectivity predicate)) planning_session))) nil)))))
 
 /* Every subset containing one vertex and any selection of its regular-edge
@@ -2058,7 +2060,7 @@ running DP over a wide projection-only graph. */
 					(if (join_order_plan_satisfies_driver_property? plan required_drivers) plan nil))
 				nil)))))
 
-(define join_order_adaptive (lambda (sources nodes raw_predicates required_drivers planning_session)
+(define join_order_adaptive (lambda (sources nodes raw_predicates required_drivers planning_session tx)
 	(begin
 		(define aliases (map nodes car))
 		/* Non-inner join constraints are hypergraph constraints even when their ON
@@ -2088,7 +2090,7 @@ running DP over a wide projection-only graph. */
 		fixed physical driver. Guard every cost input once. Pairwise DP inequalities
 		are deterministic consequences of these inputs and retaining all of them
 		would duplicate complete intermediate plan trees. */
-		(join_order_record_cost_dependencies sources nodes predicates planning_session)
+		(join_order_record_cost_dependencies sources nodes predicates planning_session tx)
 		(define result (if (not (nil? functional_relation_plan))
 			(list functional_relation_plan (- (count aliases) 1))
 			(if exact
@@ -2135,10 +2137,14 @@ running DP over a wide projection-only graph. */
 			(join_order_plan_with_cost pipeline_plan pipeline_cost) (car selected)))
 		(define chosen_entries (+ (cadr selected)
 			(if pipeline_wins (cadr pipeline_result) 0)))
+		/* An ordered search is one delivery alternative. An unavailable
+		property leaves the unrestricted join and final native sort eligible. */
 		(if (nil? chosen_plan)
-			(neumann_fail "join_reorder" (concat "SCM join ordering could not construct a connected plan: " (string (list nodes predicates result))))
+			(if (or (not (empty_list? (join_order_required_drivers required_drivers)))
+				(not (empty_list? (join_order_required_aliases required_drivers)))) nil
+				(neumann_fail "join_reorder" (concat "SCM join ordering could not construct a connected plan: " (string (list nodes predicates result)))))
 			(if (not (join_order_plan_satisfies_driver_property? chosen_plan required_drivers))
-				(neumann_fail "join_reorder" "costed join plan cannot preserve the required ORDER BY driver")
+				nil
 				(join_order_result (if (not (nil? functional_relation_plan))
 					(quote functional-relations)
 					(if pipeline_wins (quote pipeline-left-deep)
@@ -2376,6 +2382,15 @@ to the cost model, not to an adapter that overwrites unknown values. */
 (define apply_join_optimizer_plan_node (lambda (node)
 	(if (query_block? node)
 		(begin
+			/* Retained UNION/QB operands keep their own completed requirements.
+			The parent transfers neither strategy facts nor a stage catalog into
+			that independent relation scope. */
+			(define node (make_query_block (qb_schema node)
+				(map (qb_sources node) (lambda (source)
+					(source_with_relation source (apply_join_optimizer_plan_node (source_relation source)))))
+				(qb_fields node) (qb_where node) (qb_group node) (qb_having node)
+				(qb_order node) (qb_limit node) (qb_offset node) (qb_hidden node)
+				(qb_stages node) (qb_facts node)))
 			(define physical_planned (query_block_with_physical_requirement_facts node))
 			(define physical_stages (map (qb_stages physical_planned) apply_join_optimizer_plan_stage))
 			(define requirement (qassoc_get (qb_facts physical_planned) (quote membership_requirement) nil))
@@ -2446,7 +2461,7 @@ to the cost model, not to an adapter that overwrites unknown values. */
 			(gs_facts stage))
 		stage)))
 
-(define join_optimizer_plan_segment (lambda (stages relation_units all_sources segment default_alias graph required_drivers planning_session)
+(define join_optimizer_plan_segment (lambda (stages relation_units all_sources segment default_alias graph required_drivers planning_session tx)
 	(begin
 		(define aliases (map segment source_alias))
 		(define alias_index (join_hypergraph_alias_index aliases))
@@ -2471,11 +2486,11 @@ to the cost model, not to an adapter that overwrites unknown values. */
 				segment default_alias alias_index graph fixed_functional_pair planning_session)
 			predicates
 			required_drivers
-			planning_session))
-		(qassoc_set planned (quote tree)
+			planning_session tx))
+		(if (nil? planned) nil (qassoc_set planned (quote tree)
 			(join_order_tree_with_predicates
 				(qassoc_get planned (quote tree) nil)
-				predicates)))))
+				predicates))))))
 
 (define join_optimizer_reorder_result (lambda (tree strategy dp_entries cost cardinality cost_components properties)
 	(list tree strategy dp_entries cost cardinality cost_components properties)))
@@ -2492,10 +2507,10 @@ to the cost model, not to an adapter that overwrites unknown values. */
 			(match term
 				'(op left right) (if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
 					(or
-						(and (equal?? (direct_column_name_for_alias src left) col)
+						(and (equal? (direct_column_name_for_alias src left) col)
 							(empty_list? (join_hypergraph_expr_aliases
 								default_alias (source_aliases sources) right)))
-						(and (equal?? (direct_column_name_for_alias src right) col)
+						(and (equal? (direct_column_name_for_alias src right) col)
 							(empty_list? (join_hypergraph_expr_aliases
 								default_alias (source_aliases sources) left))))
 					false)
@@ -2504,7 +2519,7 @@ to the cost model, not to an adapter that overwrites unknown values. */
 (define join_optimizer_source_constant_unique_point? (lambda (sources default_alias src condition)
 	(if (not (source_is_base_table? src))
 		false
-		(reduce (source_unique_key_sets src) (lambda (found key_cols)
+		(reduce (source_storage_unique_key_sets src) (lambda (found key_cols)
 			(or found (reduce key_cols (lambda (complete col)
 				(and complete (join_optimizer_source_column_constant_bound?
 					sources default_alias src col condition))) true))) false))))
@@ -2594,16 +2609,16 @@ the lowerer can cost it. */
 		(reduce ordered_drivers (lambda (state driver)
 			(begin
 				(define planned (join_optimizer_plan_segment stage_catalog relation_units
-					sources sources default_alias graph (list driver) planning_session))
-				(define work (join_optimizer_ordered_driver_work
-					sources base_row_catalog filtered_row_catalog planned target))
-				(define candidate (list planned (car work)
-					driver))
-				(list (if (join_optimizer_ordered_driver_candidate_better? (car state) candidate)
-					candidate (car state))
-					(append (cadr state) (list (list driver
-						(qassoc_get (car work) (quote total_ns) nil)
-						(nth work 1) (nth work 2) (nth work 3)))))))
+					sources sources default_alias graph (list driver) planning_session tx))
+				(if (nil? planned) state (begin
+					(define work (join_optimizer_ordered_driver_work
+						sources base_row_catalog filtered_row_catalog planned target))
+					(define candidate (list planned (car work) driver))
+					(list (if (join_optimizer_ordered_driver_candidate_better? (car state) candidate)
+						candidate (car state))
+						(append (cadr state) (list (list driver
+							(qassoc_get (car work) (quote total_ns) nil)
+							(nth work 1) (nth work 2) (nth work 3)))))))))
 			(list nil '())))))
 
 /* Streaming delivery can start with a proper ORDER prefix, then continue with
@@ -2618,12 +2633,12 @@ Do not change the general join memo's cardinality or cap an unbound relation. */
 		(join_optimizer_left_deep? left)
 		_ false)))
 
-(define join_optimizer_streaming_order_work (lambda (stages sources default_alias graph planned planning_session)
+(define join_optimizer_streaming_order_work (lambda (stages sources default_alias graph planned planning_session tx)
 	(qassoc_get (join_optimizer_nested_scan_cost stages sources default_alias
-		(join_optimizer_costed_predicates graph) planned planning_session)
+		(join_optimizer_costed_predicates graph) planned planning_session tx)
 		(quote total_ns) 0)))
 
-(define join_optimizer_prefix_order_alternative (lambda (stages relation_units sources default_alias graph block planned planning_session)
+(define join_optimizer_prefix_order_alternative (lambda (stages relation_units sources default_alias graph block planned planning_session tx)
 	(if (or (empty_list? (qb_order block))
 		(or (not (nil? (qb_limit block)))
 			(not (reduce sources (lambda (found src)
@@ -2637,22 +2652,23 @@ Do not change the general join memo's cardinality or cap an unbound relation. */
 			(reduce candidates (lambda (best src)
 				(begin
 					(define candidate (join_optimizer_plan_segment stages relation_units sources sources
-						default_alias graph (list (source_alias src)) planning_session))
-					(define ordered (join_optimizer_sources_for_order sources
-						(join_optimizer_tree_aliases (qassoc_get candidate (quote tree) nil))))
-					(define eligible (and (join_optimizer_left_deep? (qassoc_get best (quote tree) nil))
-						(and (join_optimizer_left_deep? (qassoc_get candidate (quote tree) nil))
-							(order_items_follow_join_tree? ordered default_alias (qb_order block) stages
-								(coalesceNil (qb_where block) true)))))
-					(if (not eligible) best
-						(begin
-							(define candidate_work (join_optimizer_streaming_order_work stages sources default_alias graph candidate planning_session))
-							(define best_work (join_optimizer_streaming_order_work stages sources default_alias graph best planning_session))
-							(define selected (if (< candidate_work best_work) candidate best))
-							(qassoc_set selected (quote streaming_order_costs)
-								(append (qassoc_get best (quote streaming_order_costs) '())
-									(list (list (join_optimizer_tree_first_alias (qassoc_get best (quote tree) nil)) best_work)
-										(list (source_alias src) candidate_work)))))))) planned)))))
+						default_alias graph (list (source_alias src)) planning_session tx))
+					(if (nil? candidate) best (begin
+						(define ordered (join_optimizer_sources_for_order sources
+							(join_optimizer_tree_aliases (qassoc_get candidate (quote tree) nil))))
+						(define eligible (and (join_optimizer_left_deep? (qassoc_get best (quote tree) nil))
+							(and (join_optimizer_left_deep? (qassoc_get candidate (quote tree) nil))
+								(order_items_follow_join_tree? ordered default_alias (qb_order block) stages
+									(coalesceNil (qb_where block) true)))))
+						(if (not eligible) best
+							(begin
+								(define candidate_work (join_optimizer_streaming_order_work stages sources default_alias graph candidate planning_session tx))
+								(define best_work (join_optimizer_streaming_order_work stages sources default_alias graph best planning_session tx))
+								(define selected (if (< candidate_work best_work) candidate best))
+								(qassoc_set selected (quote streaming_order_costs)
+									(append (qassoc_get best (quote streaming_order_costs) '())
+										(list (list (join_optimizer_tree_first_alias (qassoc_get best (quote tree) nil)) best_work)
+											(list (source_alias src) candidate_work)))))))))) planned)))))
 
 /* An ORDER BY prefix is a useful property, not a mandatory join driver.
 Compare its saved sort against an unrestricted join plus final materialization.
@@ -2671,13 +2687,13 @@ Both searches already register the same bounded statistics/parameter guards. */
 				(* rows width 8) 0 rows 0.5))
 			(define unordered_ns (+ (qassoc_get unordered (quote cost) 0)
 				(qassoc_get sort_cost (quote execution_ns) 0)))
-			(define ordered_ns (qassoc_get ordered (quote cost) 0))
-			(define use_sort (< unordered_ns ordered_ns))
+			(define ordered_ns (if (nil? ordered) nil (qassoc_get ordered (quote cost) 0)))
+			(define use_sort (or (nil? ordered) (< unordered_ns ordered_ns)))
 			(define selected (if use_sort
 				(qassoc_set (qassoc_set unordered (quote cost) unordered_ns) (quote cost_components)
 					(planner_cost_add (qassoc_get unordered (quote cost_components) '()) sort_cost rows 0.5)) ordered))
 			(list selected (list (list "chosen" (if use_sort "join_then_sort" "order_prefix"))
-				(list "selection" "cost") (list "ordered_join_ns" ordered_ns)
+				(list "selection" (if (nil? ordered) "required" "cost")) (list "ordered_join_ns" ordered_ns)
 				(list "unordered_join_ns" (qassoc_get unordered (quote cost) 0))
 				(list "sort_ns" (qassoc_get sort_cost (quote execution_ns) 0))
 				(list "sort_rows" rows) (list "sort_work" sort_work)))))))
@@ -2792,15 +2808,15 @@ Both searches already register the same bounded statistics/parameter guards. */
 					(car ordered_driver_plans)))
 				(define complete_order_planned (if (nil? ordered_choice)
 					(join_optimizer_plan_segment stage_catalog relation_units
-						sources segment default_alias graph required_order_property planning_session)
+						sources segment default_alias graph required_order_property planning_session tx)
 					(car ordered_choice)))
-				(define ordered_planned (if (empty_list? required_order_aliases)
+				(define ordered_planned (if (and (not (nil? complete_order_planned)) (empty_list? required_order_aliases))
 					(join_optimizer_prefix_order_alternative stage_catalog relation_units
-						sources default_alias graph block complete_order_planned planning_session)
+						sources default_alias graph block complete_order_planned planning_session tx)
 					complete_order_planned))
-				(define unordered_planned (if (empty_list? required_order_aliases) nil
+				(define unordered_planned (if (and (not (nil? ordered_planned)) (empty_list? required_order_aliases)) nil
 					(join_optimizer_plan_segment stage_catalog relation_units
-						sources segment default_alias graph '() planning_session)))
+						sources segment default_alias graph '() planning_session tx)))
 				(define delivery (join_optimizer_order_delivery ordered_planned unordered_planned block))
 				(define planned (car delivery))
 				(join_optimizer_reorder_result
@@ -2835,13 +2851,41 @@ Both searches already register the same bounded statistics/parameter guards. */
 		(list (quote join_graph_hyperedges) (count (qassoc_get graph (quote hyperedges) '())))
 		(list (quote join_graph_barriers) (count (qassoc_get graph (quote barriers) '()))))))
 
+/* This restricted source/filter/projection profile lowers to one native
+scan. Index selection belongs to the engine; no SQL cost alternative consumes
+its row count or column statistics. Keep all other profiles conservative,
+including negative ORDER/LIMIT/probe eligibility and diagnostic estimates. */
+(define query_block_plain_native_scan? (lambda (stage_catalog block)
+	(and (empty_list? (coalesceNil stage_catalog '())) (single_source? (qb_sources block)) (begin
+		(define src (car (qb_sources block)))
+		(define expressions (list (qb_fields block) (qb_hidden block)
+			(qb_where block) (source_join_expr src)))
+		(define disjunction? (lambda (expr) (match expr
+			((symbol quote) _value) false
+			(cons head tail) (or (expr_head_or? head)
+				(reduce tail (lambda (found part) (or found (disjunction? part))) false))
+			_ false)))
+		(and (source_is_native_table? src) (not (source_outer? src))
+			(empty_list? (qb_stages block))
+			(empty_list? (coalesceNil (qassoc_get (qb_facts block) 'stage_catalog '()) '()))
+			(empty_list? (qb_group block)) (nil? (qb_having block))
+			(not (expr_has_aggregates? expressions))
+			(empty_list? (qb_order block)) (nil? (qb_limit block)) (nil? (qb_offset block))
+			(not (expr_contains_window? expressions))
+			(empty_list? (expr_probe_stages expressions))
+			(not (disjunction? (combine_where (qb_where block) (source_join_expr src)))))))))
+
 (define hybrid_reorder_query_block_using (lambda (stage_catalog block planning_session tx)
 	(if (or (empty_list? (qb_sources block)) (single_source? (qb_sources block)))
 		(begin
-			/* Single-source blocks still make statistics-sensitive physical scan
-			choices. Multi-source blocks record the same dependency during join
-			reordering; the structural guard catalog deduplicates nested uses. */
-			(planner_record_table_statistics_guards (qb_sources block) planning_session)
+			(define guard_session (planner_effective_session planning_session))
+			/* A plain scan has no join-order or SQL scan-strategy decision.
+			EXPLAIN still owns displayed estimates, and other profiles retain
+			this conservative dependency plus their physical cost guards. */
+			(if (or (not (query_block_plain_native_scan? stage_catalog block))
+				(if (nil? guard_session) false
+					(guard_session "__memcp_queryplan_diagnostic_statistics")))
+				(planner_record_table_statistics_guards (qb_sources block) planning_session tx) nil)
 			(make_query_block
 				(qb_schema block)
 				(qb_sources block)
@@ -3145,7 +3189,7 @@ floor avoids pretending that an unseen word is impossible. */
 			/* Storage already publishes one immutable, lock-free statistics
 			snapshot per table. Reading it directly keeps this metadata lookup
 			independent of request/session scope. */
-			(table_planner_statistics (table schema false relation false)))
+			(table_planner_statistics (table schema false relation false nil)))
 		(lambda (_e) nil))))
 
 (define planner_table_row_count (lambda (schema relation)
@@ -3154,7 +3198,7 @@ floor avoids pretending that an unseen word is impossible. */
 		(if (nil? stats) nil (stats "row_count")))))
 
 (define planner_source_filter_estimate (lambda (src condition max_rows tx planning_session)
-	(if (or (not (source_is_base_table? src)) (planner_symbolic_inputs? condition planning_session))
+	(if (or (not (source_is_native_table? src)) (planner_symbolic_inputs? condition planning_session))
 		nil
 		(try
 			(lambda ()
@@ -3178,7 +3222,7 @@ floor avoids pretending that an unseen word is impossible. */
 							(lower_column_expr_for_alias src condition)) planning_session)
 					(define estimate (scan_selectivity_estimate
 						tx
-						(table (source_schema src) false (source_relation src) false)
+						(table (source_schema src) false (source_storage_relation src) false tx)
 						(nth access 0)
 						values
 						filtercols
@@ -3195,9 +3239,19 @@ floor avoids pretending that an unseen word is impossible. */
 						enriched)))
 			(lambda (_e) nil)))))
 
+/* Emit the same O(1) scalar cardinality kernel without quoting logical input
+which may carry physical compile directories. No data rows or profile travel
+into a shared compiled guard. */
+(define planner_source_row_count_expr (lambda (source)
+	(if (source_is_native_table? source)
+		(list 'planner_table_row_count (source_schema source)
+			(list 'quote (source_storage_relation source)))
+		(if (row_domain_relation? (source_relation source))
+			(count (row_domain_data (source_relation source))) nil))))
+
 (define planner_source_row_count (lambda (src)
-	(if (source_is_base_table? src)
-		(planner_table_row_count (source_schema src) (source_relation src))
+	(if (source_is_native_table? src)
+		(planner_table_row_count (source_schema src) (source_storage_relation src))
 		(if (row_domain_relation? (source_relation src))
 			(count (row_domain_data (source_relation src)))
 			nil))))
@@ -3256,7 +3310,7 @@ source itself has no known row count (not a base table). */
 		(try
 			(lambda ()
 				(begin
-					(define stats (planner_table_statistics (source_schema src) (source_relation src)))
+					(define stats (planner_table_statistics (source_schema src) (source_storage_relation src)))
 					(define columns (if (nil? stats) nil (stats "columns")))
 					(define column_stats (if (nil? columns) nil (columns column)))
 					/* The immutable column catalog deliberately does not get rebuilt
@@ -3317,8 +3371,8 @@ driver: grouping the referencing columns cannot produce more non-NULL keys
 than the referenced unique relation has rows. Keep one extra bucket for NULL.
 The ordinary NDV estimate remains preferable when it is tighter. */
 (define planner_columns_unique? (lambda (src columns)
-	(or (equal? (source_primary_key_columns src) columns)
-		(contains? (source_unique_key_sets src) columns))))
+	(or (equal? (source_storage_primary_key_columns src) columns)
+		(contains? (source_storage_unique_key_sets src) columns))))
 
 (define planner_foreign_key_group_bounds (lambda (src columns)
 	(if (not (source_is_base_table? src))
@@ -3326,15 +3380,18 @@ The ordinary NDV estimate remains preferable when it is tighter. */
 		(try
 			(lambda ()
 				(begin
-					(define info (show (source_schema src) (source_relation src) "constraints"))
+					(define info (source_constraints src))
 					(define foreign_keys (coalesceNil (info "ForeignKeys") '()))
 					(filter (map foreign_keys (lambda (foreign_key)
 						(if (and (equal? (foreign_key "Role") "referencing")
-							(equal? (foreign_key "LocalColumns") columns))
+							(not (expression_equal? (foreign_key "Trusted") false))
+							(not (expression_equal? (foreign_key "Enabled") false))
+							(equal? (coalesceNil (foreign_key "LocalStorageColumns") (foreign_key "LocalColumns")) columns))
 							(begin
 								(define target (list "__aggregate_pushdown_fk_target"
-									(source_schema src) (foreign_key "OtherTable") false nil))
-								(define target_columns (foreign_key "OtherColumns"))
+									(source_schema src) (foreign_key "OtherTable") false nil
+									(source_referenced_declarations src (foreign_key "OtherTable"))))
+								(define target_columns (coalesceNil (foreign_key "OtherStorageColumns") (foreign_key "OtherColumns")))
 								(define target_rows (planner_source_row_count target))
 								(if (and (number? target_rows)
 									(planner_columns_unique? target target_columns))
@@ -3617,6 +3674,16 @@ logical IR: it samples once per request and is shared by every guard binding. */
 
 (define planner_query_block_input_rows (lambda (block)
 	(planner_add_estimates (map (qb_sources block) planner_source_row_count))))
+
+(define planner_stage_input_rows_expr (lambda (input)
+	(if (union_block? input)
+		(list 'planner_add_estimates
+			(cons 'list (map (union_branches input) planner_stage_input_rows_expr)))
+		(query_block? input)
+		(list 'planner_add_estimates
+			(cons 'list (map (qb_sources input) planner_source_row_count_expr)))
+		(source_is_base_table? input) (planner_source_row_count_expr input)
+		nil)))
 
 (define planner_stage_input_rows (lambda (input)
 	(if (union_block? input)
@@ -4910,7 +4977,8 @@ already-prepared cache instead). */
 	(or (not (nil? (recset_domain_source input)))
 		(and (query_block? input)
 			(begin
-				(define real_src (single_real_source (qb_sources input)))
+				(define real_src (find (coalesceNil (qb_sources input) '())
+					(lambda (src) (not (source_is_stage_output? src))) nil))
 				(and (not (nil? real_src)) (source_is_base_table? real_src))))
 		(and (union_block? input)
 			(reduce (union_branches input) (lambda (supported branch)
@@ -5507,7 +5575,7 @@ an ordered join pipeline against a selective join followed by sorting. */
 			(qb_limit planned) (qb_offset planned) (qb_hidden planned)
 			(qb_stages planned) (qb_facts planned)) planned)))
 
-(define join_optimizer_bound_key_distinct (lambda (stages sources default_alias src key_col probe_condition planning_session)
+(define join_optimizer_bound_key_distinct (lambda (stages sources default_alias src key_col probe_condition planning_session tx)
 	(begin
 		(define stage (join_optimizer_source_stage stages src))
 		(define input (if (group_stage? stage) (gs_input stage) src))
@@ -5516,7 +5584,7 @@ an ordered join pipeline against a selective join followed by sorting. */
 				(define position (projection_expr_position
 					(merge (map (group_key_cols (gs_keys stage)) (lambda (col) (list col col)))) key_col 0))
 				(if (nil? position) nil (direct_column_name_for_alias input (nth (gs_keys stage) position)))) key_col))
-		(planner_record_table_statistics_guards (list input) planning_session)
+		(planner_record_table_statistics_guards (list input) planning_session tx)
 		(define stats (planner_column_statistics input input_col))
 		(define prior (qassoc_get stats (quote distinct) nil))
 		/* This NDV is an actual decision input. Retain a scalar metadata guard;
@@ -5537,10 +5605,10 @@ an ordered join pipeline against a selective join followed by sorting. */
 									(not (nil? (direct_column_name_for_alias candidate other)))) nil))
 								(if (nil? binder) nil
 									(begin
-										(planner_record_table_statistics_guards (list binder) planning_session)
+										(planner_record_table_statistics_guards (list binder) planning_session tx)
 										/* A declared singleton key has the table's row count as NDV.
 										Do not manufacture this inference for a nonunique binding. */
-										(if (contains? (source_unique_key_sets binder)
+										(if (contains? (source_storage_unique_key_sets binder)
 											(list (direct_column_name_for_alias binder other)))
 											(planner_source_row_count binder) nil)))) nil)
 						_ nil))) nil) 1))))
@@ -5561,7 +5629,7 @@ a different preparation/materialization contract and must keep its own cost. */
 			(join_optimizer_nested_scan_tree? left))
 		_ false)))
 
-(define join_optimizer_nested_scan_cost (lambda (stages sources default_alias predicates planned planning_session)
+(define join_optimizer_nested_scan_cost (lambda (stages sources default_alias predicates planned planning_session tx)
 	(begin
 		(define ordered (join_optimizer_sources_for_order sources
 			(join_optimizer_tree_aliases (qassoc_get planned (quote tree) nil))))
@@ -5585,7 +5653,7 @@ a different preparation/materialization contract and must keep its own cost. */
 						/* Correlated key columns do not justify multiplying NDVs.
 						Use the strongest single-key bound until joint statistics exist. */
 						(max distinct (join_optimizer_bound_key_distinct stages sources default_alias
-							src col probe_condition planning_session))) 1))))
+							src col probe_condition planning_session tx))) 1))))
 				(define available (append (source_aliases bound) (source_alias src)))
 				(define filters (filter predicates (lambda (entry)
 					(begin
@@ -5641,14 +5709,14 @@ a different preparation/materialization contract and must keep its own cost. */
 /* Producer preparation is query-wide work. Guard its base inputs through
 published scalar statistics, and count a canonical logical producer once
 even when the same stage is bound through more than one source alias. */
-(define join_optimizer_stage_input_cost_guards (lambda (input planning_session)
+(define join_optimizer_stage_input_cost_guards (lambda (input planning_session tx)
 	(if (union_block? input)
 		(map (union_branches input) (lambda (branch)
-			(join_optimizer_stage_input_cost_guards branch planning_session)))
+			(join_optimizer_stage_input_cost_guards branch planning_session tx)))
 		(planner_record_table_statistics_guards
-			(if (query_block? input) (qb_sources input) (list input)) planning_session))))
+			(if (query_block? input) (qb_sources input) (list input)) planning_session tx))))
 
-(define join_optimizer_block_nested_scan_cost (lambda (stages block planning_session)
+(define join_optimizer_block_nested_scan_cost (lambda (stages block planning_session tx)
 	(begin
 		(define tree (qassoc_get (qb_facts block) (quote join_plan) nil))
 		(define prior (qassoc_get (qb_facts block) (quote join_cost) '()))
@@ -5659,16 +5727,16 @@ even when the same stage is bound through more than one source alias. */
 				(qassoc_get (qb_facts block) (quote default_alias) (source_alias (car (qb_sources block))))
 				(join_optimizer_costed_predicates (extract_join_hypergraph block))
 				(list (list (quote tree) tree)
-					(list (quote cost_components) prior)) planning_session)))))
+					(list (quote cost_components) prior)) planning_session tx)))))
 
-(define join_optimizer_composite_presence_preparation_cost (lambda (stages changed planning_session)
+(define join_optimizer_composite_presence_preparation_cost (lambda (stages changed planning_session tx)
 	(begin
 		(define producer_ids (merge_unique (map changed (lambda (src)
 			(list (stage_output_relation_id (source_relation src)))))))
 		(define estimates (map producer_ids (lambda (id)
 			(begin
 				(define stage (stage_by_id stages id))
-				(join_optimizer_stage_input_cost_guards (gs_input stage) planning_session)
+				(join_optimizer_stage_input_cost_guards (gs_input stage) planning_session tx)
 				(planner_stage_input_rows (gs_input stage))))))
 		/* Unknown producer cardinality must not make a candidate look free. */
 		(if (not (reduce estimates (lambda (known rows) (and known (number? rows))) true)) nil
@@ -5676,7 +5744,7 @@ even when the same stage is bound through more than one source alias. */
 				(* (planner_add_estimates estimates) planner_group_relation_build_row_ns)
 				0 0 0 0.7)))))
 
-(define join_optimizer_composite_presence_probe_cost (lambda (stages changed basic probe planning_session)
+(define join_optimizer_composite_presence_probe_cost (lambda (stages changed basic probe planning_session tx)
 	(begin
 		(define graph (extract_join_hypergraph basic))
 		(define sources (qb_sources basic))
@@ -5685,7 +5753,7 @@ even when the same stage is bound through more than one source alias. */
 		Multiply distinct relation domains, never individual key-column NDVs. */
 		(define probe_rows (reduce changed (lambda (total src)
 			(+ total (join_optimizer_composite_lookup_rows stages sources default_alias graph src planning_session))) 0))
-		(define probe_cost (join_optimizer_block_nested_scan_cost stages probe planning_session))
+		(define probe_cost (join_optimizer_block_nested_scan_cost stages probe planning_session tx))
 		(planner_cost_add probe_cost (planner_membership_direct_probe_cost probe_rows)
 			(qassoc_get probe_cost (quote expected_rows) 0)
 			(min 0.75 (qassoc_get probe_cost (quote confidence) 0.5))))))
@@ -5698,8 +5766,8 @@ Overlapping/unknown bounds retain both complete searches and the usual choice. *
 (define join_optimizer_reorder_composite_presence (lambda (stages changed basic exposed planning_session tx)
 	(begin
 		(define probe (reorder_query_block_with_candidate_strategy_using stages basic planning_session tx))
-		(define preparation (join_optimizer_composite_presence_preparation_cost stages changed planning_session))
-		(define probe_cost (join_optimizer_composite_presence_probe_cost stages changed basic probe planning_session))
+		(define preparation (join_optimizer_composite_presence_preparation_cost stages changed planning_session tx))
+		(define probe_cost (join_optimizer_composite_presence_probe_cost stages changed basic probe planning_session tx))
 		(define pruned (and (not (nil? preparation)) (planner_cost_clear_winner? probe_cost preparation)))
 		(if pruned
 			(query_block_with_reorder_facts probe
@@ -5710,7 +5778,7 @@ Overlapping/unknown bounds retain both complete searches and the usual choice. *
 				(define promoted (reorder_query_block_with_candidate_strategy_using stages exposed planning_session tx))
 				(if (nil? preparation) promoted
 					(begin
-						(define promoted_cost (join_optimizer_block_nested_scan_cost stages promoted planning_session))
+						(define promoted_cost (join_optimizer_block_nested_scan_cost stages promoted planning_session tx))
 						(define joined_cost (planner_cost_add promoted_cost preparation
 							(qassoc_get promoted_cost (quote expected_rows) 0) 0.7))
 						(define bound_domain_wins (planner_cost_clear_winner? probe_cost joined_cost))
@@ -5948,6 +6016,11 @@ embedded stage plans or prepare the rewrite machinery for unrelated queries. */
 			(concat_lookup_binary_relation? less))
 			(coalesceNil (concat_lookup_split sources (quote equal?) left right true)
 				(concat_lookup_split sources (quote equal?) right left true) term) term)
+		(cons head args)
+		/* Typed expression compilation retains the declared callable identity.
+		Recognize that same primitive, without inspecting a procedure body. */
+		(if (and (identical? head sql_compare) (equal? (count args) 4))
+			(concat_lookup_term sources (cons (quote sql_compare) args)) term)
 		_ term)))
 
 (define concat_lookup_condition (lambda (sources condition)
@@ -5976,11 +6049,17 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 (define join_reorder_node_using (lambda (stage_catalog node planning_session tx)
 	(if (query_block? node)
 		(begin
+			/* A retained QB/UNION operand owns stages below the root IR catalog.
+			Keep that lexical directory available while planning its children and
+			membership probes; the catalog is compile-local and adds no carrier. */
+			(define stage_catalog (lowering_catalog_with_local_stages stage_catalog (qb_stages node)))
 			/* CONTRACT: stage inputs are planned bottom-up exactly once. A parent
 			membership requirement embeds the completed logical stage, including its
 			join tree; it must never capture an earlier, unplanned catalog entry. */
 			(define node (make_query_block
-				(qb_schema node) (qb_sources node) (qb_fields node) (qb_where node)
+				(qb_schema node) (map (qb_sources node) (lambda (src)
+					(source_with_relation src (join_reorder_node_using stage_catalog
+						(source_relation src) planning_session tx)))) (qb_fields node) (qb_where node)
 				(qb_group node) (qb_having node) (qb_order node) (qb_limit node)
 				(qb_offset node) (qb_hidden node)
 				(map (qb_stages node) (lambda (stage)
@@ -6065,7 +6144,10 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 			(define input_result (normalize_stage_dependencies_node (gs_input stage)))
 			(define input_node (nth input_result 0))
 			(define nested_stages (nth input_result 1))
-			(define normalized_input (if (query_block? input_node)
+			/* A scoped program owns its child's producers at invocation time.
+			Ordinary groups promote those producers to their enclosing catalog. */
+			(define normalized_input (if (and (query_block? input_node)
+				(not (scoped_relational_program_stage? stage)))
 				(query_block_without_logical_stages input_node)
 				input_node))
 			(list
@@ -6081,7 +6163,9 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 					(gs_limit stage)
 					(gs_offset stage)
 					(physicalize_membership_requirement_expr (gs_facts stage)))
-				nested_stages))
+				/* Iteration children are scoped programs. Their normal local stage
+				catalogs must execute inside each transition, not before the loop. */
+				(if (scoped_relational_program_stage? stage) '() nested_stages)))
 		(list stage '()))))
 
 (define normalize_stage_dependencies_stages (lambda (stages)
@@ -6092,25 +6176,20 @@ ordinary binary-edge promotion and every original predicate stay intact. */
 			(merge_unique (list (nth head 1) (list (nth head 0)) tail)))
 		_ '())))
 
-(define normalize_stage_dependencies_query_block (lambda (block)
-	(if (empty_list? (qb_stages block))
-		(list block '())
-		(begin
-			(define normalized_stages (normalize_stage_dependencies_stages (qb_stages block)))
-			(define normalized_block (make_query_block
-				(qb_schema block)
-				(qb_sources block)
-				(qb_fields block)
-				(qb_where block)
-				(qb_group block)
-				(qb_having block)
-				(qb_order block)
-				(qb_limit block)
-				(qb_offset block)
-				(qb_hidden block)
-				normalized_stages
-				(qb_facts block)))
-			(list normalized_block normalized_stages)))))
+(define normalize_stage_dependencies_query_block (lambda (block) (begin
+	/* Retained relational operands have their own query scope. Normalize its
+	producers recursively without exporting their catalog to the parent. */
+	(define sources (map (qb_sources block) (lambda (source) (begin
+		(define relation (source_relation source))
+		(if (or (query_block? relation) (union_block? relation))
+			(source_with_relation source (car (normalize_stage_dependencies_node relation))) source)))))
+	(define normalized_stages (normalize_stage_dependencies_stages (qb_stages block)))
+	(define normalized_block (make_query_block
+		(qb_schema block) sources (qb_fields block) (qb_where block)
+		(qb_group block) (qb_having block) (qb_order block)
+		(qb_limit block) (qb_offset block) (qb_hidden block)
+		normalized_stages (qb_facts block)))
+	(list normalized_block normalized_stages))))
 
 (define normalize_stage_dependencies_union_block (lambda (block)
 	(begin
@@ -6167,12 +6246,16 @@ that are never SQL-NULL by construction. */
 /* SQL parser literals retain their spelling. Within an explicit boolean
 operator, "0" and "1" have the same truth values as false and true; keep this
 local to the boolean fold so string-valued expressions elsewhere remain
-untouched. */
+untouched. A list is expression syntax, never a scalar boolean literal.
+Reject it before coercive scalar equality can render nested logical relations
+and their declaration payloads as strings. */
 (define boolean_fold_true_literal? (lambda (expr)
-	(or (literal_true? expr) (or (equal? expr "1") (equal? expr 1)))))
+	(if (list? expr) false
+		(or (literal_true? expr) (or (equal? expr "1") (equal? expr 1))))))
 
 (define boolean_fold_false_literal? (lambda (expr)
-	(or (literal_false? expr) (or (equal? expr "0") (equal? expr 0)))))
+	(if (list? expr) false
+		(or (literal_false? expr) (or (equal? expr "0") (equal? expr 0))))))
 
 (define boolean_fold_not (lambda (folded_inner)
 	(if (boolean_fold_true_literal? folded_inner)
@@ -6367,19 +6450,19 @@ three-valued expressions whose NULL behavior remains observable. */
 					(filter (map (produceN (min (count (gs_aggregates original)) (count (gs_aggregates folded))))
 						(lambda (i)
 							(begin
-								(define original_col (aggregate_col_name_using
-									(gs_input original) (nth (gs_aggregates original) i)))
-								(define folded_col (aggregate_col_name_using
-									(gs_input folded) (nth (gs_aggregates folded) i)))
+								(define original_col (group_stage_aggregate_column
+									original (nth (gs_aggregates original) i)))
+								(define folded_col (group_stage_aggregate_column
+									folded (nth (gs_aggregates folded) i)))
 								(if (equal? original_col folded_col)
 									'()
 									(list (source_alias src) original_col folded_col)))))
 						(lambda (entry) (not (empty_list? entry))))))))))
 
-/* Boolean folding can change an aggregate descriptor's physical column hash.
-Keep every consumer synchronized, including stages with the implicit
-cardinality aggregate where the older single-output canonicalizer cannot infer
-which output was renamed. */
+/* Boolean folding can rename an aggregate's output when it has no published
+interface yet. Compare stage contracts so already frozen outputs retain their
+names while every consumer of a real rename stays synchronized, including
+the implicit cardinality aggregate. */
 (define stage_output_aggregate_fold_map (lambda (block original_stages folded_stages)
 	(begin
 		(define original_index (stage_output_stage_index original_stages))
@@ -6396,22 +6479,35 @@ that column. Propagate those positional interface renames through the stage DAG
 until both producers and all consumers agree. */
 (define propagate_stage_output_aggregate_columns (lambda (block original_stages rewritten_stages)
 	(begin
-		(define aggregate_col_map (stage_output_aggregate_fold_map
-			block original_stages rewritten_stages))
-		(if (empty_list? aggregate_col_map)
-			(list block rewritten_stages)
-			(begin
-				(define next_stages (rewrite_stage_graph_stages
-					aggregate_col_map '() rewritten_stages))
-				(define block_with_stages (make_query_block
-					(qb_schema block) (qb_sources block) (qb_fields block)
-					(qb_where block) (qb_group block) (qb_having block)
-					(qb_order block) (qb_limit block) (qb_offset block) (qb_hidden block)
-					next_stages (qb_facts block)))
-				(define next_block (rewrite_stage_graph_expr
-					aggregate_col_map '() block_with_stages))
-				(propagate_stage_output_aggregate_columns
-					next_block rewritten_stages next_stages))))))
+		/* This owner deliberately republishes recipe renames. Keep the entry
+		contract across the whole propagation: generic dependency rebinding
+		freezes outputs, but cannot prematurely close this rename operation.
+		Already published interfaces remain immutable. */
+		(define renameable_ids (map (filter original_stages (lambda (stage)
+			(and (group_stage? stage)
+				(nil? (qassoc_get (gs_facts stage) 'aggregate_output_columns nil))))) gs_id))
+		(define propagate (lambda (propagate block original_stages rewritten_stages) (begin
+			(define aggregate_col_map (stage_output_aggregate_fold_map
+				block original_stages rewritten_stages))
+			(if (empty_list? aggregate_col_map)
+				(list block rewritten_stages)
+				(begin
+					(define next_stages (map (rewrite_stage_graph_stages
+						aggregate_col_map '() rewritten_stages) (lambda (stage)
+							(if (and (group_stage? stage) (contains? renameable_ids (gs_id stage)))
+								(group_stage_with_facts stage (qassoc_set (gs_facts stage) 'aggregate_output_columns
+									(map (gs_aggregates stage) (lambda (ag)
+										(aggregate_col_name_using (gs_input stage) ag)))))
+								stage))))
+					(define block_with_stages (make_query_block
+						(qb_schema block) (qb_sources block) (qb_fields block)
+						(qb_where block) (qb_group block) (qb_having block)
+						(qb_order block) (qb_limit block) (qb_offset block) (qb_hidden block)
+						next_stages (qb_facts block)))
+					(define next_block (rewrite_stage_graph_expr
+						aggregate_col_map '() block_with_stages))
+					(propagate propagate next_block rewritten_stages next_stages))))))
+		(propagate propagate block original_stages rewritten_stages))))
 
 (define fold_boolean_tautologies_ir (lambda (ir)
 	(begin
@@ -6551,6 +6647,8 @@ no scan, RecSet, keytable, or other physical artifact. */
 						(define roots (merge (list
 							(stage_dependencies_from_output_sources
 								(stage_dependency_id_index propagated_stages) (qb_sources propagated_root))
+							(if (query_block_invocation_scope? propagated_root)
+								(list (query_block_invocation_initializer propagated_root propagated_stages)) '())
 							(filter propagated_stages (lambda (stage) (not (group_stage? stage)))))))
 						(define reachable (reachable_stage_keys_visit graph roots '()))
 						(define kept_stages (filter propagated_stages (lambda (stage)
@@ -6644,13 +6742,13 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 
 (define stage_semantic_rewrite_source (lambda (alias_map signatures src)
 	(match src
-		'(alias schema relation outer join)
+		'(alias schema relation outer join declarations)
 		(list
 			(stage_merge_lookup alias_map alias alias)
 			schema
 			(stage_semantic_rewrite_expr alias_map signatures relation)
 			outer
-			(stage_semantic_rewrite_expr alias_map signatures join))
+			(stage_semantic_rewrite_expr alias_map signatures join) declarations)
 		_ src)))
 
 (define stage_semantic_canonical_node (lambda (alias_map signatures node)
@@ -6748,8 +6846,9 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(set_assoc index (gs_id stage) (stage_semantic_signature index stage)))
 		'())))
 
-(define stage_output_left_join_stage_key (lambda (signature_index stage)
-	(if (not (group_stage? stage))
+(define stage_output_left_join_stage_key (lambda (stages signature_index stage)
+	(if (or (not (group_stage? stage))
+		(not (query_result_reusable_using_stages? stages stage)))
 		nil
 		(begin
 			(define null_semantics (qassoc_get (gs_facts stage) (quote null_semantics) nil))
@@ -6797,7 +6896,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			nil
 			(begin
 				(define stage (stage_by_id stages (stage_output_relation_id relation)))
-				(define stage_key (stage_output_left_join_stage_key signature_index stage))
+				(define stage_key (stage_output_left_join_stage_key stages signature_index stage))
 				(if (nil? stage_key)
 					nil
 					(concat "stage-output-left-join:" (stable_structural_hash (list
@@ -6806,18 +6905,30 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 						(normalize_stage_output_left_join_expr (source_alias src) (source_join_expr src))) true))))))))
 
 (define stage_output_left_join_stage_with_aggregates (lambda (stage ags)
-	(make_group_stage
-		(gs_id stage)
-		(gs_input stage)
-		(gs_domain stage)
-		(gs_keys stage)
-		(dedupe_aggregates_by_col ags)
-		(gs_having stage)
-		(gs_output stage)
-		(gs_order stage)
-		(gs_limit stage)
-		(gs_offset stage)
-		(gs_facts stage))))
+	(begin
+		(define merged_ags (dedupe_aggregates_by_col ags))
+		/* Combining carriers adds outputs, unlike rebinding their input recipes.
+		Retain each published ordinal and declare only the newly added columns. */
+		(define facts (if (nil? (qassoc_get (gs_facts stage) 'aggregate_output_columns nil))
+			(gs_facts stage)
+			(qassoc_set (gs_facts stage) 'aggregate_output_columns
+				(map merged_ags (lambda (ag)
+					(if (not (nil? (find (gs_aggregates stage)
+						(lambda (existing) (expression_equal? existing ag)) nil)))
+						(group_stage_aggregate_column stage ag)
+						(aggregate_col_name_using (gs_input stage) ag)))))))
+		(make_group_stage
+			(gs_id stage)
+			(gs_input stage)
+			(gs_domain stage)
+			(gs_keys stage)
+			merged_ags
+			(gs_having stage)
+			(gs_output stage)
+			(gs_order stage)
+			(gs_limit stage)
+			(gs_offset stage)
+			facts))))
 
 (define stage_output_left_join_entry_key (lambda (entry) (nth entry 0)))
 (define stage_output_left_join_entry_source (lambda (entry) (nth entry 1)))
@@ -6859,13 +6970,14 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(map (produceN (count source_ags)) (lambda (i)
 			(list
 				stage_alias
-				(aggregate_col_name_using (gs_input stage) (nth source_ags i))
+				(group_stage_aggregate_column stage (nth source_ags i))
 				target_alias
-				(aggregate_col_name_using (gs_input target) (nth aligned_ags i))))))))
+				(group_stage_aggregate_column target (nth aligned_ags i))))))))
 
 (define stage_output_left_join_column_maps_for_entry (lambda (stages entry)
 	(begin
-		(define target (stage_output_left_join_entry_stage entry))
+		(define target (stage_output_left_join_stage_with_aggregates
+			(stage_output_left_join_entry_stage entry) (stage_output_left_join_entry_ags entry)))
 		(define target_alias (source_alias (stage_output_left_join_entry_source entry)))
 		(define ids (stage_output_left_join_entry_ids entry))
 		(define aliases (stage_output_left_join_entry_aliases entry))
@@ -7031,8 +7143,9 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			requested_col
 			(begin
 				(define rewritten_stage (rewrite_stage_graph_stage alias_map id_map true stage))
-				(aggregate_col_name_using
-					(gs_input rewritten_stage)
+				/* Rebinding operands preserves an already published output contract.
+				Resolve the rewritten descriptor through that stage's interface. */
+				(group_stage_aggregate_column rewritten_stage
 					(rewrite_stage_graph_expr alias_map id_map ag)))))))
 
 /* Source declarations must follow the same alias map as their column reads.
@@ -7100,13 +7213,13 @@ Nested query blocks otherwise retain a removed helper alias after stage merging.
 
 (define rewrite_stage_graph_source (lambda (alias_map id_map src)
 	(match src
-		'(alias schema relation outer join)
+		'(alias schema relation outer join declarations)
 		(list
 			(stage_merge_lookup alias_map alias alias)
 			schema
 			(rewrite_stage_graph_expr alias_map id_map relation)
 			outer
-			(rewrite_stage_graph_expr alias_map id_map join))
+			(rewrite_stage_graph_expr alias_map id_map join) declarations)
 		_ src)))
 
 (define stage_id_in_list? (lambda (ids stage_id)
@@ -7222,9 +7335,10 @@ Nested query blocks otherwise retain a removed helper alias after stage merging.
 
 (define node_contains_nested_stage_input? (lambda (node)
 	(if (query_block? node)
-		(reduce (qb_stages node) (lambda (found stage)
-			(or found (node_contains_nested_stage_input? stage)))
-			false)
+		(or (reduce (qb_sources node) (lambda (found source)
+			(or found (node_contains_nested_stage_input? (source_relation source)))) false)
+			(reduce (qb_stages node) (lambda (found stage)
+				(or found (node_contains_nested_stage_input? stage))) false))
 		(if (union_block? node)
 			(reduce (union_branches node) (lambda (found branch)
 				(or found (node_contains_nested_stage_input? branch)))
@@ -7233,7 +7347,10 @@ Nested query blocks otherwise retain a removed helper alias after stage merging.
 				(begin
 					(define input (gs_input node))
 					(or
-						(and (query_block? input) (not (empty_list? (qb_stages input))))
+						/* Ordinary group inputs promote their stages. A scoped program
+						owns its child's catalog; validate that complete child recursively. */
+						(and (not (scoped_relational_program_stage? node))
+							(query_block? input) (not (empty_list? (qb_stages input))))
 						(node_contains_nested_stage_input? input)))
 				false)))))
 
@@ -7490,7 +7607,7 @@ remain ordinary residual predicates. */
 			(aggregate_pushdown_rewrite_source driver partition_alias columns src))))
 		(define all_stages (merge (list (list partition_stage) rewritten_stages)))
 		(define partition_source (list partition_alias (qb_schema block)
-			(make_stage_output_relation partition_id) false nil))
+			(make_stage_output_relation partition_id) false nil nil))
 		(define outer_block (make_query_block
 			(qb_schema block)
 			(cons partition_source rewritten_stage_sources)
@@ -7534,7 +7651,7 @@ sampling guard for a choice that no cardinality change can reverse. */
 				(or found (and (not (empty_list? key))
 					(reduce key (lambda (complete col)
 						(and complete (and (contains? columns col)
-							(source_column_guaranteed_nonnull? driver col)))) true)))) false)))))
+							(source_storage_column_guaranteed_nonnull? driver col)))) true)))) false)))))
 
 (define aggregate_pushdown_logical (lambda (ir planning_session tx)
 	(begin
@@ -7560,7 +7677,7 @@ sampling guard for a choice that no cardinality change can reverse. */
 					(aggregate_pushdown_identity_partition? driver columns))
 					(begin
 						/* Schema changes invalidate the uniqueness proof as well as the plan. */
-						(planner_record_table_statistics_guards (list driver) planning_session)
+						(planner_record_table_statistics_guards (list driver) planning_session tx)
 						ir)
 					(begin
 						(define residual (combine_where_terms residual_terms true))
@@ -7678,7 +7795,7 @@ propagation because NOT reverses FALSE. */
 					(qb_schema block)
 					(map (qb_sources block) (lambda (src)
 						(if (contains? promoted (source_alias src))
-							(list (source_alias src) (source_schema src) (source_relation src) false (source_join_expr src))
+							(list (source_alias src) (source_schema src) (source_relation src) false (source_join_expr src) (source_declarations src))
 							src)))
 					(qb_fields block) (qb_where block) (qb_group block) (qb_having block)
 					(qb_order block) (qb_limit block) (qb_offset block) (qb_hidden block)
@@ -7916,6 +8033,53 @@ constant projections cannot become ambiguous through duplicate membership. */
 			(equal? (qassoc_get (gs_facts stage) (quote partition_offset) 0) 0)
 			(empty_list? (qassoc_get (gs_facts stage) (quote partition_order) '()))))))
 
+/* A caller label is not a grouping expression on inner rows. Certify all
+three published coordinates before using that fact in contribution proofs:
+inner key, caller domain and live lookup must denote one external column. */
+(define contribution_caller_label_indices (lambda (stage) (begin
+	(define keys (gs_keys stage))
+	(define domain (gs_domain stage))
+	(define values (qassoc_get (gs_facts stage) 'lookup-keys '()))
+	(define sources (contribution_stage_sources stage))
+	(if (or (not (equal? (count keys) (count domain)))
+		(not (equal? (count keys) (count values)))) '()
+		(filter (produceN (count keys)) (lambda (i) (begin
+			(define key (nth keys i))
+			(define external_column (match key
+				((symbol get_column) alias alias_ci _column _column_ci)
+				(and (not (nil? alias)) (nil? (source_for_alias sources nil alias alias_ci)))
+				_ false))
+			(and external_column (correlation_binding_identity? key (nth domain i))
+				(correlation_binding_identity? key (nth values i))))))))))
+
+(define contribution_stage_selection_keys (lambda (stage) (begin
+	(define labels (contribution_caller_label_indices stage))
+	(map (filter (produceN (count (gs_keys stage))) (lambda (i) (not (has? labels i))))
+		(lambda (i) (nth (gs_keys stage) i))))))
+
+/* A scalar producer labels each preserved caller partition with its complete
+binding, including NULL. An exact generated join on a self-binding is not a
+selection predicate on the producer's rows. Keep the executable join intact;
+only its contribution proof can omit that already established label. */
+(define contribution_source_join_predicate (lambda (catalog source) (begin
+	(define condition (source_join_expr source))
+	(define producer (if (source_is_stage_output? source)
+		(stage_for_output_relation catalog (source_relation source)) nil))
+	(if (or (nil? producer) (not (source_outer? source))
+		(not (scalar_value_stage? producer))
+		(not (expression_equal? (qassoc_get (gs_facts producer) 'preserve_empty_domain false) true))) condition
+		(begin
+			(define keys (gs_keys producer))
+			(define values (qassoc_get (gs_facts producer) 'lookup-keys '()))
+			(define names (group_key_cols keys))
+			(define identities (map (contribution_caller_label_indices producer) (lambda (i)
+				(make_exists_stage_join_condition (source_alias source)
+					(list (nth names i)) (list (nth values i)) true))))
+			(if (empty_list? identities) condition
+				(combine_where_terms (filter (split_and_terms condition) (lambda (term)
+					(not (reduce identities (lambda (found identity)
+						(or found (expression_equal? identity term))) false)))) true)))))))
+
 (define contribution_domain_proof (lambda (catalog graph stage)
 	(begin
 		(define block (gs_input stage))
@@ -7971,9 +8135,10 @@ constant projections cannot become ambiguous through duplicate membership. */
 												(not (empty_list? (range_stage_domains stage))))
 											(reduce expressions (lambda (ok expr) (and ok (contribution_pure_expr? expr))) true)
 											(empty_list? (qb_group block)) (nil? (qb_limit block)) (nil? (qb_offset block))
-											(not (contribution_expr_contains? axis (list (gs_keys stage)
+											(not (contribution_expr_contains? axis (list (contribution_stage_selection_keys stage)
 												(qassoc_get (gs_facts stage) (quote condition) true)
-												(map (qb_sources block) source_join_expr))))
+												(map (qb_sources block) (lambda (source)
+													(contribution_source_join_predicate catalog source))))))
 											(reduce (zip dependencies selections) (lambda (ok pair)
 												(begin
 													(define dependency (car pair))
@@ -8290,7 +8455,7 @@ values remain request-bound rather than becoming exact-value plan guards. */
 											(parameter_row_union? (source_relation src)))
 											(begin (binding "changed" true) (parameter_row_union_relation (source_relation src)))
 											(if (list? (source_relation src)) (visit (source_relation src) true) (source_relation src)))
-										(source_outer? src) (visit (source_join_expr src) false))))
+										(source_outer? src) (visit (source_join_expr src) false) (source_declarations src))))
 								fields (visit (qb_where block) false) (visit (qb_group block) false)
 								(visit (qb_having block) false) (visit (qb_order block) false)
 								(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block) (qb_facts block))))))
@@ -8371,7 +8536,7 @@ for an absent WHERE/ON/HAVING after constant-column substitution. */
 									(map sources (lambda (source)
 										(list (source_alias source) (source_schema source)
 											(if (list? (source_relation source)) (visit (source_relation source) true scope) (source_relation source))
-											(source_outer? source) (constant_domain_truth_clause (source_join_expr source) (visit (source_join_expr source) false visible)))))
+											(source_outer? source) (constant_domain_truth_clause (source_join_expr source) (visit (source_join_expr source) false visible)) (source_declarations source))))
 									/* Forwarded columns need no value specialization: keep their
 									bindings live when only the output value changes. */
 									(map_assoc (qb_fields block) (lambda (name expr)

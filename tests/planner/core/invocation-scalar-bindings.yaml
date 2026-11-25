@@ -1,0 +1,40 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Explicit invocation scalar reads bind once before portable row callbacks are created
+test_cases:
+- name: Invocation read binding captures values rather than its mutable session owner
+  scm: |
+    (begin
+      (define session (newsession)) (session "value" 7)
+      (define read (list 'session "value"))
+      (define code (bind_invocation_scalar_reads (list read)
+        (list 'lambda (list 'row) (list '+ read 'row)) "__binding_test_"))
+      (define first (eval code)) (session "value" 9)
+      (define second (eval code))
+      (define restored (eval (scheme (serialize (close_procedure first)))))
+      (and (equal? (first 3) 10) (equal? (second 3) 12) (equal? (restored 3) 10)))
+  expect: {result: true}
+- name: Quoted session-looking data contributes no executable invocation reads
+  scm: |
+    (begin
+      (define datum (list 'session "value"))
+      (define code (list 'quote datum))
+      (and (equal? (count (query_expr_session_reads code)) 0)
+        (expression_equal? (bind_invocation_scalar_reads '() code "__binding_quote_") code)
+        (expression_equal? (eval code) datum)))
+  expect: {result: true}
+- name: Unselected calls remain per row instead of being evaluated as invocation inputs
+  scm: |
+    (begin
+      (define session (newsession)) (session "value" 7)
+      (define counter (newsession)) (counter "calls" 0)
+      (define pulse (lambda (row) (begin (counter "calls" (+ (counter "calls") 1)) row)))
+      (define read (list 'session "value"))
+      (define code (bind_invocation_scalar_reads (list read)
+        (list 'lambda (list 'row) (list '+ read (list pulse 'row))) "__binding_calls_"))
+      (define row (eval code))
+      (define no_eager_calls (equal? (counter "calls") 0))
+      (define first (row 3)) (session "value" 9) (define second (row 4))
+      (and no_eager_calls (equal? first 10) (equal? second 11) (equal? (counter "calls") 2)))
+  expect: {result: true}

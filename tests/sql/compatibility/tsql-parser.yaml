@@ -155,7 +155,7 @@ test_cases:
       (define failed (try (lambda () (begin
         (tds_describe "memcp-tests" "IF 1=1 CREATE TABLE dbo.tsql_if_describe(id INT)" "" session)
         false)) (lambda (_err) true)))
-      (and failed (nil? (table "memcp-tests" false "tsql_if_describe" false))))
+      (and failed (nil? (table "memcp-tests" false "tsql_if_describe" false nil))))
   expect: {result: true}
 - sql: DROP TABLE IF EXISTS dbo.tsql_if_describe
   name: Fixture cleanup for Conditional describe cannot run DDL (1)
@@ -171,18 +171,17 @@ test_cases:
   sql: IF 1 SELECT 5 AS n
   expect:
     error: true
+# Historical case names are stable CI identities; expectations now verify supported results.
 - name: IF rejects relational EXISTS until logical support exists
-  sql: |
-    IF EXISTS(SELECT id FROM dbo.tsql_data) SELECT 5 AS n
-  # Valid SQL implementation gap: check behavior, warn until implemented.
-  expect: {"rows": 1, "data": [{"n": 5}]}
-  noncritical: true
+  sql: IF EXISTS(SELECT id FROM dbo.tsql_data) SELECT 5 AS n
+  expect:
+    rows: 1
+    data: [{n: 5}]
 - name: IF rejects scalar subqueries
-  sql: |
-    IF (SELECT 1)=1 SELECT 5 AS n
-  # Valid SQL implementation gap: check behavior, warn until implemented.
-  expect: {"rows": 1, "data": [{"n": 5}]}
-  noncritical: true
+  sql: IF (SELECT 1)=1 SELECT 5 AS n
+  expect:
+    rows: 1
+    data: [{n: 5}]
 - name: IF rejects unbound column predicates
   sql: IF id=1 SELECT 5 AS n
   expect:
@@ -208,11 +207,11 @@ test_cases:
     rows: 1
     data: [{n: 5}]
 - name: IF rejects an internal semicolon before ELSE
-  sql: |
-    IF 1=1 SELECT 5 AS n; ELSE SELECT 6 AS n
-  # Valid SQL implementation gap: check behavior, warn until implemented.
-  expect: {"rows": 1, "data": [{"n": 5}]}
-  noncritical: true
+  # Keep the regression identity; the script parser now supports this terminator.
+  sql: IF 1=1 SELECT 5 AS n; ELSE SELECT 6 AS n
+  expect:
+    rows: 1
+    data: [{n: 5}]
 - name: IF does not dispatch arbitrary procedure text
   # Unselected EXEC must not look up or invoke a procedure.
   sql: IF 1=0 EXEC unknown_installation_procedure ELSE SELECT 5 AS n
@@ -223,7 +222,7 @@ test_cases:
   setup:
   - sql: DROP TABLE IF EXISTS dbo.tsql_if_catalog
   scm: "(begin\n  (define s (newsession))\n  (define cache (newcachemap))\n  (define execute (lambda (sql) (with_autocommit\
-    \ s nil nil sql (lambda (tx)\n    (sql_execute_formula s tx (cached_parse cache (list parse_tsql) \"memcp-tests\"\
+    \ s nil nil sql (lambda (tx)\n    (sql_execute_formula s tx (cached_parse cache \"sql\" (list parse_tsql) \"memcp-tests\"\
     \ sql nil \"root\" s false tx)\n      (lambda (row) true) (lambda fields true))))))\n  (define create \"IF OBJECT_ID(N'dbo.tsql_if_catalog',N'U')\
     \ IS NULL CREATE TABLE dbo.tsql_if_catalog(id INT PRIMARY KEY)\")\n  (define drop \"IF OBJECT_ID(N'dbo.tsql_if_catalog',N'U')\
     \ IS NOT NULL DROP TABLE dbo.tsql_if_catalog\")\n  (execute drop)\n  (execute create)\n  (if (nil? (sql_object_id\
@@ -748,7 +747,7 @@ test_cases:
 - name: Exact SELECT cache separates full parameter declarations without retaining values
   scm: "(begin\n  (define cache (newcachemap))\n  (define run (lambda (declaration) (begin\n    (define s (newsession))\n\
     \    (s \"tsql_bound:v\" true)\n    (s \"tsql_param:v\" nil)\n    (s \"tsql_param_type:v\" declaration)\n  \
-    \  (define output (newsession))\n    (define formula (cached_parse cache (list parse_tsql) \"memcp-tests\" \"\
+    \  (define output (newsession))\n    (define formula (cached_parse cache \"sql\" (list parse_tsql) \"memcp-tests\" \"\
     SELECT TOP (0) @v AS value\" nil \"root\" s false nil))\n    (sql_execute_formula s nil formula (lambda rows\
     \ true)\n      (lambda args (if (> (count args) 1) (output \"field\" (car (cadr args))) true)))\n    (define\
     \ field (output \"field\"))\n    (list (field \"sql_type\") (field \"precision\") (field \"scale\")))))\n  (define\
@@ -883,16 +882,16 @@ test_cases:
             (lambda (row) (out "row" row)) (lambda fields true))))
         (out "row"))))
       (execute "CREATE TABLE dbo.tsql_identity_limit (id TINYINT IDENTITY(1,1),value INT)")
-      (define metadata (car (get_schema "memcp-tests" "tsql_identity_limit")))
+      (define metadata (car (get_schema "memcp-tests" "tsql_identity_limit" nil)))
       (if (metadata "Null") (error "identity remained nullable") true)
-      (altertable (table "memcp-tests" false "tsql_identity_limit" false) "auto_increment" 255)
+      (altertable (table "memcp-tests" false "tsql_identity_limit" false nil) "auto_increment" 255)
       (define failed (try (lambda () (begin
         (execute "INSERT INTO dbo.tsql_identity_limit(value) VALUES (1),(2)") false)) (lambda (_) true)))
       (if failed true (error "tiny identity overflow was accepted"))
       (define empty (execute "SELECT COUNT(*) AS n FROM dbo.tsql_identity_limit"))
       (if (equal? (empty "n") 0) true (error "failed identity batch partially inserted"))
       /* Failed reservations can leave gaps. Rewinding would race other writers. */
-      (if (equal? (reserve_ids (table "memcp-tests" false "tsql_identity_limit" false) 1) '(257 257))
+      (if (equal? (reserve_ids (table "memcp-tests" false "tsql_identity_limit" false nil) 1) '(257 257))
         true (error "failed identity batch rewound its consumed reservation"))
       (execute "SET IDENTITY_INSERT dbo.tsql_identity_limit ON")
           (execute "INSERT INTO dbo.tsql_identity_limit(id,value) VALUES (255,3)")
@@ -906,7 +905,7 @@ test_cases:
   expect:
     result: true
 - sql: DROP TABLE IF EXISTS dbo.tsql_identity_limit
-  scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define out (newsession))\n    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda (row) (out \"row\" row)) (lambda fields true))))\n    (out \"row\"))))\n  (execute \"CREATE TABLE dbo.tsql_identity_limit (id TINYINT IDENTITY(1,1),value INT)\")\n  (define metadata (car (get_schema \"memcp-tests\" \"tsql_identity_limit\")))\n  (if (metadata \"Null\") (error \"identity remained nullable\") true)\n  (altertable (table \"memcp-tests\" false \"tsql_identity_limit\" false) \"auto_increment\" 255)\n  (define failed (try (lambda () (begin (execute \"INSERT INTO dbo.tsql_identity_limit(value) VALUES (1),(2)\") false)) (lambda (_) true)))\n  (if failed true (error \"tiny identity overflow was accepted\"))\n  (define empty (execute \"SELECT COUNT(*) AS n FROM dbo.tsql_identity_limit\"))\n  (if (equal? (empty \"n\") 0) true (error \"failed identity batch partially inserted\"))\n  (execute \"INSERT INTO dbo.tsql_identity_limit(value) VALUES (3)\")\n  (define allocated (execute \"SELECT id FROM dbo.tsql_identity_limit\"))\n  (if (equal? (allocated \"id\") 255) true (error \"failed identity batch advanced the counter\"))\n  (define updated (try (lambda () (begin (execute \"UPDATE dbo.tsql_identity_limit SET id=1\") false)) (lambda (_) true)))\n  (if updated true (error \"identity was writable through UPDATE\"))\n  (define unchanged (execute \"SELECT id FROM dbo.tsql_identity_limit\"))\n  (if (equal? (unchanged \"id\") 255) true (error \"identity changed after rejected UPDATE\"))\n  (execute \"DROP TABLE dbo.tsql_identity_limit\")\n  true)\n"
+  scm: "(begin\n  (define s (newsession))\n  (define execute (lambda (sql) (begin\n    (define out (newsession))\n    (with_autocommit s nil nil sql (lambda (tx)\n      (sql_execute_formula s tx (sql_queryplan_compile_formula tx (parse_tsql \"memcp-tests\" sql nil s tx))\n        (lambda (row) (out \"row\" row)) (lambda fields true))))\n    (out \"row\"))))\n  (execute \"CREATE TABLE dbo.tsql_identity_limit (id TINYINT IDENTITY(1,1),value INT)\")\n  (define metadata (car (get_schema \"memcp-tests\" \"tsql_identity_limit\" nil)))\n  (if (metadata \"Null\") (error \"identity remained nullable\") true)\n  (altertable (table \"memcp-tests\" false \"tsql_identity_limit\" false nil) \"auto_increment\" 255)\n  (define failed (try (lambda () (begin (execute \"INSERT INTO dbo.tsql_identity_limit(value) VALUES (1),(2)\") false)) (lambda (_) true)))\n  (if failed true (error \"tiny identity overflow was accepted\"))\n  (define empty (execute \"SELECT COUNT(*) AS n FROM dbo.tsql_identity_limit\"))\n  (if (equal? (empty \"n\") 0) true (error \"failed identity batch partially inserted\"))\n  (execute \"INSERT INTO dbo.tsql_identity_limit(value) VALUES (3)\")\n  (define allocated (execute \"SELECT id FROM dbo.tsql_identity_limit\"))\n  (if (equal? (allocated \"id\") 255) true (error \"failed identity batch advanced the counter\"))\n  (define updated (try (lambda () (begin (execute \"UPDATE dbo.tsql_identity_limit SET id=1\") false)) (lambda (_) true)))\n  (if updated true (error \"identity was writable through UPDATE\"))\n  (define unchanged (execute \"SELECT id FROM dbo.tsql_identity_limit\"))\n  (if (equal? (unchanged \"id\") 255) true (error \"identity changed after rejected UPDATE\"))\n  (execute \"DROP TABLE dbo.tsql_identity_limit\")\n  true)\n"
   expect:
     result: true
   noncritical: true
@@ -1563,4 +1562,9 @@ test_cases:
     - column count
   cleanup:
   - sql: DROP TABLE tsql_implicit_version
+- name: IF semicolon before ELSE still selects the false branch exactly once
+  sql: IF 1=0 SELECT 5 AS n; ELSE SELECT 6 AS n
+  expect:
+    rows: 1
+    data: [{n: 6}]
 cleanup: []

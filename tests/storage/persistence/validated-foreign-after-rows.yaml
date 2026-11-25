@@ -1,0 +1,358 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Validated public foreign declarations retain original row overlays endpoint leases and one durable decision
+setup:
+- sql: DROP TABLE IF EXISTS late_fk_child
+- sql: DROP TABLE IF EXISTS late_fk_parent
+- sql: DROP TABLE IF EXISTS late_fk_root
+- sql: DROP TABLE IF EXISTS late_fk_marker
+- sql: DROP TABLE IF EXISTS late_probe_child
+- sql: DROP TABLE IF EXISTS late_probe_parent
+- sql: DROP TABLE IF EXISTS late_probe_marker
+- sql: DROP TABLE IF EXISTS late_probe_fresh
+- sql: CREATE TABLE late_fk_root(id INT PRIMARY KEY)
+- sql: CREATE TABLE late_fk_parent(id INT PRIMARY KEY,root_id INT)
+- sql: CREATE TABLE late_fk_child(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE late_fk_marker(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE late_probe_parent(id INT PRIMARY KEY)
+- sql: CREATE TABLE late_probe_child(id INT PRIMARY KEY,parent_id INT)
+- sql: CREATE TABLE late_probe_marker(id INT PRIMARY KEY,value INT)
+- sql: CREATE TABLE late_probe_fresh(id INT PRIMARY KEY,value INT)
+- sql: INSERT late_fk_root VALUES(1)
+- sql: INSERT late_fk_parent VALUES(10,1),(20,999)
+- sql: INSERT late_fk_child VALUES(100,10),(200,999),(300,NULL)
+- sql: INSERT late_fk_marker VALUES(1,0)
+- sql: INSERT late_probe_parent VALUES(1)
+- sql: INSERT late_probe_child VALUES(1,1)
+- sql: INSERT late_probe_marker VALUES(1,0)
+cleanup:
+- sql: DROP TABLE IF EXISTS late_fk_child
+- sql: DROP TABLE IF EXISTS late_fk_parent
+- sql: DROP TABLE IF EXISTS late_fk_root
+- sql: DROP TABLE IF EXISTS late_fk_marker
+- sql: DROP TABLE IF EXISTS late_probe_child
+- sql: DROP TABLE IF EXISTS late_probe_parent
+- sql: DROP TABLE IF EXISTS late_probe_marker
+- sql: DROP TABLE IF EXISTS late_probe_fresh
+test_cases:
+- name: Nested cleanup and heartbeat between validated FKs retain the same original transaction
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE late_fk_marker SET value=1 WHERE id=1
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: DELETE TOP (10) FROM late_fk_child WHERE parent_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM late_fk_parent p WHERE p.id=late_fk_child.parent_id)
+    - connection: owner
+      sql: DELETE TOP (10) FROM late_fk_parent WHERE NOT EXISTS(SELECT 1 FROM late_fk_root r WHERE r.id=late_fk_parent.root_id)
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: owner
+      sql: INSERT late_fk_root VALUES(2)
+    - connection: owner
+      sql: INSERT late_fk_parent VALUES(11,2)
+    - connection: owner
+      sql: INSERT late_fk_child VALUES(101,11)
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: ALTER TABLE late_fk_child ADD CONSTRAINT late_fk_child_parent FOREIGN KEY(parent_id) REFERENCES late_fk_parent(id)
+    - connection: owner
+      sql: UPDATE late_fk_marker SET value=2 WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE late_fk_parent ADD CONSTRAINT late_fk_parent_root FOREIGN KEY(root_id) REFERENCES late_fk_root(id)
+    - connection: owner
+      sql: UPDATE late_fk_marker SET value=3 WHERE id=1
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM late_fk_marker
+      expect: {rows: 1, data: [{value: 3, depth: 1}]}
+    - connection: owner
+      sql: SELECT id,parent_id FROM late_fk_child ORDER BY id
+      expect: {rows: 3, data: [{id: 100, parent_id: 10}, {id: 101, parent_id: 11}, {id: 300, parent_id: null}]}
+    - connection: owner
+      sql: SELECT id,root_id FROM late_fk_parent ORDER BY id
+      expect: {rows: 2, data: [{id: 10, root_id: 1}, {id: 11, root_id: 2}]}
+    - connection: owner
+      sql: SELECT name,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name IN ('late_fk_child_parent','late_fk_parent_root') ORDER BY name
+      expect: {rows: 2, data: [{name: late_fk_child_parent, untrusted: 0}, {name: late_fk_parent_root, untrusted: 0}]}
+    - connection: observer
+      sql: SELECT id,parent_id FROM late_fk_child ORDER BY id
+      expect: {rows: 3, data: [{id: 100, parent_id: 10}, {id: 200, parent_id: 999}, {id: 300, parent_id: null}]}
+    - connection: observer
+      sql: SELECT value FROM late_fk_marker
+      expect: {rows: 1, data: [{value: 0}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name IN ('late_fk_child_parent','late_fk_parent_root')
+      expect: {rows: 1, data: [{n: 0}]}
+    - connection: owner
+      sql: COMMIT TRAN
+    - connection: observer
+      sql: SELECT id,parent_id FROM late_fk_child ORDER BY id
+      expect: {rows: 3, data: [{id: 100, parent_id: 10}, {id: 101, parent_id: 11}, {id: 300, parent_id: null}]}
+    - connection: observer
+      sql: SELECT id,root_id FROM late_fk_parent ORDER BY id
+      expect: {rows: 2, data: [{id: 10, root_id: 1}, {id: 11, root_id: 2}]}
+    - connection: observer
+      sql: SELECT id FROM late_fk_root ORDER BY id
+      expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+    - connection: observer
+      sql: SELECT value FROM late_fk_marker
+      expect: {rows: 1, data: [{value: 3}]}
+- name: Committed child enforcement rejects a real orphan
+  sql: INSERT late_fk_child VALUES(400,999)
+  expect: {error: true, contains: foreign key constraint}
+- name: Committed parent enforcement rejects deleting a referenced key
+  sql: DELETE FROM late_fk_parent WHERE id=10
+  expect: {error: true, contains: foreign key constraint}
+- name: Accepted row and FK decision survives a process crash
+  scm: (crash)
+  expect: {interrupted_ok: true}
+- name: Restart the native recovery owner
+  action: restart
+- name: Recovery restores all original rows marker and both trusted declarations
+  tds:
+    statements:
+    - sql: SELECT id,parent_id FROM late_fk_child ORDER BY id
+      expect: {rows: 3, data: [{id: 100, parent_id: 10}, {id: 101, parent_id: 11}, {id: 300, parent_id: null}]}
+    - sql: SELECT id,root_id FROM late_fk_parent ORDER BY id
+      expect: {rows: 2, data: [{id: 10, root_id: 1}, {id: 11, root_id: 2}]}
+    - sql: SELECT id FROM late_fk_root ORDER BY id
+      expect: {rows: 2, data: [{id: 1}, {id: 2}]}
+    - sql: SELECT value FROM late_fk_marker
+      expect: {rows: 1, data: [{value: 3}]}
+    - sql: SELECT name,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name IN ('late_fk_child_parent','late_fk_parent_root') ORDER BY name
+      expect: {rows: 2, data: [{name: late_fk_child_parent, untrusted: 0}, {name: late_fk_parent_root, untrusted: 0}]}
+    - sql: INSERT late_fk_child VALUES(400,999)
+      expect: {error: true, contains: [foreign key constraint]}
+    - sql: DELETE FROM late_fk_root WHERE id=1
+      expect: {error: true, contains: [foreign key constraint]}
+- name: Savepoint removes the guarded FK while retaining earlier rows and the original writer
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE late_probe_marker SET value=7 WHERE id=1
+    - connection: owner
+      sql: INSERT late_probe_parent VALUES(2)
+    - connection: owner
+      sql: INSERT late_probe_child VALUES(2,2)
+    - connection: owner
+      sql: SAVE TRAN before_foreign
+    - connection: owner
+      sql: ALTER TABLE late_probe_child ADD CONSTRAINT late_probe_rewind FOREIGN KEY(parent_id) REFERENCES late_probe_parent(id)
+    - connection: owner
+      sql: UPDATE late_probe_marker SET value=8 WHERE id=1
+    - connection: owner
+      sql: ROLLBACK TRAN before_foreign
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='late_probe_rewind'
+      expect: {rows: 1, data: [{n: 0}]}
+    - connection: owner
+      sql: INSERT late_probe_child VALUES(3,999)
+    - connection: owner
+      sql: SELECT id,parent_id FROM late_probe_child ORDER BY id
+      expect: {rows: 3, data: [{id: 1, parent_id: 1}, {id: 2, parent_id: 2}, {id: 3, parent_id: 999}]}
+    - connection: owner
+      sql: SELECT value,@@TRANCOUNT AS depth FROM late_probe_marker
+      expect: {rows: 1, data: [{value: 7, depth: 1}]}
+    - connection: observer
+      sql: SELECT id,parent_id FROM late_probe_child ORDER BY id
+      expect: {rows: 1, data: [{id: 1, parent_id: 1}]}
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: observer
+      sql: SELECT id,parent_id FROM late_probe_child ORDER BY id
+      expect: {rows: 1, data: [{id: 1, parent_id: 1}]}
+    - connection: observer
+      sql: SELECT value FROM late_probe_marker
+      expect: {rows: 1, data: [{value: 0}]}
+- name: Whole rollback retires both endpoint declarations and restores prior row data
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE late_probe_marker SET value=9 WHERE id=1
+    - connection: owner
+      sql: DELETE FROM late_probe_child WHERE id=1
+    - connection: owner
+      sql: DELETE FROM late_probe_parent WHERE id=1
+    - connection: owner
+      sql: ALTER TABLE late_probe_child ADD CONSTRAINT late_probe_abort FOREIGN KEY(parent_id) REFERENCES late_probe_parent(id)
+    - connection: owner
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='late_probe_abort'
+      expect: {rows: 1, data: [{n: 1}]}
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: observer
+      sql: SELECT id,parent_id FROM late_probe_child ORDER BY id
+      expect: {rows: 1, data: [{id: 1, parent_id: 1}]}
+    - connection: observer
+      sql: SELECT id FROM late_probe_parent ORDER BY id
+      expect: {rows: 1, data: [{id: 1}]}
+    - connection: observer
+      sql: SELECT value FROM late_probe_marker
+      expect: {rows: 1, data: [{value: 0}]}
+    - connection: observer
+      sql: SELECT COUNT(*) AS n FROM sys.foreign_keys WHERE name='late_probe_abort'
+      expect: {rows: 1, data: [{n: 0}]}
+- name: Own orphan failure preserves original rows active transaction and ordinary writer admission
+  scm: |
+    (begin
+    	(define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+    	(define tx (owner "__memcp_tx"))
+    	(try (lambda () (begin
+    		(define child (table "memcp-tests" false "late_probe_child" false tx))
+    		(define parent (table "memcp-tests" false "late_probe_parent" false tx))
+    		(define marker (table "memcp-tests" false "late_probe_marker" false tx))
+    		(define rows (lambda (handle input fields)
+    			(sort (scan input handle '() '() '() (lambda () true) fields
+    				(lambda (acc a b) (append acc (list a b))) '()
+    				(lambda (left right) (merge (list left right))) false)
+    				(lambda (left right) (< (car left) (car right))))))
+    		(insert marker '("id" "value") (list (list 2 7)) '() nil false nil tx)
+    		(insert child '("id" "parent_id") (list (list 9 999)) '() nil false nil tx)
+    		(define rejected (try (lambda () (begin
+    			(createforeignkey child "late_probe_own_orphan" '("parent_id") parent '("id") "restrict" "restrict" tx)
+    			false)) (lambda (failure) (if (strlike (concat failure) "%existing child row has no parent%") true (error failure)))))
+    		(insert child '("id" "parent_id") (list (list 10 1)) '() nil false nil tx)
+    		(define before (list rejected (tx_state tx) (equal? tx (owner "__memcp_tx"))
+    			(rows child tx '("id" "parent_id")) (rows marker tx '("id" "value"))
+    			(count ((show child "constraints" tx) "ForeignKeys"))
+    			(count ((show parent "constraints" tx) "ForeignKeys"))))
+    		(tx_rollback owner)
+    		(list before (rows child nil '("id" "parent_id")) (rows marker nil '("id" "value")))))
+    		(lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: [[true, active, true, [[1, 1], [9, 999], [10, 1]], [[1, 0], [2, 7]], 0, 0], [[1, 1]], [[1, 0]]]
+- name: A different retained original writer fails before FK validation without retiring either owner
+  scm: |
+    (begin
+    	(define writer (newsession)) (writer "username" "root") (tx_begin_acid writer)
+    	(define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+    	(define tx (owner "__memcp_tx"))
+    	(try (lambda () (begin
+    		(define child (table "memcp-tests" false "late_probe_child" false tx))
+    		(define parent (table "memcp-tests" false "late_probe_parent" false tx))
+    		(insert parent '("id") (list (list 88)) '() nil false nil (writer "__memcp_tx"))
+    		(insert child '("id" "parent_id") (list (list 2 1)) '() nil false nil tx)
+    		(define rejected (try (lambda () (begin
+    			(createforeignkey child "late_probe_busy" '("parent_id") parent '("id") "restrict" "restrict" tx)
+    			false)) (lambda (failure) (if (strlike (concat failure) "%active table writer%") true (error failure)))))
+    		(define before (list rejected (tx_state tx) (tx_state (writer "__memcp_tx"))
+    			(scan tx child '() '() '() (lambda () true) '("id") + 0 +)
+    			(scan nil child '() '() '() (lambda () true) '("id") + 0 +)
+    			(count ((show child "constraints" tx) "ForeignKeys"))))
+    		(tx_rollback writer)
+    		(createforeignkey child "late_probe_busy" '("parent_id") parent '("id") "restrict" "restrict" tx)
+    		(define corrected (count ((show child "constraints" tx) "ForeignKeys")))
+    		(tx_rollback owner)
+    		(list before corrected
+    			(scan nil child '() '() '() (lambda () true) '("id") + 0 +)
+    			(scan nil parent '() '() '() (lambda () true) '("id") + 0 +))))
+    		(lambda (failure) (begin (tx_rollback writer) (tx_rollback owner) (error failure)))))
+  expect:
+    result: [[true, active, active, 3, 1, 0], 1, 1, 1]
+- name: Raw retained callback authority cannot be borrowed by a validating FK
+  scm: |
+    (begin
+    	(define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+    	(define tx (owner "__memcp_tx"))
+    	(try (lambda () (begin
+    		(define child (table "memcp-tests" false "late_probe_child" false tx))
+    		(define parent (table "memcp-tests" false "late_probe_parent" false tx))
+    		(define callbacks (scan tx child '() '() '() (lambda () true) '("$update")
+    			(lambda (acc update) (+ acc 1)) 0 +))
+    		(define rejected (try (lambda () (begin
+    			(createforeignkey child "late_probe_callback" '("parent_id") parent '("id") "restrict" "restrict" tx)
+    			false)) (lambda (failure) (if (strlike (concat failure) "%retained unframed mutation callbacks%") true (error failure)))))
+    		(define before (list callbacks rejected (tx_state tx)
+    			(scan tx child '() '() '() (lambda () true) '("id") + 0 +)
+    			(count ((show child "constraints" tx) "ForeignKeys"))))
+    		(tx_rollback owner)
+    		(list before (scan nil child '() '() '() (lambda () true) '("id") + 0 +))))
+    		(lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: [[1, true, active, 1, 0], 1]
+- name: Accepted public FK input still refuses later unframed endpoint DML before effects
+  scm: |
+    (begin
+    	(define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+    	(define tx (owner "__memcp_tx"))
+    	(try (lambda () (begin
+    		(define child (table "memcp-tests" false "late_probe_child" false tx))
+    		(define parent (table "memcp-tests" false "late_probe_parent" false tx))
+    		(insert child '("id" "parent_id") (list (list 2 1)) '() nil false nil tx)
+    		(createforeignkey child "late_probe_protected" '("parent_id") parent '("id") "restrict" "restrict" tx)
+    		(define denied (try (lambda () (begin
+    			(insert child '("id" "parent_id") (list (list 3 1)) '() nil false nil tx) false))
+    			(lambda (failure) (if (strlike (concat failure) "%metadata-only%") true (error failure)))))
+    		(define before (list denied (tx_state tx)
+    			(scan tx child '() '() '() (lambda () true) '("id") + 0 +)
+    			(scan nil child '() '() '() (lambda () true) '("id") + 0 +)
+    			(count ((show child "constraints" tx) "ForeignKeys"))))
+    		(tx_rollback owner)
+    		(list before (scan nil child '() '() '() (lambda () true) '("id") + 0 +)
+    			(count ((show child "constraints") "ForeignKeys")))))
+    		(lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: [[true, active, 3, 1, 1], 1, 0]
+- name: A fresh unrelated writer retains existing late public rights and rolls back with the same original owner
+  scm: |
+    (begin
+    	(define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+    	(define tx (owner "__memcp_tx"))
+    	(try (lambda () (begin
+    		(define child (table "memcp-tests" false "late_probe_child" false tx))
+    		(define parent (table "memcp-tests" false "late_probe_parent" false tx))
+    		(define fresh (table "memcp-tests" false "late_probe_fresh" false tx))
+    		(insert child '("id" "parent_id") (list (list 2 1)) '() nil false nil tx)
+    		(createforeignkey child "late_probe_fresh_writer" '("parent_id") parent '("id") "restrict" "restrict" tx)
+    		(insert fresh '("id" "value") (list (list 1 9)) '() nil false nil tx)
+    		(define before (list (tx_state tx) (equal? tx (owner "__memcp_tx"))
+    			(scan tx fresh '() '() '() (lambda () true) '("value") + 0 +)
+    			(scan nil fresh '() '() '() (lambda () true) '("value") + 0 +)
+    			(count ((show child "constraints" tx) "ForeignKeys"))))
+    		(tx_rollback owner)
+    		(list before (scan nil fresh '() '() '() (lambda () true) '("value") + 0 +)
+    			(scan nil child '() '() '() (lambda () true) '("id") + 0 +))))
+    		(lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: [[active, true, 9, 0, 1], 0, 1]
+- name: Validation includes an orphan committed externally after the original transaction already read the child
+  scm: |
+    (begin
+    	(define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+    	(define tx (owner "__memcp_tx"))
+    	(try (lambda () (begin
+    		(define child (table "memcp-tests" false "late_probe_child" false tx))
+    		(define parent (table "memcp-tests" false "late_probe_parent" false tx))
+    		(define marker (table "memcp-tests" false "late_probe_marker" false tx))
+    		(insert marker '("id" "value") (list (list 2 9)) '() nil false nil tx)
+    		(define initial (scan tx child '() '() '() (lambda () true) '("id") + 0 +))
+    		(insert child '("id" "parent_id") (list (list 90 999)))
+    		(define rejected (try (lambda () (begin
+    			(createforeignkey child "late_probe_external_orphan" '("parent_id") parent '("id") "restrict" "restrict" tx)
+    			false)) (lambda (failure) (if (strlike (concat failure) "%existing child row has no parent%") true (error failure)))))
+    		(define before (list initial rejected (tx_state tx) (equal? tx (owner "__memcp_tx"))
+    			(scan tx child '() '() '() (lambda () true) '("id") + 0 +)
+    			(scan tx marker '() '() '() (lambda () true) '("value") + 0 +)
+    			(count ((show child "constraints" tx) "ForeignKeys"))))
+    		(tx_rollback owner)
+    		(list before (scan nil child '() '() '() (lambda () true) '("id") + 0 +)
+    			(scan nil marker '() '() '() (lambda () true) '("value") + 0 +))))
+    		(lambda (failure) (begin (tx_rollback owner) (error failure)))))
+  expect:
+    result: [[1, true, active, true, 91, 9, 0], 91, 0]

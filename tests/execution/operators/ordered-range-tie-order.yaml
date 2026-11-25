@@ -1,0 +1,272 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  syntax: mysql
+  description: Ordered native ranges retain every requested tie coordinate before LIMIT
+setup:
+- sql: DROP TABLE IF EXISTS ordered_range_ties
+- sql: CREATE TABLE ordered_range_ties(id INT PRIMARY KEY,first_key VARCHAR(20) NOT NULL,second_key VARCHAR(20)
+    NOT NULL)
+- sql: INSERT INTO ordered_range_ties VALUES(1,'Beta','UPDATE'),(2,'Alpha','UPDATE'),(3,'Alpha','SELECT'),(4,'Beta','SELECT'),(5,'Gamma','UPDATE'),(6,'Gamma','SELECT'),(7,'alpha','INSERT')
+- sql: DROP TABLE IF EXISTS ordered_range_three
+- sql: CREATE TABLE ordered_range_three(id INT PRIMARY KEY,bucket INT,major_key VARCHAR(20),suffix_key
+    VARCHAR(20),ordinal_key INT)
+- sql: INSERT INTO ordered_range_three VALUES(1,1,'B','X',NULL),(2,1,'A','Z',3),(3,1,'A','Z',NULL),(4,1,'A','Z',1),(5,1,'B','Y',2),(6,2,'A','Z',0),(7,1,'C','X',1)
+test_cases:
+- name: A bounded first key retains complete ascending tie order after reverse insertion
+  scm: |-
+    (begin
+      (define target (table "memcp-tests" false "ordered_range_ties" false nil))
+      (define relation (collate "unicode-string" false))
+      (define schema (scan_access_schema
+        (list (scan_boundary "range" "first_key" 0 -1 true false "unicode-string" true
+          -1 '() relation "unicode-string:asc" false)) '() nil false '("first_key")))
+      (define run (lambda ()
+        (scan_order nil target schema (list "Alpha") '("first_key")
+          (lambda (first_key) (not (relation first_key "Alpha")))
+          '("first_key" "second_key")
+          (list (collate "unicode-string" false) (collate "unicode-string" false))
+          0 0 -1 '("id" "first_key" "second_key")
+          (lambda (acc id first_key second_key) (append acc (list id first_key second_key)))
+          '() false)))
+      (map (produceN 3) (lambda (_sample) (run))))
+  expect:
+    result:
+    - &id001
+      - &id003
+        - 3
+        - Alpha
+        - SELECT
+      - &id002
+        - 2
+        - Alpha
+        - UPDATE
+      - &id005
+        - 4
+        - Beta
+        - SELECT
+      - &id004
+        - 1
+        - Beta
+        - UPDATE
+      - &id007
+        - 6
+        - Gamma
+        - SELECT
+      - &id006
+        - 5
+        - Gamma
+        - UPDATE
+      - &id008
+        - 7
+        - alpha
+        - INSERT
+    - *id001
+    - *id001
+- name: A bounded first key retains descending tie order
+  scm: |-
+    (begin
+      (define target (table "memcp-tests" false "ordered_range_ties" false nil))
+      (define relation (collate "unicode-string" false))
+      (define schema (scan_access_schema
+        (list (scan_boundary "range" "first_key" 0 -1 true false "unicode-string" true
+          -1 '() relation "unicode-string:asc" false)) '() nil false '("first_key")))
+      (define run (lambda ()
+        (scan_order nil target schema (list "Alpha") '("first_key")
+          (lambda (first_key) (not (relation first_key "Alpha")))
+          '("first_key" "second_key")
+          (list (collate "unicode-string" false) (collate "unicode-string" true))
+          0 0 -1 '("id" "first_key" "second_key")
+          (lambda (acc id first_key second_key) (append acc (list id first_key second_key)))
+          '() false)))
+      (map (produceN 3) (lambda (_sample) (run))))
+  expect:
+    result:
+    - &id009
+      - *id002
+      - *id003
+      - *id004
+      - *id005
+      - *id006
+      - *id007
+      - *id008
+    - *id009
+    - *id009
+- name: A bounded first key applies LIMIT after the complete tie order
+  scm: |-
+    (begin
+      (define target (table "memcp-tests" false "ordered_range_ties" false nil))
+      (define relation (collate "unicode-string" false))
+      (define schema (scan_access_schema
+        (list (scan_boundary "range" "first_key" 0 -1 true false "unicode-string" true
+          -1 '() relation "unicode-string:asc" false)) '() nil false '("first_key")))
+      (define run (lambda ()
+        (scan_order nil target schema (list "Alpha") '("first_key")
+          (lambda (first_key) (not (relation first_key "Alpha")))
+          '("first_key" "second_key")
+          (list (collate "unicode-string" false) (collate "unicode-string" false))
+          0 0 1 '("id" "first_key" "second_key")
+          (lambda (acc id first_key second_key) (append acc (list id first_key second_key)))
+          '() false)))
+      (map (produceN 3) (lambda (_sample) (run))))
+  expect:
+    result:
+    - &id010
+      - *id003
+    - *id010
+    - *id010
+- name: A different range relation retains the requested complete sort
+  scm: |-
+    (begin
+      (define target (table "memcp-tests" false "ordered_range_ties" false nil))
+      (define relation (collate "unicode-simple-fold" false))
+      (define schema (scan_access_schema
+        (list (scan_boundary "range" "first_key" 0 -1 true false "unicode-simple-fold" true
+          -1 '() relation "unicode-simple-fold:asc" false)) '() nil false '("first_key")))
+      (define run (lambda ()
+        (scan_order nil target schema (list "Alpha") '("first_key")
+          (lambda (first_key) (not (relation first_key "Alpha")))
+          '("first_key" "second_key")
+          (list (collate "unicode-string" false) (collate "unicode-string" false))
+          0 0 -1 '("id" "first_key" "second_key")
+          (lambda (acc id first_key second_key) (append acc (list id first_key second_key)))
+          '() false)))
+      (map (produceN 3) (lambda (_sample) (run))))
+  expect:
+    result:
+    - *id001
+    - *id001
+    - *id001
+- name: An initial NULL native bound retains the complete requested order
+  scm: |-
+    (begin
+      (define target (table "memcp-tests" false "ordered_range_ties" false nil))
+      (define relation (collate "unicode-string" false))
+      (define schema (scan_access_schema
+        (list (scan_boundary "range" "first_key" 0 -1 true false "unicode-string" true
+          -1 '() relation "unicode-string:asc" false)) '() nil false '("first_key")))
+      (define run (lambda ()
+        (scan_order nil target schema (list nil) '("first_key")
+          (lambda (first_key) (not (relation first_key nil)))
+          '("first_key" "second_key")
+          (list (collate "unicode-string" false) (collate "unicode-string" false))
+          0 0 -1 '("id" "first_key" "second_key")
+          (lambda (acc id first_key second_key) (append acc (list id first_key second_key)))
+          '() false)))
+      (map (produceN 3) (lambda (_sample) (run))))
+  expect:
+    result:
+    - *id001
+    - *id001
+    - *id001
+- name: An equality prefix with an exclusive lower range retains all three sort axes
+  scm: |-
+    (begin
+      (define target (table "memcp-tests" false "ordered_range_three" false nil))
+      (define relation (collate "unicode-string" false))
+      (define schema (scan_access_schema (list
+        (scan_boundary "equal" "bucket" 0 0 true true "bin" false)
+        (scan_boundary "range" "major_key" 1 2 false true
+          "unicode-string" true -1 '() relation "unicode-string:asc" false))
+        '() nil false '("bucket" "major_key")))
+      (define run (lambda ()
+        (scan_order nil target schema (list 1 "A" "B") '("bucket" "major_key")
+          (lambda (bucket major_key) (and (equal? bucket 1) (and (relation "A" major_key) (not (relation "B" major_key)))))
+          '("major_key" "suffix_key" "ordinal_key")
+          (list relation (collate "unicode-string" true) (collate "bin" false))
+          0 0 -1 '("id" "major_key" "suffix_key" "ordinal_key")
+          (lambda (acc id major_key suffix_key ordinal_key)
+            (append acc (list id major_key suffix_key ordinal_key)))
+          '() false)))
+      (map (produceN 3) (lambda (_sample) (run))))
+  expect:
+    result:
+    - &id011
+      - &id012
+        - 5
+        - B
+        - Y
+        - 2
+      - &id013
+        - 1
+        - B
+        - X
+        - null
+    - *id011
+    - *id011
+- name: An equality prefix with an exclusive upper range retains NULL and descending suffixes
+  scm: |-
+    (begin
+      (define target (table "memcp-tests" false "ordered_range_three" false nil))
+      (define relation (collate "unicode-string" false))
+      (define schema (scan_access_schema (list
+        (scan_boundary "equal" "bucket" 0 0 true true "bin" false)
+        (scan_boundary "range" "major_key" 1 2 true false
+          "unicode-string" true -1 '() relation "unicode-string:asc" false))
+        '() nil false '("bucket" "major_key")))
+      (define run (lambda ()
+        (scan_order nil target schema (list 1 "A" "C") '("bucket" "major_key")
+          (lambda (bucket major_key) (and (equal? bucket 1) (and (not (relation major_key "A")) (relation major_key "C"))))
+          '("major_key" "suffix_key" "ordinal_key")
+          (list relation (collate "unicode-string" true) (collate "bin" false))
+          0 0 -1 '("id" "major_key" "suffix_key" "ordinal_key")
+          (lambda (acc id major_key suffix_key ordinal_key)
+            (append acc (list id major_key suffix_key ordinal_key)))
+          '() false)))
+      (map (produceN 3) (lambda (_sample) (run))))
+  expect:
+    result:
+    - &id014
+      - &id015
+        - 3
+        - A
+        - Z
+        - null
+      - &id016
+        - 4
+        - A
+        - Z
+        - 1
+      - &id017
+        - 2
+        - A
+        - Z
+        - 3
+      - *id012
+      - *id013
+    - *id014
+    - *id014
+- name: An upper-only range after equality retains the complete three-axis order
+  scm: |-
+    (begin
+      (define target (table "memcp-tests" false "ordered_range_three" false nil))
+      (define relation (collate "unicode-string" false))
+      (define schema (scan_access_schema (list
+        (scan_boundary "equal" "bucket" 0 0 true true "bin" false)
+        (scan_boundary "range" "major_key" -1 1 true true
+          "unicode-string" true -1 '() relation "unicode-string:asc" false))
+        '() nil false '("bucket" "major_key")))
+      (define run (lambda ()
+        (scan_order nil target schema (list 1 "B") '("bucket" "major_key")
+          (lambda (bucket major_key) (and (equal? bucket 1) (not (relation "B" major_key))))
+          '("major_key" "suffix_key" "ordinal_key")
+          (list relation (collate "unicode-string" true) (collate "bin" false))
+          0 0 -1 '("id" "major_key" "suffix_key" "ordinal_key")
+          (lambda (acc id major_key suffix_key ordinal_key)
+            (append acc (list id major_key suffix_key ordinal_key)))
+          '() false)))
+      (map (produceN 3) (lambda (_sample) (run))))
+  expect:
+    result:
+    - &id018
+      - *id015
+      - *id016
+      - *id017
+      - *id012
+      - *id013
+    - *id018
+    - *id018
+cleanup:
+- sql: DROP TABLE IF EXISTS ordered_range_three
+- sql: DROP TABLE IF EXISTS ordered_range_ties

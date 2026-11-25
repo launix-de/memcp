@@ -123,18 +123,20 @@ func (m *uniqueWriteMask) include(other uniqueWriteMask) {
 }
 
 type uniqueWriteGuard struct {
-	afterTriggers []uniqueAfterTrigger
-	ownedShard    *storageShard // an UPDATE already owns this native MOSI writer
-	reservations  *uniqueReservationSet
-	mutation      *mosi.Writer
-	table         *table // SQL table-lock admission; the stripe pool remains node-global
-	tx            *TxContext
-	admitted      bool
-	locks         *UniqueLockPool
-	mask          uniqueWriteMask
-	held          bool
-	wrote         bool
-	version       uint64 // advances when a collision callback temporarily releases guards
+	input                 *nativeMutationInput
+	afterTriggers         []uniqueAfterTrigger
+	transitionCompression []*nativeTransitionWriter
+	ownedShard            *storageShard // an UPDATE already owns this native MOSI writer
+	reservations          *uniqueReservationSet
+	mutation              *mosi.Writer
+	table                 *table // SQL table-lock admission; the stripe pool remains node-global
+	tx                    *TxContext
+	admitted              bool
+	locks                 *UniqueLockPool
+	mask                  uniqueWriteMask
+	held                  bool
+	wrote                 bool
+	version               uint64 // advances when a collision callback temporarily releases guards
 }
 
 // AFTER triggers run after the mutation's key reservations are released. They
@@ -145,11 +147,12 @@ type uniqueAfterTrigger struct {
 	timing   TriggerTiming
 	old, new dataset
 	tx       *TxContext
+	input    *nativeMutationInput
 }
 
 func (g *uniqueWriteGuard) after(event uniqueAfterTrigger) {
 	if g == nil {
-		event.table.ExecuteTriggers(event.timing, event.old, event.new, event.tx)
+		event.table.ExecuteTriggers(event.timing, event.old, event.new, event.tx, event.input)
 		return
 	}
 	g.afterTriggers = append(g.afterTriggers, event)
@@ -161,11 +164,30 @@ func (g *uniqueWriteGuard) release() {
 		g.mutation.Release()
 		g.mutation = nil
 	}
+	// The existing AFTER owner already requires source shard/UNIQUE release.
+	// Transition data is independently owned, so compress its sealed native
+	// generations here, never inside a borrowed mutation/frame callback.
+	pending := g.transitionCompression
+	g.transitionCompression = nil
+	for _, writer := range pending {
+		writer.compressReady()
+	}
 	events := g.afterTriggers
 	g.afterTriggers = nil
 	for _, event := range events {
-		event.table.ExecuteTriggers(event.timing, event.old, event.new, event.tx)
+		event.table.ExecuteTriggers(event.timing, event.old, event.new, event.tx, event.input)
 	}
+}
+
+// At most one entry per actual transition writer in this mutation guard;
+// registration occurs at shard-size rotation, not in the inner row loop.
+func (g *uniqueWriteGuard) deferTransitionCompression(writer *nativeTransitionWriter) {
+	for _, previous := range g.transitionCompression {
+		if previous == writer {
+			return
+		}
+	}
+	g.transitionCompression = append(g.transitionCompression, writer)
 }
 
 type uniqueReadRetry struct{}
@@ -177,11 +199,23 @@ func (g *uniqueWriteGuard) validReads() bool {
 // Forward UNIQUE existence checks before acquiring local shard payload. Warm
 // readable local shards keep the direct path; other owners run the same native
 // reservation/visibility kernel through the ordinary scan protocol.
-func (s *storageShard) probeUnique(access scanAccess, tx *TxContext) bool {
+func (s *storageShard) probeUnique(access scanAccess, tx *TxContext, exclude *recMapTarget) bool {
+	if exclude != nil && s.uuid == exclude.shard.uuid && s != exclude.shard {
+		panic(uniqueReadRetry{})
+	}
+	if exclude != nil && exclude.shard == s {
+		lease := s.getRead(tx, shardReadOptions{mutation: true})
+		defer lease.Release()
+		if lease.shard != s {
+			panic(uniqueReadRetry{})
+		}
+		_, found := lease.shard.GetRecordidForUnique(access, tx, true, exclude)
+		return found
+	}
 	if !sharedClusterSource(s.t) {
 		lease := s.GetRead(tx, false)
 		defer lease.Release()
-		_, found := lease.shard.GetRecordidForUnique(access, tx, true)
+		_, found := lease.shard.GetRecordidForUnique(access, tx, true, exclude)
 		return found
 	}
 	cluster := activeNodeCluster()
@@ -214,7 +248,7 @@ func (s *storageShard) probeUnique(access scanAccess, tx *TxContext) bool {
 			}()
 			lease := s.getRead(tx, shardReadOptions{mutation: true})
 			defer lease.Release()
-			_, found = lease.shard.GetRecordidForUnique(access, tx, true)
+			_, found = lease.shard.GetRecordidForUnique(access, tx, true, exclude)
 		}()
 		if !delegated {
 			return found
@@ -397,6 +431,12 @@ func uniqueColumnValue(declaration *column, value scm.Scmer) scm.Scmer {
 // UNIQUE comparison and hashing share the declared type/collation contract,
 // independently of plain, compressed and UUID string representations.
 func (t *table) uniqueColumnDeclaration(columnName string) *column {
+	if names := t.columnNamesSnapshot.Load(); names != nil {
+		if entry, found := names.exact[columnName]; found {
+			return names.declarations[entry.ordinal]
+		}
+		return nil
+	}
 	for _, candidate := range t.columnDeclarations() {
 		if candidate.Name == columnName {
 			return candidate
@@ -515,14 +555,15 @@ func (t *table) uniqueAccess(access scanAccess) scanAccess {
 	return access
 }
 
-func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeNull bool, first int, tx *TxContext) uniqueWriteGuard {
+func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeNull bool, first int, tx *TxContext, input *nativeMutationInput) uniqueWriteGuard {
+	keys := mutationUniqueKeys(t, input)
 	locks := nodeUniqueWriteLocks()
 	var identity [8]byte
 	binary.LittleEndian.PutUint64(identity[:], uint64(uintptr(unsafe.Pointer(t))))
 	seed := xxhash.Sum64(identity[:])
 	var mask uniqueWriteMask
-	for idx := t.nextUniqueConstraint(columns, first); idx < len(t.Unique); idx = t.nextUniqueConstraint(columns, idx+1) {
-		key := t.Unique[idx]
+	for idx := t.nextUniqueConstraint(columns, first, input); idx < len(keys); idx = t.nextUniqueConstraint(columns, idx+1, input) {
+		key := keys[idx]
 		var inlinePositions [8]int
 		positions := inlinePositions[:]
 		if len(key.Cols) <= len(positions) {
@@ -562,12 +603,12 @@ func (t *table) guardUniqueWrites(columns []string, values [][]scm.Scmer, mergeN
 				for stripe := range locks.stripes {
 					mask.add(stripe)
 				}
-				return uniqueWriteGuard{table: t, tx: tx, locks: locks, mask: mask}
+				return uniqueWriteGuard{input: input, table: t, tx: tx, locks: locks, mask: mask}
 			}
 			mask.add(int(hash % uint64(len(locks.stripes))))
 		}
 	}
-	return uniqueWriteGuard{table: t, tx: tx, locks: locks, mask: mask}
+	return uniqueWriteGuard{input: input, table: t, tx: tx, locks: locks, mask: mask}
 }
 
 // guardUniqueRow gives mutation mappers the same logical-key ownership as
@@ -611,13 +652,15 @@ func (s *storageShard) mutationGuard(tx *TxContext) *uniqueWriteGuard {
 	}
 }
 
-func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext) (*uniqueWriteGuard, uint32, bool) {
-	if activeReplication(s.t.schema) == nil && len(s.t.Triggers) != 0 && len(s.t.GetTriggers(BeforeUpdate)) != 0 {
+func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext, input *nativeMutationInput, initializedColumns *nativeColumnInitialInput) (*uniqueWriteGuard, uint32, bool) {
+	keys := mutationUniqueKeys(s.t, input)
+	if activeReplication(s.t.schema) == nil && ((input != nil && len(input.beforeUpdate) != 0) || (input == nil && len(s.t.Triggers) != 0 && len(s.t.GetTriggers(BeforeUpdate, nil, nativeTriggerProfileFor(tx), nil)) != 0)) {
 		guard := s.mutationGuard(tx)
+		guard.input = input
 		s.mu.RLock()
 		defer s.mu.RUnlock()
 		if (tx == nil || tx.Mode != TxACID) && s.deletions.Get(uint(id)) {
-			current, found := s.resolveVisiblePrimaryRecidLocked(id)
+			current, found := s.resolveVisiblePrimaryRecidLocked(id, input, tx, initializedColumns)
 			if !found {
 				guard.release()
 				return nil, id, false
@@ -626,11 +669,11 @@ func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext) (*uniqueWriteGua
 		}
 		return guard, id, true
 	}
-	if len(s.t.Unique) == 0 || activeReplication(s.t.schema) != nil {
+	if len(keys) == 0 || activeReplication(s.t.schema) != nil {
 		return nil, id, true
 	}
 	var columns []string
-	for _, constraint := range s.t.Unique {
+	for _, constraint := range keys {
 		for _, column := range constraint.Cols {
 			if !slices.Contains(columns, column) {
 				columns = append(columns, column)
@@ -638,19 +681,19 @@ func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext) (*uniqueWriteGua
 		}
 	}
 	for _, column := range columns {
-		s.getColumnStorageOrPanic(column, false, tx)
+		s.getColumnStorageInput(column, false, s.initializedColumnInput(s.t.bindColumnInput(tx)), tx)
 	}
 	values := make([]scm.Scmer, len(columns))
 	read := func() bool {
 		if (tx == nil || tx.Mode != TxACID) && s.deletions.Get(uint(id)) {
 			var found bool
-			id, found = s.resolveVisiblePrimaryRecidLocked(id)
+			id, found = s.resolveVisiblePrimaryRecidLocked(id, input, tx, initializedColumns)
 			if !found {
 				return false
 			}
 		}
 		for i, column := range columns {
-			values[i] = s.rowValueByRecidLocked(id, column)
+			values[i] = s.rowValueByRecidLocked(id, column, tx, initializedColumns)
 		}
 		return true
 	}
@@ -661,11 +704,11 @@ func (s *storageShard) guardUniqueRow(id uint32, tx *TxContext) (*uniqueWriteGua
 		if !found {
 			return nil, id, false
 		}
-		guard := s.t.guardUniqueWrites(columns, [][]scm.Scmer{values}, false, 0, tx)
+		guard := s.t.guardUniqueWrites(columns, [][]scm.Scmer{values}, false, 0, tx, input)
 		guard.lock()
 		s.mu.RLock()
 		found = read()
-		current := s.t.guardUniqueWrites(columns, [][]scm.Scmer{values}, false, 0, tx)
+		current := s.t.guardUniqueWrites(columns, [][]scm.Scmer{values}, false, 0, tx, input)
 		s.mu.RUnlock()
 		if !found {
 			guard.unlock()
@@ -803,9 +846,9 @@ func (t *table) localInsertShard(shard *storageShard) bool {
 
 // Expand volatile defaults before partition routing and UNIQUE checks. The
 // generated value becomes explicit invocation data, reused by WAL and forwarding.
-func (t *table) prepareInsertDefaults(columns []string, values [][]scm.Scmer) ([]string, [][]scm.Scmer) {
+func (t *table) prepareInsertDefaults(columns []string, values [][]scm.Scmer, declarations []*column) ([]string, [][]scm.Scmer) {
 	var missing []*column
-	for _, c := range t.columnDeclarations() {
+	for _, c := range declarations {
 		if c.DefaultExpression == "" {
 			continue
 		}
@@ -838,17 +881,10 @@ func (t *table) prepareInsertDefaults(columns []string, values [][]scm.Scmer) ([
 	return cols, rows
 }
 
-// Reserve before shard ownership when clustering or hash routing requires the
-// generated values. The shard sink then receives explicit IDs.
-func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify func(int64), dimensions []shardDimension) ([]string, [][]scm.Scmer, bool) {
-	needed := sharedClusterSource(t)
-	for _, d := range dimensions {
-		needed = needed || d.Method != ""
-	}
-	if !needed {
-		return columns, values, false
-	}
-	for _, c := range t.columnDeclarations() {
+// Every generated value is assigned before shard ownership or UNIQUE guards.
+// The shard sink receives complete explicit values; recovery never reserves.
+func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify func(int64), declarations []*column, tx *TxContext) ([]string, [][]scm.Scmer, bool) {
+	for _, c := range declarations {
 		if !c.AutoIncrement {
 			continue
 		}
@@ -860,19 +896,24 @@ func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify 
 			}
 		}
 		generated := uint64(0)
-		explicit := uint64(0)
+		input := tableIDExplicit{}
 		for _, row := range values {
 			if position < 0 || position >= len(row) || row[position].IsNil() {
 				generated++
 				continue
 			}
-			if id := scm.ToInt(row[position]); id > 0 {
-				explicit = max(explicit, uint64(id))
+			id := int64(scm.ToInt(row[position]))
+			if !input.Observed || id > input.Value {
+				input.Value = id
+			}
+			input.Observed = true
+			if id > 0 {
+				input.High = max(input.High, uint64(id))
 			}
 		}
-		base := t.reserveAutoIncrement(explicit, generated)
+		reservation := t.reserveAutoIncrement(input, generated, tx)
 		if generated > 0 && notify != nil {
-			notify(int64(base + 1))
+			notify(reservation.First)
 		}
 		cols := append([]string(nil), columns...)
 		if position < 0 {
@@ -880,12 +921,13 @@ func (t *table) prepareInsertIDs(columns []string, values [][]scm.Scmer, notify 
 			cols = append(cols, c.Name)
 		}
 		rows := make([][]scm.Scmer, len(values))
+		generatedOffset := int64(0)
 		for i, row := range values {
 			rows[i] = make([]scm.Scmer, len(cols))
 			copy(rows[i], row)
 			if rows[i][position].IsNil() {
-				base++
-				rows[i][position] = scm.NewInt(int64(base))
+				rows[i][position] = scm.NewInt(reservation.First + generatedOffset)
+				generatedOffset++
 			}
 		}
 		return cols, rows, true

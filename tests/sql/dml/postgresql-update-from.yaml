@@ -1,0 +1,88 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://www.postgresql.org/docs/current/sql-update.html
+metadata:
+  syntax: postgresql
+  isolated: true
+  description: PostgreSQL UPDATE binds target aliases and complete FROM relations through shared DML
+setup:
+- sql: DROP TABLE IF EXISTS pg_from_extra
+- sql: DROP TABLE IF EXISTS pg_from_source
+- sql: DROP TABLE IF EXISTS pg_from_target
+- sql: CREATE TABLE pg_from_target(id INT PRIMARY KEY,amount INT,note VARCHAR(12))
+- sql: CREATE TABLE pg_from_source(id INT PRIMARY KEY,amount INT)
+- sql: CREATE TABLE pg_from_extra(id INT PRIMARY KEY,bonus INT)
+- sql: INSERT INTO pg_from_target VALUES(1,0,'old'),(2,0,'old'),(3,0,'old')
+- sql: INSERT INTO pg_from_source VALUES(1,10),(2,20)
+- sql: INSERT INTO pg_from_extra VALUES(1,5)
+test_cases:
+- name: FROM aliases bind assignment values and the target predicate
+  steps:
+  - sql: UPDATE pg_from_target SET amount=a.amount FROM pg_from_source a WHERE pg_from_target.id=a.id
+    expect: {affected_rows: 2}
+  - sql: SELECT id,amount,note FROM pg_from_target ORDER BY id
+    expect:
+      data: [{id: 1,amount: 10,note: old},{id: 2,amount: 20,note: old},{id: 3,amount: 0,note: old}]
+- name: An explicit target alias binds a joined source and leaves unmatched rows alone
+  steps:
+  - sql: UPDATE pg_from_target AS t SET note=CAST(a.amount AS VARCHAR(12)) FROM pg_from_source AS a WHERE t.id=a.id AND a.id=1
+    expect: {affected_rows: 1}
+  - sql: SELECT id,amount,note FROM pg_from_target ORDER BY id
+    expect:
+      data: [{id: 1,amount: 10,note: '10'},{id: 2,amount: 20,note: old},{id: 3,amount: 0,note: old}]
+- name: A target alias hides the original visible target name
+  sql: UPDATE pg_from_target AS t SET amount=1 WHERE pg_from_target.id=1
+  expect: {error: true,contains: unknown relation alias}
+- name: A rejected target binding preserves every row
+  sql: SELECT id,amount,note FROM pg_from_target ORDER BY id
+  expect:
+    data: [{id: 1,amount: 10,note: '10'},{id: 2,amount: 20,note: old},{id: 3,amount: 0,note: old}]
+- name: LEFT JOIN source rows retain their actual NULL extension
+  steps:
+  - sql: UPDATE pg_from_target t SET note=COALESCE(CAST(m.bonus AS VARCHAR(12)),'none') FROM pg_from_source a LEFT JOIN pg_from_extra m ON m.id=a.id WHERE t.id=a.id
+    expect: {affected_rows: 2}
+  - sql: SELECT id,amount,note FROM pg_from_target ORDER BY id
+    expect:
+      data: [{id: 1,amount: 10,note: '5'},{id: 2,amount: 20,note: none},{id: 3,amount: 0,note: old}]
+- name: Comma FROM inputs share the same assignment and predicate scope
+  steps:
+  - sql: UPDATE pg_from_target t SET amount=a.amount+m.bonus FROM pg_from_source a,pg_from_extra m WHERE t.id=a.id AND a.id=m.id
+    expect: {affected_rows: 1}
+  - sql: SELECT id,amount,note FROM pg_from_target ORDER BY id
+    expect:
+      data: [{id: 1,amount: 15,note: '5'},{id: 2,amount: 20,note: none},{id: 3,amount: 0,note: old}]
+- name: A qualified target retains derived FROM exports through inlining
+  steps:
+  - sql: UPDATE "memcp-tests".pg_from_target AS t SET amount=a.amount+1 FROM (SELECT id,amount FROM pg_from_source WHERE id=2) a WHERE t.id=a.id
+    expect: {affected_rows: 1}
+  - sql: SELECT id,amount,note FROM pg_from_target ORDER BY id
+    expect:
+      data: [{id: 1,amount: 15,note: '5'},{id: 2,amount: 21,note: none},{id: 3,amount: 0,note: old}]
+- name: PostgreSQL counts a successful matched row whose value is unchanged
+  sql: UPDATE pg_from_target SET amount=amount WHERE id=3
+  expect: {affected_rows: 1}
+- name: Joined updates preserve their original transaction and rollback
+  session_id: pg-from-rollback
+  steps:
+  - sql: BEGIN
+    session_id: pg-from-rollback
+  - sql: UPDATE pg_from_target AS t SET amount=a.amount+100 FROM pg_from_source a WHERE t.id=a.id
+    session_id: pg-from-rollback
+    expect: {affected_rows: 2}
+  - sql: SELECT id,amount,note FROM pg_from_target ORDER BY id
+    session_id: pg-from-rollback
+    expect:
+      data: [{id: 1,amount: 110,note: '5'},{id: 2,amount: 120,note: none},{id: 3,amount: 0,note: old}]
+  - sql: ROLLBACK
+    session_id: pg-from-rollback
+  - sql: SELECT id,amount,note FROM pg_from_target ORDER BY id
+    session_id: pg-from-rollback
+    expect:
+      data: [{id: 1,amount: 15,note: '5'},{id: 2,amount: 21,note: none},{id: 3,amount: 0,note: old}]
+  cleanup:
+  - sql: ROLLBACK
+    session_id: pg-from-rollback
+cleanup:
+- sql: DROP TABLE IF EXISTS pg_from_extra
+- sql: DROP TABLE IF EXISTS pg_from_source
+- sql: DROP TABLE IF EXISTS pg_from_target

@@ -2224,3 +2224,61 @@ test_cases:
     cleanup:
       - sql: DROP TABLE IF EXISTS trigger_unique_source
       - sql: DROP TABLE IF EXISTS trigger_unique_target
+
+  - name: Same-value UPDATE retains complete NEW values for native cascades and AFTER callbacks
+    setup:
+      - sql: DROP TABLE IF EXISTS trigger_noop_child
+      - sql: DROP TABLE IF EXISTS trigger_noop_parent
+      - sql: DROP TABLE IF EXISTS trigger_noop_audit
+      - sql: CREATE TABLE trigger_noop_parent(id INT AUTO_INCREMENT PRIMARY KEY, val INT NOT NULL)
+      - sql: CREATE TABLE trigger_noop_child(id INT PRIMARY KEY, parent_id INT NOT NULL, payload INT NOT NULL, FOREIGN KEY(parent_id) REFERENCES trigger_noop_parent(id) ON UPDATE CASCADE)
+      - sql: CREATE TABLE trigger_noop_audit(old_id INT, new_id INT, old_value INT, new_value INT)
+      - sql: INSERT INTO trigger_noop_parent(val) VALUES(7)
+      - sql: INSERT INTO trigger_noop_child VALUES(10,1,9)
+      - sql: CREATE TRIGGER trigger_noop_after AFTER UPDATE ON trigger_noop_parent FOR EACH ROW BEGIN INSERT INTO trigger_noop_audit(old_id,new_id,old_value,new_value) VALUES(OLD.id,NEW.id,OLD.val,NEW.val); END
+      - sql: UPDATE trigger_noop_parent SET val=val WHERE id=1
+    sql: SELECT p.id,p.val,c.parent_id,c.payload,a.old_id,a.new_id,a.old_value,a.new_value FROM trigger_noop_parent p JOIN trigger_noop_child c ON c.parent_id=p.id CROSS JOIN trigger_noop_audit a
+    expect:
+      rows: 1
+      data: [{id: 1, val: 7, parent_id: 1, payload: 9, old_id: 1, new_id: 1, old_value: 7, new_value: 7}]
+    cleanup:
+      - sql: DROP TABLE IF EXISTS trigger_noop_child
+      - sql: DROP TABLE IF EXISTS trigger_noop_parent
+      - sql: DROP TABLE IF EXISTS trigger_noop_audit
+
+  - name: Same-value UPDATE of an ordinary key preserves its nonnullable child
+    setup:
+      - sql: DROP TABLE IF EXISTS trigger_noop_child
+      - sql: DROP TABLE IF EXISTS trigger_noop_parent
+      - sql: CREATE TABLE trigger_noop_parent(id INT PRIMARY KEY, val INT NOT NULL)
+      - sql: CREATE TABLE trigger_noop_child(id INT PRIMARY KEY, parent_id INT NOT NULL, payload INT NOT NULL, FOREIGN KEY(parent_id) REFERENCES trigger_noop_parent(id) ON UPDATE CASCADE)
+      - sql: INSERT INTO trigger_noop_parent VALUES(1,7)
+      - sql: INSERT INTO trigger_noop_child VALUES(10,1,9)
+      - sql: UPDATE trigger_noop_parent SET val=7 WHERE id=1
+    sql: SELECT p.id,p.val,c.parent_id,c.payload FROM trigger_noop_parent p JOIN trigger_noop_child c ON c.parent_id=p.id
+    expect:
+      rows: 1
+      data: [{id: 1, val: 7, parent_id: 1, payload: 9}]
+    cleanup:
+      - sql: DROP TABLE IF EXISTS trigger_noop_child
+      - sql: DROP TABLE IF EXISTS trigger_noop_parent
+
+  - name: AFTER callbacks receive complete unchanged NULL rows and changed rows
+    setup:
+      - sql: DROP TABLE IF EXISTS trigger_noop_input
+      - sql: DROP TABLE IF EXISTS trigger_noop_audit
+      - sql: CREATE TABLE trigger_noop_input(id INT PRIMARY KEY, val INT NULL)
+      - sql: CREATE TABLE trigger_noop_audit(old_id INT, new_id INT, old_value INT, new_value INT)
+      - sql: INSERT INTO trigger_noop_input VALUES(1,NULL)
+      - sql: CREATE TRIGGER trigger_noop_after AFTER UPDATE ON trigger_noop_input FOR EACH ROW BEGIN INSERT INTO trigger_noop_audit(old_id,new_id,old_value,new_value) VALUES(OLD.id,NEW.id,OLD.val,NEW.val); END
+      - sql: UPDATE trigger_noop_input SET val=NULL WHERE id=1
+      - sql: UPDATE trigger_noop_input SET val=7 WHERE id=1
+    sql: SELECT old_id,new_id,old_value,new_value FROM trigger_noop_audit ORDER BY new_value
+    expect:
+      rows: 2
+      data:
+        - {old_id: 1, new_id: 1, old_value: null, new_value: null}
+        - {old_id: 1, new_id: 1, old_value: null, new_value: 7}
+    cleanup:
+      - sql: DROP TABLE IF EXISTS trigger_noop_input
+      - sql: DROP TABLE IF EXISTS trigger_noop_audit

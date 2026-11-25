@@ -1,0 +1,105 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Numeric field spacing reference: https://dbfiddle.uk/cZniOMGM
+metadata:
+  syntax: tsql
+  requires_tds: true
+  description: Numeric calendar field padding respects DATEFORMAT and strict format boundaries
+setup:
+- sql: CREATE TABLE calendar_spacing_text(id INT PRIMARY KEY,v VARCHAR(40),n NVARCHAR(40),c CHAR(40))
+- sql: INSERT calendar_spacing_text VALUES(1,' 1 . 2 . 2026 ',N' 1 . 2 . 2026 ',' 1 . 2 . 2026 '),(2,'31 . 2 . 2026',N'31 . 2 . 2026','31 . 2 . 2026')
+cleanup:
+- sql: DROP VIEW IF EXISTS dbo.calendar_spacing_view
+- sql: DROP TABLE IF EXISTS calendar_spacing_text
+test_cases:
+- name: STR padding in the original numeric calendar shape requires no SQL rewrite
+  sql: SELECT CONVERT(VARCHAR(30),CONVERT(DATETIME,STR(1)+'.'+STR(1)+'.'+STR(2026)),121) AS value
+  expect: {rows: 1,data: [{value: '2026-01-01 00:00:00.000'}]}
+- name: Declared VARCHAR NVARCHAR and CHAR inputs retain DATEFORMAT and temporal wire contracts
+  tds:
+    statements:
+    - sql: SET DATEFORMAT dmy
+    - sql: SELECT CONVERT(DATETIME,v) AS v,CONVERT(DATETIME,n) AS n,CONVERT(DATETIME,c) AS c FROM calendar_spacing_text WHERE id=1
+      expect:
+        rows: 1
+        data: [{v: {temporal_type: datetime,value: '2026-02-01T00:00:00Z'},
+          n: {temporal_type: datetime,value: '2026-02-01T00:00:00Z'},c: {temporal_type: datetime,value: '2026-02-01T00:00:00Z'}}]
+        column_types: [{name: v,type: DATETIME},{name: n,type: DATETIME},{name: c,type: DATETIME}]
+- name: Numeric padding never changes month-day ordering
+  tds:
+    statements:
+    - sql: SET DATEFORMAT mdy
+    - sql: SELECT CONVERT(VARCHAR(30),CONVERT(DATETIME,N' 1 / 2 / 2026 '),121) AS value
+      expect: {rows: 1,data: [{value: '2026-01-02 00:00:00.000'}]}
+- name: A four-digit leading year retains its existing numeric order
+  tds:
+    statements:
+    - sql: SET DATEFORMAT ymd
+    - sql: SELECT CONVERT(VARCHAR(30),CONVERT(DATETIME,N' 2026 - 2 - 1 '),121) AS value
+      expect: {rows: 1,data: [{value: '2026-02-01 00:00:00.000'}]}
+- name: Mixed numeric separators keep their existing allowed semantics
+  tds:
+    statements:
+    - sql: SET DATEFORMAT mdy
+    - sql: SELECT CONVERT(VARCHAR(30),CONVERT(DATETIME,N'1 / 2 - 2026'),121) AS value
+      expect: {rows: 1,data: [{value: '2026-01-02 00:00:00.000'}]}
+- name: Numeric spacing keeps the existing two-digit year cutoff
+  tds:
+    statements:
+    - sql: SET DATEFORMAT mdy
+    - sql: SELECT CONVERT(VARCHAR(30),CONVERT(DATETIME,N' 1 . 2 . 26 '),121) AS value
+      expect: {rows: 1,data: [{value: '2026-01-02 00:00:00.000'}]}
+- name: Explicit pure numeric styles use the same field spacing owner
+  sql: SELECT CONVERT(VARCHAR(30),CONVERT(DATETIME,v,104),121) AS value FROM calendar_spacing_text WHERE id=1
+  expect: {rows: 1,data: [{value: '2026-02-01 00:00:00.000'}]}
+- name: A stored explicit-style view keeps typed numeric text conversion
+  sql: CREATE VIEW dbo.calendar_spacing_view AS SELECT id,CONVERT(DATETIME,v,104) AS stamp FROM calendar_spacing_text
+- name: Stored conversion outputs retain declared DATETIME metadata
+  tds:
+    statements:
+    - sql: SELECT stamp FROM dbo.calendar_spacing_view WHERE id=1
+      expect:
+        rows: 1
+        data: [{stamp: {temporal_type: datetime,value: '2026-02-01T00:00:00Z'}}]
+        column_types: [{name: stamp,type: DATETIME}]
+- name: Invalid calendar days in a declared text column stay invalid
+  tds:
+    statements:
+    - sql: SET DATEFORMAT dmy
+    - sql: SELECT CONVERT(DATETIME,n) AS value FROM calendar_spacing_text WHERE id=2
+      expect: {error: true,contains: [invalid calendar input]}
+- name: A zero numeric day cannot be repaired by spacing normalization
+  sql: SELECT CONVERT(DATETIME,N'0 . 2 . 2026',104) AS value
+  expect: {error: true,contains: invalid styled calendar input}
+- name: An invalid numeric month cannot be repaired by spacing normalization
+  sql: SELECT CONVERT(DATETIME,N'1 . 13 . 2026',104) AS value
+  expect: {error: true,contains: invalid styled calendar input}
+- name: Whitespace inside a digit sequence stays invalid
+  sql: SELECT CONVERT(DATETIME,N'1 2 . 2 . 2026',104) AS value
+  expect: {error: true,contains: invalid styled calendar input}
+- name: Repeated numeric separators stay invalid
+  sql: SELECT CONVERT(DATETIME,N'1 .. 2 . 2026',104) AS value
+  expect: {error: true,contains: invalid styled calendar input}
+- name: Numeric fields cannot absorb a trailing text suffix
+  sql: SELECT CONVERT(DATETIME,N'1 . 2 . 2026extra',104) AS value
+  expect: {error: true,contains: invalid styled calendar input}
+- name: A numeric timezone suffix cannot be removed to construct a calendar date
+  sql: SELECT CONVERT(DATETIME,N'1 . 2 . 2026 +01:00') AS value
+  expect: {error: true,contains: [invalid calendar input]}
+- name: ISO calendar and clock spacing is outside the numeric date-only profile
+  sql: SELECT CONVERT(DATETIME,N'2026 - 01 - 01T12:00:00',126) AS value
+  expect: {error: true,contains: invalid styled calendar input}
+- name: Explicit ISO clock fields retain strict whitespace boundaries
+  sql: |
+    SELECT CONVERT(DATETIME,N'2026-01-01T12: 00:00',126) AS value
+  expect: {error: true,contains: invalid styled calendar input}
+- name: Noncalendar token families remain byte-identical at the field-spacing owner
+  scm: |
+    (begin
+      (define values (list "2026 - 01 - 01T12:00:00" "12 : 00 : 00" "1 . 2 . 2026 +01:00"
+        "Jan 1,2026" "1 2 . 2 . 2026" "1 .. 2 . 2026" "1 . 2 . 2026extra" "1,.2.2026"))
+      (expression_equal? values (map values tsql_numeric_calendar_fields)))
+  expect: {result: true}
+- name: Named month parsing keeps its ordinary comma handling
+  sql: SELECT CONVERT(VARCHAR(30),CONVERT(DATETIME,N'Feb 1,2026'),121) AS value
+  expect: {rows: 1,data: [{value: '2026-02-01 00:00:00.000'}]}

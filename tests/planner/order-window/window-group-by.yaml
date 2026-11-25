@@ -140,6 +140,62 @@ test_cases:
       data:
         - {id: 1, total: 150}
 
+  - name: "A filtered window reads all five rows in its own input"
+    sql: |
+      SELECT id, SUM(amount) OVER () AS total
+      FROM wgb_data WHERE week_date<=2 ORDER BY id
+    expect:
+      data:
+        - {id: 1, total: 150}
+        - {id: 2, total: 150}
+        - {id: 3, total: 150}
+        - {id: 4, total: 150}
+        - {id: 5, total: 150}
+
+  - name: "A derived filtered window preserves its complete aggregate values"
+    sql: |
+      SELECT id, total FROM
+        (SELECT id, SUM(amount) OVER () AS total FROM wgb_data WHERE week_date<=2) t
+      ORDER BY id
+    expect:
+      data:
+        - {id: 1, total: 150}
+        - {id: 2, total: 150}
+        - {id: 3, total: 150}
+        - {id: 4, total: 150}
+        - {id: 5, total: 150}
+
+  - name: "A PostgreSQL derived window retains its filtered aggregate input"
+    syntax: psql
+    sql: |
+      SELECT id, total FROM
+        (SELECT id, SUM(amount) OVER () AS total FROM wgb_data WHERE week_date<=2) t
+      WHERE id=1
+    expect:
+      data:
+        - {id: 1, total: 150}
+
+  - name: "A TSQL derived window retains its filtered aggregate input"
+    syntax: tsql
+    sql: |
+      SELECT id, total FROM
+        (SELECT id, SUM(amount) OVER () AS total FROM wgb_data WHERE week_date<=2) t
+      WHERE id=1
+    expect:
+      data:
+        - {id: 1, total: 150}
+
+  - name: "A computed derived lookup remains free beside a colliding aggregate source"
+    sql: |
+      SELECT d.id,
+        (SELECT SUM(c.amount) FROM wgb_data c WHERE c.id=d.lookup_id) AS total
+      FROM (SELECT c.id, c.id+1 AS lookup_id FROM wgb_data c WHERE c.id<=2) d
+      ORDER BY d.id
+    expect:
+      data:
+        - {id: 1, total: 20}
+        - {id: 2, total: 30}
+
   - name: "Empty filtered group domain produces no window rows"
     sql: |
       SELECT week_date, SUM(COUNT(*)) OVER () AS total_cnt

@@ -67,7 +67,7 @@ func TestLazyTriggerPlanUsesJIT(t *testing.T) {
 		FuncPlan: triggerJITTestPlan(),
 		Language: "sql",
 	}
-	compileTriggerForUse("test", "items", &trigger)
+	compileTriggerForUse("test", "items", &trigger, nil)
 	requireCompiledTrigger(t, trigger)
 }
 
@@ -83,7 +83,7 @@ func TestLazyTriggerPlanIsOptimizedBeforeJIT(t *testing.T) {
 			changed_rows))`, true),
 		Language: "sql",
 	}
-	compileTriggerForUse("test", "items", &trigger)
+	compileTriggerForUse("test", "items", &trigger, nil)
 	if trigger.Func.Proc() == nil || trigger.Func.Proc().Compiled == nil {
 		t.Fatal("lazy trigger procedure has no native entry point")
 	}

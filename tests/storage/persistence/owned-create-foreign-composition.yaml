@@ -1,0 +1,727 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Owned CREATE generations and foreign declarations share the original transaction and durable decision
+setup:
+- sql: DROP TABLE IF EXISTS joint_fact_child
+- sql: DROP TABLE IF EXISTS joint_fact_parent
+- sql: DROP VIEW IF EXISTS joint_participant_view
+- sql: DROP TABLE IF EXISTS joint_participant_child
+- sql: DROP TABLE IF EXISTS joint_failed
+- sql: DROP TABLE IF EXISTS joint_drop_new_b
+- sql: DROP TABLE IF EXISTS joint_drop_old_b
+- sql: DROP TABLE IF EXISTS joint_drop_new_a
+- sql: DROP TABLE IF EXISTS joint_drop_old_a
+- sql: DROP PROCEDURE IF EXISTS joint_source
+- sql: DROP TABLE IF EXISTS joint_published_child
+- sql: DROP TABLE IF EXISTS joint_overlay_parent
+- sql: DROP TABLE IF EXISTS joint_rewind
+- sql: DROP TABLE IF EXISTS joint_source_child
+- sql: DROP TABLE IF EXISTS joint_unaccepted
+- sql: DROP TABLE IF EXISTS joint_child
+- sql: DROP TABLE IF EXISTS joint_parent
+- sql: DROP TABLE IF EXISTS joint_rollback_child
+- sql: DROP TABLE IF EXISTS joint_two_child
+- sql: DROP TABLE IF EXISTS joint_two_parent_b
+- sql: DROP TABLE IF EXISTS joint_two_parent_a
+- sql: DROP TABLE IF EXISTS joint_prefix_child
+- sql: DROP TABLE IF EXISTS joint_prefix_parent
+- sql: DROP TABLE IF EXISTS joint_discarded
+- sql: DROP TABLE IF EXISTS joint_audit
+- sql: DROP TABLE IF EXISTS joint_existing
+- sql: CREATE TABLE joint_existing(id INT NOT NULL PRIMARY KEY,value INT)
+- sql: CREATE TABLE joint_audit(value INT)
+- sql: INSERT joint_existing VALUES(1,7)
+- sql: CREATE TRIGGER joint_existing_update ON joint_existing AFTER UPDATE AS INSERT joint_audit SELECT value FROM inserted
+- sql: CREATE TABLE joint_published_child(id INT NOT NULL PRIMARY KEY,parent_id INT)
+- sql: INSERT joint_published_child VALUES(10,1)
+- sql: CREATE TABLE joint_drop_old_a(id INT)
+- sql: CREATE TABLE joint_drop_old_b(id INT)
+- sql: CREATE TABLE joint_fact_parent(id SMALLINT NOT NULL PRIMARY KEY)
+- sql: CREATE TABLE joint_fact_child(id INT NOT NULL PRIMARY KEY,parent_id SMALLINT NULL)
+- sql: INSERT joint_fact_parent VALUES(0)
+- sql: INSERT joint_fact_child VALUES(1,NULL)
+- sql: ALTER TABLE joint_fact_child ADD CONSTRAINT joint_fact_reference FOREIGN KEY(parent_id) REFERENCES joint_fact_parent(id) ON UPDATE CASCADE
+cleanup:
+- sql: DROP TABLE IF EXISTS joint_fact_child
+- sql: DROP TABLE IF EXISTS joint_fact_parent
+- sql: DROP VIEW IF EXISTS joint_participant_view
+- sql: DROP TABLE IF EXISTS joint_participant_child
+- sql: DROP TABLE IF EXISTS joint_failed
+- sql: DROP TABLE IF EXISTS joint_drop_new_b
+- sql: DROP TABLE IF EXISTS joint_drop_old_b
+- sql: DROP TABLE IF EXISTS joint_drop_new_a
+- sql: DROP TABLE IF EXISTS joint_drop_old_a
+- sql: DROP PROCEDURE IF EXISTS joint_source
+- sql: DROP TABLE IF EXISTS joint_published_child
+- sql: DROP TABLE IF EXISTS joint_overlay_parent
+- sql: DROP TABLE IF EXISTS joint_rewind
+- sql: DROP TABLE IF EXISTS joint_source_child
+- sql: DROP TABLE IF EXISTS joint_unaccepted
+- sql: DROP TABLE IF EXISTS joint_child
+- sql: DROP TABLE IF EXISTS joint_parent
+- sql: DROP TABLE IF EXISTS joint_rollback_child
+- sql: DROP TABLE IF EXISTS joint_two_child
+- sql: DROP TABLE IF EXISTS joint_two_parent_b
+- sql: DROP TABLE IF EXISTS joint_two_parent_a
+- sql: DROP TABLE IF EXISTS joint_prefix_child
+- sql: DROP TABLE IF EXISTS joint_prefix_parent
+- sql: DROP TABLE IF EXISTS joint_discarded
+- sql: DROP TABLE IF EXISTS joint_audit
+- sql: DROP TABLE IF EXISTS joint_existing
+test_cases:
+- name: Foreign preconditions use the original transaction column declaration
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE joint_fact_child DROP CONSTRAINT joint_fact_reference
+    - connection: owner
+      sql: UPDATE joint_fact_child SET parent_id=0 WHERE parent_id IS NULL
+    - connection: owner
+      sql: ALTER TABLE joint_fact_child ALTER COLUMN parent_id SMALLINT NOT NULL
+    - connection: owner
+      sql: ALTER TABLE joint_fact_child ADD CONSTRAINT joint_fact_reference FOREIGN KEY(parent_id) REFERENCES joint_fact_parent(id) ON UPDATE CASCADE
+    - connection: owner
+      sql: SELECT c.parent_id,CAST(m.is_nullable AS INT) AS nullable FROM joint_fact_child c CROSS JOIN sys.columns m WHERE m.object_id=OBJECT_ID('joint_fact_child') AND m.name='parent_id'
+      expect:
+        rows: 1
+        data: [{parent_id: 0, nullable: 0}]
+    - connection: observer
+      sql: SELECT c.parent_id,CAST(m.is_nullable AS INT) AS nullable FROM joint_fact_child c CROSS JOIN sys.columns m WHERE m.object_id=OBJECT_ID('joint_fact_child') AND m.name='parent_id'
+      expect:
+        rows: 1
+        data: [{parent_id: null, nullable: 1}]
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: UPDATE joint_fact_parent SET id=1 WHERE id=0
+    - connection: observer
+      sql: SELECT c.parent_id,CAST(m.is_nullable AS INT) AS nullable FROM joint_fact_child c CROSS JOIN sys.columns m WHERE m.object_id=OBJECT_ID('joint_fact_child') AND m.name='parent_id'
+      expect:
+        rows: 1
+        data: [{parent_id: 1, nullable: 0}]
+- name: New child and parent enforce privately and publish with one original commit
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE TABLE joint_parent(id INT NOT NULL PRIMARY KEY,code INT)
+    - connection: owner
+      sql: CREATE TABLE joint_child(id INT NOT NULL PRIMARY KEY,parent_id INT)
+    - connection: owner
+      sql: ALTER TABLE joint_child ADD CONSTRAINT joint_child_parent FOREIGN KEY(parent_id) REFERENCES joint_parent(id) ON UPDATE CASCADE
+    - connection: owner
+      sql: INSERT joint_parent VALUES(1,17)
+    - connection: owner
+      sql: INSERT joint_child VALUES(1,1)
+    - connection: owner
+      sql: UPDATE joint_parent SET code=code WHERE id=1
+    - connection: owner
+      sql: UPDATE joint_child SET parent_id=parent_id WHERE id=1
+    - connection: owner
+      sql: SELECT c.id,c.parent_id,p.code FROM joint_child c JOIN joint_parent p ON p.id=c.parent_id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          parent_id: 1
+          code: 17
+    - connection: owner
+      sql: SELECT CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name='joint_child_parent'
+      expect:
+        rows: 1
+        data:
+        - disabled: 0
+          untrusted: 0
+    - connection: observer
+      sql: SELECT CASE WHEN OBJECT_ID('joint_parent','U') IS NULL THEN 0 ELSE 1 END AS parent_present,CASE WHEN OBJECT_ID('joint_child','U') IS
+        NULL THEN 0 ELSE 1 END AS child_present
+      expect:
+        rows: 1
+        data:
+        - parent_present: 0
+          child_present: 0
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT c.id,c.parent_id,p.code FROM joint_child c JOIN joint_parent p ON p.id=c.parent_id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          parent_id: 1
+          code: 17
+- name: Committed child rejects a genuine missing reference
+  sql: INSERT joint_child VALUES(2,999)
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Committed parent rejects deleting a referenced key
+  sql: DELETE FROM joint_parent WHERE id=1
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Crash preserves the accepted joint decision
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart replays the accepted joint declaration and rows
+  action: restart
+- name: Cold rows and enforcing metadata retain the joint decision
+  sql: SELECT c.id,c.parent_id,p.code,CAST(f.is_disabled AS INT) AS disabled,CAST(f.is_not_trusted AS INT) AS untrusted FROM joint_child c JOIN
+    joint_parent p ON p.id=c.parent_id CROSS JOIN sys.foreign_keys f WHERE f.name='joint_child_parent'
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      parent_id: 1
+      code: 17
+      disabled: 0
+      untrusted: 0
+- name: Cold child update retains actual reference enforcement
+  sql: UPDATE joint_child SET parent_id=999 WHERE id=1
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Cold parent update cascades the actual reference and rollback restores both rows
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE joint_parent SET id=2 WHERE id=1
+    - connection: owner
+      sql: SELECT p.id AS parent_id,c.id AS child_id,c.parent_id AS reference_id,p.code FROM joint_parent p JOIN joint_child c ON c.parent_id=p.id
+      expect:
+        rows: 1
+        data:
+        - parent_id: 2
+          child_id: 1
+          reference_id: 2
+          code: 17
+    - connection: observer
+      sql: SELECT p.id AS parent_id,c.id AS child_id,c.parent_id AS reference_id,p.code FROM joint_parent p JOIN joint_child c ON c.parent_id=p.id
+      expect:
+        rows: 1
+        data:
+        - parent_id: 1
+          child_id: 1
+          reference_id: 1
+          code: 17
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+- name: A new child can reference a published parent and roll back without a leaked name
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE TABLE joint_rollback_child(id INT NOT NULL PRIMARY KEY,parent_id INT)
+    - connection: owner
+      sql: ALTER TABLE joint_rollback_child ADD CONSTRAINT joint_rollback_reference FOREIGN KEY(parent_id) REFERENCES joint_parent(id)
+    - connection: owner
+      sql: INSERT joint_rollback_child VALUES(3,1)
+    - connection: owner
+      sql: SELECT id,parent_id FROM joint_rollback_child
+      expect:
+        rows: 1
+        data:
+        - id: 3
+          parent_id: 1
+    - connection: observer
+      sql: SELECT COUNT(*) AS present FROM sys.foreign_keys WHERE name='joint_rollback_reference'
+      expect:
+        rows: 1
+        data:
+        - present: 0
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT CASE WHEN OBJECT_ID('joint_rollback_child','U') IS NULL THEN 0 ELSE 1 END AS child_present
+      expect:
+        rows: 1
+        data:
+        - child_present: 0
+- name: Two different parents and private key rewind retain one ordered history
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE TABLE joint_two_parent_a(id INT NOT NULL PRIMARY KEY,code INT NOT NULL)
+    - connection: owner
+      sql: CREATE TABLE joint_two_parent_b(id INT NOT NULL PRIMARY KEY)
+    - connection: owner
+      sql: CREATE TABLE joint_two_child(id INT NOT NULL PRIMARY KEY,a INT,b INT)
+    - connection: owner
+      sql: SAVE TRANSACTION before_keys
+    - connection: owner
+      sql: ALTER TABLE joint_two_parent_a ADD CONSTRAINT joint_two_code UNIQUE(code)
+    - connection: owner
+      sql: ALTER TABLE joint_two_child ADD CONSTRAINT joint_two_a FOREIGN KEY(a) REFERENCES joint_two_parent_a(code)
+    - connection: owner
+      sql: ALTER TABLE joint_two_child ADD CONSTRAINT joint_two_b FOREIGN KEY(b) REFERENCES joint_two_parent_b(id)
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_keys
+    - connection: owner
+      sql: SELECT COUNT(*) AS present FROM sys.foreign_keys WHERE name IN('joint_two_a','joint_two_b')
+      expect:
+        rows: 1
+        data:
+        - present: 0
+    - connection: owner
+      sql: ALTER TABLE joint_two_parent_a ADD CONSTRAINT joint_two_code UNIQUE(code)
+    - connection: owner
+      sql: ALTER TABLE joint_two_child ADD CONSTRAINT joint_two_a FOREIGN KEY(a) REFERENCES joint_two_parent_a(code)
+    - connection: owner
+      sql: ALTER TABLE joint_two_child ADD CONSTRAINT joint_two_b FOREIGN KEY(b) REFERENCES joint_two_parent_b(id)
+    - connection: owner
+      sql: INSERT joint_two_parent_a VALUES(1,27)
+    - connection: owner
+      sql: INSERT joint_two_parent_b VALUES(2)
+    - connection: owner
+      sql: INSERT joint_two_child VALUES(3,27,2)
+    - connection: owner
+      sql: SELECT c.id,c.a,c.b,p.code FROM joint_two_child c JOIN joint_two_parent_a p ON p.code=c.a JOIN joint_two_parent_b q ON q.id=c.b
+      expect:
+        rows: 1
+        data:
+        - id: 3
+          a: 27
+          b: 2
+          code: 27
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: Second parent reference has actual enforcement
+  sql: INSERT joint_two_child VALUES(4,27,999)
+  expect:
+    error: true
+    contains: foreign key constraint
+- name: Public state and earlier rows can precede a private generation in the same original transaction
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: DISABLE TRIGGER joint_existing_update ON joint_existing
+    - connection: owner
+      sql: UPDATE joint_existing SET value=19 WHERE id=1
+    - connection: owner
+      sql: CREATE TABLE joint_prefix_parent(id INT NOT NULL PRIMARY KEY)
+    - connection: owner
+      sql: CREATE TABLE joint_prefix_child(id INT NOT NULL PRIMARY KEY,parent_id INT)
+    - connection: owner
+      sql: ALTER TABLE joint_prefix_child ADD CONSTRAINT joint_prefix_reference FOREIGN KEY(parent_id) REFERENCES joint_prefix_parent(id)
+    - connection: owner
+      sql: INSERT joint_prefix_parent VALUES(5)
+    - connection: owner
+      sql: INSERT joint_prefix_child VALUES(6,5)
+    - connection: owner
+      sql: SELECT e.value,c.id,c.parent_id FROM joint_existing e CROSS JOIN joint_prefix_child c
+      expect:
+        rows: 1
+        data:
+        - value: 19
+          id: 6
+          parent_id: 5
+    - connection: observer
+      sql: SELECT value FROM joint_existing WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 7
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT e.value,c.id,c.parent_id FROM joint_existing e CROSS JOIN joint_prefix_child c
+      expect:
+        rows: 1
+        data:
+        - value: 19
+          id: 6
+          parent_id: 5
+- name: Public trigger state and rows roll back across an owned CREATE savepoint
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ENABLE TRIGGER joint_existing_update ON joint_existing
+    - connection: owner
+      sql: UPDATE joint_existing SET value=23 WHERE id=1
+    - connection: owner
+      sql: SAVE TRANSACTION before_create
+    - connection: owner
+      sql: CREATE TABLE joint_discarded(id INT NOT NULL PRIMARY KEY)
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_create
+    - connection: owner
+      sql: SELECT value FROM joint_existing WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 23
+    - connection: owner
+      sql: SELECT CASE WHEN OBJECT_ID('joint_discarded','U') IS NULL THEN 0 ELSE 1 END AS present
+      expect:
+        rows: 1
+        data:
+        - present: 0
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT value FROM joint_existing WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 19
+    - connection: observer
+      sql: SELECT COUNT(*) AS audit_rows FROM joint_audit
+      expect:
+        rows: 1
+        data:
+        - audit_rows: 0
+- name: Retained original leases bind first DELETE and UPDATE after private key and FK rewind
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: ALTER TABLE joint_existing ADD CONSTRAINT joint_existing_default DEFAULT 7 FOR value
+    - connection: owner
+      sql: CREATE TABLE joint_rewind(id INT NOT NULL PRIMARY KEY,code INT NOT NULL,parent_id INT)
+    - connection: owner
+      sql: SAVE TRANSACTION before_key
+    - connection: owner
+      sql: ALTER TABLE joint_rewind ADD CONSTRAINT joint_rewind_code UNIQUE(code)
+    - connection: owner
+      sql: ALTER TABLE joint_rewind ADD CONSTRAINT joint_rewind_reference FOREIGN KEY(parent_id) REFERENCES joint_existing(id)
+    - connection: owner
+      sql: ROLLBACK TRANSACTION before_key
+    - connection: owner
+      sql: DELETE FROM joint_rewind WHERE id=99
+      expect:
+        affected_rows: 0
+    - connection: owner
+      sql: UPDATE joint_rewind SET code=17 WHERE id=99
+      expect:
+        affected_rows: 0
+    - connection: owner
+      sql: INSERT joint_rewind VALUES(1,10,1),(2,20,1)
+    - connection: owner
+      sql: UPDATE joint_rewind SET code=17 WHERE id=1
+    - connection: owner
+      sql: INSERT joint_rewind VALUES(3,17,1)
+    - connection: owner
+      sql: SELECT id,code,parent_id FROM joint_rewind ORDER BY id
+      expect:
+        rows: 3
+        data:
+        - id: 1
+          code: 17
+          parent_id: 1
+        - id: 2
+          code: 20
+          parent_id: 1
+        - id: 3
+          code: 17
+          parent_id: 1
+    - connection: owner
+      sql: SELECT COUNT(*) AS present FROM sys.foreign_keys WHERE name='joint_rewind_reference'
+      expect:
+        rows: 1
+        data:
+        - present: 0
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: Published child validation reads the original owned-parent row overlay
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE TABLE joint_overlay_parent(id INT NOT NULL PRIMARY KEY)
+    - connection: owner
+      sql: INSERT joint_overlay_parent VALUES(1)
+    - connection: owner
+      sql: ALTER TABLE joint_published_child ADD CONSTRAINT joint_overlay_reference FOREIGN KEY(parent_id) REFERENCES joint_overlay_parent(id)
+    - connection: owner
+      sql: INSERT joint_published_child VALUES(11,1)
+    - connection: owner
+      sql: SELECT c.id,c.parent_id FROM joint_published_child c JOIN joint_overlay_parent p ON p.id=c.parent_id ORDER BY c.id
+      expect:
+        rows: 2
+        data:
+        - id: 10
+          parent_id: 1
+        - id: 11
+          parent_id: 1
+    - connection: observer
+      sql: SELECT id,parent_id FROM joint_published_child ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 10
+          parent_id: 1
+    - connection: owner
+      sql: ROLLBACK TRANSACTION
+    - connection: observer
+      sql: SELECT id,parent_id FROM joint_published_child ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 10
+          parent_id: 1
+- name: Public callable source and private key declaration retain one accepted decision
+  tds:
+    statements:
+    - connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: CREATE PROCEDURE joint_source AS SELECT 37 AS value
+    - connection: owner
+      sql: CREATE TABLE joint_source_child(id INT NOT NULL PRIMARY KEY,parent_id INT,code INT NOT NULL)
+    - connection: owner
+      sql: ALTER TABLE joint_source_child ADD CONSTRAINT joint_source_code UNIQUE(code)
+    - connection: owner
+      sql: ALTER TABLE joint_source_child ADD CONSTRAINT joint_source_reference FOREIGN KEY(parent_id) REFERENCES joint_existing(id)
+    - connection: owner
+      sql: INSERT joint_source_child VALUES(12,1,47)
+    - connection: owner
+      sql: EXEC joint_source
+      expect:
+        rows: 1
+        data:
+        - value: 37
+    - connection: owner
+      sql: COMMIT TRANSACTION
+- name: Prior rows and joined FK include the actual SQL view participant in one decision
+  tds:
+    statements:
+    - &id001
+      connection: owner
+      sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    - &id002
+      connection: owner
+      sql: BEGIN TRANSACTION
+    - connection: owner
+      sql: UPDATE joint_existing SET value=29 WHERE id=1
+    - connection: owner
+      sql: CREATE TABLE joint_participant_child(id INT NOT NULL PRIMARY KEY,parent_id INT,value INT)
+    - connection: owner
+      sql: ALTER TABLE joint_participant_child ADD CONSTRAINT joint_participant_reference FOREIGN KEY(parent_id) REFERENCES joint_existing(id)
+    - connection: owner
+      sql: INSERT joint_participant_child VALUES(31,1,53)
+    - connection: owner
+      sql: CREATE VIEW joint_participant_view AS SELECT id,parent_id,value FROM joint_participant_child
+    - connection: owner
+      sql: SELECT id,parent_id,value FROM joint_participant_view
+      expect:
+        rows: 1
+        data:
+        - id: 31
+          parent_id: 1
+          value: 53
+    - connection: observer
+      sql: SELECT CASE WHEN OBJECT_ID('joint_participant_view','V') IS NULL THEN 0 ELSE 1 END AS present
+      expect:
+        rows: 1
+        data:
+        - present: 0
+    - connection: observer
+      sql: SELECT value FROM joint_existing WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 19
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id,parent_id,value FROM joint_participant_view
+      expect:
+        rows: 1
+        data:
+        - id: 31
+          parent_id: 1
+          value: 53
+    - connection: observer
+      sql: SELECT value FROM joint_existing WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 29
+- name: Failed first public FK validation preserves earlier private key undo and original rows
+  scm: "(begin\n  (define owner (newsession)) (owner \"username\" \"root\") (tx_begin_acid owner)\n  (define tx (owner \"__memcp_tx\"))\n  (try\
+    \ (lambda () (begin\n    (createtable \"memcp-tests\" \"joint_failed\" (list\n      (list \"column\" \"id\" \"INT\" (list) (list))\n     \
+    \ (list \"column\" \"parent_id\" \"INT\" (list) (list))\n      (list \"column\" \"code\" \"INT\" (list) (list))) '(\"engine\" \"safe\") false\
+    \ tx)\n    (define child (table \"memcp-tests\" false \"joint_failed\" false tx))\n    (define parent (table \"memcp-tests\" false \"joint_existing\"\
+    \ false tx))\n    (define boundary (tx_savepoint tx))\n    (createkey child \"joint_failed_code\" true '(\"code\") tx)\n    (insert child\
+    \ '(\"id\" \"parent_id\" \"code\") (list (list 1 999 7)) '() nil false nil tx)\n    (define rejected (try (lambda () (begin\n      (createforeignkey\
+    \ child \"joint_failed_reference\" '(\"parent_id\") parent '(\"id\") \"restrict\" \"restrict\" tx)\n      false)) (lambda (failure) (strlike\
+    \ (concat failure) \"%existing child row has no parent%\"))))\n    (define before (list rejected (tx_state tx) (count ((show child \"constraints\"\
+    \ tx) \"Unique\"))\n      (scan tx child '() '() '() (lambda () true) '(\"parent_id\") + 0 +)))\n    (tx_rollback_to_savepoint tx boundary)\n\
+    \    (insert child '(\"id\" \"parent_id\" \"code\") (list (list 2 1 7) (list 3 1 7)) '() nil false nil tx)\n    (define after (list (count\
+    \ ((show child \"constraints\" tx) \"Unique\"))\n      (scan tx child '() '() '() (lambda () true) '(\"id\") + 0 +)\n      (scan tx child\
+    \ '() '() '() (lambda () true) '(\"code\") + 0 +)\n      (count ((show child \"constraints\" tx) \"ForeignKeys\"))))\n    (tx_rollback owner)\n\
+    \    (list before after (nil? (table \"memcp-tests\" false \"joint_failed\" false nil)))))\n    (lambda (failure) (begin (tx_rollback owner)\
+    \ (error failure)))))"
+  expect:
+    result:
+    - - true
+      - active
+      - 1
+      - 999
+    - - 0
+      - 5
+      - 14
+      - 0
+    - true
+- name: Unaccepted original HTTP owner retains its private generation until crash
+  session_id: joint-unaccepted-crash
+  steps:
+  - sql: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+    session_id: joint-unaccepted-crash
+  - sql: BEGIN TRANSACTION
+    session_id: joint-unaccepted-crash
+  - sql: CREATE TABLE joint_unaccepted(id INT NOT NULL PRIMARY KEY,parent_id INT)
+    session_id: joint-unaccepted-crash
+  - sql: ALTER TABLE joint_unaccepted ADD CONSTRAINT joint_unaccepted_reference FOREIGN KEY(parent_id) REFERENCES joint_existing(id)
+    session_id: joint-unaccepted-crash
+  - sql: INSERT joint_unaccepted VALUES(9,1)
+    session_id: joint-unaccepted-crash
+  - sql: SELECT id,parent_id FROM joint_unaccepted
+    expect:
+      rows: 1
+      data:
+      - id: 9
+        parent_id: 1
+    session_id: joint-unaccepted-crash
+- name: Observer cannot see the still-active original owner before crash
+  session_id: joint-unaccepted-observer
+  sql: SELECT CASE WHEN OBJECT_ID('joint_unaccepted','U') IS NULL THEN 0 ELSE 1 END AS present,(SELECT COUNT(*) FROM sys.foreign_keys WHERE name='joint_unaccepted_reference')
+    AS foreign_count
+  expect:
+    rows: 1
+    data:
+    - present: 0
+      foreign_count: 0
+- name: Crash discards the unaccepted joint decision
+  scm: (crash)
+  expect:
+    interrupted_ok: true
+- name: Restart retains accepted joint sources and discards unaccepted names
+  action: restart
+- name: Cold accepted rows survive while unaccepted catalog and FK do not
+  sql: SELECT id,code,parent_id FROM joint_rewind ORDER BY id
+  expect:
+    rows: 3
+    data:
+    - id: 1
+      code: 17
+      parent_id: 1
+    - id: 2
+      code: 20
+      parent_id: 1
+    - id: 3
+      code: 17
+      parent_id: 1
+- name: Cold accepted source still executes
+  sql: EXEC joint_source
+  expect:
+    rows: 1
+    data:
+    - value: 37
+- name: Cold recovery omits unaccepted generation and reference
+  sql: SELECT CASE WHEN OBJECT_ID('joint_unaccepted','U') IS NULL THEN 0 ELSE 1 END AS present,(SELECT COUNT(*) FROM sys.foreign_keys WHERE name='joint_unaccepted_reference')
+    AS foreign_count
+  expect:
+    rows: 1
+    data:
+    - present: 0
+      foreign_count: 0
+- name: Cold joint decision retains the real SQL view participant and its complete rows
+  sql: SELECT id,parent_id,value FROM joint_participant_view
+  expect:
+    rows: 1
+    data:
+    - id: 31
+      parent_id: 1
+      value: 53
+- name: Future create-first table removal and creation retain complete SQL results
+  tds:
+    statements:
+    - *id001
+    - *id002
+    - connection: owner
+      sql: CREATE TABLE joint_drop_new_a(id INT)
+    - connection: owner
+      sql: DROP TABLE joint_drop_old_a
+    - connection: owner
+      sql: INSERT joint_drop_new_a VALUES(71)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id FROM joint_drop_new_a
+      expect:
+        rows: 1
+        data:
+        - id: 71
+    - connection: observer
+      sql: SELECT CASE WHEN OBJECT_ID('joint_drop_old_a','U') IS NULL THEN 0 ELSE 1 END AS present
+      expect:
+        rows: 1
+        data:
+        - present: 0
+  noncritical: true
+- name: Future drop-first table removal and creation retain complete SQL results
+  tds:
+    statements:
+    - *id001
+    - *id002
+    - connection: owner
+      sql: DROP TABLE joint_drop_old_b
+    - connection: owner
+      sql: CREATE TABLE joint_drop_new_b(id INT)
+    - connection: owner
+      sql: INSERT joint_drop_new_b VALUES(73)
+    - connection: owner
+      sql: COMMIT TRANSACTION
+    - connection: observer
+      sql: SELECT id FROM joint_drop_new_b
+      expect:
+        rows: 1
+        data:
+        - id: 73
+    - connection: observer
+      sql: SELECT CASE WHEN OBJECT_ID('joint_drop_old_b','U') IS NULL THEN 0 ELSE 1 END AS present
+      expect:
+        rows: 1
+        data:
+        - present: 0
+  noncritical: true

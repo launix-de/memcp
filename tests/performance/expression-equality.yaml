@@ -1,0 +1,23 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Fixed four-row values, 500000 comparisons, one retained measured sample.
+metadata:
+  description: Compare complete immutable expression data without coercive scalar dispatch
+  isolated: true
+test_cases:
+- name: Fixed immutable expression data comparisons
+  performance_rows: 500000
+  warmup: 0
+  timing_samples: 1
+  timing_aggregation: total
+  threshold_ms: 2000
+  scm: |
+    (begin
+      (define build_values (lambda () (map (produceN 4) (lambda (i)
+        (list "label" (concat "item" i) "nullable" nil "valid" true "ordinal" i
+          "width" 12.5 "dimensions" (list 16 4) "flags" (list false true))))))
+      (define left (build_values)) (define right (build_values))
+      (define compare (jit (eval (optimize (scheme
+        "(lambda (left right) (reduce_range 500000 (lambda (same index) (and same (expression_equal? left right))) true))")))))
+      (and (not (identical? left right)) (compare left right)))
+  expect: {result: true}

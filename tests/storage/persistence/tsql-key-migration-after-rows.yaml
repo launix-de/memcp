@@ -1,0 +1,258 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  syntax: tsql
+  isolated: true
+  requires_tds: true
+  description: Existing rows precede composite key replacement and native nonnull validation in one original transaction
+setup:
+- sql: DROP TABLE IF EXISTS migration_adjustment
+- sql: DROP TABLE IF EXISTS migration_extra
+- sql: DROP TABLE IF EXISTS migration_entitlement
+- sql: DROP TABLE IF EXISTS migration_staff
+- sql: DROP TABLE IF EXISTS migration_marker
+- sql: CREATE TABLE migration_staff(team INT NOT NULL,person INT NOT NULL,CONSTRAINT PK_migration_staff PRIMARY KEY(team,person))
+- sql: CREATE TABLE migration_entitlement(team INT NOT NULL,person INT NOT NULL,starts DATETIME NULL,value INT,CONSTRAINT
+    PK_migration_entitlement PRIMARY KEY(team,person))
+- sql: CREATE TABLE migration_adjustment(team INT NOT NULL,person INT NOT NULL,starts DATETIME NULL,kind INT NOT NULL,value
+    INT,CONSTRAINT PK_migration_adjustment PRIMARY KEY(team,person,kind))
+- sql: CREATE TABLE migration_extra(team INT NOT NULL,person INT NOT NULL,starts DATETIME NULL,kind INT NOT NULL,value INT,CONSTRAINT
+    PK_migration_extra PRIMARY KEY(team,person,kind))
+- sql: CREATE TABLE migration_marker(id INT PRIMARY KEY,value INT)
+- sql: INSERT migration_staff VALUES(1,11),(1,22)
+- sql: INSERT migration_entitlement VALUES(1,11,'20240101',1),(1,33,'20240101',2)
+- sql: INSERT migration_adjustment VALUES(1,11,'20240101',1,10),(1,33,'20240101',1,20)
+- sql: INSERT migration_extra VALUES(1,11,'20240101',1,40),(1,33,'20240101',1,50)
+- sql: INSERT migration_marker VALUES(1,0)
+- sql: ALTER TABLE migration_entitlement WITH NOCHECK ADD CONSTRAINT FK_migration_entitlement_staff FOREIGN KEY(team,person)
+    REFERENCES migration_staff(team,person)
+- sql: ALTER TABLE migration_adjustment ADD CONSTRAINT FK_migration_adjustment_parent FOREIGN KEY(team,person) REFERENCES
+    migration_entitlement(team,person)
+- sql: ALTER TABLE migration_extra ADD CONSTRAINT FK_migration_extra_parent FOREIGN KEY(team,person) REFERENCES migration_entitlement(team,person)
+test_cases:
+- name: Cleanup and composite key replacement remain private and rollback restores rows and declarations
+  tds:
+    statements:
+    - connection: owner
+      sql: BEGIN TRAN
+    - connection: owner
+      sql: UPDATE migration_marker SET value=99 WHERE id=1
+    - connection: owner
+      sql: DELETE FROM migration_extra FROM migration_extra AS u LEFT JOIN migration_staff AS a ON u.team=a.team AND u.person=a.person
+        WHERE a.person IS NULL
+    - connection: owner
+      sql: DELETE FROM migration_adjustment FROM migration_adjustment AS u LEFT JOIN migration_staff AS a ON u.team=a.team
+        AND u.person=a.person WHERE a.person IS NULL
+    - connection: owner
+      sql: DELETE FROM migration_entitlement FROM migration_entitlement AS u LEFT JOIN migration_staff AS a ON u.team=a.team
+        AND u.person=a.person WHERE a.person IS NULL
+    - connection: owner
+      sql: ALTER TABLE migration_adjustment DROP CONSTRAINT FK_migration_adjustment_parent
+    - connection: owner
+      sql: ALTER TABLE migration_extra DROP CONSTRAINT FK_migration_extra_parent
+    - connection: owner
+      sql: ALTER TABLE migration_entitlement DROP CONSTRAINT FK_migration_entitlement_staff
+    - connection: owner
+      sql: ALTER TABLE migration_entitlement DROP CONSTRAINT PK_migration_entitlement
+    - connection: owner
+      sql: ALTER TABLE migration_adjustment DROP CONSTRAINT PK_migration_adjustment
+    - connection: owner
+      sql: ALTER TABLE migration_extra DROP CONSTRAINT PK_migration_extra
+    - connection: owner
+      sql: ALTER TABLE migration_entitlement ALTER COLUMN starts DATETIME NOT NULL
+    - connection: owner
+      sql: ALTER TABLE migration_entitlement ADD CONSTRAINT PK_migration_entitlement PRIMARY KEY NONCLUSTERED(team,person,StArTs)
+    - connection: owner
+      sql: ALTER TABLE migration_adjustment ALTER COLUMN starts DATETIME NOT NULL
+    - connection: owner
+      sql: ALTER TABLE migration_adjustment ADD CONSTRAINT PK_migration_adjustment PRIMARY KEY NONCLUSTERED(team,person,starts,kind)
+    - connection: owner
+      sql: ALTER TABLE migration_extra ALTER COLUMN starts DATETIME NOT NULL
+    - connection: owner
+      sql: ALTER TABLE migration_extra ADD CONSTRAINT PK_migration_extra PRIMARY KEY NONCLUSTERED(team,person,starts,kind)
+    - connection: owner
+      sql: ALTER TABLE migration_adjustment ADD CONSTRAINT FK_migration_adjustment_parent FOREIGN KEY(team,person,starts)
+        REFERENCES migration_entitlement(team,person,starts) ON DELETE CASCADE ON UPDATE CASCADE
+    - connection: owner
+      sql: ALTER TABLE migration_extra ADD CONSTRAINT FK_migration_extra_parent FOREIGN KEY(team,person,starts) REFERENCES
+        migration_entitlement(team,person,starts) ON DELETE CASCADE ON UPDATE CASCADE
+    - connection: owner
+      sql: ALTER TABLE migration_entitlement ADD CONSTRAINT FK_migration_entitlement_staff FOREIGN KEY(team,person) REFERENCES
+        migration_staff(team,person) ON DELETE CASCADE ON UPDATE CASCADE
+    - connection: owner
+      sql: SELECT team,person,value FROM migration_entitlement ORDER BY person
+      expect:
+        rows: 1
+        data:
+        - team: 1
+          person: 11
+          value: 1
+    - connection: owner
+      sql: SELECT team,person,value FROM migration_adjustment ORDER BY person
+      expect:
+        rows: 1
+        data:
+        - team: 1
+          person: 11
+          value: 10
+    - connection: owner
+      sql: SELECT team,person,value FROM migration_extra ORDER BY person
+      expect:
+        rows: 1
+        data:
+        - team: 1
+          person: 11
+          value: 40
+    - connection: owner
+      sql: SELECT is_nullable FROM sys.columns WHERE object_id=OBJECT_ID('migration_entitlement') AND name=N'starts'
+      expect:
+        rows: 1
+        data:
+        - is_nullable: false
+    - connection: observer
+      sql: SELECT team,person,value FROM migration_entitlement ORDER BY person
+      expect:
+        rows: 2
+        data:
+        - team: 1
+          person: 11
+          value: 1
+        - team: 1
+          person: 33
+          value: 2
+    - connection: owner
+      sql: ROLLBACK TRAN
+    - connection: observer
+      sql: SELECT team,person,value FROM migration_entitlement ORDER BY person
+      expect:
+        rows: 2
+        data:
+        - team: 1
+          person: 11
+          value: 1
+        - team: 1
+          person: 33
+          value: 2
+    - connection: observer
+      sql: SELECT team,person,value FROM migration_adjustment ORDER BY person
+      expect:
+        rows: 2
+        data:
+        - team: 1
+          person: 11
+          value: 10
+        - team: 1
+          person: 33
+          value: 20
+    - connection: observer
+      sql: SELECT team,person,value FROM migration_extra ORDER BY person
+      expect:
+        rows: 2
+        data:
+        - team: 1
+          person: 11
+          value: 40
+        - team: 1
+          person: 33
+          value: 50
+    - connection: observer
+      sql: SELECT is_nullable FROM sys.columns WHERE object_id=OBJECT_ID('migration_entitlement') AND name=N'starts'
+      expect:
+        rows: 1
+        data:
+        - is_nullable: true
+    - connection: observer
+      sql: SELECT value FROM migration_marker WHERE id=1
+      expect:
+        rows: 1
+        data:
+        - value: 0
+    timeout: 30
+- name: Committed replacement accepts the expanded key and cascades through both child declarations
+  tds:
+    statements:
+    - connection: commit-owner
+      sql: BEGIN TRAN
+    - connection: commit-owner
+      sql: UPDATE migration_marker SET value=99 WHERE id=1
+    - connection: commit-owner
+      sql: DELETE FROM migration_extra FROM migration_extra AS u LEFT JOIN migration_staff AS a ON u.team=a.team AND u.person=a.person
+        WHERE a.person IS NULL
+    - connection: commit-owner
+      sql: DELETE FROM migration_adjustment FROM migration_adjustment AS u LEFT JOIN migration_staff AS a ON u.team=a.team
+        AND u.person=a.person WHERE a.person IS NULL
+    - connection: commit-owner
+      sql: DELETE FROM migration_entitlement FROM migration_entitlement AS u LEFT JOIN migration_staff AS a ON u.team=a.team
+        AND u.person=a.person WHERE a.person IS NULL
+    - connection: commit-owner
+      sql: ALTER TABLE migration_adjustment DROP CONSTRAINT FK_migration_adjustment_parent
+    - connection: commit-owner
+      sql: ALTER TABLE migration_extra DROP CONSTRAINT FK_migration_extra_parent
+    - connection: commit-owner
+      sql: ALTER TABLE migration_entitlement DROP CONSTRAINT FK_migration_entitlement_staff
+    - connection: commit-owner
+      sql: ALTER TABLE migration_entitlement DROP CONSTRAINT PK_migration_entitlement
+    - connection: commit-owner
+      sql: ALTER TABLE migration_adjustment DROP CONSTRAINT PK_migration_adjustment
+    - connection: commit-owner
+      sql: ALTER TABLE migration_extra DROP CONSTRAINT PK_migration_extra
+    - connection: commit-owner
+      sql: ALTER TABLE migration_entitlement ALTER COLUMN starts DATETIME NOT NULL
+    - connection: commit-owner
+      sql: ALTER TABLE migration_entitlement ADD CONSTRAINT PK_migration_entitlement PRIMARY KEY NONCLUSTERED(team,person,StArTs)
+    - connection: commit-owner
+      sql: ALTER TABLE migration_adjustment ALTER COLUMN starts DATETIME NOT NULL
+    - connection: commit-owner
+      sql: ALTER TABLE migration_adjustment ADD CONSTRAINT PK_migration_adjustment PRIMARY KEY NONCLUSTERED(team,person,starts,kind)
+    - connection: commit-owner
+      sql: ALTER TABLE migration_extra ALTER COLUMN starts DATETIME NOT NULL
+    - connection: commit-owner
+      sql: ALTER TABLE migration_extra ADD CONSTRAINT PK_migration_extra PRIMARY KEY NONCLUSTERED(team,person,starts,kind)
+    - connection: commit-owner
+      sql: ALTER TABLE migration_adjustment ADD CONSTRAINT FK_migration_adjustment_parent FOREIGN KEY(team,person,starts)
+        REFERENCES migration_entitlement(team,person,starts) ON DELETE CASCADE ON UPDATE CASCADE
+    - connection: commit-owner
+      sql: ALTER TABLE migration_extra ADD CONSTRAINT FK_migration_extra_parent FOREIGN KEY(team,person,starts) REFERENCES
+        migration_entitlement(team,person,starts) ON DELETE CASCADE ON UPDATE CASCADE
+    - connection: commit-owner
+      sql: ALTER TABLE migration_entitlement ADD CONSTRAINT FK_migration_entitlement_staff FOREIGN KEY(team,person) REFERENCES
+        migration_staff(team,person) ON DELETE CASCADE ON UPDATE CASCADE
+    - connection: commit-owner
+      sql: COMMIT TRAN
+    - connection: commit-owner
+      sql: INSERT migration_entitlement VALUES(1,11,'20250101',3); INSERT migration_adjustment VALUES(1,11,'20250101',1,30);
+        SELECT team,person,value FROM migration_adjustment ORDER BY starts
+      expect:
+        rows: 2
+        data:
+        - team: 1
+          person: 11
+          value: 10
+        - team: 1
+          person: 11
+          value: 30
+    - connection: commit-owner
+      sql: DELETE migration_staff WHERE team=1 AND person=11; SELECT COUNT(*) AS n FROM migration_entitlement
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: commit-owner
+      sql: SELECT COUNT(*) AS n FROM migration_adjustment
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    - connection: commit-owner
+      sql: SELECT COUNT(*) AS n FROM migration_extra
+      expect:
+        rows: 1
+        data:
+        - n: 0
+    timeout: 30
+cleanup:
+- sql: DROP TABLE IF EXISTS migration_adjustment
+- sql: DROP TABLE IF EXISTS migration_extra
+- sql: DROP TABLE IF EXISTS migration_entitlement
+- sql: DROP TABLE IF EXISTS migration_staff
+- sql: DROP TABLE IF EXISTS migration_marker

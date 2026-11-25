@@ -56,7 +56,7 @@ func TestJITMapReduceBufferBestOf(t *testing.T) {
 		t.Fatalf("implausible calibrated buffer break-even: %d", minimumRows)
 	}
 	shard := benchmarkMapReduceFusionShard(minimumRows + 1)
-	mapper := shard.OpenMapReducer([]string{"amount"}, callback, false, 0, nil, nil)
+	mapper := shard.OpenMapReducer([]string{"amount"}, callback, false, 0, nil, nil, shard.t.bindColumnInput(nil))
 	defer mapper.Close()
 	if mapper.bufferReduceProc == nil || mapper.bufferMinRows <= 1 {
 		t.Fatalf("simple typed reducer was not admitted: proc=%p min_rows=%d", mapper.bufferReduceProc, mapper.bufferMinRows)
@@ -82,7 +82,7 @@ func TestJITMapReduceBufferBestOf(t *testing.T) {
 		t.Fatalf("profitable reducer did not compile: min=%d columns=%d kind=%d", mapper.bufferMinRows, mapper.bufferColumnCount, mapper.mapReduceProgram.Kind)
 	}
 	count := benchmarkMapReduceFusionProc(t, "(lambda (acc) (+ acc 1))")
-	countMapper := shard.OpenMapReducer(nil, count, false, 0, nil, nil)
+	countMapper := shard.OpenMapReducer(nil, count, false, 0, nil, nil, shard.t.bindColumnInput(nil))
 	defer countMapper.Close()
 	if countMapper.bufferReduceProc == nil {
 		t.Fatal("zero-column accumulator reducer was not admitted")
@@ -103,7 +103,7 @@ func TestJITMapReduceBufferBestOf(t *testing.T) {
 	if sumBinding == nil {
 		t.Fatal("sql_sum_reduce is not registered")
 	}
-	nativeMapper := shard.OpenMapReducer([]string{"amount"}, sumBinding.Vars[scm.Symbol("sql_sum_reduce")], false, 0, nil, nil)
+	nativeMapper := shard.OpenMapReducer([]string{"amount"}, sumBinding.Vars[scm.Symbol("sql_sum_reduce")], false, 0, nil, nil, shard.t.bindColumnInput(nil))
 	defer nativeMapper.Close()
 	if nativeMapper.bufferReduceProc == nil {
 		wrapped := scm.PrepareJITBufferProc(sumBinding.Vars[scm.Symbol("sql_sum_reduce")], 2)
@@ -122,14 +122,14 @@ func TestJITMapReduceBufferBestOf(t *testing.T) {
 	// probe. A fixed short shard tests rejection independently of timer noise.
 	shortShard := benchmarkMapReduceFusionShard(len(ids))
 	complex := benchmarkMapReduceFusionProc(t, "(lambda (acc amount) (+ acc (* amount 3)))")
-	complexMapper := shortShard.OpenMapReducer([]string{"amount"}, complex, false, 0, nil, nil)
+	complexMapper := shortShard.OpenMapReducer([]string{"amount"}, complex, false, 0, nil, nil, shortShard.t.bindColumnInput(nil))
 	defer complexMapper.Close()
 	if complexMapper.bufferReduceProc != nil {
 		t.Fatal("short expression reduction should not pay for adaptive compilation")
 	}
 
 	wide := benchmarkMapReduceFusionProc(t, "(lambda (acc amount quantity) (+ acc (* amount quantity)))")
-	wideMapper := shortShard.OpenMapReducer([]string{"amount", "quantity"}, wide, false, 0, nil, nil)
+	wideMapper := shortShard.OpenMapReducer([]string{"amount", "quantity"}, wide, false, 0, nil, nil, shortShard.t.bindColumnInput(nil))
 	defer wideMapper.Close()
 	if wideMapper.bufferReduceProc != nil {
 		t.Fatal("short wide reduction should not pay for adaptive compilation")
@@ -137,7 +137,7 @@ func TestJITMapReduceBufferBestOf(t *testing.T) {
 
 	largeShard := benchmarkMapReduceFusionShard(mapReduceFusionBenchmarkRows)
 	expression := benchmarkMapReduceFusionProc(t, "(lambda (acc amount quantity factor) (+ acc (+ amount (* quantity factor))))")
-	expressionMapper := largeShard.OpenMapReducer([]string{"amount", "quantity", "factor"}, expression, false, 0, nil, nil)
+	expressionMapper := largeShard.OpenMapReducer([]string{"amount", "quantity", "factor"}, expression, false, 0, nil, nil, largeShard.t.bindColumnInput(nil))
 	defer expressionMapper.Close()
 	wantExpression := expressionMapper.Stream(scm.NewInt(0), ids, nil)
 	expressionMapper.prefetchMainColumns(ids)
@@ -152,7 +152,7 @@ func TestJITMapReduceBufferBestOf(t *testing.T) {
 	if got := kernel(scm.NewInt(0), expressionMapper.mainBulkValues, len(ids)); !scm.Equal(got, wantExpression) {
 		t.Fatalf("typed expression reducer = %s, want %s", scm.String(got), scm.String(wantExpression))
 	}
-	lifecycleMapper := largeShard.OpenMapReducer([]string{"amount", "quantity", "factor"}, expression, false, 0, nil, nil)
+	lifecycleMapper := largeShard.OpenMapReducer([]string{"amount", "quantity", "factor"}, expression, false, 0, nil, nil, largeShard.t.bindColumnInput(nil))
 	lifecycleMapper.prefetchMainColumns(ids)
 	if len(lifecycleMapper.mainBulkValues) == 0 {
 		t.Fatal("lifecycle test did not allocate the query-local value buffer")
@@ -174,7 +174,7 @@ func TestJITMapReduceCompilationUsesRemainingRows(t *testing.T) {
 	if _, processed := unsafeProbe.processJITBuffer(container, []uint32{0}); processed || !unsafeProbe.bufferRejected || unsafeProbe.bufferReduceFn != nil {
 		t.Fatal("a mutable accumulator entered the replay probe")
 	}
-	mapper := shard.OpenMapReducer([]string{"amount"}, callback, false, 0, nil, nil)
+	mapper := shard.OpenMapReducer([]string{"amount"}, callback, false, 0, nil, nil, shard.t.bindColumnInput(nil))
 	defer mapper.Close()
 	// Force a deterministic threshold, independent of startup timer noise.
 	mapper.bufferReduceProc = callback.Proc()
@@ -282,7 +282,7 @@ func BenchmarkMapReduceBufferedSpectrum(b *testing.B) {
 
 	for _, shape := range shapes {
 		callback := benchmarkMapReduceFusionProc(b, shape.source)
-		mapper := shard.OpenMapReducer(shape.cols, callback, false, 0, nil, nil)
+		mapper := shard.OpenMapReducer(shape.cols, callback, false, 0, nil, nil, shard.t.bindColumnInput(nil))
 		defer mapper.Close()
 		valueTypes := make([]uint8, len(mapper.mainCols))
 		for index, column := range mapper.mainCols {
@@ -400,13 +400,13 @@ func BenchmarkMapReduceBufferedBestOf(b *testing.B) {
 					for _, id := range recids[:rowCount] {
 						args[0] = want
 						for col, name := range shape.cols {
-							args[col+1] = shard.getColumnStorageOrPanic(name, false, nil).GetValue(id)
+							args[col+1] = shard.getColumnStorageInput(name, false, shard.initializedColumnInput(shard.t.bindColumnInput(nil)), nil).GetValue(id)
 						}
 						want = scm.Apply(callback, args...)
 					}
 					b.ResetTimer()
 					for sample := 0; sample < b.N; sample++ {
-						mapper := shard.OpenMapReducer(shape.cols, callback, false, 0, nil, nil)
+						mapper := shard.OpenMapReducer(shape.cols, callback, false, 0, nil, nil, shard.t.bindColumnInput(nil))
 						if mode == "Baseline" {
 							mapper.bufferReduceProc = nil
 						}

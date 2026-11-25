@@ -1,0 +1,71 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  isolated: true
+  description: Complete scalar invocation coordinates retain typed expression identity
+test_cases:
+- name: Distinct NULL zero and text coordinates execute with their own bound values
+  scm: |
+    (begin
+      (define column (list 'get_column "caller" false "flag" false))
+      (define null_key (list 'if column nil 1))
+      (define zero_key (list 'if column 0 1))
+      (define text_key (list 'if column "0" 1))
+      (define coordinates (list null_key zero_key text_key))
+      (define parameters (list 'null_value 'zero_value 'text_value))
+      (define bindings (scalar_query_probe_param_index coordinates coordinates parameters))
+      (define program (rewrite_scalar_query_probe_params bindings (cons 'list coordinates)))
+      (eval (list (list 'lambda parameters program) nil 0 "0")))
+  expect: {data: [[null,0,"0"]]}
+- name: Binding complete coordinates never changes quoted user data
+  scm: |
+    (begin
+      (define column (list 'get_column "caller" false "flag" false))
+      (define null_key (list 'if column nil 1))
+      (define zero_key (list 'if column 0 1))
+      (define coordinates (list null_key zero_key))
+      (define bindings (scalar_query_probe_param_index coordinates coordinates (list 'null_value 'zero_value)))
+      (define datum (list 'quote coordinates))
+      (define preserved (eval (rewrite_scalar_query_probe_params bindings datum)))
+      (list (nth (nth preserved 0) 2) (nth (nth preserved 1) 2)))
+  expect: {data: [[null,0]]}
+- name: Binding an entire computed coordinate does not capture its constituent column
+  scm: |
+    (begin
+      (define column (list 'get_column "caller" false "id" false))
+      (define coordinate (list '+ column 1))
+      (define bindings (scalar_query_probe_param_index (list coordinate) (list coordinate) (list 'computed_value)))
+      (define read_column (rewrite_scalar_query_probe_params bindings column))
+      (define getter (list 'lambda (list '_alias '_alias_ic '_column '_column_ic) 7))
+      (eval (list (list 'lambda (list 'computed_value)
+        (list (list 'lambda (list 'get_column) read_column) getter)) 42)))
+  expect: {data: [7]}
+
+- name: Five-coordinate probe catalogs traverse metadata without hashing logical containers
+  scm: |
+    (begin
+      (define keys (map (produceN 5) (lambda (i)
+        (list 'get_column "caller" true (concat "k" i) true))))
+      (define params (map (produceN 5) (lambda (i) (symbol (concat "bound_" i)))))
+      (define index (scalar_query_probe_param_index keys keys params))
+      (define metadata (set_assoc (list) "purpose" "scalar"
+        "coordinate0" (nth keys 0) "coordinate1" (nth keys 1)
+        "coordinate2" (nth keys 2) "coordinate3" (nth keys 3)))
+      (define facts (list (list 'purpose 'scalar) (list 'btw2025_info metadata)))
+      (define stage (make_group_stage "coordinate_catalog" "unused_input"
+        keys keys (list) true (list) (list) nil nil facts))
+      (define rewritten (rewrite_scalar_query_probe_params index stage))
+      (define expected (map params (lambda (param) (list relational_iteration_parameter param))))
+      (and (expression_equal? (gs_domain rewritten) expected)
+        (expression_equal? (gs_keys rewritten) expected)
+        (expression_equal? (get_assoc (qassoc_get (gs_facts rewritten) 'btw2025_info nil)
+          "coordinate0") (car expected))))
+  expect: {result: true}
+- name: Source locations preserve a complete computed caller coordinate
+  scm: |
+    (begin
+      (define key (scheme "(+ (get_column \"caller\" true \"k0\" true) 1)"))
+      (define index (scalar_query_probe_param_index (list key) (list key) (list 'computed_value)))
+      (expression_equal? (rewrite_scalar_query_probe_params index key)
+        (list relational_iteration_parameter 'computed_value)))
+  expect: {result: true}

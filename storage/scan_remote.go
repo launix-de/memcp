@@ -338,9 +338,9 @@ func withRemoteScanShard(expected *remoteScanShard, tx *TxContext, mutation, own
 	if db == nil {
 		return fmt.Errorf("remote schema disappeared")
 	}
-	schemaLease := db.GetRead(nil)
+	schemaLease := db.GetRead(tx)
 	defer schemaLease.Release()
-	tbl := db.GetTable(expected.Resource.Table)
+	tbl := db.GetTableForTx(expected.Resource.Table, false, tx)
 	if tbl == nil {
 		return fmt.Errorf("remote table disappeared")
 	}
@@ -742,6 +742,9 @@ func (s *scanRPCSession) beginInvocation(ctx context.Context, transaction *scm.C
 		// subscans import the same serialized capture, beginQuery/endQuery must
 		// belong to distinct native participants with independent cancellation.
 		tx = origin.newInvocation()
+		if tx.remoteObject == nil {
+			tx.retainRemoteInvocation()
+		}
 	} else {
 		tx = NewTxContext(TxCursorStability)
 		tx.autoCommit = true
@@ -765,10 +768,10 @@ func (s *scanRPCSession) beginInvocation(ctx context.Context, transaction *scm.C
 	return &remoteInvocation{tx: tx, decode: decode, anonymous: transaction == nil, close: func() {
 		stop()
 		s.service.executions.Delete(id)
+		defer tx.endQuery(seq)
 		if transaction == nil && tx.State == TxActive {
 			tx.Rollback()
 		}
-		tx.endQuery(seq)
 	}}, nil
 }
 

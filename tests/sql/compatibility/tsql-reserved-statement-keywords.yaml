@@ -1,0 +1,45 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# https://learn.microsoft.com/sql/t-sql/language-elements/reserved-keywords-transact-sql
+metadata:
+  syntax: tsql
+  isolated: true
+  description: Reserved statement tokens preserve module boundaries and delimited identifiers
+setup:
+- sql: CREATE TABLE keyword_input(id INT)
+- sql: INSERT keyword_input VALUES(1),(2)
+cleanup:
+- sql: DROP PROCEDURE IF EXISTS keyword_boundary_proc
+- sql: DROP TABLE IF EXISTS keyword_input
+test_cases:
+- name: TRUNCATE is not an unquoted result alias
+  sql: SELECT 1 AS TRUNCATE
+  expect: {error: true}
+- name: TRUNCATE is not an unquoted table alias
+  sql: SELECT id FROM keyword_input AS TRUNCATE
+  expect: {error: true}
+- name: Delimited reserved result names remain valid
+  sql: SELECT 2 AS [TRUNCATE]
+  expect: {rows: 1,data: [{TRUNCATE: 2}]}
+- name: Longer identifiers retain their ordinary name contract
+  sql: SELECT 3 AS truncate_archive
+  expect: {rows: 1,data: [{truncate_archive: 3}]}
+- name: A delimited reserved table alias keeps qualified column binding
+  sql: SELECT [TRUNCATE].id FROM keyword_input AS [TRUNCATE] WHERE [TRUNCATE].id=1
+  expect: {rows: 1,data: [{id: 1}]}
+- name: Reserved words inside comments and literals remain data
+  sql: SELECT N'TRUNCATE TABLE keyword_input' AS text_value /* TRUNCATE TABLE keyword_input */
+  expect: {rows: 1,data: [{text_value: 'TRUNCATE TABLE keyword_input'}]}
+- name: A following TRUNCATE remains a separate statement inside a module loop
+  sql: |
+    CREATE PROCEDURE keyword_boundary_proc AS BEGIN
+      DECLARE @repeat INT=0;
+      WHILE @repeat<1 BEGIN
+        SELECT id FROM keyword_input
+        TRUNCATE TABLE keyword_input
+        SET @repeat=@repeat+1
+      END
+    END
+- name: A module with adjacent SELECT and TRUNCATE is published in the procedure catalog
+  sql: SELECT CASE WHEN OBJECT_ID(N'dbo.keyword_boundary_proc') IS NULL THEN 0 ELSE 1 END AS total
+  expect: {rows: 1,data: [{total: 1}]}
