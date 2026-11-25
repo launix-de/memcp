@@ -189,13 +189,33 @@ test_cases:
       (define retired_owner (newsession)) (retired_owner "username" "root") (tx_begin retired_owner)
       (define retired_tx (retired_owner "__memcp_tx"))
       (define retired_target (table "memcp-tests" false "nullable_append_retired" false retired_tx))
-      (define retired (try (lambda () (begin
-        (createcolumn retired_target "retired" "INT" '() '("null" true) nil nil retired_tx) false))
-        (lambda (_failure) true)))
-      (tx_rollback retired_owner)
-      (list (and missing_default absent) retired
-        (scan nil retired_target '() '() '() (lambda () true) '("id") + 0 +)))
-  expect: {result: [true,true,6]}
+      (define physical_rows (lambda ()
+        (scan nil retired_target '() '() '() (lambda () true) '("id" "retired")
+          (lambda (rows id value) (cons (list id value) rows)) '() merge)))
+      (define before (physical_rows))
+      (try (lambda () (begin
+        (createcolumn retired_target "retired" "INT" '() '("null" true) nil nil retired_tx)
+        (define header (show retired_target "column" "retired" false retired_tx))
+        (define storage (get_assoc header "StorageField"))
+        (define fresh (and (not (nil? storage)) (not (equal? storage "retired"))))
+        (define no_default (and (nil? (get_assoc header "Default"))
+          (equal? (get_assoc header "DefaultName") "")
+          (equal? (get_assoc header "DefaultExpression") "")
+          (not (get_assoc header "DefaultDeferred")) (get_assoc header "Null")))
+        (define initial (scan retired_tx retired_target '() '() '() (lambda () true) (list "id" storage)
+          (lambda (rows id value) (cons (list id value) rows)) '() merge))
+        (define hidden (nil? (show retired_target "column" "retired" false nil)))
+        (with_table_mutation (list retired_target) (list "update" (list storage)) retired_tx retired_owner (lambda (bound)
+          (scan bound retired_target '() '() '() (lambda () true) '("$update")
+            (lambda (n update) (begin (update (list storage 99)) (+ n 1))) 0 +)))
+        (define own (scan retired_tx retired_target '() '() '() (lambda () true) (list "id" storage)
+          (lambda (rows id value) (cons (list id value) rows)) '() merge))
+        (define observed (physical_rows))
+        (tx_rollback retired_owner)
+        (list (and missing_default absent) fresh no_default hidden before initial own observed
+          (nil? (show retired_target "column" "retired" false nil)) (physical_rows))))
+        (lambda (failure) (begin (tx_rollback retired_owner) (error failure)))))
+  expect: {result: [true,true,true,true,[[6,66]],[[6,null]],[[6,99]],[[6,66]],true,[[6,66]]]}
 - name: A native literal default appends historical values privately and rollback removes the declaration
   scm: |
     (begin
