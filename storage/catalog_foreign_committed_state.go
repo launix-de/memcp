@@ -25,9 +25,6 @@ type catalogForeignStateTarget struct {
 // Caller owns changes.mu and native schema access. Only child-owned entries
 // participate in ALL; incoming parent mirrors never grant constraint ownership.
 func constraintStateNames(snapshot *tableShowColumnsSnapshot, names []string, all bool) []string {
-	if !all {
-		return names
-	}
 	constraints := snapshot.nativeConstraints().Slice()
 	if (len(constraints) != 4 && len(constraints) != 6) || constraints[0].String() != "Unique" || constraints[2].String() != "ForeignKeys" || len(constraints) == 6 && constraints[4].String() != "Checks" {
 		panic("foreign state ALL requires a complete supported constraint directory")
@@ -43,20 +40,40 @@ func constraintStateNames(snapshot *tableShowColumnsSnapshot, names []string, al
 			result = append(result, foreignMetadataValue(row, "Id").String())
 		}
 	}
-	return result
+	if all {
+		return result
+	}
+	resolved := make([]string, 0, len(names))
+	for _, requested := range names {
+		actual := ""
+		for _, name := range result {
+			if strings.EqualFold(name, requested) {
+				if actual != "" && actual != name {
+					panic("constraint state has ambiguous native names: " + requested)
+				}
+				actual = name
+			}
+		}
+		if actual == "" {
+			panic("foreign state target is not an owned pending declaration: " + requested)
+		}
+		resolved = append(resolved, actual)
+	}
+	return resolved
 }
 
-func (changes *publicCatalogChanges) constraintStateHasCommittedLocked(tx *TxContext, child *table, names []string, all bool) bool {
+func (changes *publicCatalogChanges) constraintStateTargetsLocked(tx *TxContext, child *table, names []string, all bool) ([]string, bool) {
 	access := changes.db.GetRead(tx)
 	defer access.Release()
 	changes.db.schemalock.RLock()
 	defer changes.db.schemalock.RUnlock()
-	for _, name := range constraintStateNames(child.declarationMetadataForTx(tx), names, all) {
+	resolved := constraintStateNames(child.declarationMetadataForTx(tx), names, all)
+	for _, name := range resolved {
 		if state := changes.constraintStates[name]; state == nil || !state.owns(child) {
-			return true
+			return resolved, true
 		}
 	}
-	return false
+	return resolved, false
 }
 
 // A whole named/ALL cohort is prepared under this one native constructor.

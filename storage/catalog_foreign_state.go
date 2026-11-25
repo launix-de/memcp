@@ -44,13 +44,14 @@ func (tx *TxContext) stageConstraintState(child *table, names []string, all, ena
 	if tx.State != TxActive || tx.decisionStarted || validate && !enabled {
 		panic("invalid native foreign state request")
 	}
-	changes := tx.publicCatalogChanges()
-	if changes == nil {
-		return tx.stagePublicCatalogDeclaration(child.schema, catalogForeignReplacementKind, nil, func(changes *publicCatalogChanges) bool {
-			return changes.stageConstraintState(tx, child, names, all, enabled, validate)
-		})
+	if changes := tx.publicCatalogChanges(); changes != nil && (changes.owner != tx.transactionState || changes.db != child.schema || tx.coordinator != nil) {
+		panic("foreign state requires its original native catalog owner")
 	}
-	return changes.stageConstraintState(tx, child, names, all, enabled, validate)
+	// Reused state must pass the same unfinished-factory guard as a first
+	// declaration. A recursive compiler/projection cannot borrow partial state.
+	return tx.stagePublicCatalogDeclaration(child.schema, catalogForeignReplacementKind, nil, func(changes *publicCatalogChanges) bool {
+		return changes.stageConstraintState(tx, child, names, all, enabled, validate)
+	})
 }
 
 func (changes *publicCatalogChanges) stageConstraintState(tx *TxContext, child *table, names []string, all, enabled, validate bool) bool {
@@ -59,11 +60,14 @@ func (changes *publicCatalogChanges) stageConstraintState(tx *TxContext, child *
 	}
 	// Resolve committed versus pending membership at the same existing header
 	// owner. The selected stage repeats the complete proof before any effects.
-	committed := func() bool {
+	resolved, committed := func() ([]string, bool) {
 		changes.mu.Lock()
 		defer changes.mu.Unlock()
-		return changes.constraintStateHasCommittedLocked(tx, child, names, all)
+		return changes.constraintStateTargetsLocked(tx, child, names, all)
 	}()
+	if !all {
+		names = resolved
+	}
 	if committed {
 		return changes.stageCommittedForeignState(tx, child, names, all, enabled, validate)
 	}

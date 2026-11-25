@@ -9,11 +9,13 @@ setup:
   - sql: CREATE TABLE committed_state_parent(id INT PRIMARY KEY)
   - sql: CREATE TABLE committed_state_child(id INT PRIMARY KEY,parent_id INT)
   - sql: CREATE TABLE committed_state_marker(id INT PRIMARY KEY,value INT)
+  - sql: CREATE TABLE committed_state_callback(value VARCHAR(2))
   - sql: CREATE TABLE committed_state_legacy(id INT PRIMARY KEY,parent_id INT)
   - sql: CREATE TABLE committed_state_mixed(id INT PRIMARY KEY,parent_id INT,value INT)
   - sql: INSERT committed_state_parent VALUES(1),(2)
   - sql: INSERT committed_state_child VALUES(10,1),(20,NULL)
   - sql: INSERT committed_state_marker VALUES(1,0)
+  - sql: INSERT committed_state_callback VALUES('ok')
   - sql: INSERT committed_state_legacy VALUES(50,999)
   - sql: INSERT committed_state_mixed VALUES(60,1,1)
   - sql: ALTER TABLE committed_state_child ADD CONSTRAINT FK_committed_state FOREIGN KEY(parent_id) REFERENCES committed_state_parent(id)
@@ -28,6 +30,7 @@ cleanup:
   - sql: DROP TABLE IF EXISTS committed_state_child
   - sql: DROP TABLE IF EXISTS committed_state_parent
   - sql: DROP TABLE IF EXISTS committed_state_marker
+  - sql: DROP TABLE IF EXISTS committed_state_callback
 test_cases:
   - name: WITH CHECK CHECK joins earlier original work and rollback restores complete values
     tds:
@@ -45,6 +48,38 @@ test_cases:
         - connection: observer
           sql: SELECT id,value FROM committed_state_marker
           expect: {rows: 1, data: [{id: 1, value: 0}]}
+  - name: Recursive state change cannot enter the first unfinished public declaration factory
+    scm: |
+      (begin
+        (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
+        (define tx (owner "__memcp_tx"))
+        (try (lambda () (begin
+          (define child (table "memcp-tests" false "committed_state_child" false tx))
+          (define target (table "memcp-tests" false "committed_state_callback" false tx))
+          (define marker (table "memcp-tests" false "committed_state_marker" false tx))
+          (insert marker '("id" "value") (list (list 2 8)) '() nil false nil tx)
+          (define witness (newsession)) (witness "busy" false)
+          (define previous (show target "column" "value" true tx))
+          (define collation (coalesceNil (previous "Collation") ""))
+          (define projection (lambda (value) (begin
+            (define busy (try (lambda () (begin (constraint_state child true false false tx owner) false))
+              (lambda (cause) (if (strlike (string (failure_value cause)) "%native mutation is still active; retry public declaration construction%") true (error cause)))))
+            (witness "busy" busy)
+            value)))
+          (altercolumn target "value" "validated_declaration"
+            (list (list "NVARCHAR" '(2) true collation) (list "VARCHAR" '(2) true collation) projection) tx)
+          (define fk (car ((show child "constraints" tx) "ForeignKeys")))
+          (define before (list (witness "busy") (tx_state tx) (identical? tx (owner "__memcp_tx"))
+            ((show target "column" "value" true tx) "RawType")
+            (coalesceNil (fk "Enabled") true) (coalesceNil (fk "Trusted") true)
+            (scan tx marker '() '() '() (lambda () true) '("value") + 0 +)))
+          (tx_rollback owner)
+          (list before ((show target "column" "value" true) "RawType")
+            (scan nil target '() '() '() (lambda () true) '("value")
+              (lambda (_ value) value) nil (lambda (left right) (coalesceNil left right)))
+            (scan nil marker '() '() '() (lambda () true) '("value") + 0 +))))
+          (lambda (cause) (begin (tx_rollback owner) (error cause)))))
+    expect: {result: [[true, active, true, NVARCHAR, true, true, 8], VARCHAR, ok, 0]}
   - name: Trusted legacy metadata never substitutes for actual historical validation
     scm: |
       (begin
@@ -185,7 +220,7 @@ test_cases:
         - {connection: owner, sql: SAVE TRANSACTION before_state}
         - {connection: owner, sql: ALTER TABLE committed_state_child NOCHECK CONSTRAINT FK_committed_state}
         - {connection: owner, sql: SAVE TRANSACTION disabled_state}
-        - {connection: owner, sql: ALTER TABLE committed_state_child WITH CHECK CHECK CONSTRAINT FK_committed_state}
+        - {connection: owner, sql: ALTER TABLE committed_state_child WITH CHECK CHECK CONSTRAINT fk_COMMITTED_state}
         - {connection: owner, sql: ROLLBACK TRANSACTION disabled_state}
         - connection: owner
           sql: SELECT CAST(is_disabled AS INT) AS disabled,CAST(is_not_trusted AS INT) AS untrusted FROM sys.foreign_keys WHERE name=N'FK_committed_state'
@@ -219,7 +254,7 @@ test_cases:
           (insert marker '("id" "value") (list (list 2 6)) '() nil false nil tx)
           (define rejected (try (lambda () (begin
             (constraint_state child '("FK_committed_state" "missing_constraint") false false tx owner) false))
-            (lambda (cause) (if (strlike (concat cause) "%not an actual child-owned declaration%") true (error cause)))))
+            (lambda (cause) (if (strlike (concat cause) "%not an owned pending declaration%") true (error cause)))))
           (insert marker '("id" "value") (list (list 3 7)) '() nil false nil tx)
           (define fk (car ((show child "constraints" tx) "ForeignKeys")))
           (define before (list rejected (tx_state tx) (coalesceNil (fk "Enabled") true)
