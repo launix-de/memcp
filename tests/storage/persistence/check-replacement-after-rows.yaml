@@ -631,7 +631,7 @@ test_cases:
     (begin
       (define owner (newsession)) (owner "username" "root") (tx_begin_acid owner)
       (define tx (owner "__memcp_tx"))
-      (define target (table "memcp-tests" false "check_row_probe" false tx))
+      (define target (table "memcp-tests" false "check_row_unconstrained" false tx))
       (define marker (table "memcp-tests" false "check_row_marker" false tx))
       (define request (lambda (text body) (with_query_request owner nil 0 text "acid" (lambda (statement)
         (statement text false body (lambda (_cause _completion) "preserve"))))))
@@ -645,10 +645,10 @@ test_cases:
         (write marker '("id" "value") (list (list 2 7)))
         (scan tx target '() '() '("id") (lambda (id) (equal? id -99)) '("$update")
           (lambda (acc update) acc) 0 +)
-        (define rejected (try (lambda () (begin (dropcheck target "CK_check_row_probe" tx) false))
+        (define rejected (try (lambda () (begin (createcheck target "CK_check_row_unframed" "tsql-check" "v>=0" '("v") tx owner) false))
           (lambda (failure) (if (strlike (concat failure) "%retained unframed mutation callbacks%") true (error failure)))))
         (define before (list rejected (tx_state tx) (rows target tx '("id" "v"))
-          (count ((show target "constraints" tx) "Checks"))))
+          (count (coalesceNil ((show target "constraints" tx) "Checks") '()))))
         (tx_rollback owner)
         (list before (rows target nil '("id" "v")) (rows marker nil '("id" "value")))))
         (lambda (failure) (begin (tx_rollback owner) (error failure)))))
@@ -658,13 +658,9 @@ test_cases:
       - active
       - - - 1
           - 1
-        - - 2
-          - 2
-      - 1
+      - 0
     - - - 1
         - 1
-      - - 2
-        - 2
     - - - 1
         - 3
 - name: A current committed violating row cannot hide behind an earlier original-T read
