@@ -129,7 +129,7 @@ test_cases:
           expect: {rows: 3, data: [{id: 10, parent_id: 1}, {id: 20, parent_id: null}, {id: 30, parent_id: 999}]}
   - name: Crash retains the committed disabled predecessor and its complete rows
     scm: (crash)
-    expect: {error: true}
+    expect: {interrupted_ok: true}
   - name: Restart after the accepted disabled-decision crash
     action: restart
   - name: Recovered disabled state remains an actual dependency without enforcement
