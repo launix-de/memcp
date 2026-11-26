@@ -13451,9 +13451,14 @@ across branches. Keep their scalar compilation path as direct as a flat block. *
 		(define checked (require_physical_scan_relations fused_plan))
 		/* Flat source blocks and their aggregate/UNION wrappers have no
 		row-dependent ordinary source lookup. Preserve their direct compilation. */
-		(define checked (if (and
-			(reduce (ir_stages ir) (lambda (flat stage) (and flat (group_stage? stage))) true)
-			(physical_table_binding_flat_root? (ir_root ir)))
+		(define checked (if (or
+			(and (query_block? (ir_root ir)) (empty_list? (ir_stages ir))
+				(<= (count (qb_sources (ir_root ir))) 1)
+				(or (empty_list? (qb_sources (ir_root ir)))
+					(string? (source_relation (car (qb_sources (ir_root ir)))))))
+			(and (union_block? (ir_root ir))
+				(reduce (ir_stages ir) (lambda (flat stage) (and flat (group_stage? stage))) true)
+				(physical_table_binding_flat_root? (ir_root ir))))
 			checked (bind_physical_table_handles checked)))
 		(if (and (not (nil? carrier)) (and (not (nth carrier 5))
 			(qassoc_get (qb_facts (ir_root ir)) (quote sql_calc_found_rows) false)))
