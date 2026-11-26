@@ -13332,7 +13332,7 @@ persisted computors and OnInit recipes must not capture this query's pointers. *
 (define physical_table_binding_source? (lambda (expr)
 	(match expr
 		'(head schema schema_ci name name_ci)
-		(and (physical_table_binding_head? (expression_syntax head) "table" table) (string? schema) (string? name)
+		(and (not (list? head)) (physical_table_binding_head? (expression_syntax head) "table" table) (string? schema) (string? name)
 			(not (equal? (substr name 0 1) "."))
 			(or (expression_equal? schema_ci false) (expression_equal? schema_ci true))
 			(or (expression_equal? name_ci false) (expression_equal? name_ci true)))
@@ -13358,6 +13358,8 @@ in argument nine. A list in an input position carries the same source scope. */
 /* Normalize scalar operator heads only: an immediate lambda head is a code
 subtree which the recursive visit already handles once. Native operators have
 identity; their classification does not need structural-expression traversal.
+A list-valued callback head is an immediate call, never the lambda symbol;
+recognizing its scope must not normalize that entire nested body.
 
 Probe before copying code: complex cache recipes frequently contain no
 repeated native scan source. An unchanged plan keeps its existing code graph. */
@@ -13378,7 +13380,7 @@ repeated native scan source. An unchanged plan keeps its existing code graph. */
 						(match remaining
 							(cons child rest)
 							(or (physical_table_binding_needed? child
-								(+ depth (if (and loop (list? child) (not (empty_list? child))
+								(+ depth (if (and loop (list? child) (not (empty_list? child)) (not (list? (car child)))
 									(expression_equal? (expression_syntax (car child)) (symbol "lambda"))) 1 0)) loop
 								(physical_table_binding_source_slot? scan_input recmap input_list index))
 								(visit rest (+ index 1)))
@@ -13411,7 +13413,7 @@ that can escape is rewritten independently and contributes no outer bindings. */
 						(physical_table_binding_walk (car expr) depth true false)
 						(mapIndex tail (lambda (index child)
 							(physical_table_binding_walk child
-								(+ depth (if (and loop (list? child) (not (empty_list? child))
+								(+ depth (if (and loop (list? child) (not (empty_list? child)) (not (list? (car child)))
 									(expression_equal? (expression_syntax (car child)) (symbol "lambda"))) 1 0)) loop
 								(physical_table_binding_source_slot? scan_input recmap input_list index))))))
 					(list (map children car) (merge (map children cadr)))))
@@ -13785,8 +13787,8 @@ compilation break-even estimate smaller and hide a later specialization. */
 
 (define sql_truncate (lambda (schema tbl planning_session tx)
 	(build_dml_plan tbl nil
-				(make_query_block schema (list (list tbl schema tbl false nil)) nil true
-					nil nil nil nil nil nil nil nil) planning_session tx)))
+		(make_query_block schema (list (list tbl schema tbl false nil)) nil true
+			nil nil nil nil nil nil nil nil) planning_session tx)))
 
 (define explain_union_ir_metadata (lambda (ir)
 	(begin
