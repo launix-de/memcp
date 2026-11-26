@@ -132,6 +132,7 @@ python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
 bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/before.json"
 python3 "$HELPERS" mutate "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
 bash "$VALIDATOR" "$MYSQL_PORT" mutate "$ORACLES/before.json" "$ORACLES/after-dml.json"
+python3 "$HELPERS" current-date-write "$MYSQL_PORT" "$API_PORT"
 stop_server
 
 # The post-DML oracle is derived from the old reference plus specified
@@ -139,5 +140,6 @@ stop_server
 start_server candidate candidate-restart
 python3 "$HELPERS" cold-mutate "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
 python3 "$HELPERS" check "$MYSQL_PORT" "$ORACLES/queries.json" --alias-variants
+python3 "$HELPERS" current-date-check "$MYSQL_PORT"
 bash "$VALIDATOR" "$MYSQL_PORT" compare "$ORACLES/after-dml.json"
 stop_server

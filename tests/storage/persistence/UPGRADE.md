@@ -41,6 +41,12 @@ concat pools. `up_concat_text` exercises repeated SQL-shaped fragments,
 unique parameters, Unicode, empty values and NULL through legacy loading,
 candidate writes and restarts.
 
+The `upgrade-release-before-packed-native-dates-2026-11-26` pin identifies
+`2b25a811a38bc3a080965f13f55438952c1d4676`, before exact scalar version 2
+adds compact native date storage. The permanent version-1 reader is covered by
+literal historical scalar/proxy frames; the candidate additionally writes,
+rebuilds and reopens fractional date rows after all predecessor comparisons.
+
 ## What each matrix job proves
 
 The predecessor binary creates the complete fixture and supplies two oracles:
@@ -79,6 +85,12 @@ test. It never edits the implementation to synthesize a layout change or checks
 for a particular version string. The candidate first executes the public queries
 on the predecessor's untouched persisted data, before any candidate DML. A
 separate cold process then tests mutations before the first query.
+
+After the predecessor's data and specified DML have passed their complete
+oracles, a candidate-only date fixture checks the current writer. Complete rows
+include adjacent nanoseconds, NULL and a negative epoch. The candidate rebuilds
+that table, restarts and checks every value before dropping only that fixture.
+The original post-DML snapshot comparison still runs unchanged afterwards.
 
 A crash, query error or result mismatch fails the upgrade. Successful migration
 or reconstruction is judged by the same public results and complete public-data
