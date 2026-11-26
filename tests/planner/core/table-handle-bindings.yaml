@@ -99,6 +99,11 @@ test_cases:
       (if (and (expression_equal? retained callback) (equal? (retained 3) 10))
         "ok" (error "compiled callback lost its environment")))
   expect: {data: [ok]}
+- name: simple scalar scan keeps its existing physical compilation path
+  sql: EXPLAIN SELECT COUNT(*) AS n FROM handle_left WHERE id>=1
+  expect:
+    rows: 1
+    result_not_contains: [__query_table_handle_]
 - name: prepared join first execution
   session_id: table-handles
   sql: SELECT l.id,r.value FROM handle_left l JOIN handle_right r ON l.k=r.k WHERE l.id>=? ORDER BY l.id,r.value

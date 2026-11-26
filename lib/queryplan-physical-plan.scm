@@ -13434,7 +13434,12 @@ that can escape is rewritten independently and contributes no outer bindings. */
 				(empty_list? (ir_stages ir))
 				(<= (count (qb_sources (ir_root ir))) 1)))
 			memoized_plan (lower_ordered_keyset_scans memoized_plan)))
-		(define checked (bind_physical_table_handles (require_physical_scan_relations fused_plan)))
+		(define checked (require_physical_scan_relations fused_plan))
+		/* A single source without stages cannot contain a lowered inner scan.
+		Keep its established scalar/scan compilation path allocation-free. */
+		(define checked (if (and (query_block? (ir_root ir))
+			(empty_list? (ir_stages ir)) (<= (count (qb_sources (ir_root ir))) 1))
+			checked (bind_physical_table_handles checked)))
 		(if (and (not (nil? carrier)) (and (not (nth carrier 5))
 			(qassoc_get (qb_facts (ir_root ir)) (quote sql_calc_found_rows) false)))
 			(list (quote found_rows_result) checked) checked))))
