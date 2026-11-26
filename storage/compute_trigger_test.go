@@ -955,6 +955,11 @@ func TestComputeProxyHistoricalV3RoundTrip(t *testing.T) {
 		}
 	}
 	assert(&proxy)
+	cloned := cloneComputeProxyRows(&proxy, &storageShard{}, []uint32{0})
+	if cloned.persistedVersion != 3 {
+		t.Fatal("rebuild discarded historical native value encoding")
+	}
+	assert(cloned)
 	var encoded bytes.Buffer
 	proxy.Serialize(&encoded)
 	if bytes := encoded.Bytes(); bytes[0] != 50 || bytes[1] != 3 {

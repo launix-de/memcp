@@ -175,6 +175,9 @@ func appendComputeProxyRows(newProxy *StorageComputeProxy, oldProxy *StorageComp
 	}
 	oldProxy.mu.RLock()
 	defer oldProxy.mu.RUnlock()
+	if oldProxy.persistedVersion == 3 {
+		newProxy.persistedVersion = 3
+	}
 	newIdx := startIdx
 	for _, oldIdx := range oldRowIDs {
 		val, inDelta := oldProxy.delta[oldIdx]
