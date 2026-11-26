@@ -1,0 +1,45 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Frozen workload: one cold execution plus ten repetitions, all retained.
+metadata:
+  description: Invocation-local handles in nested indexed joins
+  isolated: true
+  performance_rows: 32768
+setup:
+- sql: DROP TABLE IF EXISTS binding_driver
+- sql: DROP TABLE IF EXISTS binding_probe
+- sql: CREATE TABLE binding_driver (id INT, k INT) ENGINE=memory
+- sql: CREATE TABLE binding_probe (k INT, value INT) ENGINE=memory
+- scm: |
+    (begin
+      (insert (table "memcp-tests" false "binding_driver" false) '("id" "k")
+        (map (produceN 32768) (lambda (i) (list i (mod i 128)))))
+      (insert (table "memcp-tests" false "binding_probe" false) '("k" "value")
+        (map (produceN 256) (lambda (i) (list (mod i 128) i))))
+      (rebuild (table "memcp-tests" false "binding_driver" false) true false)
+      (rebuild (table "memcp-tests" false "binding_probe" false) true false))
+cleanup:
+- sql: DROP TABLE binding_driver
+- sql: DROP TABLE binding_probe
+test_cases:
+- name: nested-indexed-join
+  sql: SELECT SUM(d.id + p.value) AS total FROM binding_driver d JOIN binding_probe p ON p.k = d.k WHERE p.value >= d.k
+  threshold_ms: 5000
+  timing_samples: 11
+  timing_aggregation: total
+  warmup: 0
+  expect: {rows: 1, data: [{total: 1082064896}]}
+- name: nested-range-join
+  sql: SELECT SUM(d.id + p.value) AS total FROM binding_driver d JOIN binding_probe p ON p.k >= d.k AND p.k <= d.k WHERE p.value >= d.k
+  threshold_ms: 5000
+  timing_samples: 11
+  timing_aggregation: total
+  warmup: 0
+  expect: {rows: 1, data: [{total: 1082064896}]}
+- name: nested-left-indexed-join
+  sql: SELECT SUM(d.id + p.value) AS total FROM binding_driver d LEFT JOIN binding_probe p ON p.k = d.k AND p.value >= d.k
+  threshold_ms: 5000
+  timing_samples: 11
+  timing_aggregation: total
+  warmup: 0
+  expect: {rows: 1, data: [{total: 1082064896}]}

@@ -13315,6 +13315,79 @@ prepare bindings; no key enumeration or storage artifact enters logical IR. */
 							(if (equal? index 1) source (nth children index))))))))
 		_ expr)))
 
+/* Resolve ordinary literal relations in the invocation that owns the scan,
+not in each outer row and never while compiling a reusable plan. Table values
+already serialize by logical name and resolve locally when a worker imports a
+callback. Generated cache relations must retain their preparation ordering.
+
+Only nonescaping scan callbacks and immediate lambda calls share their caller's
+bindings. Every other lambda is an independent execution boundary: in particular,
+persisted computors and OnInit recipes must not capture this query's pointers. */
+(define physical_table_binding_name (lambda (expr)
+	(symbol (concat "__query_table_handle_" (stable_structural_hash (cons (symbol "table") (cdr expr)) true)))))
+
+(define physical_table_binding_head? (lambda (head name value)
+	(or (expression_equal? head (symbol name)) (expression_equal? head value))))
+
+(define physical_table_binding_source? (lambda (expr)
+	(match expr
+		'(head schema schema_ci name name_ci)
+		(and (physical_table_binding_head? head "table" table) (string? schema) (string? name)
+			(not (equal? (substr name 0 1) "."))
+			(or (expression_equal? schema_ci false) (expression_equal? schema_ci true))
+			(or (expression_equal? name_ci false) (expression_equal? name_ci true)))
+		_ false)))
+
+(define physical_table_binding_operators (list scan scan_order scan_order_multi scan_join_order
+	scan_recset scan_recmap scan_exists scan_lookup scan_batch scan_order_keys scan_order_batch_accept))
+(define physical_table_binding_operator_names (map '("scan" "scan_order" "scan_order_multi" "scan_join_order"
+	"scan_recset" "scan_recmap" "scan_exists" "scan_lookup" "scan_batch" "scan_order_keys" "scan_order_batch_accept") symbol))
+(define physical_table_binding_loop? (lambda (head)
+	(if (symbol? head) (contains? physical_table_binding_operator_names head)
+		(reduce physical_table_binding_operators
+			(lambda (found operator) (or found (expression_equal? head operator))) false))))
+
+/* Return rewritten code and its invocation-local definitions together. A lambda
+that can escape is rewritten independently and contributes no outer bindings. */
+(define physical_table_binding_walk (lambda (expr depth shared_lambda)
+	/* match can expose a compiled procedure as lambda data. Its captured
+	environment is opaque here, so only traverse actual expression lists. */
+	(if (or (not (list? expr)) (empty_list? expr)) (list expr '())
+		(match (cons (expression_syntax (car expr)) (cdr expr))
+			((symbol quote) _value) (list expr '())
+			(cons (symbol lambda) (cons params (cons body metadata)))
+			(if shared_lambda
+				(match (physical_table_binding_walk body depth false) '(rewritten sources)
+					(list (cons (car expr) (cons params (cons rewritten metadata))) sources))
+				(list (cons (car expr) (cons params (cons (bind_physical_table_handles body) metadata))) '()))
+			(cons head tail)
+			(if (and (> depth 0) (physical_table_binding_source? expr))
+				(list (physical_table_binding_name expr) (list expr))
+				(begin
+					(define loop (or (physical_table_binding_loop? head)
+						(and shared_lambda (physical_table_binding_head? head "list" list))))
+					(define children (cons
+						(physical_table_binding_walk (car expr) depth true)
+						(map tail (lambda (child)
+							(physical_table_binding_walk child
+								(+ depth (if (and loop (list? child) (not (empty_list? child))
+									(expression_equal? (expression_syntax (car child)) (symbol "lambda"))) 1 0)) loop)))))
+					(list (map children car) (merge (map children cadr)))))
+			_ (list expr '())))))
+
+(define bind_physical_table_handles (lambda (plan)
+	(match (physical_table_binding_walk plan 0 false) '(rewritten sources)
+		(if (empty_list? sources) rewritten
+			/* Once a nested source needs a binding, reuse it in the outer scans too.
+			Single scan operators already retain their input handle without a binding. */
+			(match (physical_table_binding_walk rewritten 1 false) '(complete remaining)
+				(begin
+					(define bindings (reduce (merge (list sources remaining)) (lambda (acc expr)
+						(set_assoc acc (physical_table_binding_name expr) expr)) '()))
+					(cons (quote !begin) (append
+						(extract_assoc bindings (lambda (name expr) (list (quote define) name expr)))
+						complete))))))))
+
 (define emit_physical_queryplan (lambda (ir)
 	(begin
 		(define candidate (if (equal? (ir_return ir) (quote rows)) (semijoin_carrier_spec (ir_root ir)) nil))
@@ -13361,7 +13434,7 @@ prepare bindings; no key enumeration or storage artifact enters logical IR. */
 				(empty_list? (ir_stages ir))
 				(<= (count (qb_sources (ir_root ir))) 1)))
 			memoized_plan (lower_ordered_keyset_scans memoized_plan)))
-		(define checked (require_physical_scan_relations fused_plan))
+		(define checked (bind_physical_table_handles (require_physical_scan_relations fused_plan)))
 		(if (and (not (nil? carrier)) (and (not (nth carrier 5))
 			(qassoc_get (qb_facts (ir_root ir)) (quote sql_calc_found_rows) false)))
 			(list (quote found_rows_result) checked) checked))))
