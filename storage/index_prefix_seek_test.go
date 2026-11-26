@@ -77,6 +77,33 @@ func BenchmarkDeltaIndexPrefixWithUnboundedSuffix(b *testing.B) {
 	}
 }
 
+// A complete unique point leaves custom hooks to residual evaluation; a
+// nonunique point or range must retain those hooks in the index access.
+func TestIndexPrefixWithUniquePointAndHooks(t *testing.T) {
+	point := analyzedBoundary{col: "id", matcher: EqualMatcher, lower: scm.NewInt(1), upper: scm.NewInt(1), lowerInclusive: true, upperInclusive: true}
+	ranged := analyzedBoundary{col: "id", matcher: RangeMatcher, lower: scm.NewInt(1), lowerInclusive: true}
+	hook := analyzedBoundary{col: "text", matcher: LikeMatcher, lower: scm.NewString("%needle%"), upper: scm.NewString("%needle%")}
+	for _, tc := range []struct {
+		name   string
+		unique []uniqueKey
+		bounds analyzedBoundaries
+		want   int
+	}{
+		{"unique sorted point", []uniqueKey{{Cols: []string{"id"}}}, analyzedBoundaries{point}, 1},
+		{"unique point leaves hook to residual", []uniqueKey{{Cols: []string{"id"}}}, analyzedBoundaries{point, hook}, 1},
+		{"nonunique point retains hook", nil, analyzedBoundaries{point, hook}, 2},
+		{"range retains hook despite unique declaration", []uniqueKey{{Cols: []string{"id"}}}, analyzedBoundaries{ranged, hook}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shard := &storageShard{t: &table{Unique: tc.unique}}
+			bounds, prefix := shard.indexAccess(runtimeScanAccess(tc.bounds))
+			if bounds.len() != tc.want || prefix != tc.want {
+				t.Fatalf("bounds=%d prefix=%d, want %d", bounds.len(), prefix, tc.want)
+			}
+		})
+	}
+}
+
 // Cold source counts, rather than index length or directory order, decide
 // between complete prefix matches. Logical input dependencies are deduplicated.
 func TestIndexPrefixMinimizesColumnLoads(t *testing.T) {

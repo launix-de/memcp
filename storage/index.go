@@ -985,14 +985,11 @@ func (t *storageShard) indexAccess(cols scanAccess) (scanIndexBounds, int) {
 	// A complete unique point prefix yields at most one live row. Building or
 	// retaining a full-column candidate hook cannot narrow that driver further;
 	// leave the suffix to the mandatory residual predicate.
-	if t.t.hasBoundUniquePoint(cols) {
-		sortedEnd := 0
-		for sortedEnd < cols.len() && cols.boundaryAnalyzer(sortedEnd).IsSorted() {
-			sortedEnd++
-		}
-		if sortedEnd < cols.len() && indexBounds.len() > sortedEnd {
-			indexBounds.truncate(cols, sortedEnd)
-		}
+	// With no hook suffix, a unique-point check cannot change these bounds.
+	// Reuse the sorted-prefix extent already determined above instead of
+	// searching unique declarations and scanning the boundaries again.
+	if indexBounds.len() > indexBounds.usableSorted && t.t.hasBoundUniquePoint(cols) {
+		indexBounds.truncate(cols, indexBounds.usableSorted)
 	}
 
 	// Exact RecSet membership is a query-bound overlay. A prepared base index
