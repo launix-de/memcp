@@ -17,6 +17,8 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -288,5 +290,99 @@ func TestFileReadOnlyReplayDoesNotCreateOrExposeAppendHandle(t *testing.T) {
 	}
 	if _, found := committed["committed"]; !found || count != 1 || writer != nil {
 		t.Fatal("read-only replay lost a decision or exposed a writer")
+	}
+}
+
+type nativeDateWALCodec struct {
+	name   string
+	encode func(interface{}) []byte
+	decode func([]byte, chan interface{})
+}
+
+var nativeDateWALCodecs = []nativeDateWALCodec{{"s3", encodeS3LogEntry, decodeS3LogStream}}
+
+func TestNativeDateWALFrames(t *testing.T) {
+	value := scm.NewDateNanoWithZone(1700000000, 123456789, 17)
+	check := func(entry interface{}, hidden bool) {
+		t.Helper()
+		var rows [][]scm.Scmer
+		var tx string
+		switch row := entry.(type) {
+		case LogEntryInsert:
+			if hidden {
+				t.Fatal("hidden native-date row became visible")
+			}
+			rows, tx = row.values, row.txID
+		case LogEntryInsertHidden:
+			if !hidden {
+				t.Fatal("visible native-date row became hidden")
+			}
+			rows, tx = row.values, row.txID
+		default:
+			t.Fatalf("missing native-date WAL entry: %T", entry)
+		}
+		if tx != "native/17" || len(rows) != 1 || len(rows[0]) != 1 {
+			t.Fatal("native-date WAL shape/transaction changed", entry)
+		}
+		got := rows[0][0]
+		if !got.IsDate() || got.Int() != 1700000000 || got.DateNanosecond() != 123456789 || got.DateZone() != 17 {
+			t.Fatal("native-date WAL lost precision/zone", got)
+		}
+	}
+	for _, hidden := range []bool{false, true} {
+		kind := "insert-v2"
+		if hidden {
+			kind = "insert_hidden-v2"
+		}
+		// This payload is literal predecessor data, independent of today's writer.
+		payload := []byte(fmt.Sprintf(`{"t":%q,"cols":["stamp"],"values":[[{"scmer_date_v1":[1700000000,123456789,17]}]],"txid":"native/17"}`, kind))
+		var literal bytes.Buffer
+		binary.Write(&literal, binary.LittleEndian, uint32(len(payload)))
+		literal.Write(payload)
+		var entry interface{} = LogEntryInsert{cols: []string{"stamp"}, values: [][]scm.Scmer{{value}}, txID: "native/17"}
+		if hidden {
+			entry = LogEntryInsertHidden{cols: []string{"stamp"}, values: [][]scm.Scmer{{value}}, txID: "native/17"}
+		}
+		for _, backend := range nativeDateWALCodecs {
+			for _, frame := range [][]byte{literal.Bytes(), backend.encode(entry)} {
+				out := make(chan interface{}, 1)
+				backend.decode(frame, out)
+				select {
+				case got := <-out:
+					check(got, hidden)
+				default:
+					t.Fatal(backend.name, "omitted valid native-date frame")
+				}
+			}
+		}
+		for _, literalFrame := range []bool{false, true} {
+			engine := &FileStorage{path: filepath.Join(t.TempDir(), "db") + "/"}
+			log := engine.OpenLog("date")
+			if literalFrame {
+				log.Close()
+				prefix := "insert-v2 "
+				if hidden {
+					prefix = "insert-hidden-v2 "
+				}
+				body := prefix + `{"cols":["stamp"],"values":[[{"scmer_date_v1":[1700000000,123456789,17]}]],"tx":"native/17"}` + "\n"
+				if err := os.WriteFile(engine.path+"date.log", []byte(body), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				log.Write(entry)
+				log.Flush(true)
+				log.Close()
+			}
+			_, entries, reopened := engine.ReplayLog("date", false)
+			var restored []interface{}
+			for row := range entries {
+				restored = append(restored, row)
+			}
+			reopened.Close()
+			if len(restored) != 1 {
+				t.Fatal("file WAL changed entry count", restored)
+			}
+			check(restored[0], hidden)
+		}
 	}
 }

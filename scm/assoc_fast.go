@@ -76,7 +76,7 @@ func HashKey(k Scmer) uint64 {
 			} else {
 				h.WriteByte(0)
 			}
-		case tagInt, tagFloat:
+		case tagInt, tagFloat, tagDate:
 			// Compressed columns can expose the same numeric group key as an
 			// int or float. Hash both representations alike; Equal still
 			// distinguishes large int/int values sharing a rounded hash.
@@ -198,8 +198,10 @@ func hashStructuralScalar(value Scmer) uint64 {
 			return hashStructuralFloat(1)
 		}
 		return hashStructuralFloat(0)
-	case tagInt, tagDate:
+	case tagInt:
 		return hashStructuralFloat(float64(value.Int()))
+	case tagDate:
+		return hashStructuralFloat(value.Float())
 	case tagFloat:
 		return hashStructuralFloat(value.Float())
 	case tagString, tagSymbol, tagCString, tagBString, tagConcat:
@@ -207,8 +209,8 @@ func hashStructuralScalar(value Scmer) uint64 {
 		if text == "" || strings.EqualFold(text, "false") {
 			return hashStructuralFloat(0)
 		}
-		if timestamp, ok := ParseDateString(text); ok {
-			return hashStructuralFloat(float64(timestamp))
+		if timestamp, ok := ParseDateValue(text); ok {
+			return hashStructuralFloat(timestamp.Float())
 		}
 		if numericPrefix(text) != "" {
 			return hashStructuralFloat(value.Float())

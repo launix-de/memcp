@@ -37,12 +37,15 @@ type StorageSCMER struct {
 	hasBSON   bool
 	// hasComposite marks lists, dictionaries and other non-scalar values.
 	// They have no string or numeric encoding and must keep a value storage.
-	hasComposite bool
-	longStrings  int
-	longSample   *longTextSample
-	null         uint  // amount of NULL values (sparse map!)
-	numSeq       uint  // sequence statistics
-	last1, last2 int64 // sequence statistics
+	hasComposite      bool
+	hasNativeDate     bool
+	hasNonDate        bool
+	dateFractionScale int
+	longStrings       int
+	longSample        *longTextSample
+	null              uint  // amount of NULL values (sparse map!)
+	numSeq            uint  // sequence statistics
+	last1, last2      int64 // sequence statistics
 
 	// enum detection: collect up to enumMaxSymbols distinct values
 	enumVals  [enumMaxSymbols]scm.Scmer
@@ -74,7 +77,8 @@ func (s *StorageSCMER) String() string {
 //	byte in v0.1.0. Historically StorageSCMER was not a final storage type;
 //	BSON values intentionally remain in it. Format changes still require a NEW
 //	magic byte in storages[] (storage.go); keep magic 1 as a legacy reader
-//	forever.
+//	forever. Native dates select the versioned magic-3 private
+//	frame, preserving their identity, zone and fractional seconds.
 //	BSON values use a reserved JSON object envelope inside their existing JSONL
 //	line. This adds a representation for the new Scmer tag without changing the
 //	legacy framing or the decoding of any previously supported Scmer value.
@@ -142,6 +146,12 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 }
 
 func (s *StorageSCMER) Serialize(f io.Writer) {
+	for _, value := range s.values {
+		if scm.HasNativeDate(value) {
+			(&storageSCMERExact{StorageSCMER: *s}).Serialize(f)
+			return
+		}
+	}
 	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
 	for i := 0; i < len(s.values); i++ {
@@ -258,6 +268,11 @@ func storageValueEqual(a, b scm.Scmer) bool {
 }
 
 func (s *StorageSCMER) scan(i uint32, value scm.Scmer) {
+	if value.IsDate() {
+		s.dateFractionScale = nativeDateGCD(s.dateFractionScale, value.DateNanosecond())
+	} else if !value.IsNil() {
+		s.hasNonDate = true
+	}
 	// enum detection: track up to enumMaxSymbols distinct values with frequencies
 	if s.enumK != 0xFF {
 		found := false
@@ -288,13 +303,9 @@ func (s *StorageSCMER) scan(i uint32, value scm.Scmer) {
 		s.minIntScale = math.MinInt8
 		return
 	}
-	if value.GetTag() == scm.TagDate {
-		v2 := value.Int()
-		if v2-s.last1 == s.last1-s.last2 {
-			s.numSeq++
-		}
-		s.last2 = s.last1
-		s.last1 = v2
+	if scm.HasNativeDate(value) {
+		s.hasNativeDate = true
+		s.minIntScale = math.MinInt8
 		return
 	}
 	if value.IsInt() {
@@ -360,6 +371,9 @@ func (s *StorageSCMER) prepare() {
 	s.hasString = false
 	s.hasBSON = false
 	s.hasComposite = false
+	s.hasNativeDate = false
+	s.hasNonDate = false
+	s.dateFractionScale = 0
 	s.enumK = 0
 	s.longStrings = 0
 	s.longSample = nil
@@ -379,6 +393,12 @@ func (s *StorageSCMER) finish() {
 
 // soley to StorageSCMER
 func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
+	if s.hasNativeDate {
+		if !s.hasNonDate {
+			return &storageSCMERExact{nativeDates: newNativeDateColumn(s.dateFractionScale)}
+		}
+		return nil
+	}
 	if s.hasBSON {
 		return nil
 	}
@@ -458,3 +478,145 @@ func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
 }
 
 func (s *StorageSCMER) DistinctCount() uint { return uint(len(s.values)) }
+
+const storageExactScalarVersion = 3
+
+// storageSCMERExact preserves historical native scalar values. Magic 1 keeps
+// its independent reader/writer and never interprets the private envelopes.
+// Version 1 is the historical length-framed private JSON payload. Version 2
+// adds an encoding byte: 1 retains that JSON payload, 2 stores native dates
+// as three bit-packed integer columns. Version 3 adds encoding 3: upper-zone
+// biased seconds and scaled nanoseconds, each in a bounded integer frame.
+// All current writers emit version 3; old version/encoding assignments remain.
+type storageSCMERExact struct {
+	StorageSCMER
+	// Decoded packed columns stay compressed; generic v1/JSON values use values.
+	nativeDates *nativeDateColumn
+}
+
+func (s *storageSCMERExact) Serialize(f io.Writer) {
+	if s.nativeDates != nil {
+		s.nativeDates.serialize(f)
+		return
+	}
+	if s.serializeNativeDates(f) {
+		return
+	}
+	// Magic 3 v3/encoding 1: header, uint64 row count, then byte length and
+	// complete private JSON for each scalar. Exact framing composes inside
+	// containers that have their own trailing fields; no stream read-ahead.
+	if err := binary.Write(f, binary.LittleEndian, [3]byte{3, storageExactScalarVersion, 1}); err != nil {
+		panic(err)
+	}
+	if err := binary.Write(f, binary.LittleEndian, uint64(len(s.values))); err != nil {
+		panic(err)
+	}
+	for i := 0; i < len(s.values); i++ {
+		value := s.values[i]
+		var v []byte
+		var err error
+		if value.IsBSON() {
+			typ, payload := value.BSONRaw()
+			v, err = json.Marshal(map[string]any{
+				"$memcp.scmer": "bson-v1",
+				"type":         typ,
+				"payload":      base64.RawStdEncoding.EncodeToString(payload),
+			})
+		} else {
+			v, err = scm.MarshalPersistentJSON(value)
+		}
+		if err != nil {
+			panic(err)
+		}
+		if err := binary.Write(f, binary.LittleEndian, uint64(len(v))); err != nil {
+			panic(err)
+		}
+		if count, err := f.Write(v); err != nil {
+			panic(err)
+		} else if count != len(v) {
+			panic(io.ErrShortWrite)
+		}
+	}
+}
+func (s *storageSCMERExact) Deserialize(f io.Reader) uint {
+	s.nativeDates = nil
+	s.values = nil
+	s.storageJITFunctions = storageJITFunctions{}
+	var version [1]byte
+	readStorageBytes(f, version[:])
+	if version[0] == 1 {
+		return s.deserializeExactJSON(f)
+	}
+	if version[0] != 2 && version[0] != 3 {
+		panic("unknown generic scalar column version")
+	}
+	var encoding [1]byte
+	readStorageBytes(f, encoding[:])
+	switch encoding[0] {
+	case 1:
+		return s.deserializeExactJSON(f)
+	case 2:
+		return s.deserializeNativeDates(f)
+	case 3:
+		if version[0] != 3 {
+			panic("packed date components require exact scalar version 3")
+		}
+		return s.deserializePackedNativeDates(f)
+	default:
+		panic("unknown exact scalar column encoding")
+	}
+}
+
+// Permanent version-1 payload; version 2 retains it under encoding 1.
+func (s *storageSCMERExact) deserializeExactJSON(f io.Reader) uint {
+	var count uint64
+	if err := binary.Read(f, binary.LittleEndian, &count); err != nil {
+		panic(err)
+	}
+	if count > uint64(^uint32(0)) {
+		panic("scalar column count exceeds row identifier domain")
+	}
+	s.values = make([]scm.Scmer, 0, min(count, 1024))
+	for index := uint64(0); index < count; index++ {
+		var length uint64
+		if err := binary.Read(f, binary.LittleEndian, &length); err != nil {
+			panic(err)
+		}
+		if length > uint64(int(^uint(0)>>1)) {
+			panic("scalar column record exceeds addressable memory")
+		}
+		payload := make([]byte, int(length))
+		if _, err := io.ReadFull(f, payload); err != nil {
+			panic(err)
+		}
+		s.values = append(s.values, decodePersistentColumnValue(payload))
+	}
+	return uint(count)
+}
+
+func decodePersistentColumnValue(line []byte) scm.Scmer {
+	if !json.Valid(line) {
+		panic("invalid persistent scalar column JSON")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(line))
+	decoder.UseNumber()
+	var decoded any
+	if err := decoder.Decode(&decoded); err != nil {
+		panic(err)
+	}
+	// This opaque envelope is shared with the permanent magic-1 BSON writer.
+	if envelope, ok := decoded.(map[string]any); ok && len(envelope) == 3 && envelope["$memcp.scmer"] == "bson-v1" {
+		kind := scm.TransformFromJSON(envelope["type"])
+		payload, ok := envelope["payload"].(string)
+		data, err := base64.RawStdEncoding.DecodeString(payload)
+		if !kind.IsInt() || kind.Int() < 0 || kind.Int() > 255 || !ok || err != nil {
+			panic("invalid BSON envelope in scalar column")
+		}
+		return scm.NewBSONRaw(byte(kind.Int()), data)
+	}
+	var value scm.Scmer
+	if err := scm.UnmarshalPersistentJSON(line, &value); err != nil {
+		panic(err)
+	}
+	return value
+}

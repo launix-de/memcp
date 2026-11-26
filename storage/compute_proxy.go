@@ -106,16 +106,17 @@ func (r *orderedComputeProxyReader) GetValueMulti(recids []uint32, target []scm.
 // values the StorageComputeProxy represents.
 type StorageComputeProxy struct {
 	storageJITFunctions
-	main       ColumnStorage                       // after Compress() — typically StorageSCMER or compressed type
-	delta      map[uint32]scm.Scmer                // sparse overwrites (lazy-computed values before Compress)
-	validMask  NonLockingReadMap.NonBlockingBitMap // 1=valid, 0=needs compute
-	compressed bool                                // true after Compress() → skip validMask, read from main
-	computor   scm.Scmer                           // computation lambda
-	inputCols  []string                            // column names the computor reads
-	shard      *storageShard                       // back-reference for reading input columns
-	colName    string                              // own column name (for cycle protection)
-	mu         sync.RWMutex                        // protects delta, main, compressed and retained byte counters
-	count      uint32                              // total row count at creation
+	main             ColumnStorage                       // after Compress() — typically StorageSCMER or compressed type
+	delta            map[uint32]scm.Scmer                // sparse overwrites (lazy-computed values before Compress)
+	validMask        NonLockingReadMap.NonBlockingBitMap // 1=valid, 0=needs compute
+	compressed       bool                                // true after Compress() → skip validMask, read from main
+	computor         scm.Scmer                           // computation lambda
+	inputCols        []string                            // column names the computor reads
+	shard            *storageShard                       // back-reference for reading input columns
+	colName          string                              // own column name (for cycle protection)
+	mu               sync.RWMutex                        // protects delta, main, compressed and retained byte counters
+	count            uint32                              // total row count at creation
+	persistedVersion uint8                               // preserve version-3 native scalar identity on rewrites
 	// ORC support: when isOrdered=true, single-row lazy compute is disabled.
 	// Validity is tracked per-row via validMask (1=valid, 0=needs compute).
 	// Invalidation sets bits to 0; on-demand recompute sets them back to 1.
@@ -174,6 +175,9 @@ func appendComputeProxyRows(newProxy *StorageComputeProxy, oldProxy *StorageComp
 	}
 	oldProxy.mu.RLock()
 	defer oldProxy.mu.RUnlock()
+	if oldProxy.persistedVersion == 3 {
+		newProxy.persistedVersion = 3
+	}
 	newIdx := startIdx
 	for _, oldIdx := range oldRowIDs {
 		val, inDelta := oldProxy.delta[oldIdx]
@@ -1112,9 +1116,32 @@ const storageComputeProxyVersion = 2
 //	1: adds [isOrdered uint8] after validMask, but validMask indices were written
 //	   via binary.Write(uint), so persisted data may miss the bitmap payload.
 //	2: writes validMask indices as uint32 and keeps the trailing isOrdered byte.
+//	3: historical uint64-framed private native values; loaded v3 proxies retain
+//	   this encoding on rewrite, while new proxies keep the current v2 format.
 func (p *StorageComputeProxy) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(50))                         // magic byte
-	binary.Write(f, binary.LittleEndian, uint8(storageComputeProxyVersion)) // version byte
+	version := uint8(storageComputeProxyVersion)
+	if p.persistedVersion == 3 || scm.HasNativeDate(p.computor) {
+		version = 3
+	}
+	for _, value := range p.delta {
+		if scm.HasNativeDate(value) {
+			version = 3
+			break
+		}
+	}
+	binary.Write(f, binary.LittleEndian, uint8(50)) // magic byte
+	binary.Write(f, binary.LittleEndian, version)
+	marshal := json.Marshal
+	if version == 3 {
+		marshal = func(v any) ([]byte, error) { return scm.MarshalPersistentJSON(v.(scm.Scmer)) }
+	}
+	writeLength := func(length int) {
+		if version == 3 {
+			binary.Write(f, binary.LittleEndian, uint64(length))
+		} else {
+			binary.Write(f, binary.LittleEndian, uint32(length))
+		}
+	}
 	binary.Write(f, binary.LittleEndian, p.count)
 
 	// inputCols
@@ -1126,11 +1153,11 @@ func (p *StorageComputeProxy) Serialize(f io.Writer) {
 	}
 
 	// computor as JSON
-	computorJSON, err := json.Marshal(p.computor)
+	computorJSON, err := marshal(p.computor)
 	if err != nil {
 		panic(err)
 	}
-	binary.Write(f, binary.LittleEndian, uint32(len(computorJSON)))
+	writeLength(len(computorJSON))
 	f.Write(computorJSON)
 
 	// compressed flag
@@ -1150,11 +1177,11 @@ func (p *StorageComputeProxy) Serialize(f io.Writer) {
 		binary.Write(f, binary.LittleEndian, uint32(len(p.delta)))
 		for idx, val := range p.delta {
 			binary.Write(f, binary.LittleEndian, idx)
-			valJSON, err := json.Marshal(val)
+			valJSON, err := marshal(val)
 			if err != nil {
 				panic(err)
 			}
-			binary.Write(f, binary.LittleEndian, uint32(len(valJSON)))
+			writeLength(len(valJSON))
 			f.Write(valJSON)
 		}
 	}
@@ -1186,6 +1213,8 @@ func (p *StorageComputeProxy) Deserialize(f io.Reader) uint {
 		return p.deserializeComputeProxyV1(f)
 	case 2:
 		return p.deserializeComputeProxyV2(f)
+	case 3:
+		return p.deserializeComputeProxyV3(f)
 	default:
 		panic(fmt.Sprintf("StorageComputeProxy: unknown version %d", version))
 	}
@@ -1313,6 +1342,103 @@ func (p *StorageComputeProxy) deserializeComputeProxyV2(f io.Reader) uint {
 	binary.Read(f, binary.LittleEndian, &isOrderedByte)
 	p.isOrdered = isOrderedByte != 0
 	return n
+}
+
+// readComputeProxyValue consumes exactly one v3 payload. In particular it cannot
+// borrow bytes belonging to a nested format or an enclosing trailer.
+func readComputeProxyValue(reader io.Reader) scm.Scmer {
+	var length uint64
+	if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
+		panic(err)
+	}
+	if length > uint64(int(^uint(0)>>1)) {
+		panic("computed scalar exceeds addressable memory")
+	}
+	payload := make([]byte, int(length))
+	readStorageBytes(reader, payload)
+	var value scm.Scmer
+	if err := scm.UnmarshalPersistentJSON(payload, &value); err != nil {
+		panic(err)
+	}
+	return value
+}
+
+func (p *StorageComputeProxy) deserializeComputeProxyV3(reader io.Reader) uint {
+	p.persistedVersion = 3
+	if err := binary.Read(reader, binary.LittleEndian, &p.count); err != nil {
+		panic(err)
+	}
+	var columns uint16
+	if err := binary.Read(reader, binary.LittleEndian, &columns); err != nil {
+		panic(err)
+	}
+	p.inputCols = make([]string, columns)
+	for index := range p.inputCols {
+		var length uint16
+		if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
+			panic(err)
+		}
+		name := make([]byte, int(length))
+		readStorageBytes(reader, name)
+		p.inputCols[index] = string(name)
+	}
+	p.computor = upgradePersistedTableCalls(readComputeProxyValue(reader))
+	var compressed, hasMain uint8
+	if err := binary.Read(reader, binary.LittleEndian, &compressed); err != nil {
+		panic(err)
+	}
+	if err := binary.Read(reader, binary.LittleEndian, &hasMain); err != nil {
+		panic(err)
+	}
+	if compressed > 1 || hasMain > 1 || (hasMain == 1 && compressed == 0) {
+		panic("invalid computed column flags")
+	}
+	p.compressed = compressed == 1
+	p.delta = make(map[uint32]scm.Scmer)
+	p.deltaBytes = 0
+	if hasMain == 1 {
+		var magic uint8
+		if err := binary.Read(reader, binary.LittleEndian, &magic); err != nil {
+			panic(err)
+		}
+		kind, exists := storages[magic]
+		if !exists {
+			panic("unknown nested computed column format")
+		}
+		main := reflect.New(kind).Interface().(ColumnStorage)
+		if count := main.Deserialize(reader); count != uint(p.count) {
+			panic("computed column extent differs from its main storage")
+		}
+		p.main = main
+		p.mainBytes = ownedColumnMemory(main)
+	} else {
+		var count uint32
+		if err := binary.Read(reader, binary.LittleEndian, &count); err != nil {
+			panic(err)
+		}
+		for index := uint32(0); index < count; index++ {
+			var row uint32
+			if err := binary.Read(reader, binary.LittleEndian, &row); err != nil {
+				panic(err)
+			}
+			if _, duplicate := p.delta[row]; duplicate {
+				panic("duplicate computed column delta row")
+			}
+			p.setDeltaValueLocked(row, readComputeProxyValue(reader))
+		}
+	}
+	if err := p.readValidMaskV2(reader); err != nil {
+		panic(err)
+	}
+	var ordered uint8
+	if err := binary.Read(reader, binary.LittleEndian, &ordered); err != nil {
+		panic(err)
+	}
+	if ordered > 1 {
+		panic("invalid computed column ordering flag")
+	}
+	p.isOrdered = ordered == 1
+	return uint(p.count)
 }
 
 func (s *StorageComputeProxy) DistinctCount() uint {

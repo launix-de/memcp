@@ -8,6 +8,8 @@ gives adaptive caches enough observed work to be admitted naturally. The test
 never inspects or names planner-owned tables, columns or operators.
 """
 import json
+import base64
+import urllib.request
 import pathlib
 import subprocess
 import sys
@@ -146,6 +148,16 @@ def write_oracle(path, results):
         output.write('\n')
 
 
+def check_current_dates():
+    expected = ('1\t2023-11-14 22:13:20.000000001\n'
+                '2\t2023-11-14 22:13:20.000000002\n'
+                '3\tNULL\n'
+                '4\t1969-12-31 23:59:59.999999999')
+    actual = query('SELECT id, clock FROM up_current_native_dates ORDER BY id')
+    if actual != expected:
+        raise AssertionError(f'current native date values changed: {actual!r}')
+
+
 if mode == 'record':
     write_oracle(args[0], run_cases())
 elif mode == 'check':
@@ -166,5 +178,25 @@ elif mode in ('mutate', 'cold-mutate'):
     query('UPDATE up_group_events SET amount=1 WHERE id=1')
     query('UPDATE up_group_events SET happened_at=999 WHERE id=1000')
     run_cases(oracle=oracle)
+elif mode == 'current-date-write':
+    # Candidate-only data is written after the immutable predecessor oracle
+    # comparisons. It exercises the new writer without altering those oracles.
+    query('DROP TABLE IF EXISTS up_current_native_dates')
+    query('CREATE TABLE up_current_native_dates (id INT PRIMARY KEY, clock DATETIME)')
+    query("INSERT INTO up_current_native_dates VALUES "
+          "(1,'2023-11-14 22:13:20.000000001'),"
+          "(2,'2023-11-14 22:13:20.000000002'),(3,NULL),"
+          "(4,'1969-12-31 23:59:59.999999999')")
+    check_current_dates()
+    request = urllib.request.Request(
+        f'http://127.0.0.1:{int(args[0])}/scm',
+        data=b'(rebuild (table "memcp-tests" false "up_current_native_dates" false) true false)',
+        headers={'Authorization': 'Basic ' + base64.b64encode(b'root:admin').decode('ascii')})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        response.read()
+    check_current_dates()
+elif mode == 'current-date-check':
+    check_current_dates()
+    query('DROP TABLE up_current_native_dates')
 else:
     raise ValueError('unknown mode: ' + mode)

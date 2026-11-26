@@ -128,3 +128,59 @@ func TestScmerJSON_RoundTripMany(t *testing.T) {
 		}
 	}
 }
+
+func TestHistoricalPersistentRuntimeValues(t *testing.T) {
+	for _, encoded := range []string{
+		`{"scmer_custom":8,"value":[1,"*"]}`,
+		`{"scmer_date_v1":[1700000000,0,0]}`,
+		`{"scmer_date_v1":[1700000000,1,0]}`,
+		`{"scmer_bson_v1":[16,"KgAAAA=="]}`,
+	} {
+		var private, public Scmer
+		if err := UnmarshalPersistentJSON([]byte(encoded), &private); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal([]byte(encoded), &public); err != nil {
+			t.Fatal(err)
+		}
+		if private.GetTag() == public.GetTag() {
+			t.Fatal("private envelope changed public JSON semantics")
+		}
+		serialized, err := MarshalPersistentJSON(private)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var restored Scmer
+		if err := UnmarshalPersistentJSON(serialized, &restored); err != nil {
+			t.Fatal(err)
+		}
+		encodedAgain, err := MarshalPersistentJSON(restored)
+		if err != nil || string(encodedAgain) != string(serialized) {
+			t.Fatalf("private value lost its native encoding: %s / %s (%v)", serialized, encodedAgain, err)
+		}
+		if private.IsNativeFunc() && !Equal(Apply(restored, NewInt(6), NewInt(7)), NewInt(42)) {
+			t.Fatal("restored callable changed its behavior")
+		}
+	}
+	for _, encoded := range []string{
+		`{"scmer_custom":8,"value":[2,"*"]}`,
+		`{"scmer_custom":8,"value":[1,"not-an-existing-declaration"]}`,
+		`{"scmer_custom":10,"value":[1,[]]}`,
+		`{"scmer_date_v1":[1700000000,1000000000,0]}`,
+		`{"scmer_date_v1":[1700000000,-1,0]}`,
+		`{"scmer_date_v1":[1700000000,0,2048]}`,
+		`{"scmer_date_v1":[17592186044416,0,0]}`,
+	} {
+		t.Run(encoded, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("unsupported native value silently accepted")
+				}
+			}()
+			var value Scmer
+			if err := UnmarshalPersistentJSON([]byte(encoded), &value); err != nil {
+				panic(err)
+			}
+		})
+	}
+}

@@ -544,6 +544,25 @@ func (s *FileStorage) ReplayLog(shard string, readOnly bool) (map[string]struct{
 				}
 				if len(b) == 0 && err == nil {
 					// nop
+				} else if bytes.HasPrefix(b, []byte("insert-v2 ")) || bytes.HasPrefix(b, []byte("insert-hidden-v2 ")) {
+					hidden := bytes.HasPrefix(b, []byte("insert-hidden-v2 "))
+					prefix := "insert-v2 "
+					if hidden {
+						prefix = "insert-hidden-v2 "
+					}
+					var frame struct {
+						Cols   []string      `json:"cols"`
+						Values persistedRows `json:"values"`
+						Tx     string        `json:"tx"`
+					}
+					if err := json.Unmarshal(b[len(prefix):], &frame); err != nil {
+						panic("corrupt precise insert log: " + err.Error())
+					}
+					if hidden {
+						replay <- LogEntryInsertHidden{cols: frame.Cols, values: [][]scm.Scmer(frame.Values), txID: frame.Tx}
+					} else {
+						replay <- LogEntryInsert{cols: frame.Cols, values: [][]scm.Scmer(frame.Values), txID: frame.Tx}
+					}
 				} else if len(b) >= 10 && string(b[0:10]) == "commit-tx " {
 					fields := strings.Fields(string(b[10:]))
 					if len(fields) != 2 || fields[0] == "" || fields[1] != fileCommitChecksum(fields[0]) {
@@ -790,6 +809,26 @@ func encodeFileLogEntry(logentry interface{}) []byte {
 }
 
 func encodeFileInsert(b *bytes.Buffer, prefix string, txID string, cols []string, values [][]scm.Scmer) {
+	encodedRows, precise := marshalLogRows(values)
+	if precise {
+		if prefix == "insert-hidden " {
+			b.WriteString("insert-hidden-v2 ")
+		} else {
+			b.WriteString("insert-v2 ")
+		}
+		frame := struct {
+			Cols   []string        `json:"cols"`
+			Values json.RawMessage `json:"values"`
+			Tx     string          `json:"tx,omitempty"`
+		}{cols, encodedRows, txID}
+		payload, err := json.Marshal(frame)
+		if err != nil {
+			panic(err)
+		}
+		b.Write(payload)
+		b.WriteByte('\n')
+		return
+	}
 	if txID == "" {
 		b.WriteString(prefix)
 	} else {
@@ -800,8 +839,7 @@ func encodeFileInsert(b *bytes.Buffer, prefix string, txID string, cols []string
 	}
 	tmp, _ := json.Marshal(cols)
 	b.Write(tmp)
-	tmp, _ = json.Marshal(values)
-	b.Write(tmp)
+	b.Write(encodedRows)
 	b.WriteString("\n")
 }
 func (w FileLogfile) Flush(durable bool) {

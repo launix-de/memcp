@@ -879,6 +879,7 @@ func (db *database) ensureLoaded() {
 		// generated code. Rebuild that code at the persistence boundary so schema
 		// files written by older binaries cannot retain an obsolete builtin ABI.
 		rebuildFKTriggersAfterLoad(db)
+		rebuildORCSelfTriggersAfterLoad(db)
 		db.srState = SHARED
 		// Dot-prefixed cache tables are planner-owned and persisted only so a
 		// warm query cache can survive restart. Re-register their table-level
@@ -1108,6 +1109,18 @@ func upgradePersistedTableCalls(value scm.Scmer) scm.Scmer {
 				bound = scope // declarations in this nested scope do not escape
 			}
 		}
+		// A historical constructor additionally carried a nil native transaction.
+		// Only remove that inert argument. Never discard a dynamic transaction
+		// expression or reinterpret generation-attested native table addresses.
+		if len(items) == 6 && callHeadIs(items[0], "table") && items[5].IsNil() {
+			if scope == conditional {
+				panic("cannot upgrade a table call after conditional rebinding; update the stored definition explicitly")
+			}
+			if replacement != nil {
+				items = replacement
+			}
+			return scm.NewSlice(append([]scm.Scmer(nil), items[:5]...)), bound
+		}
 		if len(items) == 3 && callHeadIs(items[0], "table") {
 			if scope == conditional {
 				panic("cannot upgrade a table call after conditional rebinding; update the stored definition explicitly")
@@ -1124,6 +1137,25 @@ func upgradePersistedTableCalls(value scm.Scmer) scm.Scmer {
 	}
 	restored, _ := restore(value, native)
 	return restored
+}
+
+// ORC self invalidation is generated from column declarations. Restore it while
+// the database is unpublished; do not reinterpret obsolete native addresses.
+func rebuildORCSelfTriggersAfterLoad(db *database) {
+	for _, t := range db.tables.GetAll() {
+		kept := t.Triggers[:0]
+		for _, trigger := range t.Triggers {
+			if !trigger.IsSystem || !strings.HasPrefix(trigger.Name, ".orc:") {
+				kept = append(kept, trigger)
+			}
+		}
+		t.Triggers = kept
+		for _, column := range t.Columns {
+			if len(column.OrcSortCols) != 0 {
+				t.registerORCSelfTriggers(column.Name)
+			}
+		}
+	}
 }
 
 func invalidatePersistedPlannerCodeAfterLoad(t *table) {

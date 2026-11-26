@@ -828,6 +828,17 @@ func callHeadIs(head scm.Scmer, names ...string) bool {
 // The triggers are idempotent (skipped if already registered).
 func (t *table) registerORCTriggers(name string) {
 	t.removeORCDependencyTriggers(name)
+	col := t.registerORCSelfTriggers(name)
+	if col != nil {
+		refs := extractScanJoinInfo(col.OrcMapReduceFn)
+		t.registerORCDependencyTriggers(name, col, refs)
+	}
+}
+
+// Self invalidation is derived exclusively from this table's column metadata.
+// It can be restored while the database is still unpublished, without resolving
+// another database or replaying generation-attested code from an older runtime.
+func (t *table) registerORCSelfTriggers(name string) *column {
 	// Find the column to check for partition support
 	var col *column
 	for _, c := range t.Columns {
@@ -908,10 +919,7 @@ func (t *table) registerORCTriggers(name string) {
 			Func:     buildFKProc(body),
 		})
 	}
-	if col != nil {
-		refs := extractScanJoinInfo(col.OrcMapReduceFn)
-		t.registerORCDependencyTriggers(name, col, refs)
-	}
+	return col
 }
 
 type tableRef struct{ schema, table string }

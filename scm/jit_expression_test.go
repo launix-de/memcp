@@ -2162,3 +2162,126 @@ func TestJITRegexpReplacementUsesRuntimeClosure(t *testing.T) {
 		t.Fatal("replacement lost runtime closure", got)
 	}
 }
+
+// Constructor-only numeric results can use scalar stores; a generic number
+// contract still permits native Date pointers and must retain its GC roots.
+func TestJITNumericReturnScalarProofs(t *testing.T) {
+	date := NewDateNanoWithZone(1700000000, 1, 17)
+	mapper := NewFunc(func(...Scmer) Scmer { return NewInt(1) })
+	for _, test := range []struct {
+		name string
+		args []Scmer
+	}{
+		{"float", []Scmer{NewInt(1)}},
+		{"+", []Scmer{date, NewInt(1)}},
+		{"-", []Scmer{date, NewInt(1)}},
+		{"*", []Scmer{date, NewInt(1)}},
+		{"/", []Scmer{date, NewInt(1)}},
+		{"div_null", []Scmer{date, NewInt(0)}},
+		{"mod", []Scmer{date, NewInt(2)}},
+		{"floor", []Scmer{date}},
+		{"ceil", []Scmer{date}},
+		{"round", []Scmer{date}},
+		{"sql_abs", []Scmer{date}},
+		{"sqrt", []Scmer{date}},
+		{"sql_rand", nil},
+		{"sum_float_map", []Scmer{NewSlice(nil), mapper, date}},
+		{"numcpu", nil},
+		{"dot", []Scmer{NewSlice([]Scmer{date}), NewSlice([]Scmer{NewInt(1)})}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			decl := declarations[test.name]
+			if !jitReturnHasNoHeapPointer(decl.Type.Return) {
+				t.Fatal("constructor-only numeric result lost its scalar proof")
+			}
+			value := decl.Fn(test.args...)
+			if !value.IsNil() && !value.IsInt() && !value.IsFloat() && !value.IsBool() {
+				t.Fatalf("scalar proof returned a pointer representation: %v", value)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name string
+		args []Scmer
+	}{
+		{"sql_sum_reduce", []Scmer{NewNil(), date}},
+		{"sql_decimal_output", []Scmer{date, NewInt(-1)}},
+		{"sum_map", []Scmer{NewSlice(nil), mapper, date}},
+	} {
+		decl := declarations[test.name]
+		value := decl.Fn(test.args...)
+		if jitReturnHasNoHeapPointer(decl.Type.Return) || !value.IsDate() || value.DateNanosecond() != 1 || value.DateZone() != 17 {
+			t.Fatalf("%s did not preserve the pointer-carrying numeric identity", test.name)
+		}
+	}
+}
+
+func TestJITScalarNativeReturnSurvivesSliceMaterialization(t *testing.T) {
+	const name = "jit_test_scalar_native_return"
+	decl := &Declaration{Name: name, Fn: func(args ...Scmer) Scmer {
+		if args[0].IsNil() {
+			return NewNil()
+		}
+		return NewFloat(args[0].Float() + 0.5)
+	}, Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "number|nil"}},
+		Return: &TypeDescriptor{Kind: "number|nil", JITNoHeapPointer: true}}}
+	titles := declaration_titles
+	Declare(&Globalenv, decl)
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(decl.Fn))
+		declaration_titles = titles
+	}()
+	compiled := compileJITExpressionTestProc(t, "(lambda (value) (list ("+name+" value)))")
+	for _, input := range []Scmer{NewInt(2), NewFloat(1.25), NewNil(), NewDateNanoWithZone(1, 1, 17)} {
+		want := decl.Fn(input)
+		got := Apply(compiled, input)
+		runtime.GC() // Correctness only: native scalar words remain valid in a heap slice.
+		values := got.Slice()
+		if len(values) != 1 || !Equal(values[0], want) || values[0].GetTag() != want.GetTag() {
+			t.Fatalf("native scalar materialization = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestJITNativeDateNanosecondsStayRooted(t *testing.T) {
+	for _, kind := range []string{"date", "number", "number|nil"} {
+		if jitReturnHasNoHeapPointer(&TypeDescriptor{Kind: kind}) {
+			t.Fatalf("%s can contain a fractional date pointer", kind)
+		}
+	}
+	ctx := &JITContext{}
+	if ctx.TryEmitStoreScmerSliceElement(nil, nil, &JITValueDesc{Type: tagDate}, 16) {
+		t.Fatal("date used pointer-free slice store")
+	}
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	const name = "jit_test_date_gc"
+	Declare(&Globalenv, &Declaration{Name: name, Fn: func(...Scmer) Scmer { runtime.GC(); return NewNil() },
+		Type: &TypeDescriptor{Kind: "func", HasSideEffects: true, Return: &TypeDescriptor{Kind: "nil"}}})
+	Declare(&Globalenv, &Declaration{Name: "jit_test_generic_numeric_date", Fn: func(args ...Scmer) Scmer {
+		return NewDateNanoWithZone(1700000000, int(args[0].Int()), 17)
+	}, Type: &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{{Kind: "int"}}, Return: &TypeDescriptor{Kind: "number"}}})
+	generic := compileJITExpressionTestProc(t, `(lambda (ns)
+		((lambda (value) (begin (jit_test_date_gc) (list value (date_parts value))))
+			(jit_test_generic_numeric_date ns)))`)
+	compiled := compileJITExpressionTestProc(t, `(lambda (ns)
+		((lambda (value) (begin (jit_test_date_gc) (list value (date_parts value))))
+			(date_from_parts 1700000000 ns 17)))`)
+	less := compileJITExpressionTestProc(t, `(lambda (ns)
+		(< (date_from_parts 1700000000 ns 17)
+			(date_from_parts 1700000000 (+ ns 1) 17)))`)
+	for ns := int64(1); ns <= 32; ns++ {
+		if !Apply(less, NewInt(ns)).Bool() {
+			t.Fatal("JIT collapsed adjacent native nanoseconds", ns)
+		}
+		for _, proc := range []Scmer{compiled, generic} {
+			values := Apply(proc, NewInt(ns)).Slice()
+			if len(values) != 2 || values[0].DateNanosecond() != int(ns) || values[0].DateZone() != 17 || !Equal(values[1], NewSlice([]Scmer{NewInt(1700000000), NewInt(ns), NewInt(17)})) {
+				t.Fatal("JIT lost live date storage", ns, values)
+			}
+		}
+	}
+}

@@ -2740,8 +2740,8 @@ func (c *column) UpdateSanitizer() {
 				if ts, err := strconv.ParseInt(v.String(), 10, 64); err == nil {
 					return scm.NewDate(ts)
 				}
-				if ts, ok := scm.ParseDateString(v.String()); ok {
-					return scm.NewDate(ts)
+				if value, ok := scm.ParseDateValue(v.String()); ok {
+					return value
 				}
 				panic("cannot parse date string for column " + name + ": " + v.String())
 			}

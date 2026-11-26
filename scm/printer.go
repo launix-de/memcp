@@ -415,16 +415,47 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		value := strconv.AppendInt(buffer[:0], v.Int(), 10)
 		_, _ = b.Write(value)
 	case tagDate:
+		// Construct native dates before entering any receiving lambda scope.
+		// This also keeps fractional payload allocation out of row callbacks.
 		if b.objects != nil {
-			// Network values preserve the native date scalar, including its zone.
-			// Local diagnostic/persistence text keeps its historical spelling.
-			b.WriteString("(serialized_date ")
+			if b.literals == nil {
+				b.literals = make(map[Scmer]int64)
+			}
+			id, exists := b.literals[v]
+			if !exists {
+				id = int64(len(b.references) + len(b.literals) + len(b.procedures) + 1)
+				b.literals[v] = id
+			}
+			b.WriteString("(serialized_value ")
+			b.writeInt(id)
+			b.WriteByte(' ')
+			if exists {
+				b.WriteString("nil)")
+				return
+			}
+		}
+		nanos := v.DateNanosecond()
+		if nanos != 0 || v.DateZone() != 0 || b.objects != nil {
+			// A new constructor name makes older peers reject subsecond values
+			// explicitly; the permanent two-field date marker stays unchanged.
+			if nanos != 0 || v.DateZone() != 0 {
+				b.WriteString("(date_from_parts ")
+			} else {
+				b.WriteString("(serialized_date ")
+			}
 			b.writeInt(v.Int())
 			b.WriteByte(' ')
+			if nanos != 0 || v.DateZone() != 0 {
+				b.WriteString(strconv.Itoa(nanos))
+				b.WriteByte(' ')
+			}
 			b.WriteString(strconv.Itoa(TagDateDecodeZone(auxVal(v.aux))))
 			b.WriteByte(')')
 		} else {
 			b.writeInt(v.Int())
+		}
+		if b.objects != nil {
+			b.WriteByte(')')
 		}
 	case tagFloat:
 		if b.objects != nil && (math.IsInf(v.Float(), 0) || math.IsNaN(v.Float())) {
@@ -499,7 +530,7 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 			slice = append([]Scmer(nil), slice...)
 			slice[1] = NewString(slice[1].Regex().String())
 		}
-		if b.objects != nil && len(slice) == 2 && scmerIsSymbol(slice[0], "quote") {
+		if len(slice) == 2 && scmerIsSymbol(slice[0], "quote") && (b.objects != nil || quotedLiteralHasDateParts(slice[1])) {
 			serializeClusterLiteral(b, slice[1], glob)
 			return
 		}
@@ -847,4 +878,20 @@ func serializeClusterLiteral(b *schemeTextWriter, value Scmer, glob *Env) {
 		return
 	}
 	serializeEx(b, value, glob, glob, nil)
+}
+
+// A quoted runtime date needs a constructor even in stored, non-network code.
+func quotedLiteralHasDateParts(value Scmer) bool {
+	value = value.WithoutSourceInfo()
+	if value.IsDate() {
+		return value.DateNanosecond() != 0 || value.DateZone() != 0
+	}
+	if value.IsSlice() {
+		for _, item := range value.Slice() {
+			if quotedLiteralHasDateParts(item) {
+				return true
+			}
+		}
+	}
+	return false
 }

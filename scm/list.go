@@ -41253,7 +41253,7 @@ func init_list() {
 				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Kind: "any", Label: "unused sum"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "number"}},
 				{Kind: "number", Label: "zero"},
 			},
-			Return:             &TypeDescriptor{Kind: "number"},
+			Return:             &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:              true,
 			Forbidden:          true,
 			JITNativeFP:        true,

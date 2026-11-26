@@ -133,6 +133,11 @@ type TypeDescriptor struct {
 	// lowering; declarations may enable this only when their source function
 	// proves that float values cannot change representation inside the loop.
 	JITNativeFP bool
+	// JITNoHeapPointer on a return descriptor proves that every successful
+	// result is built as an integer, float, bool or nil. Generic number values
+	// can carry fractional Date pointers and do not imply this property.
+	// This is local code-generation metadata, never a transport contract.
+	JITNoHeapPointer bool `json:"-"`
 	// JITInlineCost is jitgen's architecture-neutral estimate of the emitted
 	// builtin body: the builtin's SSA instructions plus recursively inlined Go
 	// helpers. Zero denotes a handwritten emitter without generated cost data;
