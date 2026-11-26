@@ -8423,7 +8423,12 @@ func ComputeSize(v Scmer) uint {
 	switch v.GetTag() {
 	case tagNil:
 		return base
-	case tagBool, tagInt, tagFloat, tagDate:
+	case tagBool, tagInt, tagFloat:
+		return base
+	case tagDate:
+		if v.ptr != nil {
+			return base + goAllocOverhead + 4
+		}
 		return base
 	case tagFunc, tagFuncEnv:
 		return base + goAllocOverhead

@@ -2162,3 +2162,36 @@ func TestJITRegexpReplacementUsesRuntimeClosure(t *testing.T) {
 		t.Fatal("replacement lost runtime closure", got)
 	}
 }
+
+func TestJITNativeDateNanosecondsStayRooted(t *testing.T) {
+	for _, kind := range []string{"date", "number", "number|nil"} {
+		if jitReturnHasNoHeapPointer(&TypeDescriptor{Kind: kind}) {
+			t.Fatalf("%s can contain a fractional date pointer", kind)
+		}
+	}
+	ctx := &JITContext{}
+	if ctx.TryEmitStoreScmerSliceElement(nil, nil, &JITValueDesc{Type: tagDate}, 16) {
+		t.Fatal("date used pointer-free slice store")
+	}
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	const name = "jit_test_date_gc"
+	Declare(&Globalenv, &Declaration{Name: name, Fn: func(...Scmer) Scmer { runtime.GC(); return NewNil() },
+		Type: &TypeDescriptor{Kind: "func", HasSideEffects: true, Return: &TypeDescriptor{Kind: "nil"}}})
+	compiled := compileJITExpressionTestProc(t, `(lambda (ns)
+		((lambda (value) (begin (jit_test_date_gc) (list value (date_parts value))))
+			(date_from_parts 1700000000 ns 17)))`)
+	less := compileJITExpressionTestProc(t, `(lambda (ns)
+		(< (date_from_parts 1700000000 ns 17)
+			(date_from_parts 1700000000 (+ ns 1) 17)))`)
+	for ns := int64(1); ns <= 32; ns++ {
+		if !Apply(less, NewInt(ns)).Bool() {
+			t.Fatal("JIT collapsed adjacent native nanoseconds", ns)
+		}
+		values := Apply(compiled, NewInt(ns)).Slice()
+		if len(values) != 2 || values[0].DateNanosecond() != int(ns) || values[0].DateZone() != 17 || !Equal(values[1], NewSlice([]Scmer{NewInt(1700000000), NewInt(ns), NewInt(17)})) {
+			t.Fatal("JIT lost live date storage", ns, values)
+		}
+	}
+}

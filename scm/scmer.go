@@ -828,7 +828,7 @@ func (s Scmer) Float() float64 {
 	case tagBSON:
 		return bsonFloat(s)
 	case tagDate:
-		return float64(TagDateDecodeUnix(auxVal(s.aux)))
+		return float64(TagDateDecodeUnix(auxVal(s.aux))) + float64(s.DateNanosecond())/1000000000
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return 1.0
@@ -1241,7 +1241,7 @@ func (s Scmer) marshalJSON(persistent bool) ([]byte, error) {
 			return v.Float()
 		case tagDate:
 			if persistent {
-				return map[string]any{"scmer_date_v1": []int64{v.Int(), 0, int64(TagDateDecodeZone(auxVal(v.aux)))}}
+				return map[string]any{"scmer_date_v1": []int64{v.Int(), int64(v.DateNanosecond()), int64(v.DateZone())}}
 			}
 			return DateToDisplay(v, time.UTC)
 		case tagString, tagConcat:
@@ -1529,12 +1529,7 @@ func (s *Scmer) unmarshalJSON(data []byte, persistent bool) error {
 					}
 					values[index] = value
 				}
-				// The legacy calendar runtime cannot represent a fractional second.
-				// Refuse it rather than silently discarding persisted precision.
-				if values[1] != 0 {
-					panic("persistent subsecond date requires a nanosecond calendar runtime")
-				}
-				return NewDateWithZone(values[0], int(values[2]))
+				return NewDateNanoWithZone(values[0], int(values[1]), int(values[2]))
 			}
 			if encodedTag, ok := t["scmer_custom"]; ok && len(t) == 2 {
 				var tag int64 = -1

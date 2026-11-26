@@ -80,3 +80,52 @@ func TestDateStringConversionsPreserveTemporalValues(t *testing.T) {
 		})
 	}
 }
+
+// Literal predecessor payloads establish compatibility independently of this
+// runtime's encoder and of the zero-fraction upgrade fixtures.
+func TestHistoricalDateNanoseconds(t *testing.T) {
+	decode := func(payload string) Scmer {
+		var value Scmer
+		if err := UnmarshalPersistentJSON([]byte(payload), &value); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	first := decode(`{"scmer_date_v1":[1700000000,100000001,17]}`)
+	second := decode(`{"scmer_date_v1":[1700000000,100000002,17]}`)
+	if Equal(first, second) || EqualSQL(first, second).Bool() || !Less(first, second) || Less(second, first) {
+		t.Fatal("adjacent native nanoseconds lost exact ordering")
+	}
+	if DateToDisplay(first, nil) != "2023-11-14 22:13:20.100000001" {
+		t.Fatal("fraction was lost in display", first)
+	}
+	for _, value := range []Scmer{first, second, decode(`{"scmer_date_v1":[-1,999999999,2047]}`), decode(`{"scmer_date_v1":[1700000000,0,17]}`)} {
+		check := func(restored Scmer) {
+			want, err := MarshalPersistentJSON(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := MarshalPersistentJSON(restored)
+			if err != nil || string(want) != string(got) {
+				t.Fatalf("date identity changed: %s -> %s (%v)", want, got, err)
+			}
+		}
+		check(Eval(Read(t.Name(), SerializeToString(value, &Globalenv), true), &Globalenv))
+		quoted := NewSlice([]Scmer{NewSymbol("quote"), NewSlice([]Scmer{value})})
+		check(Eval(Read(t.Name(), SerializeToString(quoted, &Globalenv), true), &Globalenv).Slice()[0])
+		env := &Env{Vars: Vars{Symbol("captured"): value}, Outer: &Globalenv}
+		proc := Eval(Read(t.Name(), `(lambda () captured)`, true), env)
+		wire, err := MarshalProcedure(proc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restored, err := UnmarshalProcedure(wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(Apply(restored))
+		if HashKey(value) != HashKey(NewFloat(value.Float())) {
+			t.Fatal("equal numeric dates hash differently")
+		}
+	}
+}

@@ -133,6 +133,7 @@ func TestHistoricalPersistentRuntimeValues(t *testing.T) {
 	for _, encoded := range []string{
 		`{"scmer_custom":8,"value":[1,"*"]}`,
 		`{"scmer_date_v1":[1700000000,0,0]}`,
+		`{"scmer_date_v1":[1700000000,1,0]}`,
 		`{"scmer_bson_v1":[16,"KgAAAA=="]}`,
 	} {
 		var private, public Scmer
@@ -165,7 +166,10 @@ func TestHistoricalPersistentRuntimeValues(t *testing.T) {
 		`{"scmer_custom":8,"value":[2,"*"]}`,
 		`{"scmer_custom":8,"value":[1,"not-an-existing-declaration"]}`,
 		`{"scmer_custom":10,"value":[1,[]]}`,
-		`{"scmer_date_v1":[1700000000,1,0]}`,
+		`{"scmer_date_v1":[1700000000,1000000000,0]}`,
+		`{"scmer_date_v1":[1700000000,-1,0]}`,
+		`{"scmer_date_v1":[1700000000,0,2048]}`,
+		`{"scmer_date_v1":[17592186044416,0,0]}`,
 	} {
 		t.Run(encoded, func(t *testing.T) {
 			defer func() {
