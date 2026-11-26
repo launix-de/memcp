@@ -22,6 +22,24 @@ test_cases:
           (list 3 (date_from_parts -1 999999999 2047))))
   - name: Date column coercion preserves supplied nanoseconds
     sql: INSERT INTO sr_date_ns VALUES (4, '2023-11-14 22:13:20.000000003')
+  - name: Begin exact native date rollback
+    session_id: native-date-rollback
+    sql: BEGIN
+  - name: Write fractional date in rolled back transaction
+    session_id: native-date-rollback
+    sql: UPDATE sr_date_ns SET stamp='2023-11-14 22:13:20.999999999' WHERE id=1
+  - name: Roll back fractional date write
+    session_id: native-date-rollback
+    sql: ROLLBACK
+  - name: Begin exact native date commit
+    session_id: native-date-commit
+    sql: BEGIN
+  - name: Write fractional date in committed transaction
+    session_id: native-date-commit
+    sql: UPDATE sr_date_ns SET stamp='2023-11-14 22:13:20.000000004' WHERE id=4
+  - name: Commit fractional date write
+    session_id: native-date-commit
+    sql: COMMIT
   - name: Crash with native fractional dates in WAL
     scm: (crash)
     expect: {interrupted_ok: true}
@@ -35,7 +53,7 @@ test_cases:
       - {id: 1, stamp: '2023-11-14 22:13:20.000000001'}
       - {id: 2, stamp: '2023-11-14 22:13:20.000000002'}
       - {id: 3, stamp: '1969-12-31 23:59:59.999999999'}
-      - {id: 4, stamp: '2023-11-14 22:13:20.000000003'}
+      - {id: 4, stamp: '2023-11-14 22:13:20.000000004'}
   - name: Rebuild retains native fractional date parts
     scm: (rebuild true false)
   - name: Complete native date rows before restart
@@ -46,7 +64,7 @@ test_cases:
       - {id: 1, stamp: '2023-11-14 22:13:20.000000001'}
       - {id: 2, stamp: '2023-11-14 22:13:20.000000002'}
       - {id: 3, stamp: '1969-12-31 23:59:59.999999999'}
-      - {id: 4, stamp: '2023-11-14 22:13:20.000000003'}
+      - {id: 4, stamp: '2023-11-14 22:13:20.000000004'}
   - name: Native date sort keeps adjacent nanoseconds distinct
     sql: SELECT id FROM sr_date_ns ORDER BY stamp
     expect: {rows: 4, data: [{id: 3}, {id: 1}, {id: 2}, {id: 4}]}
