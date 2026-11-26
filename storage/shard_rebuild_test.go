@@ -3314,3 +3314,27 @@ func TestColdIndexSuffixReloadsForPrefixRead(t *testing.T) {
 		})
 	}
 }
+
+func TestORCInvalidationReadsReloadedSortColumn(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
+	tbl.CreateColumn("running", "INT", nil, nil)
+	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+		t.Fatal(result)
+	}
+	tbl.Columns[2].OrcSortCols = []string{"payload"}
+	tbl.Columns[2].OrcSortDirs = []bool{false}
+	shard := tbl.ActiveShards()[0]
+	proxy := &StorageComputeProxy{shard: shard, colName: "running", count: 2,
+		isOrdered: true, delta: map[uint32]scm.Scmer{0: scm.NewInt(10), 1: scm.NewInt(30)}}
+	proxy.validMask.Set(0, true)
+	proxy.validMask.Set(1, true)
+	shard.mu.Lock()
+	shard.columns["running"] = proxy
+	shard.columns["payload"] = nil
+	shard.mu.Unlock()
+
+	tbl.invalidateORCFromSortKey("running", []scm.Scmer{scm.NewString("row-00000002")})
+	if !proxy.validMask.AtomicGet(0) || proxy.validMask.AtomicGet(1) {
+		t.Fatal("invalidation did not compare the reloaded sort values against the suffix boundary")
+	}
+}

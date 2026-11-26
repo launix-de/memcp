@@ -157,3 +157,44 @@ func TestIndexPrefixMinimizesColumnLoads(t *testing.T) {
 		t.Fatal("iteration did not retain a fully prepared covering index")
 	}
 }
+
+// A covering prefix is required for reuse; a short existing key must not stop
+// definition creation or the ordinary savings-triggered physical index build.
+func TestIndexPrefixStillCreatesAndBuildsMissingKeys(t *testing.T) {
+	rows := make([][]scm.Scmer, 1024)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString("value")}
+	}
+	tbl := setupScanLookupTable(t, "memcp-tests", rows)
+	shard := tbl.ActiveShards()[0]
+	lease := shard.GetRead(nil, false)
+	defer lease.Release()
+	for width := 1; width <= 2; width++ {
+		bounds := analyzedBoundaries{
+			{col: "key", matcher: EqualMatcher, lower: scm.NewInt(511), upper: scm.NewInt(511), lowerInclusive: true, upperInclusive: true},
+		}
+		if width == 2 {
+			bounds = append(bounds, analyzedBoundary{col: "value", matcher: EqualMatcher,
+				lower: scm.NewString("value"), upper: scm.NewString("value"), lowerInclusive: true, upperInclusive: true})
+		}
+		access := runtimeScanAccess(bounds)
+		for probe := 1; probe <= 2; probe++ {
+			if _, found := shard.scanFirstRecord(access, nil, scm.NewBool(true), nil, nil, nil); !found {
+				t.Fatal("missing fixture row")
+			}
+			if len(shard.Indexes) != width {
+				t.Fatalf("width=%d probe=%d: definitions=%d, want %d", width, probe, len(shard.Indexes), width)
+			}
+			index := shard.Indexes[width-1]
+			if len(index.Cols) != width {
+				t.Fatal("reused an incomplete prefix")
+			}
+			index.mu.Lock()
+			active := index.baseState != nil && index.baseState.active
+			index.mu.Unlock()
+			if active != (probe == 2) {
+				t.Fatalf("width=%d probe=%d: active=%t; adaptive build did not run at its normal threshold", width, probe, active)
+			}
+		}
+	}
+}
