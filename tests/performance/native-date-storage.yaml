@@ -18,11 +18,14 @@ setup:
     \ \"DATETIME\" \"UTC\")\n        (concat \"Article \" i) (if (equal? (mod i 11)\
     \ 0) \"post\" \"revision\") \"publish\"))))\n  (rebuild))\n"
 test_cases:
-- name: First temporal page plus ten repetitions
+# The former cold+10 packet lasted about 30 ms; isolated pauses during the
+# second execution could dominate it. Retain the first cold query and freeze
+# 100 further executions before A/B, with full rows and the same 1000 ms cap.
+- name: First temporal page plus one hundred repetitions
   sql: SELECT id, title, stamp FROM temporal_order_page WHERE kind='post' AND status='publish'
     ORDER BY stamp DESC, id DESC LIMIT 10
   warmup: 0
-  timing_samples: 11
+  timing_samples: 101
   timing_aggregation: total
   threshold_ms: 1000
   expect:
