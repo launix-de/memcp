@@ -2031,6 +2031,9 @@ func jitReturnHasNoHeapPointer(td *TypeDescriptor) bool {
 	if td == nil {
 		return false
 	}
+	if td.JITNoHeapPointer {
+		return true
+	}
 	switch td.Kind {
 	case "bool", "int", "int|nil", "nil":
 		return true

@@ -3791,7 +3791,7 @@ func init_alu() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "converts a number to floating-point representation, preserving nil",
 			Params:        []*TypeDescriptor{{Kind: "number|nil", Label: "value"}},
-			Return:        &TypeDescriptor{Kind: "number|nil"},
+			Return:        &TypeDescriptor{Kind: "number|nil", JITNoHeapPointer: true},
 			Const:         true,
 			JITInlineCost: 21,
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -4692,7 +4692,7 @@ func init_alu() {
 			Params: []*TypeDescriptor{
 				{Kind: "number", Label: "value...", Description: "values to add", Variadic: true},
 			},
-			Return: &TypeDescriptor{Kind: "number"},
+			Return: &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -6630,7 +6630,7 @@ func init_alu() {
 			Params: []*TypeDescriptor{
 				{Kind: "number", Label: "value...", Description: "values", Variadic: true},
 			},
-			Return: &TypeDescriptor{Kind: "number"},
+			Return: &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -10929,7 +10929,7 @@ func init_alu() {
 			Params: []*TypeDescriptor{
 				{Kind: "number", Label: "value...", Description: "values", Variadic: true},
 			},
-			Return: &TypeDescriptor{Kind: "number"},
+			Return: &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -15846,7 +15846,7 @@ func init_alu() {
 			Params: []*TypeDescriptor{
 				{Kind: "number", Label: "value...", Description: "values", Variadic: true},
 			},
-			Return: &TypeDescriptor{Kind: "number"},
+			Return: &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -16792,7 +16792,7 @@ func init_alu() {
 			Params: []*TypeDescriptor{
 				{Kind: "number", Label: "value...", Description: "values", Variadic: true},
 			},
-			Return:        &TypeDescriptor{Kind: "number"},
+			Return:        &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:         true,
 			JITInlineCost: 34,
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -19510,7 +19510,7 @@ func init_alu() {
 				{Kind: "number", Label: "a", Description: "dividend"},
 				{Kind: "number", Label: "b", Description: "divisor"},
 			},
-			Return: &TypeDescriptor{Kind: "number"},
+			Return: &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -26182,7 +26182,7 @@ func init_alu() {
 			Params: []*TypeDescriptor{
 				{Kind: "number", Label: "value", Description: "value"},
 			},
-			Return: &TypeDescriptor{Kind: "number"},
+			Return: &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -26250,7 +26250,7 @@ func init_alu() {
 			Params: []*TypeDescriptor{
 				{Kind: "number", Label: "value", Description: "value"},
 			},
-			Return: &TypeDescriptor{Kind: "number"},
+			Return: &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -26318,7 +26318,7 @@ func init_alu() {
 			Params: []*TypeDescriptor{
 				{Kind: "number", Label: "value", Description: "value"},
 			},
-			Return: &TypeDescriptor{Kind: "number"},
+			Return: &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -27978,7 +27978,7 @@ func init_alu() {
 			Params: []*TypeDescriptor{
 				{Kind: "number", Label: "value", Description: "value"},
 			},
-			Return: &TypeDescriptor{Kind: "number"},
+			Return: &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -28792,7 +28792,7 @@ func init_alu() {
 			Params: []*TypeDescriptor{
 				{Kind: "number", Label: "value", Description: "value"},
 			},
-			Return: &TypeDescriptor{Kind: "number"},
+			Return: &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -29158,7 +29158,7 @@ func init_alu() {
 			return NewFloat(float64(u) / (1 << 53))
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "SQL RAND(): returns a random float in [0,1)",
-			Return: &TypeDescriptor{Kind: "number"},
+			Return: &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
