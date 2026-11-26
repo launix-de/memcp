@@ -1003,8 +1003,8 @@ func TestHistoricalExactScalarFrameAndNestedProxy(t *testing.T) {
 	}
 	var saved bytes.Buffer
 	exact.Serialize(&saved)
-	if saved.Bytes()[0] != 3 || saved.Bytes()[1] != 1 {
-		t.Fatal("loaded exact scalar frame was downgraded")
+	if saved.Bytes()[0] != 3 || saved.Bytes()[1] != 2 || saved.Bytes()[2] != 1 {
+		t.Fatal("loaded exact scalar frame did not use current generic encoding")
 	}
 	var reread storageSCMERExact
 	reread.Deserialize(bytes.NewReader(saved.Bytes()[1:]))
@@ -1056,5 +1056,70 @@ func TestNativeDateStorageRetainsIdentityOnRebuild(t *testing.T) {
 		if got := reloaded.GetValue(0); !got.IsDate() || got.Int() != value.Int() || got.DateNanosecond() != value.DateNanosecond() || got.DateZone() != value.DateZone() {
 			t.Fatal("computed date lost fractional precision", got)
 		}
+	}
+}
+
+func TestCompactNativeDateFrame(t *testing.T) {
+	// Literal magic-10/version-0 components, independent of the new writer.
+	literal := func(nanos int64, nanoNull bool) []byte {
+		var data bytes.Buffer
+		data.Write([]byte{3, 2, 2})
+		binary.Write(&data, binary.LittleEndian, uint64(1))
+		for part, offset := range []int64{1700000000, nanos, 17} {
+			nullFlag := byte(0)
+			if part == 1 && nanoNull {
+				nullFlag = 1
+			}
+			data.Write([]byte{10, 1, nullFlag, 0})
+			binary.Write(&data, binary.LittleEndian, uint32(0))
+			for _, value := range []uint64{2, 1, uint64(offset), 0, 0, 0} {
+				binary.Write(&data, binary.LittleEndian, value)
+			}
+		}
+		return data.Bytes()
+	}
+	frame := literal(123456789, false)
+	reader := bytes.NewBuffer(append(append([]byte(nil), frame[1:]...), []byte("tail")...))
+	var restored storageSCMERExact
+	if count := restored.Deserialize(reader); count != 1 || reader.String() != "tail" {
+		t.Fatal("native date frame crossed its boundary")
+	}
+	if got := restored.GetValue(0); !got.IsDate() || got.Int() != 1700000000 || got.DateNanosecond() != 123456789 || got.DateZone() != 17 {
+		t.Fatal("literal compact date changed", got)
+	}
+	values := []scm.Scmer{scm.NewDateNanoWithZone(-1, 999999999, 2047), scm.NewNil(), scm.NewDateNanoWithZone(-(1 << 44), 0, 0)}
+	var saved bytes.Buffer
+	(&storageSCMERExact{StorageSCMER: StorageSCMER{values: values}}).Serialize(&saved)
+	if saved.Bytes()[0] != 3 || saved.Bytes()[1] != 2 || saved.Bytes()[2] != 2 {
+		t.Fatal("homogeneous dates did not select compact version 2")
+	}
+	var loaded storageSCMERExact
+	loaded.Deserialize(bytes.NewReader(saved.Bytes()[1:]))
+	for i, want := range values {
+		got, err := scm.MarshalPersistentJSON(loaded.GetValue(uint32(i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected, err := scm.MarshalPersistentJSON(want)
+		if err != nil || string(got) != string(expected) {
+			t.Fatalf("compact date parts changed: %s -> %s", expected, got)
+		}
+	}
+	for name, malformed := range map[string][]byte{"truncated": frame[:len(frame)-1], "out-of-range": literal(1000000000, false), "null-mask": literal(0, true)} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("invalid compact date was accepted")
+				}
+			}()
+			var invalid storageSCMERExact
+			invalid.Deserialize(bytes.NewReader(malformed[1:]))
+		})
+	}
+	mixed := &storageSCMERExact{StorageSCMER: StorageSCMER{values: []scm.Scmer{values[0], scm.NewInt(7)}}}
+	saved.Reset()
+	mixed.Serialize(&saved)
+	if saved.Bytes()[1] != 2 || saved.Bytes()[2] != 1 {
+		t.Fatal("mixed values lost their permanent JSON payload")
 	}
 }

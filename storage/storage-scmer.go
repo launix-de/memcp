@@ -464,16 +464,23 @@ func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
 
 func (s *StorageSCMER) DistinctCount() uint { return uint(len(s.values)) }
 
-// storageSCMERExact preserves the historical magic-3 v1 native scalar frame.
-// Magic 1 retains its original reader/writer; decoding one cannot reinterpret
-// the other, and rewriting a loaded exact frame retains its exact envelopes.
+const storageExactScalarVersion = 2
+
+// storageSCMERExact preserves historical native scalar values. Magic 1 keeps
+// its independent reader/writer and never interprets the private envelopes.
+// Version 1 is the historical length-framed private JSON payload. Version 2
+// adds an encoding byte: 1 retains that JSON payload, 2 stores native dates
+// as three bit-packed integer columns. All current writers emit version 2.
 type storageSCMERExact struct{ StorageSCMER }
 
 func (s *storageSCMERExact) Serialize(f io.Writer) {
-	// Magic 3 v1: header, uint64 row count, then uint64 byte length and
+	if s.serializeNativeDates(f) {
+		return
+	}
+	// Magic 3 v2/encoding 1: header, uint64 row count, then byte length and
 	// complete private JSON for each scalar. Exact framing composes inside
 	// containers that have their own trailing fields; no stream read-ahead.
-	if err := binary.Write(f, binary.LittleEndian, [2]byte{3, 1}); err != nil {
+	if err := binary.Write(f, binary.LittleEndian, [3]byte{3, storageExactScalarVersion, 1}); err != nil {
 		panic(err)
 	}
 	if err := binary.Write(f, binary.LittleEndian, uint64(len(s.values))); err != nil {
@@ -509,9 +516,26 @@ func (s *storageSCMERExact) Serialize(f io.Writer) {
 func (s *storageSCMERExact) Deserialize(f io.Reader) uint {
 	var version [1]byte
 	readStorageBytes(f, version[:])
-	if version[0] != 1 {
+	if version[0] == 1 {
+		return s.deserializeExactJSON(f)
+	}
+	if version[0] != 2 {
 		panic("unknown generic scalar column version")
 	}
+	var encoding [1]byte
+	readStorageBytes(f, encoding[:])
+	switch encoding[0] {
+	case 1:
+		return s.deserializeExactJSON(f)
+	case 2:
+		return s.deserializeNativeDates(f)
+	default:
+		panic("unknown exact scalar column encoding")
+	}
+}
+
+// Permanent version-1 payload; version 2 retains it under encoding 1.
+func (s *storageSCMERExact) deserializeExactJSON(f io.Reader) uint {
 	var count uint64
 	if err := binary.Read(f, binary.LittleEndian, &count); err != nil {
 		panic(err)
