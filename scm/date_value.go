@@ -66,17 +66,22 @@ func ParseDateValue(text string) (Scmer, bool) {
 	return NewNil(), false
 }
 
+// Both operands are native dates. Decode their known payload directly; the
+// generic Int accessor takes its coercion path for every non-integer scalar.
 func compareDates(left, right Scmer) int {
-	if left.Int() < right.Int() {
+	leftSeconds := TagDateDecodeUnix(auxVal(left.aux))
+	rightSeconds := TagDateDecodeUnix(auxVal(right.aux))
+	if leftSeconds < rightSeconds {
 		return -1
 	}
-	if left.Int() > right.Int() {
+	if leftSeconds > rightSeconds {
 		return 1
 	}
-	if left.DateNanosecond() < right.DateNanosecond() {
+	leftNanos, rightNanos := left.DateNanosecond(), right.DateNanosecond()
+	if leftNanos < rightNanos {
 		return -1
 	}
-	if left.DateNanosecond() > right.DateNanosecond() {
+	if leftNanos > rightNanos {
 		return 1
 	}
 	return 0

@@ -471,9 +471,17 @@ const storageExactScalarVersion = 2
 // Version 1 is the historical length-framed private JSON payload. Version 2
 // adds an encoding byte: 1 retains that JSON payload, 2 stores native dates
 // as three bit-packed integer columns. All current writers emit version 2.
-type storageSCMERExact struct{ StorageSCMER }
+type storageSCMERExact struct {
+	StorageSCMER
+	// Decoded packed columns stay compressed; generic v1/JSON values use values.
+	nativeDates *nativeDateColumn
+}
 
 func (s *storageSCMERExact) Serialize(f io.Writer) {
+	if s.nativeDates != nil {
+		s.nativeDates.serialize(f)
+		return
+	}
 	if s.serializeNativeDates(f) {
 		return
 	}
@@ -514,6 +522,9 @@ func (s *storageSCMERExact) Serialize(f io.Writer) {
 	}
 }
 func (s *storageSCMERExact) Deserialize(f io.Reader) uint {
+	s.nativeDates = nil
+	s.values = nil
+	s.storageJITFunctions = storageJITFunctions{}
 	var version [1]byte
 	readStorageBytes(f, version[:])
 	if version[0] == 1 {

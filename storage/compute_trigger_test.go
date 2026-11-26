@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -1121,5 +1122,79 @@ func TestCompactNativeDateFrame(t *testing.T) {
 	mixed.Serialize(&saved)
 	if saved.Bytes()[1] != 2 || saved.Bytes()[2] != 1 {
 		t.Fatal("mixed values lost their permanent JSON payload")
+	}
+}
+
+func TestCompactNativeDateReaders(t *testing.T) {
+	values := []scm.Scmer{scm.NewDateNanoWithZone(1700000000, 1, 17), scm.NewNil(), scm.NewDateNanoWithZone(-1, 999999999, 2047), scm.NewDate(1700000001)}
+	var encoded bytes.Buffer
+	(&storageSCMERExact{StorageSCMER: StorageSCMER{values: values}}).Serialize(&encoded)
+	var column storageSCMERExact
+	column.Deserialize(bytes.NewReader(encoded.Bytes()[1:]))
+	column.finish()
+	reader := column.GetCachedReader(ReadCompressed)
+	defer ReleaseColumnReader(reader)
+	if scm.JITEnabled() && (compiledColumnGetValue(reader) == nil || compiledColumnGetValueRange(reader) == nil || compiledColumnGetValueMulti(reader) == nil) {
+		t.Fatal("packed date did not compile all three native read modes")
+	}
+	check := func(got, want scm.Scmer) {
+		t.Helper()
+		a, err := scm.MarshalPersistentJSON(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := scm.MarshalPersistentJSON(want)
+		if err != nil || !bytes.Equal(a, b) {
+			t.Fatalf("date reader changed parts: %s -> %s", b, a)
+		}
+	}
+	for i, want := range values {
+		value := reader.GetValue(uint32(i))
+		runtime.GC() // Correctness-only: returned fractional pointers cross the native ABI.
+		check(value, want)
+	}
+	strided := make([]scm.Scmer, 12)
+	reader.GetValueRange(1, 3, strided, 3)
+	for i, want := range values[1:] {
+		check(strided[i*3], want)
+	}
+	reader.GetValueMulti([]uint32{3, 0, 2, 1}, strided, 2)
+	for i, index := range []int{3, 0, 2, 1} {
+		check(strided[i*2], values[index])
+	}
+	if column.JITValueType() != scm.JITTypeUnknown {
+		t.Fatal("nullable date advertised a uniform physical type")
+	}
+	var rewritten bytes.Buffer
+	column.Serialize(&rewritten)
+	var reopened storageSCMERExact
+	reopened.Deserialize(bytes.NewReader(rewritten.Bytes()[1:]))
+	for i, want := range values {
+		check(reopened.GetValue(uint32(i)), want)
+	}
+}
+
+func TestCompactNativeDateRetainsCompressedFootprint(t *testing.T) {
+	const count = 60000
+	values := make([]scm.Scmer, count)
+	for i := range values {
+		values[i] = scm.NewDate(1700000000 + int64(i)*3600)
+	}
+	var encoded bytes.Buffer
+	(&storageSCMERExact{StorageSCMER: StorageSCMER{values: values}}).Serialize(&encoded)
+	var column storageSCMERExact
+	if rows := column.Deserialize(bytes.NewReader(encoded.Bytes()[1:])); rows != count {
+		t.Fatalf("date rows = %d", rows)
+	}
+	if size := column.ComputeSize(); size >= count*16 {
+		t.Fatalf("compressed date column materialized its row bag: %d bytes", size)
+	}
+	if column.JITValueType() != scm.TagDate {
+		t.Fatal("non-null packed date lost its physical type")
+	}
+	for _, index := range []uint32{0, 12345, count - 1} {
+		if got := column.GetValue(index); !got.IsDate() || got.Int() != values[index].Int() || got.DateNanosecond() != 0 {
+			t.Fatalf("compressed date row %d changed", index)
+		}
 	}
 }
