@@ -10,6 +10,53 @@ metadata:
   isolated: true
 
 test_cases:
+  - name: Drop leftover fractional dates
+    sql: DROP TABLE IF EXISTS sr_date_ns
+  - name: Create native fractional date storage
+    sql: CREATE TABLE sr_date_ns (id INT PRIMARY KEY, stamp DATETIME)
+  - name: Insert exact native fractional dates
+    scm: |
+      (insert (table "memcp-tests" false "sr_date_ns" false) '("id" "stamp")
+        (list (list 1 (date_from_parts 1700000000 1 17))
+          (list 2 (date_from_parts 1700000000 2 17))
+          (list 3 (date_from_parts -1 999999999 2047))))
+  - name: Date column coercion preserves supplied nanoseconds
+    sql: INSERT INTO sr_date_ns VALUES (4, '2023-11-14 22:13:20.000000003')
+  - name: Crash with native fractional dates in WAL
+    scm: (crash)
+    expect: {interrupted_ok: true}
+  - name: Restart native fractional date WAL
+    action: restart
+  - name: Complete native date rows after WAL replay
+    sql: SELECT id, stamp FROM sr_date_ns ORDER BY id
+    expect:
+      rows: 4
+      data:
+      - {id: 1, stamp: '2023-11-14 22:13:20.000000001'}
+      - {id: 2, stamp: '2023-11-14 22:13:20.000000002'}
+      - {id: 3, stamp: '1969-12-31 23:59:59.999999999'}
+      - {id: 4, stamp: '2023-11-14 22:13:20.000000003'}
+  - name: Rebuild retains native fractional date parts
+    scm: (rebuild true false)
+  - name: Complete native date rows before restart
+    sql: SELECT id, stamp FROM sr_date_ns ORDER BY id
+    expect: &native_date_rows
+      rows: 4
+      data:
+      - {id: 1, stamp: '2023-11-14 22:13:20.000000001'}
+      - {id: 2, stamp: '2023-11-14 22:13:20.000000002'}
+      - {id: 3, stamp: '1969-12-31 23:59:59.999999999'}
+      - {id: 4, stamp: '2023-11-14 22:13:20.000000003'}
+  - name: Native date sort keeps adjacent nanoseconds distinct
+    sql: SELECT id FROM sr_date_ns ORDER BY stamp
+    expect: {rows: 4, data: [{id: 3}, {id: 1}, {id: 2}, {id: 4}]}
+  - name: Nanosecond group equality does not collapse adjacent dates
+    sql: SELECT COUNT(DISTINCT stamp) AS n FROM sr_date_ns
+    expect: {rows: 1, data: [{n: 4}]}
+  - name: Invalid fractional date parts fail
+    scm: (date_from_parts 1700000000 1000000000 0)
+    expect: {error: true}
+
   # --- Setup ---
   - name: "Drop leftover table"
     sql: "DROP TABLE IF EXISTS sr_data"
@@ -92,6 +139,18 @@ test_cases:
       rows: 0
 
   # --- Re-query after restart: must return identical results ---
+  - name: Complete native date rows after restart
+    sql: SELECT id, stamp FROM sr_date_ns ORDER BY id
+    expect: *native_date_rows
+  - name: Exact date parts remain native after restart
+    scm: |
+      (scan nil (table "memcp-tests" false "sr_date_ns" false) '() '() '("id")
+        (lambda (id) (equal? id 1)) '("stamp")
+        (lambda (acc stamp)
+          (if (equal? (date_parts stamp) '(1700000000 1 17))
+            (+ acc 1) (error "native date parts changed"))) 0 + false)
+    expect: {data: [1]}
+
   - name: "After restart: persisted scalar values unchanged"
     sql: "SELECT id, doubled FROM sr_data ORDER BY id"
     expect:
@@ -197,6 +256,12 @@ test_cases:
       rows: 1
       data:
         - c: 3
+
+  - name: Complete native date rows after second restart
+    sql: SELECT id, stamp FROM sr_date_ns ORDER BY id
+    expect: *native_date_rows
+  - name: Cleanup fractional dates
+    sql: DROP TABLE sr_date_ns
 
   # --- Cleanup ---
   - name: "After second restart: recomputed scalar value survived"

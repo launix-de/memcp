@@ -37,12 +37,13 @@ type StorageSCMER struct {
 	hasBSON   bool
 	// hasComposite marks lists, dictionaries and other non-scalar values.
 	// They have no string or numeric encoding and must keep a value storage.
-	hasComposite bool
-	longStrings  int
-	longSample   *longTextSample
-	null         uint  // amount of NULL values (sparse map!)
-	numSeq       uint  // sequence statistics
-	last1, last2 int64 // sequence statistics
+	hasComposite  bool
+	hasNativeDate bool
+	longStrings   int
+	longSample    *longTextSample
+	null          uint  // amount of NULL values (sparse map!)
+	numSeq        uint  // sequence statistics
+	last1, last2  int64 // sequence statistics
 
 	// enum detection: collect up to enumMaxSymbols distinct values
 	enumVals  [enumMaxSymbols]scm.Scmer
@@ -74,7 +75,8 @@ func (s *StorageSCMER) String() string {
 //	byte in v0.1.0. Historically StorageSCMER was not a final storage type;
 //	BSON values intentionally remain in it. Format changes still require a NEW
 //	magic byte in storages[] (storage.go); keep magic 1 as a legacy reader
-//	forever.
+//	forever. Native dates now select the existing magic-3/version-1 private
+//	frame, preserving their identity, zone and fractional seconds.
 //	BSON values use a reserved JSON object envelope inside their existing JSONL
 //	line. This adds a representation for the new Scmer tag without changing the
 //	legacy framing or the decoding of any previously supported Scmer value.
@@ -142,6 +144,12 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 }
 
 func (s *StorageSCMER) Serialize(f io.Writer) {
+	for _, value := range s.values {
+		if scm.HasNativeDate(value) {
+			(&storageSCMERExact{StorageSCMER: *s}).Serialize(f)
+			return
+		}
+	}
 	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
 	for i := 0; i < len(s.values); i++ {
@@ -288,13 +296,9 @@ func (s *StorageSCMER) scan(i uint32, value scm.Scmer) {
 		s.minIntScale = math.MinInt8
 		return
 	}
-	if value.GetTag() == scm.TagDate {
-		v2 := value.Int()
-		if v2-s.last1 == s.last1-s.last2 {
-			s.numSeq++
-		}
-		s.last2 = s.last1
-		s.last1 = v2
+	if scm.HasNativeDate(value) {
+		s.hasNativeDate = true
+		s.minIntScale = math.MinInt8
 		return
 	}
 	if value.IsInt() {
@@ -360,6 +364,7 @@ func (s *StorageSCMER) prepare() {
 	s.hasString = false
 	s.hasBSON = false
 	s.hasComposite = false
+	s.hasNativeDate = false
 	s.enumK = 0
 	s.longStrings = 0
 	s.longSample = nil
@@ -379,7 +384,7 @@ func (s *StorageSCMER) finish() {
 
 // soley to StorageSCMER
 func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
-	if s.hasBSON {
+	if s.hasBSON || s.hasNativeDate {
 		return nil
 	}
 	// const: all values identical — store only the single value (beats everything incl. sparse)

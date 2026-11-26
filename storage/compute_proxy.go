@@ -1120,8 +1120,14 @@ const storageComputeProxyVersion = 2
 //	   this encoding on rewrite, while new proxies keep the current v2 format.
 func (p *StorageComputeProxy) Serialize(f io.Writer) {
 	version := uint8(storageComputeProxyVersion)
-	if p.persistedVersion == 3 {
+	if p.persistedVersion == 3 || scm.HasNativeDate(p.computor) {
 		version = 3
+	}
+	for _, value := range p.delta {
+		if scm.HasNativeDate(value) {
+			version = 3
+			break
+		}
 	}
 	binary.Write(f, binary.LittleEndian, uint8(50)) // magic byte
 	binary.Write(f, binary.LittleEndian, version)

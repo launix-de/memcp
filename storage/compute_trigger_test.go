@@ -982,7 +982,7 @@ func TestComputeProxyHistoricalV3RoundTrip(t *testing.T) {
 }
 
 func TestHistoricalExactScalarFrameAndNestedProxy(t *testing.T) {
-	payloads := []string{`{"$memcp.scmer":"bson-v1","type":16,"payload":"KgAAAA"}`, `{"scmer_date_v1":[1700000000,0,0]}`}
+	payloads := []string{`{"$memcp.scmer":"bson-v1","type":16,"payload":"KgAAAA"}`, `{"scmer_date_v1":[1700000000,123456789,17]}`}
 	var frame bytes.Buffer
 	frame.WriteByte(1) // magic 3 already consumed, historical version 1
 	binary.Write(&frame, binary.LittleEndian, uint64(len(payloads)))
@@ -997,6 +997,9 @@ func TestHistoricalExactScalarFrameAndNestedProxy(t *testing.T) {
 	}
 	if !exact.values[0].IsBSON() || !exact.values[1].IsDate() {
 		t.Fatal("native scalar identities were not restored")
+	}
+	if exact.values[1].DateNanosecond() != 123456789 || exact.values[1].DateZone() != 17 {
+		t.Fatal("historical date parts were changed")
 	}
 	var saved bytes.Buffer
 	exact.Serialize(&saved)
@@ -1017,5 +1020,41 @@ func TestHistoricalExactScalarFrameAndNestedProxy(t *testing.T) {
 	restored.Deserialize(bytes.NewReader(saved.Bytes()[1:]))
 	if !restored.validMask.Get(0) || !restored.validMask.Get(1) || !restored.main.GetValue(0).IsBSON() || !restored.main.GetValue(1).IsDate() {
 		t.Fatal("nested frame lost payload or outer validity")
+	}
+}
+
+func TestNativeDateStorageRetainsIdentityOnRebuild(t *testing.T) {
+	for _, value := range []scm.Scmer{scm.NewDate(1700000000), scm.NewDateWithZone(1700000000, 17), scm.NewDateNanoWithZone(1700000000, 123456789, 17)} {
+		var scalar StorageSCMER
+		scalar.prepare()
+		scalar.scan(0, value)
+		if scalar.proposeCompression(1) != nil {
+			t.Fatal("fractional native date proposed lossy compression")
+		}
+		scalar.init(1)
+		scalar.build(0, value)
+		scalar.finish()
+		var data bytes.Buffer
+		scalar.Serialize(&data)
+		if data.Bytes()[0] != 3 {
+			t.Fatal("fractional native date used legacy JSON storage")
+		}
+		var restored storageSCMERExact
+		restored.Deserialize(bytes.NewReader(data.Bytes()[1:]))
+		if got := restored.GetValue(0); !got.IsDate() || got.Int() != value.Int() || got.DateNanosecond() != value.DateNanosecond() || got.DateZone() != value.DateZone() {
+			t.Fatal("fractional storage changed date identity", got)
+		}
+		proxy := &StorageComputeProxy{count: 1, delta: map[uint32]scm.Scmer{0: value}, computor: scm.Globalenv.Vars[scm.Symbol("list")]}
+		proxy.validMask.AtomicSet(0, true)
+		data.Reset()
+		proxy.Serialize(&data)
+		if data.Bytes()[1] != 3 {
+			t.Fatal("fractional computed result used lossy v2 encoding")
+		}
+		var reloaded StorageComputeProxy
+		reloaded.Deserialize(bytes.NewReader(data.Bytes()[1:]))
+		if got := reloaded.GetValue(0); !got.IsDate() || got.Int() != value.Int() || got.DateNanosecond() != value.DateNanosecond() || got.DateZone() != value.DateZone() {
+			t.Fatal("computed date lost fractional precision", got)
+		}
 	}
 }
