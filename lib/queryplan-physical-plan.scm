@@ -13460,6 +13460,18 @@ recognizing its scope must not normalize that entire nested body.
 
 Probe before copying code: complex cache recipes frequently contain no
 repeated native scan source. An unchanged plan keeps its existing code graph. */
+/* Pass traversal state explicitly. A probe that retains its original plan
+must not construct a fresh captured visitor procedure at every AST node. */
+(define physical_table_binding_needed_children? (lambda (remaining index depth loop scan_input recmap input_list)
+	(match remaining
+		(cons child rest)
+		(or (physical_table_binding_needed? child
+			(+ depth (if (and loop (list? child) (not (empty_list? child)) (not (list? (car child)))
+				(expression_equal? (expression_syntax (car child)) (symbol "lambda"))) 1 0)) loop
+			(physical_table_binding_source_slot? scan_input recmap input_list index))
+			(physical_table_binding_needed_children? rest (+ index 1) depth loop scan_input recmap input_list))
+		_ false)))
+
 (define physical_table_binding_needed? (lambda (expr depth shared_lambda source_slot)
 	(if (or (not (list? expr)) (empty_list? expr)) false
 		(match (cons (if (list? (car expr)) (car expr) (expression_syntax (car expr))) (cdr expr))
@@ -13473,16 +13485,8 @@ repeated native scan source. An unchanged plan keeps its existing code graph. */
 					(define input_list (and source_slot (physical_table_binding_head? head "list" list)))
 					(define recmap (physical_table_binding_head? head "scan_recmap" scan_recmap))
 					(define loop (or scan_input (and shared_lambda (physical_table_binding_head? head "list" list))))
-					(define visit (lambda (remaining index)
-						(match remaining
-							(cons child rest)
-							(or (physical_table_binding_needed? child
-								(+ depth (if (and loop (list? child) (not (empty_list? child)) (not (list? (car child)))
-									(expression_equal? (expression_syntax (car child)) (symbol "lambda"))) 1 0)) loop
-								(physical_table_binding_source_slot? scan_input recmap input_list index))
-								(visit rest (+ index 1)))
-							_ false)))
-					(or (physical_table_binding_needed? (car expr) depth true false) (visit tail 0))))
+					(or (physical_table_binding_needed? (car expr) depth true false)
+						(physical_table_binding_needed_children? tail 0 depth loop scan_input recmap input_list))))
 			_ false))))
 
 /* Return rewritten code and its invocation-local definitions together. A lambda
