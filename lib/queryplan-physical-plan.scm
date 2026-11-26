@@ -13345,8 +13345,10 @@ persisted computors and OnInit recipes must not capture this query's pointers. *
 (define physical_table_binding_loop? (lambda (head)
 	(if (symbol? head) (contains? physical_table_binding_operator_names head)
 		(if (list? head) false
-			(reduce physical_table_binding_operators
-				(lambda (found operator) (or found (identical? head operator))) false)))))
+			/* Native callable equality is pointer identity. Keep membership inside
+			the native list primitive instead of allocating/interpreting one
+			Scheme reducer callback for every candidate operator at each AST node. */
+			(contains? physical_table_binding_operators head)))))
 
 /* Only native scan input positions need query-local source bindings. Metadata
 expressions such as scan_estimate retain their direct planner expression. The
