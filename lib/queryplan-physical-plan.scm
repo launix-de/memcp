@@ -13339,17 +13339,51 @@ persisted computors and OnInit recipes must not capture this query's pointers. *
 		_ false)))
 
 (define physical_table_binding_operators (list scan scan_order scan_order_multi scan_join_order
-	scan_recset scan_recmap scan_exists scan_lookup scan_batch scan_order_keys scan_order_batch_accept))
+	scan_recset scan_recmap scan_exists scan_lookup scan_batch scan_order_keys scan_order_batch_accept scan_order_recset))
 (define physical_table_binding_operator_names (map '("scan" "scan_order" "scan_order_multi" "scan_join_order"
-	"scan_recset" "scan_recmap" "scan_exists" "scan_lookup" "scan_batch" "scan_order_keys" "scan_order_batch_accept") symbol))
+	"scan_recset" "scan_recmap" "scan_exists" "scan_lookup" "scan_batch" "scan_order_keys" "scan_order_batch_accept" "scan_order_recset") symbol))
 (define physical_table_binding_loop? (lambda (head)
 	(if (symbol? head) (contains? physical_table_binding_operator_names head)
 		(reduce physical_table_binding_operators
 			(lambda (found operator) (or found (expression_equal? head operator))) false))))
 
+/* Only native scan input positions need query-local source bindings. Metadata
+expressions such as scan_estimate retain their direct planner expression. The
+second argument is the input (or input list); RecMap additionally has its target
+in argument nine. A list in an input position carries the same source scope. */
+(define physical_table_binding_source_slot? (lambda (scan_input recmap input_list index)
+	(or input_list (and scan_input (or (equal? index 1) (and recmap (equal? index 8)))))))
+
+/* Probe before copying code: complex cache recipes frequently contain no
+repeated native scan source. An unchanged plan keeps its existing code graph. */
+(define physical_table_binding_needed? (lambda (expr depth shared_lambda source_slot)
+	(if (or (not (list? expr)) (empty_list? expr)) false
+		(match (cons (expression_syntax (car expr)) (cdr expr))
+			((symbol quote) _value) false
+			(cons (symbol lambda) (cons _params (cons body _metadata)))
+			(physical_table_binding_needed? body (if shared_lambda depth 0) false false)
+			(cons head tail)
+			(or (and source_slot (> depth 0) (physical_table_binding_source? expr))
+				(begin
+					(define scan_input (physical_table_binding_loop? head))
+					(define input_list (and source_slot (physical_table_binding_head? head "list" list)))
+					(define recmap (physical_table_binding_head? head "scan_recmap" scan_recmap))
+					(define loop (or scan_input (and shared_lambda (physical_table_binding_head? head "list" list))))
+					(define visit (lambda (remaining index)
+						(match remaining
+							(cons child rest)
+							(or (physical_table_binding_needed? child
+								(+ depth (if (and loop (list? child) (not (empty_list? child))
+									(expression_equal? (expression_syntax (car child)) (symbol "lambda"))) 1 0)) loop
+								(physical_table_binding_source_slot? scan_input recmap input_list index))
+								(visit rest (+ index 1)))
+							_ false)))
+					(or (physical_table_binding_needed? (car expr) depth true false) (visit tail 0))))
+			_ false))))
+
 /* Return rewritten code and its invocation-local definitions together. A lambda
 that can escape is rewritten independently and contributes no outer bindings. */
-(define physical_table_binding_walk (lambda (expr depth shared_lambda)
+(define physical_table_binding_walk (lambda (expr depth shared_lambda source_slot)
 	/* match can expose a compiled procedure as lambda data. Its captured
 	environment is opaque here, so only traverse actual expression lists. */
 	(if (or (not (list? expr)) (empty_list? expr)) (list expr '())
@@ -13357,36 +13391,40 @@ that can escape is rewritten independently and contributes no outer bindings. */
 			((symbol quote) _value) (list expr '())
 			(cons (symbol lambda) (cons params (cons body metadata)))
 			(if shared_lambda
-				(match (physical_table_binding_walk body depth false) '(rewritten sources)
+				(match (physical_table_binding_walk body depth false false) '(rewritten sources)
 					(list (cons (car expr) (cons params (cons rewritten metadata))) sources))
 				(list (cons (car expr) (cons params (cons (bind_physical_table_handles body) metadata))) '()))
 			(cons head tail)
-			(if (and (> depth 0) (physical_table_binding_source? expr))
+			(if (and source_slot (> depth 0) (physical_table_binding_source? expr))
 				(list (physical_table_binding_name expr) (list expr))
 				(begin
-					(define loop (or (physical_table_binding_loop? head)
-						(and shared_lambda (physical_table_binding_head? head "list" list))))
+					(define scan_input (physical_table_binding_loop? head))
+					(define input_list (and source_slot (physical_table_binding_head? head "list" list)))
+					(define recmap (physical_table_binding_head? head "scan_recmap" scan_recmap))
+					(define loop (or scan_input (and shared_lambda (physical_table_binding_head? head "list" list))))
 					(define children (cons
-						(physical_table_binding_walk (car expr) depth true)
-						(map tail (lambda (child)
+						(physical_table_binding_walk (car expr) depth true false)
+						(mapIndex tail (lambda (index child)
 							(physical_table_binding_walk child
 								(+ depth (if (and loop (list? child) (not (empty_list? child))
-									(expression_equal? (expression_syntax (car child)) (symbol "lambda"))) 1 0)) loop)))))
+									(expression_equal? (expression_syntax (car child)) (symbol "lambda"))) 1 0)) loop
+								(physical_table_binding_source_slot? scan_input recmap input_list index))))))
 					(list (map children car) (merge (map children cadr)))))
 			_ (list expr '())))))
 
 (define bind_physical_table_handles (lambda (plan)
-	(match (physical_table_binding_walk plan 0 false) '(rewritten sources)
-		(if (empty_list? sources) rewritten
-			/* Once a nested source needs a binding, reuse it in the outer scans too.
-			Single scan operators already retain their input handle without a binding. */
-			(match (physical_table_binding_walk rewritten 1 false) '(complete remaining)
-				(begin
-					(define bindings (reduce (merge (list sources remaining)) (lambda (acc expr)
-						(set_assoc acc (physical_table_binding_name expr) expr)) '()))
-					(cons (quote !begin) (append
-						(extract_assoc bindings (lambda (name expr) (list (quote define) name expr)))
-						complete))))))))
+	(if (not (physical_table_binding_needed? plan 0 false false)) plan
+		(match (physical_table_binding_walk plan 0 false false) '(rewritten sources)
+			(if (empty_list? sources) rewritten
+				/* Once a nested source needs a binding, reuse it in the outer scans too.
+				Single scan operators already retain their input handle without a binding. */
+				(match (physical_table_binding_walk rewritten 1 false false) '(complete remaining)
+					(begin
+						(define bindings (reduce (merge (list sources remaining)) (lambda (acc expr)
+							(set_assoc acc (physical_table_binding_name expr) expr)) '()))
+						(cons (quote !begin) (append
+							(extract_assoc bindings (lambda (name expr) (list (quote define) name expr)))
+							complete)))))))))
 
 /* Independent flat UNION branches have no row-dependent source resolution
 across branches. Keep their scalar compilation path as direct as a flat block. */

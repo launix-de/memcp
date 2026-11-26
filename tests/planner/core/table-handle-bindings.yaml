@@ -91,6 +91,17 @@ test_cases:
         (expression_equal? (expression_syntax (bind_physical_table_handles recipe)) (expression_syntax expected)))
         "ok" (error "escaping recipe captured caller handles")))
   expect: {data: [ok]}
+- name: metadata cost expressions retain their planner scope
+  scm: |
+    (begin
+      (define metadata (list (symbol "scan_estimate")
+        (list (symbol "table") "memcp-tests" false "handle_right" false)))
+      (define plan (list (symbol "scan") (symbol "tx")
+        (list (symbol "table") "memcp-tests" false "handle_left" false) nil nil
+        (list (symbol "lambda") (list (symbol "row")) metadata)))
+      (if (expression_equal? (expression_syntax (bind_physical_table_handles plan)) plan)
+        "ok" (error "metadata lookup introduced a query capture")))
+  expect: {data: [ok]}
 - name: compiled callback retains its captured environment
   scm: |
     (begin
