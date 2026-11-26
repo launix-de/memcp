@@ -415,6 +415,25 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		value := strconv.AppendInt(buffer[:0], v.Int(), 10)
 		_, _ = b.Write(value)
 	case tagDate:
+		// Construct native dates before entering any receiving lambda scope.
+		// This also keeps fractional payload allocation out of row callbacks.
+		if b.objects != nil {
+			if b.literals == nil {
+				b.literals = make(map[Scmer]int64)
+			}
+			id, exists := b.literals[v]
+			if !exists {
+				id = int64(len(b.references) + len(b.literals) + len(b.procedures) + 1)
+				b.literals[v] = id
+			}
+			b.WriteString("(serialized_value ")
+			b.writeInt(id)
+			b.WriteByte(' ')
+			if exists {
+				b.WriteString("nil)")
+				return
+			}
+		}
 		nanos := v.DateNanosecond()
 		if nanos != 0 || v.DateZone() != 0 || b.objects != nil {
 			// A new constructor name makes older peers reject subsecond values
@@ -434,6 +453,9 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 			b.WriteByte(')')
 		} else {
 			b.writeInt(v.Int())
+		}
+		if b.objects != nil {
+			b.WriteByte(')')
 		}
 	case tagFloat:
 		if b.objects != nil && (math.IsInf(v.Float(), 0) || math.IsNaN(v.Float())) {

@@ -129,3 +129,30 @@ func TestHistoricalDateNanoseconds(t *testing.T) {
 		}
 	}
 }
+
+func TestDateWireLiteralsImportBeforeLambdaScope(t *testing.T) {
+	for _, value := range []Scmer{NewDate(1700000000), NewDateWithZone(1700000000, 17), NewDateNanoWithZone(1700000000, 1, 17)} {
+		for _, parameter := range []string{"date_from_parts", "serialized_date", "serialized_value"} {
+			t.Run(parameter+"/"+value.String(), func(t *testing.T) {
+				env := &Env{Vars: Vars{Symbol("captured"): value}, Outer: &Globalenv}
+				proc := Eval(Read(t.Name(), "(lambda ("+parameter+") captured)", true), env)
+				wire, err := MarshalProcedure(proc)
+				if err != nil {
+					t.Fatal(err)
+				}
+				restored, err := UnmarshalProcedure(wire)
+				if err != nil {
+					t.Fatal(err)
+				}
+				first := Apply(restored, NewInt(0))
+				second := Apply(restored, NewInt(0))
+				if !first.IsDate() || first.Int() != value.Int() || first.DateNanosecond() != value.DateNanosecond() || first.DateZone() != value.DateZone() {
+					t.Fatal("wire date literal changed", first)
+				}
+				if first != second {
+					t.Fatal("immutable date literal was reconstructed per invocation")
+				}
+			})
+		}
+	}
+}
