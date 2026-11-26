@@ -426,6 +426,7 @@ func (j *storageJITFunctions) finish(owner storageJITEmitter) {
 //
 //	 1  StorageSCMER   – generic Scmer values        (no version byte — see above)
 //	 2  StorageSparse  – sparse/NULL-only column     (no version byte — see above)
+//	 3  storageSCMERExact – exact native scalars (versions 1–3)
 //	10  StorageInt     – bit-packed integer
 //	11  StorageSeq     – sequential/auto-increment integer
 //	12  StorageFloat   – 64-bit float
@@ -439,6 +440,7 @@ func (j *storageJITFunctions) finish(owner storageJITEmitter) {
 var storages = map[uint8]reflect.Type{
 	1:  reflect.TypeOf(StorageSCMER{}),
 	2:  reflect.TypeOf(StorageSparse{}),
+	3:  reflect.TypeOf(storageSCMERExact{}),
 	10: reflect.TypeOf(StorageInt{}),
 	11: reflect.TypeOf(StorageSeq{}),
 	12: reflect.TypeOf(StorageFloat{}),

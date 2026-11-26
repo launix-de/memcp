@@ -61,7 +61,7 @@ func init_vector() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "produced the dot product",
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", Label: "v1", Description: "vector1"}, &TypeDescriptor{Kind: "list", Label: "v2", Description: "vector2"}, &TypeDescriptor{Kind: "string", Label: "mode", Description: "DOT, COSINE, EUCLIDEAN, default is DOT", Optional: true}},
-			Return: &TypeDescriptor{Kind: "number"},
+			Return: &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:  true,
 			// All loop accumulators are native float64 values until the final
 			// NewFloat boundary. Keep them in the backend FP register class.

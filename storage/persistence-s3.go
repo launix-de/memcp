@@ -709,10 +709,10 @@ type s3EncDelete struct {
 	TxID string `json:"txid,omitempty"`
 }
 type s3EncInsert struct {
-	T      string        `json:"t"`
-	Cols   []string      `json:"cols"`
-	Values [][]scm.Scmer `json:"values"`
-	TxID   string        `json:"txid,omitempty"`
+	T      string          `json:"t"`
+	Cols   []string        `json:"cols"`
+	Values json.RawMessage `json:"values"`
+	TxID   string          `json:"txid,omitempty"`
 }
 type s3EncCommit struct {
 	T    string `json:"t"`
@@ -729,10 +729,20 @@ func encodeS3LogEntry(e interface{}) []byte {
 		tmp, _ := json.Marshal(s3EncDelete{T: "undelete", Idx: l.idx, TxID: l.txID})
 		payload = tmp
 	case LogEntryInsert:
-		tmp, _ := json.Marshal(s3EncInsert{T: "insert", Cols: l.cols, Values: l.values, TxID: l.txID})
+		rows, precise := marshalLogRows(l.values)
+		kind := "insert"
+		if precise {
+			kind += "-v2"
+		}
+		tmp, _ := json.Marshal(s3EncInsert{T: kind, Cols: l.cols, Values: rows, TxID: l.txID})
 		payload = tmp
 	case LogEntryInsertHidden:
-		tmp, _ := json.Marshal(s3EncInsert{T: "insert_hidden", Cols: l.cols, Values: l.values, TxID: l.txID})
+		rows, precise := marshalLogRows(l.values)
+		kind := "insert_hidden"
+		if precise {
+			kind += "-v2"
+		}
+		tmp, _ := json.Marshal(s3EncInsert{T: kind, Cols: l.cols, Values: rows, TxID: l.txID})
 		payload = tmp
 	case LogEntryCommit:
 		tmp, _ := json.Marshal(s3EncCommit{T: "commit", TxID: l.txID})
@@ -783,18 +793,19 @@ func decodeS3LogStream(data []byte, out chan interface{}) {
 			if json.Unmarshal(payload, &d) == nil {
 				out <- LogEntryUndelete{idx: uint32(d.Idx), txID: d.TxID}
 			}
-		case "insert", "insert_hidden":
+		case "insert", "insert_hidden", "insert-v2", "insert_hidden-v2":
 			var ins s3EncInsert
 			if json.Unmarshal(payload, &ins) == nil {
-				for r := 0; r < len(ins.Values); r++ {
-					for c := 0; c < len(ins.Values[r]); c++ {
-						ins.Values[r][c] = scm.TransformFromJSON(ins.Values[r][c])
+				values := unmarshalPersistedRows(ins.Values, head.T == "insert-v2" || head.T == "insert_hidden-v2")
+				for r := 0; r < len(values); r++ {
+					for c := 0; c < len(values[r]); c++ {
+						values[r][c] = scm.TransformFromJSON(values[r][c])
 					}
 				}
-				if head.T == "insert_hidden" {
-					out <- LogEntryInsertHidden{cols: ins.Cols, values: ins.Values, txID: ins.TxID}
+				if head.T == "insert_hidden" || head.T == "insert_hidden-v2" {
+					out <- LogEntryInsertHidden{cols: ins.Cols, values: values, txID: ins.TxID}
 				} else {
-					out <- LogEntryInsert{cols: ins.Cols, values: ins.Values, txID: ins.TxID}
+					out <- LogEntryInsert{cols: ins.Cols, values: values, txID: ins.TxID}
 				}
 			}
 		}

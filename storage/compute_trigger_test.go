@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -916,5 +917,482 @@ func TestOrderedKeysetScanRetainsTargetAndProducerDependencies(t *testing.T) {
 	}
 	if findScanNode(target, "keys", "items") == nil || !containsScan(target) {
 		t.Fatal("ordered keyset was not recognized as a scan")
+	}
+}
+
+// Literal historical frames exercise the reader independently of its writer.
+func TestComputeProxyHistoricalV3RoundTrip(t *testing.T) {
+	const recipe = `{"scmer_custom":10,"value":[1,[{"symbol":"lambda"},[{"symbol":"value"}],[{"scmer_custom":8,"value":[1,"*"]},{"var":0},2],1]]}`
+	const payload = `{"scmer_bson_v1":[16,"KgAAAA=="]}`
+	var frame bytes.Buffer
+	for _, field := range []any{uint8(3), uint32(1), uint16(1), uint16(5)} {
+		if err := binary.Write(&frame, binary.LittleEndian, field); err != nil {
+			t.Fatal(err)
+		}
+	}
+	frame.WriteString("value")
+	binary.Write(&frame, binary.LittleEndian, uint64(len(recipe)))
+	frame.WriteString(recipe)
+	frame.Write([]byte{0, 0}) // uncompressed sparse delta
+	binary.Write(&frame, binary.LittleEndian, uint32(1))
+	binary.Write(&frame, binary.LittleEndian, uint32(0))
+	binary.Write(&frame, binary.LittleEndian, uint64(len(payload)))
+	frame.WriteString(payload)
+	binary.Write(&frame, binary.LittleEndian, uint32(1))
+	binary.Write(&frame, binary.LittleEndian, uint32(0))
+	frame.WriteByte(0)
+	original := append([]byte(nil), frame.Bytes()...)
+	var proxy StorageComputeProxy
+	if got := proxy.Deserialize(&frame); got != 1 || frame.Len() != 0 {
+		t.Fatalf("extent=%d trailing=%d", got, frame.Len())
+	}
+	assert := func(p *StorageComputeProxy) {
+		if !scm.Equal(scm.Apply(p.computor, scm.NewInt(9)), scm.NewInt(18)) {
+			t.Fatal("native procedure did not restore")
+		}
+		kind, raw := p.delta[0].BSONRaw()
+		if kind != 16 || !bytes.Equal(raw, []byte{42, 0, 0, 0}) {
+			t.Fatal("native BSON identity was lost")
+		}
+	}
+	assert(&proxy)
+	cloned := cloneComputeProxyRows(&proxy, &storageShard{}, []uint32{0})
+	if cloned.persistedVersion != 3 {
+		t.Fatal("rebuild discarded historical native value encoding")
+	}
+	assert(cloned)
+	var encoded bytes.Buffer
+	proxy.Serialize(&encoded)
+	if bytes := encoded.Bytes(); bytes[0] != 50 || bytes[1] != 3 {
+		t.Fatal("historical v3 was downgraded on rewrite")
+	}
+	var restored StorageComputeProxy
+	restored.Deserialize(bytes.NewReader(encoded.Bytes()[1:]))
+	assert(&restored)
+	// A shortened payload must fail before creating a partially initialized proxy.
+	for _, end := range []int{1, 7, 17, len(original) - 1} {
+		t.Run(fmt.Sprintf("truncated-%d", end), func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("truncated v3 frame accepted")
+				}
+			}()
+			new(StorageComputeProxy).Deserialize(bytes.NewReader(original[:end]))
+		})
+	}
+}
+
+func TestHistoricalExactScalarFrameAndNestedProxy(t *testing.T) {
+	payloads := []string{`{"$memcp.scmer":"bson-v1","type":16,"payload":"KgAAAA"}`, `{"scmer_date_v1":[1700000000,123456789,17]}`}
+	var frame bytes.Buffer
+	frame.WriteByte(1) // magic 3 already consumed, historical version 1
+	binary.Write(&frame, binary.LittleEndian, uint64(len(payloads)))
+	for _, payload := range payloads {
+		binary.Write(&frame, binary.LittleEndian, uint64(len(payload)))
+		frame.WriteString(payload)
+	}
+	frame.WriteString("tail")
+	var exact storageSCMERExact
+	if count := exact.Deserialize(&frame); count != 2 || frame.String() != "tail" {
+		t.Fatal("exact scalar reader consumed enclosing trailer")
+	}
+	if !exact.values[0].IsBSON() || !exact.values[1].IsDate() {
+		t.Fatal("native scalar identities were not restored")
+	}
+	if exact.values[1].DateNanosecond() != 123456789 || exact.values[1].DateZone() != 17 {
+		t.Fatal("historical date parts were changed")
+	}
+	var saved bytes.Buffer
+	exact.Serialize(&saved)
+	if saved.Bytes()[0] != 3 || saved.Bytes()[1] != 3 || saved.Bytes()[2] != 1 {
+		t.Fatal("loaded exact scalar frame did not use current generic encoding")
+	}
+	var reread storageSCMERExact
+	reread.Deserialize(bytes.NewReader(saved.Bytes()[1:]))
+	if !reread.values[0].IsBSON() || !reread.values[1].IsDate() {
+		t.Fatal("rewrite changed native scalar identities")
+	}
+	proxy := &StorageComputeProxy{main: &exact, compressed: true, count: 2, persistedVersion: 3}
+	proxy.validMask.AtomicSet(0, true)
+	proxy.validMask.AtomicSet(1, true)
+	saved.Reset()
+	proxy.Serialize(&saved)
+	var restored StorageComputeProxy
+	restored.Deserialize(bytes.NewReader(saved.Bytes()[1:]))
+	if !restored.validMask.Get(0) || !restored.validMask.Get(1) || !restored.main.GetValue(0).IsBSON() || !restored.main.GetValue(1).IsDate() {
+		t.Fatal("nested frame lost payload or outer validity")
+	}
+}
+
+func TestNativeDateStorageRetainsIdentityOnRebuild(t *testing.T) {
+	for _, value := range []scm.Scmer{scm.NewDate(1700000000), scm.NewDateWithZone(1700000000, 17), scm.NewDateNanoWithZone(1700000000, 123456789, 17)} {
+		var scalar StorageSCMER
+		scalar.prepare()
+		scalar.scan(0, value)
+		if scalar.proposeCompression(1) == nil {
+			t.Fatal("native date has no lossless compressed RAM representation")
+		}
+		scalar.init(1)
+		scalar.build(0, value)
+		scalar.finish()
+		var data bytes.Buffer
+		scalar.Serialize(&data)
+		if data.Bytes()[0] != 3 {
+			t.Fatal("fractional native date used legacy JSON storage")
+		}
+		var restored storageSCMERExact
+		restored.Deserialize(bytes.NewReader(data.Bytes()[1:]))
+		if got := restored.GetValue(0); !got.IsDate() || got.Int() != value.Int() || got.DateNanosecond() != value.DateNanosecond() || got.DateZone() != value.DateZone() {
+			t.Fatal("fractional storage changed date identity", got)
+		}
+		proxy := &StorageComputeProxy{count: 1, delta: map[uint32]scm.Scmer{0: value}, computor: scm.Globalenv.Vars[scm.Symbol("list")]}
+		proxy.validMask.AtomicSet(0, true)
+		data.Reset()
+		proxy.Serialize(&data)
+		if data.Bytes()[1] != 3 {
+			t.Fatal("fractional computed result used lossy v2 encoding")
+		}
+		var reloaded StorageComputeProxy
+		reloaded.Deserialize(bytes.NewReader(data.Bytes()[1:]))
+		if got := reloaded.GetValue(0); !got.IsDate() || got.Int() != value.Int() || got.DateNanosecond() != value.DateNanosecond() || got.DateZone() != value.DateZone() {
+			t.Fatal("computed date lost fractional precision", got)
+		}
+	}
+}
+
+func TestCompactNativeDateFrame(t *testing.T) {
+	// Literal magic-10/version-0 components, independent of the new writer.
+	literal := func(nanos int64, nanoNull bool) []byte {
+		var data bytes.Buffer
+		data.Write([]byte{3, 2, 2})
+		binary.Write(&data, binary.LittleEndian, uint64(1))
+		for part, offset := range []int64{1700000000, nanos, 17} {
+			nullFlag := byte(0)
+			if part == 1 && nanoNull {
+				nullFlag = 1
+			}
+			data.Write([]byte{10, 1, nullFlag, 0})
+			binary.Write(&data, binary.LittleEndian, uint32(0))
+			for _, value := range []uint64{2, 1, uint64(offset), 0, 0, 0} {
+				binary.Write(&data, binary.LittleEndian, value)
+			}
+		}
+		return data.Bytes()
+	}
+	frame := literal(123456789, false)
+	reader := bytes.NewBuffer(append(append([]byte(nil), frame[1:]...), []byte("tail")...))
+	var restored storageSCMERExact
+	if count := restored.Deserialize(reader); count != 1 || reader.String() != "tail" {
+		t.Fatal("native date frame crossed its boundary")
+	}
+	if got := restored.GetValue(0); !got.IsDate() || got.Int() != 1700000000 || got.DateNanosecond() != 123456789 || got.DateZone() != 17 {
+		t.Fatal("literal compact date changed", got)
+	}
+	values := []scm.Scmer{scm.NewDateNanoWithZone(-1, 999999999, 2047), scm.NewNil(), scm.NewDateNanoWithZone(-(1 << 44), 0, 0)}
+	var saved bytes.Buffer
+	(&storageSCMERExact{StorageSCMER: StorageSCMER{values: values}}).Serialize(&saved)
+	if saved.Bytes()[0] != 3 || saved.Bytes()[1] != 3 || saved.Bytes()[2] != 3 {
+		t.Fatal("homogeneous dates did not select compact version 2")
+	}
+	var loaded storageSCMERExact
+	loaded.Deserialize(bytes.NewReader(saved.Bytes()[1:]))
+	for i, want := range values {
+		got, err := scm.MarshalPersistentJSON(loaded.GetValue(uint32(i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected, err := scm.MarshalPersistentJSON(want)
+		if err != nil || string(got) != string(expected) {
+			t.Fatalf("compact date parts changed: %s -> %s", expected, got)
+		}
+	}
+	for name, malformed := range map[string][]byte{"truncated": frame[:len(frame)-1], "out-of-range": literal(1000000000, false), "null-mask": literal(0, true)} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("invalid compact date was accepted")
+				}
+			}()
+			var invalid storageSCMERExact
+			invalid.Deserialize(bytes.NewReader(malformed[1:]))
+		})
+	}
+	mixed := &storageSCMERExact{StorageSCMER: StorageSCMER{values: []scm.Scmer{values[0], scm.NewInt(7)}}}
+	saved.Reset()
+	mixed.Serialize(&saved)
+	if saved.Bytes()[1] != 3 || saved.Bytes()[2] != 1 {
+		t.Fatal("mixed values lost their permanent JSON payload")
+	}
+}
+
+func TestCompactNativeDateReaders(t *testing.T) {
+	values := []scm.Scmer{scm.NewDateNanoWithZone(1700000000, 1, 17), scm.NewNil(), scm.NewDateNanoWithZone(-1, 999999999, 2047), scm.NewDate(1700000001)}
+	var encoded bytes.Buffer
+	(&storageSCMERExact{StorageSCMER: StorageSCMER{values: values}}).Serialize(&encoded)
+	var column storageSCMERExact
+	column.Deserialize(bytes.NewReader(encoded.Bytes()[1:]))
+	column.finish()
+	reader := column.GetCachedReader(ReadCompressed)
+	defer ReleaseColumnReader(reader)
+	if scm.JITEnabled() && (compiledColumnGetValue(reader) == nil || compiledColumnGetValueRange(reader) == nil || compiledColumnGetValueMulti(reader) == nil) {
+		t.Fatal("packed date did not compile all three native read modes")
+	}
+	check := func(got, want scm.Scmer) {
+		t.Helper()
+		a, err := scm.MarshalPersistentJSON(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := scm.MarshalPersistentJSON(want)
+		if err != nil || !bytes.Equal(a, b) {
+			t.Fatalf("date reader changed parts: %s -> %s", b, a)
+		}
+	}
+	for i, want := range values {
+		value := reader.GetValue(uint32(i))
+		runtime.GC() // Correctness-only: returned fractional pointers cross the native ABI.
+		check(value, want)
+	}
+	strided := make([]scm.Scmer, 12)
+	reader.GetValueRange(1, 3, strided, 3)
+	for i, want := range values[1:] {
+		check(strided[i*3], want)
+	}
+	reader.GetValueMulti([]uint32{3, 0, 2, 1}, strided, 2)
+	for i, index := range []int{3, 0, 2, 1} {
+		check(strided[i*2], values[index])
+	}
+	if column.JITValueType() != scm.JITTypeUnknown {
+		t.Fatal("nullable date advertised a uniform physical type")
+	}
+	var rewritten bytes.Buffer
+	column.Serialize(&rewritten)
+	var reopened storageSCMERExact
+	reopened.Deserialize(bytes.NewReader(rewritten.Bytes()[1:]))
+	for i, want := range values {
+		check(reopened.GetValue(uint32(i)), want)
+	}
+}
+
+func TestCompactNativeDateRetainsCompressedFootprint(t *testing.T) {
+	const count = 60000
+	values := make([]scm.Scmer, count)
+	for i := range values {
+		values[i] = scm.NewDate(1700000000 + int64(i)*3600)
+	}
+	var encoded bytes.Buffer
+	(&storageSCMERExact{StorageSCMER: StorageSCMER{values: values}}).Serialize(&encoded)
+	var column storageSCMERExact
+	if rows := column.Deserialize(bytes.NewReader(encoded.Bytes()[1:])); rows != count {
+		t.Fatalf("date rows = %d", rows)
+	}
+	if size := column.ComputeSize(); size >= count*16 {
+		t.Fatalf("compressed date column materialized its row bag: %d bytes", size)
+	}
+	if column.JITValueType() != scm.TagDate {
+		t.Fatal("non-null packed date lost its physical type")
+	}
+	for _, index := range []uint32{0, 12345, count - 1} {
+		if got := column.GetValue(index); !got.IsDate() || got.Int() != values[index].Int() || got.DateNanosecond() != 0 {
+			t.Fatalf("compressed date row %d changed", index)
+		}
+	}
+}
+
+// Exercise the engine's compression negotiation before serialization. A
+// writer-only/reader-only round trip misses retained Scmer row bags in RAM.
+func TestFreshNativeDateColumnCompression(t *testing.T) {
+	const count = 60000
+	value := func(row uint32) scm.Scmer { return scm.NewDateNanoWithZone(1700000000+int64(row), int(row%2)*500, 17) }
+	var column ColumnStorage = new(StorageSCMER)
+	for {
+		column.prepare()
+		for row := uint32(0); row < count; row++ {
+			column.scan(row, value(row))
+		}
+		next := column.proposeCompression(count)
+		if next == nil {
+			break
+		}
+		column = next
+	}
+	column.init(count)
+	for row := uint32(0); row < count; row++ {
+		column.build(row, value(row))
+	}
+	column.finish()
+	exact, ok := column.(*storageSCMERExact)
+	if !ok || exact.nativeDates == nil || len(exact.values) != 0 {
+		t.Fatal("fresh rebuild retained the generic date row bag")
+	}
+	if exact.nativeDates.fractionScale != 500 {
+		t.Fatal("fractional integer scale was not retained")
+	}
+	if _, ok := exact.nativeDates.parts[0].(*StorageSeq); !ok {
+		t.Fatal("constant upper zone blocked ordinary sequence compression")
+	}
+	t.Logf("fresh fractional Date RAM=%d bytes, rows=%d, integer components=%d, fractional scale=%d", column.ComputeSize(), count, len(exact.nativeDates.parts), exact.nativeDates.fractionScale)
+	if size := column.ComputeSize(); size >= count/4 {
+		t.Fatalf("fresh compressed Date RAM: %d bytes", size)
+	}
+	for row := uint32(0); row < count; row++ {
+		got, want := column.GetValue(row), value(row)
+		if !got.IsDate() || !scm.Equal(got, want) || got.DateZone() != 17 {
+			t.Fatalf("fresh native Date row %d changed", row)
+		}
+	}
+}
+
+func TestPackedNativeDateVersion3Frame(t *testing.T) {
+	literal := func(clock, nanos string, scale uint32) []byte {
+		var data bytes.Buffer
+		data.Write([]byte{3, 3, 3})
+		binary.Write(&data, binary.LittleEndian, uint64(1))
+		binary.Write(&data, binary.LittleEndian, scale)
+		for _, value := range []string{clock, nanos} {
+			var component bytes.Buffer
+			component.WriteByte(41) // permanent StorageConst frame, independent of writer
+			binary.Write(&component, binary.LittleEndian, uint64(1))
+			binary.Write(&component, binary.LittleEndian, uint32(len(value)))
+			component.WriteString(value)
+			binary.Write(&data, binary.LittleEndian, uint64(component.Len()))
+			data.Write(component.Bytes())
+		}
+		return data.Bytes()
+	}
+	// Zone17 in upper bits, bias maps Unix0 to the middle of the lower45 bits.
+	const clock = "615726511554560"
+	frame := literal(clock, "1", 500)
+	reader := bytes.NewBuffer(append(append([]byte(nil), frame[1:]...), []byte("tail")...))
+	var column storageSCMERExact
+	if count := column.Deserialize(reader); count != 1 || reader.String() != "tail" {
+		t.Fatal("new date components crossed their frame")
+	}
+	got := column.GetValue(0)
+	if !got.IsDate() || got.Int() != 0 || got.DateNanosecond() != 500 || got.DateZone() != 17 {
+		t.Fatal("new literal date parts changed", got)
+	}
+	var saved bytes.Buffer
+	column.Serialize(&saved)
+	var restored storageSCMERExact
+	restored.Deserialize(bytes.NewReader(saved.Bytes()[1:]))
+	if !scm.Equal(got, restored.GetValue(0)) || restored.GetValue(0).DateZone() != 17 {
+		t.Fatal("new date rewrite lost parts")
+	}
+	for name, frame := range map[string][]byte{
+		"zero-scale":        literal(clock, "1", 0),
+		"clock-overflow":    literal("72057594037927936", "1", 500),
+		"fraction-overflow": literal(clock, "2000000", 500),
+		"mismatched-null":   literal("null", "1", 500),
+		"negative-fraction": literal(clock, "-1", 500),
+		"truncated":         frame[:len(frame)-1],
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("invalid packed date frame accepted")
+				}
+			}()
+			new(storageSCMERExact).Deserialize(bytes.NewReader(frame[1:]))
+		})
+	}
+}
+
+var nativeDateReadSink scm.Scmer
+
+func TestNativeDatePointReadsRemainLocalAndAllocationFree(t *testing.T) {
+	const count = 60000
+	value := func(row uint32) scm.Scmer {
+		seconds := int64(1700000000) + int64(row)
+		if row >= count/2 {
+			seconds += 1000
+		}
+		return scm.NewDateWithZone(seconds, 2047)
+	}
+	column := buildNativeDateColumn(count, 1, value)
+	sequence, ok := column.nativeDates.parts[0].(*StorageSeq)
+	if !ok || sequence.seqCount != 2 {
+		t.Fatal("fixture did not retain two sequence runs")
+	}
+	// Seed the ordinary reader at the second, valid segment. Date reads use the
+	// existing local sequence path and must leave this shared cursor untouched.
+	sequence.GetValue(count - 1)
+	if sequence.lastValue.Load() != 1 {
+		t.Fatal("negative control did not move shared cursor")
+	}
+	iteration := uint32(0)
+	allocs := testing.AllocsPerRun(1000, func() { iteration++; nativeDateReadSink = column.GetValue(iteration % (count / 2)) })
+	if allocs != 0 {
+		t.Fatalf("whole-second date point read allocated %g times", allocs)
+	}
+	if sequence.lastValue.Load() != 1 {
+		t.Fatal("date point read mutated shared sequence cursor")
+	}
+	if !nativeDateReadSink.IsDate() || nativeDateReadSink.DateZone() != 2047 {
+		t.Fatal("allocation-free read lost native date")
+	}
+	sequence.GetValue(0)
+	if sequence.lastValue.Load() != 0 {
+		t.Fatal("ordinary reader negative control stopped observing its shared cursor")
+	}
+}
+
+func TestNativeDateZonePrefixDisappearsIntoIntegerOffset(t *testing.T) {
+	for _, zone := range []int{0, 17, 2047} {
+		values := []scm.Scmer{scm.NewDateNanoWithZone(-1, 999999999, zone), scm.NewDateWithZone(0, zone)}
+		column := buildNativeDateColumn(2, 999999999, func(row uint32) scm.Scmer { return values[row] })
+		clock, ok := column.nativeDates.parts[0].(*StorageInt)
+		if !ok || clock.bitsize != 1 {
+			t.Fatalf("constant zone %d widened the one-second epoch boundary", zone)
+		}
+		for row, want := range values {
+			got := column.GetValue(uint32(row))
+			if !scm.Equal(got, want) || got.DateZone() != zone {
+				t.Fatal("offset removed semantic timezone or nanoseconds", zone, row)
+			}
+		}
+	}
+}
+
+func TestNativeDateBulkReads(t *testing.T) {
+	const count = 513
+	for _, nullable := range []bool{false, true} {
+		value := func(row uint32) scm.Scmer {
+			if nullable && row%17 == 0 {
+				return scm.NewNil()
+			}
+			return scm.NewDateWithZone(int64(row)-256, 17)
+		}
+		column := buildNativeDateColumn(count, 1, value)
+		var target [count * 3]scm.Scmer
+		var rows [count]uint32
+		for i := range rows {
+			rows[i] = uint32((i * 127) % count)
+		}
+		check := func(multi bool) {
+			for i := 0; i < count; i++ {
+				row := uint32(i)
+				if multi {
+					row = rows[i]
+				}
+				got, want := target[i*3], value(row)
+				if !scm.Equal(got, want) || !got.IsNil() && got.DateZone() != 17 {
+					t.Fatalf("bulk date mismatch nullable=%t multi=%t row=%d", nullable, multi, row)
+				}
+				if !target[i*3+1].IsNil() || !target[i*3+2].IsNil() {
+					t.Fatal("bulk read overwrote stride padding")
+				}
+			}
+		}
+		if allocs := testing.AllocsPerRun(100, func() { column.GetValueRange(0, count, target[:], 3) }); allocs != 0 {
+			t.Fatalf("whole-second range read allocated %g times", allocs)
+		}
+		check(false)
+		if allocs := testing.AllocsPerRun(100, func() { column.GetValueMulti(rows[:], target[:], 3) }); allocs != 0 {
+			t.Fatalf("whole-second gather allocated %g times", allocs)
+		}
+		check(true)
+		column.GetValueRange(count, 0, nil, 0)
+		column.GetValueMulti(nil, nil, 0)
 	}
 }

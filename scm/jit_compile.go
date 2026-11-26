@@ -1079,7 +1079,7 @@ func (ctx *JITContext) EmitStoreScmerSliceElement(slice, index, value *JITValueD
 // ordinary Go-call bridge preserves live values and roots on the slow path.
 func (ctx *JITContext) TryEmitStoreScmerSliceElement(slice, index, value *JITValueDesc, elementSize int32) bool {
 	switch value.Type {
-	case tagNil, tagFloat, tagInt, tagBool, tagDate, tagNthLocalVar:
+	case tagNil, tagFloat, tagInt, tagBool, tagNthLocalVar:
 		value.NoHeapPointer = true
 	}
 	if !value.NoHeapPointer {
@@ -2031,8 +2031,11 @@ func jitReturnHasNoHeapPointer(td *TypeDescriptor) bool {
 	if td == nil {
 		return false
 	}
+	if td.JITNoHeapPointer {
+		return true
+	}
 	switch td.Kind {
-	case "bool", "date", "int", "int|nil", "nil", "number", "number|nil":
+	case "bool", "int", "int|nil", "nil":
 		return true
 	default:
 		return false

@@ -1918,7 +1918,7 @@ func init_sync() {
 			return NewInt(int64(runtime.NumCPU()))
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "Returns the number of logical CPUs available for parallel execution",
-			Return: &TypeDescriptor{Kind: "number"},
+			Return: &TypeDescriptor{Kind: "number", JITNoHeapPointer: true},
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {

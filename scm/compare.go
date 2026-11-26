@@ -189,7 +189,7 @@ func Equal(a, b Scmer) bool {
 		case tagInt:
 			return a.Int() == b.Int()
 		case tagDate:
-			return a.Int() == b.Int()
+			return compareDates(a, b) == 0
 		case tagFloat:
 			return a.Float() == b.Float()
 		case tagString, tagSymbol:
@@ -254,11 +254,14 @@ func Equal(a, b Scmer) bool {
 		return a.Bool() == b.Bool()
 	case tagDate:
 		if tb == tagString || tb == tagSymbol {
-			if ts, ok := ParseDateString(b.String()); ok {
-				return a.Int() == ts
+			if value, ok := ParseDateValue(b.String()); ok {
+				return compareDates(a, value) == 0
 			}
 		}
-		return a.Int() == b.Int()
+		if tb == tagInt {
+			return a.DateNanosecond() == 0 && TagDateDecodeUnix(auxVal(a.aux)) == b.Int()
+		}
+		return a.Float() == b.Float()
 	case tagInt:
 		if tb == tagFloat {
 			return float64(a.Int()) == b.Float()
@@ -266,7 +269,10 @@ func Equal(a, b Scmer) bool {
 		if tb == tagString || tb == tagSymbol {
 			return a.Int() == b.Int()
 		}
-		if tb == tagBool || tb == tagDate {
+		if tb == tagDate {
+			return b.DateNanosecond() == 0 && a.Int() == TagDateDecodeUnix(auxVal(b.aux))
+		}
+		if tb == tagBool {
 			return a.Int() == b.Int()
 		}
 		return false
@@ -283,8 +289,8 @@ func Equal(a, b Scmer) bool {
 		return false
 	case tagString, tagSymbol:
 		if tb == tagDate {
-			if ts, ok := ParseDateString(a.String()); ok {
-				return ts == b.Int()
+			if value, ok := ParseDateValue(a.String()); ok {
+				return compareDates(value, b) == 0
 			}
 		}
 		if tb == tagInt {
@@ -416,7 +422,7 @@ func EqualSQL(a, b Scmer) Scmer {
 		case tagInt:
 			return NewBool(a.Int() == b.Int())
 		case tagDate:
-			return NewBool(a.Int() == b.Int())
+			return NewBool(compareDates(a, b) == 0)
 		case tagFloat:
 			return NewBool(a.Float() == b.Float())
 		case tagString, tagSymbol:
@@ -462,12 +468,18 @@ func EqualSQL(a, b Scmer) Scmer {
 	switch ta {
 	case tagDate:
 		if tb == tagString || tb == tagSymbol {
-			if ts, ok := ParseDateString(b.String()); ok {
-				return NewBool(a.Int() == ts)
+			if value, ok := ParseDateValue(b.String()); ok {
+				return NewBool(compareDates(a, value) == 0)
 			}
 		}
-		return NewBool(a.Int() == b.Int())
+		if tb == tagInt {
+			return NewBool(a.DateNanosecond() == 0 && TagDateDecodeUnix(auxVal(a.aux)) == b.Int())
+		}
+		return NewBool(a.Float() == b.Float())
 	case tagInt:
+		if tb == tagDate {
+			return NewBool(b.DateNanosecond() == 0 && a.Int() == TagDateDecodeUnix(auxVal(b.aux)))
+		}
 		if tb == tagFloat {
 			return NewBool(float64(a.Int()) == b.Float())
 		}
@@ -485,8 +497,8 @@ func EqualSQL(a, b Scmer) Scmer {
 		return NewBool(a.Float() == b.Float())
 	case tagString, tagSymbol, tagCString, tagConcat:
 		if tb == tagDate {
-			if ts, ok := ParseDateString(a.String()); ok {
-				return NewBool(ts == b.Int())
+			if value, ok := ParseDateValue(a.String()); ok {
+				return NewBool(compareDates(value, b) == 0)
 			}
 		}
 		if tb == tagInt {
@@ -610,13 +622,24 @@ func Less(a, b Scmer) bool {
 
 	switch ta {
 	case tagDate:
+		if tb == tagInt {
+			return nativeDateSeconds(a) < b.Int()
+		}
+		if tb == tagDate {
+			return compareDates(a, b) < 0
+		}
 		if tb == tagString || tb == tagSymbol {
-			if ts, ok := ParseDateString(b.String()); ok {
-				return a.Int() < ts
+			if value, ok := ParseDateValue(b.String()); ok {
+				return compareDates(a, value) < 0
 			}
 		}
-		return float64(a.Int()) < b.Float()
+		return a.Float() < b.Float()
 	case tagInt:
+		if tb == tagDate {
+			seconds := nativeDateSeconds(b)
+			integer := a.Int()
+			return integer < seconds || integer == seconds && b.DateNanosecond() > 0
+		}
 		if tb == tagInt {
 			return a.Int() < b.Int()
 		}
@@ -660,8 +683,8 @@ func lessNonNumeric(a, b Scmer, ta, tb uint8) bool {
 	case tagString, tagSymbol, tagCString, tagBString, tagConcat:
 		switch tb {
 		case tagDate:
-			if ts, ok := ParseDateString(a.String()); ok {
-				return ts < b.Int()
+			if value, ok := ParseDateValue(a.String()); ok {
+				return compareDates(value, b) < 0
 			}
 			return a.Float() < b.Float()
 		case tagInt:
@@ -694,114 +717,152 @@ func lessNonNumeric(a, b Scmer, ta, tb uint8) bool {
 // emitter is producing machine code, so known argument tags prune Less' cold
 // comparison arms without duplicating its SSA in every generated builtin.
 func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-	var d0 JITValueDesc
-	_ = d0
-	var d1 JITValueDesc
-	_ = d1
-	var d2 JITValueDesc
-	_ = d2
 	var d3 JITValueDesc
 	_ = d3
 	var d4 JITValueDesc
 	_ = d4
 	var d5 JITValueDesc
 	_ = d5
-	var d13 JITValueDesc
-	_ = d13
-	var d14 JITValueDesc
-	_ = d14
-	var d15 JITValueDesc
-	_ = d15
-	var d26 JITValueDesc
-	_ = d26
-	var d27 JITValueDesc
-	_ = d27
-	var d40 JITValueDesc
-	_ = d40
-	var d41 JITValueDesc
-	_ = d41
-	var d42 JITValueDesc
-	_ = d42
-	var d58 JITValueDesc
-	_ = d58
-	var d59 JITValueDesc
-	_ = d59
-	var d60 JITValueDesc
-	_ = d60
-	var d79 JITValueDesc
-	_ = d79
-	var d80 JITValueDesc
-	_ = d80
-	var d101 JITValueDesc
-	_ = d101
-	var d102 JITValueDesc
-	_ = d102
-	var d125 JITValueDesc
-	_ = d125
-	var d126 JITValueDesc
-	_ = d126
-	var d151 JITValueDesc
-	_ = d151
-	var d152 JITValueDesc
-	_ = d152
-	var d154 JITValueDesc
-	_ = d154
-	var d155 JITValueDesc
-	_ = d155
-	var d156 JITValueDesc
-	_ = d156
-	var d186 JITValueDesc
-	_ = d186
-	var d187 JITValueDesc
-	_ = d187
-	var d188 JITValueDesc
-	_ = d188
-	var d190 JITValueDesc
-	_ = d190
-	var d191 JITValueDesc
-	_ = d191
-	var d192 JITValueDesc
-	_ = d192
-	var d228 JITValueDesc
-	_ = d228
-	var d230 JITValueDesc
-	_ = d230
-	var d231 JITValueDesc
-	_ = d231
-	var d232 JITValueDesc
-	_ = d232
-	var d234 JITValueDesc
-	_ = d234
-	var d235 JITValueDesc
-	_ = d235
-	var d236 JITValueDesc
-	_ = d236
-	var d279 JITValueDesc
-	_ = d279
-	var d280 JITValueDesc
-	_ = d280
-	var d282 JITValueDesc
-	_ = d282
-	var d283 JITValueDesc
-	_ = d283
-	var d284 JITValueDesc
-	_ = d284
-	var d285 JITValueDesc
-	_ = d285
-	var d287 JITValueDesc
-	_ = d287
-	var d288 JITValueDesc
-	_ = d288
-	var d289 JITValueDesc
-	_ = d289
-	var d291 JITValueDesc
-	_ = d291
-	var d292 JITValueDesc
-	_ = d292
+	var d6 JITValueDesc
+	_ = d6
+	var d7 JITValueDesc
+	_ = d7
+	var d8 JITValueDesc
+	_ = d8
+	var d18 JITValueDesc
+	_ = d18
+	var d19 JITValueDesc
+	_ = d19
+	var d20 JITValueDesc
+	_ = d20
+	var d33 JITValueDesc
+	_ = d33
+	var d34 JITValueDesc
+	_ = d34
+	var d49 JITValueDesc
+	_ = d49
+	var d50 JITValueDesc
+	_ = d50
+	var d51 JITValueDesc
+	_ = d51
+	var d69 JITValueDesc
+	_ = d69
+	var d70 JITValueDesc
+	_ = d70
+	var d71 JITValueDesc
+	_ = d71
+	var d92 JITValueDesc
+	_ = d92
+	var d93 JITValueDesc
+	_ = d93
+	var d116 JITValueDesc
+	_ = d116
+	var d117 JITValueDesc
+	_ = d117
+	var d142 JITValueDesc
+	_ = d142
+	var d143 JITValueDesc
+	_ = d143
+	var d170 JITValueDesc
+	_ = d170
+	var d171 JITValueDesc
+	_ = d171
+	var d173 JITValueDesc
+	_ = d173
+	var d174 JITValueDesc
+	_ = d174
+	var d175 JITValueDesc
+	_ = d175
+	var d207 JITValueDesc
+	_ = d207
+	var d209 JITValueDesc
+	_ = d209
+	var d210 JITValueDesc
+	_ = d210
+	var d211 JITValueDesc
+	_ = d211
+	var d247 JITValueDesc
+	_ = d247
+	var d248 JITValueDesc
+	_ = d248
+	var d250 JITValueDesc
+	_ = d250
+	var d251 JITValueDesc
+	_ = d251
+	var d252 JITValueDesc
+	_ = d252
 	var d293 JITValueDesc
 	_ = d293
+	var d294 JITValueDesc
+	_ = d294
+	var d296 JITValueDesc
+	_ = d296
+	var d297 JITValueDesc
+	_ = d297
+	var d298 JITValueDesc
+	_ = d298
+	var d344 JITValueDesc
+	_ = d344
+	var d346 JITValueDesc
+	_ = d346
+	var d347 JITValueDesc
+	_ = d347
 	var d348 JITValueDesc
 	_ = d348
+	var d350 JITValueDesc
+	_ = d350
+	var d351 JITValueDesc
+	_ = d351
+	var d352 JITValueDesc
+	_ = d352
+	var d405 JITValueDesc
+	_ = d405
+	var d406 JITValueDesc
+	_ = d406
+	var d407 JITValueDesc
+	_ = d407
+	var d408 JITValueDesc
+	_ = d408
+	var d521 JITValueDesc
+	_ = d521
+	var d522 JITValueDesc
+	_ = d522
+	var d581 JITValueDesc
+	_ = d581
+	var d582 JITValueDesc
+	_ = d582
+	var d703 JITValueDesc
+	_ = d703
+	var d704 JITValueDesc
+	_ = d704
+	var d705 JITValueDesc
+	_ = d705
+	var d706 JITValueDesc
+	_ = d706
+	var d707 JITValueDesc
+	_ = d707
+	var d709 JITValueDesc
+	_ = d709
+	var d710 JITValueDesc
+	_ = d710
+	var d711 JITValueDesc
+	_ = d711
+	var d712 JITValueDesc
+	_ = d712
+	var d714 JITValueDesc
+	_ = d714
+	var d715 JITValueDesc
+	_ = d715
+	var d716 JITValueDesc
+	_ = d716
+	var d718 JITValueDesc
+	_ = d718
+	var d719 JITValueDesc
+	_ = d719
+	var d720 JITValueDesc
+	_ = d720
+	var d796 JITValueDesc
+	_ = d796
 	for i := range args {
 		if args[i].Type != JITTypeUnknown {
 			continue
@@ -821,9 +882,16 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		return result
 	}
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+	phiBase0 := ctx.AllocStack(int32(32))
 	branchSerial := ctx.branchSerial
 	_ = branchSerial
-	var bbs [22]BBDescriptor
+	var bbs [32]BBDescriptor
+	bbs[24].PhiBase = int32(phiBase0) + int32(0)
+	bbs[26].PhiBase = int32(phiBase0) + int32(16)
+	d1 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+	_ = d1
+	d2 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
+	_ = d2
 	if result.Loc == LocAny {
 		result = JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: ctx.AllocReg()}
 		ctx.BindReg(result.Reg, &result)
@@ -921,6 +989,46 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 	_ = bbpos_0_21
 	lbl22 := ctx.ReserveLabel()
 	_ = lbl22
+	bbpos_0_22 := int32(-1)
+	_ = bbpos_0_22
+	lbl23 := ctx.ReserveLabel()
+	_ = lbl23
+	bbpos_0_23 := int32(-1)
+	_ = bbpos_0_23
+	lbl24 := ctx.ReserveLabel()
+	_ = lbl24
+	bbpos_0_24 := int32(-1)
+	_ = bbpos_0_24
+	lbl25 := ctx.ReserveLabel()
+	_ = lbl25
+	bbpos_0_25 := int32(-1)
+	_ = bbpos_0_25
+	lbl26 := ctx.ReserveLabel()
+	_ = lbl26
+	bbpos_0_26 := int32(-1)
+	_ = bbpos_0_26
+	lbl27 := ctx.ReserveLabel()
+	_ = lbl27
+	bbpos_0_27 := int32(-1)
+	_ = bbpos_0_27
+	lbl28 := ctx.ReserveLabel()
+	_ = lbl28
+	bbpos_0_28 := int32(-1)
+	_ = bbpos_0_28
+	lbl29 := ctx.ReserveLabel()
+	_ = lbl29
+	bbpos_0_29 := int32(-1)
+	_ = bbpos_0_29
+	lbl30 := ctx.ReserveLabel()
+	_ = lbl30
+	bbpos_0_30 := int32(-1)
+	_ = bbpos_0_30
+	lbl31 := ctx.ReserveLabel()
+	_ = lbl31
+	bbpos_0_31 := int32(-1)
+	_ = bbpos_0_31
+	lbl32 := ctx.ReserveLabel()
+	_ = lbl32
 	bbs[0].Render = func() JITValueDesc {
 		if bbs[0].Rendered {
 			ctx.EmitJmp(lbl1)
@@ -931,57 +1039,63 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl1)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		d0 = args[0]
-		d0.ID = 0
-		d1 = ctx.EmitGetTagDesc(&d0, JITValueDesc{Loc: LocAny})
-		ctx.StabilizeDescForControlFlow(&d1)
-		d2 = args[1]
-		d2.ID = 0
-		d3 = ctx.EmitGetTagDesc(&d2, JITValueDesc{Loc: LocAny})
-		ctx.StabilizeDescForControlFlow(&d3)
-		ctx.EnsureDesc(&d1)
-		if d1.Loc == LocImm {
-			d4 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(0x0))}
+		d3 = args[0]
+		d3.ID = 0
+		d4 = ctx.EmitGetTagDesc(&d3, JITValueDesc{Loc: LocAny})
+		ctx.StabilizeDescForControlFlow(&d4)
+		d5 = args[1]
+		d5.ID = 0
+		d6 = ctx.EmitGetTagDesc(&d5, JITValueDesc{Loc: LocAny})
+		ctx.StabilizeDescForControlFlow(&d6)
+		ctx.EnsureDesc(&d4)
+		if d4.Loc == LocImm {
+			d7 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d4.Imm.Int()) == uint64(0x0))}
 		} else {
-			r0 := ctx.AllocRegExcept(d1.Reg)
-			ctx.EmitCmpRegImm32(d1.Reg, 0)
-			d4 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondEqual}
-			ctx.BindReg(r0, &d4)
+			r0 := ctx.AllocRegExcept(d4.Reg)
+			ctx.EmitCmpRegImm32(d4.Reg, 0)
+			d7 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r0, Condition: CondEqual}
+			ctx.BindReg(r0, &d7)
 		}
-		d5 = d4
-		ctx.SyncDesc(&d5)
-		if d5.Loc != LocImm && d5.Loc != LocFlags {
+		d8 = d7
+		ctx.SyncDesc(&d8)
+		if d8.Loc != LocImm && d8.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
-		if d5.Loc == LocImm {
-			if d5.Imm.Bool() {
+		if d8.Loc == LocImm {
+			if d8.Imm.Bool() {
 				return bbs[3].Render()
 			}
 			return bbs[2].Render()
 		}
-		ctx.EmitJump(d5.Condition, lbl4)
+		ctx.EmitJump(d8.Condition, lbl4)
 		if bbs[2].Rendered {
 			ctx.EmitJmp(lbl3)
 		}
-		ctx.FreeDesc(&d4)
+		ctx.FreeDesc(&d7)
 		ctx.FlushRegisterMoves()
 		if !bbs[2].Rendered {
-			snap6 := d0
-			snap7 := d1
-			snap8 := d2
-			snap9 := d3
-			snap10 := d4
-			snap11 := d5
-			alloc12 := ctx.SnapshotAllocState()
+			snap9 := d1
+			snap10 := d2
+			snap11 := d3
+			snap12 := d4
+			snap13 := d5
+			snap14 := d6
+			snap15 := d7
+			snap16 := d8
+			alloc17 := ctx.SnapshotAllocState()
 			bbs[2].Render()
-			ctx.RestoreAllocState(alloc12)
-			d0 = snap6
-			d1 = snap7
-			d2 = snap8
-			d3 = snap9
-			d4 = snap10
-			d5 = snap11
+			ctx.RestoreAllocState(alloc17)
+			d1 = snap9
+			d2 = snap10
+			d3 = snap11
+			d4 = snap12
+			d5 = snap13
+			d6 = snap14
+			d7 = snap15
+			d8 = snap16
 		}
 		if !bbs[3].Rendered {
 			return bbs[3].Render()
@@ -999,14 +1113,16 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl2)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		d13 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
-		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d13) {
-			return d13
+		d18 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d18) {
+			return d18
 		}
-		ctx.EnsureDesc(&d13)
-		ctx.EmitMovToReg(result.Reg, d13)
-		result.Type = d13.Type
+		ctx.EnsureDesc(&d18)
+		ctx.EmitMovToReg(result.Reg, d18)
+		result.Type = d18.Type
 		ctx.EmitJmp(lbl0)
 		return result
 	}
@@ -1020,55 +1136,61 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl3)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&d1)
-		if d1.Loc == LocImm {
-			d14 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(0x0))}
+		ctx.EnsureDesc(&d4)
+		if d4.Loc == LocImm {
+			d19 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d4.Imm.Int()) == uint64(0x0))}
 		} else {
-			r1 := ctx.AllocRegExcept(d1.Reg)
-			ctx.EmitCmpRegImm32(d1.Reg, 0)
-			d14 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r1, Condition: CondEqual}
-			ctx.BindReg(r1, &d14)
+			r1 := ctx.AllocRegExcept(d4.Reg)
+			ctx.EmitCmpRegImm32(d4.Reg, 0)
+			d19 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r1, Condition: CondEqual}
+			ctx.BindReg(r1, &d19)
 		}
-		d15 = d14
-		ctx.SyncDesc(&d15)
-		if d15.Loc != LocImm && d15.Loc != LocFlags {
+		d20 = d19
+		ctx.SyncDesc(&d20)
+		if d20.Loc != LocImm && d20.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
-		if d15.Loc == LocImm {
-			if d15.Imm.Bool() {
+		if d20.Loc == LocImm {
+			if d20.Imm.Bool() {
 				return bbs[4].Render()
 			}
 			return bbs[5].Render()
 		}
-		ctx.EmitJump(d15.Condition, lbl5)
+		ctx.EmitJump(d20.Condition, lbl5)
 		if bbs[5].Rendered {
 			ctx.EmitJmp(lbl6)
 		}
-		ctx.FreeDesc(&d14)
+		ctx.FreeDesc(&d19)
 		ctx.FlushRegisterMoves()
 		if !bbs[5].Rendered {
-			snap16 := d0
-			snap17 := d1
-			snap18 := d2
-			snap19 := d3
-			snap20 := d4
-			snap21 := d5
-			snap22 := d13
-			snap23 := d14
-			snap24 := d15
-			alloc25 := ctx.SnapshotAllocState()
+			snap21 := d1
+			snap22 := d2
+			snap23 := d3
+			snap24 := d4
+			snap25 := d5
+			snap26 := d6
+			snap27 := d7
+			snap28 := d8
+			snap29 := d18
+			snap30 := d19
+			snap31 := d20
+			alloc32 := ctx.SnapshotAllocState()
 			bbs[5].Render()
-			ctx.RestoreAllocState(alloc25)
-			d0 = snap16
-			d1 = snap17
-			d2 = snap18
-			d3 = snap19
-			d4 = snap20
-			d5 = snap21
-			d13 = snap22
-			d14 = snap23
-			d15 = snap24
+			ctx.RestoreAllocState(alloc32)
+			d1 = snap21
+			d2 = snap22
+			d3 = snap23
+			d4 = snap24
+			d5 = snap25
+			d6 = snap26
+			d7 = snap27
+			d8 = snap28
+			d18 = snap29
+			d19 = snap30
+			d20 = snap31
 		}
 		if !bbs[4].Rendered {
 			return bbs[4].Render()
@@ -1086,59 +1208,65 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl4)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&d3)
-		if d3.Loc == LocImm {
-			d26 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d3.Imm.Int()) == uint64(0x0))}
+		ctx.EnsureDesc(&d6)
+		if d6.Loc == LocImm {
+			d33 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d6.Imm.Int()) == uint64(0x0))}
 		} else {
-			r2 := ctx.AllocRegExcept(d3.Reg)
-			ctx.EmitCmpRegImm32(d3.Reg, 0)
-			d26 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r2, Condition: CondEqual}
-			ctx.BindReg(r2, &d26)
+			r2 := ctx.AllocRegExcept(d6.Reg)
+			ctx.EmitCmpRegImm32(d6.Reg, 0)
+			d33 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r2, Condition: CondEqual}
+			ctx.BindReg(r2, &d33)
 		}
-		d27 = d26
-		ctx.SyncDesc(&d27)
-		if d27.Loc != LocImm && d27.Loc != LocFlags {
+		d34 = d33
+		ctx.SyncDesc(&d34)
+		if d34.Loc != LocImm && d34.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
-		if d27.Loc == LocImm {
-			if d27.Imm.Bool() {
+		if d34.Loc == LocImm {
+			if d34.Imm.Bool() {
 				return bbs[1].Render()
 			}
 			return bbs[2].Render()
 		}
-		ctx.EmitJump(d27.Condition, lbl2)
+		ctx.EmitJump(d34.Condition, lbl2)
 		if bbs[2].Rendered {
 			ctx.EmitJmp(lbl3)
 		}
-		ctx.FreeDesc(&d26)
+		ctx.FreeDesc(&d33)
 		ctx.FlushRegisterMoves()
 		if !bbs[2].Rendered {
-			snap28 := d0
-			snap29 := d1
-			snap30 := d2
-			snap31 := d3
-			snap32 := d4
-			snap33 := d5
-			snap34 := d13
-			snap35 := d14
-			snap36 := d15
-			snap37 := d26
-			snap38 := d27
-			alloc39 := ctx.SnapshotAllocState()
+			snap35 := d1
+			snap36 := d2
+			snap37 := d3
+			snap38 := d4
+			snap39 := d5
+			snap40 := d6
+			snap41 := d7
+			snap42 := d8
+			snap43 := d18
+			snap44 := d19
+			snap45 := d20
+			snap46 := d33
+			snap47 := d34
+			alloc48 := ctx.SnapshotAllocState()
 			bbs[2].Render()
-			ctx.RestoreAllocState(alloc39)
-			d0 = snap28
-			d1 = snap29
-			d2 = snap30
-			d3 = snap31
-			d4 = snap32
-			d5 = snap33
-			d13 = snap34
-			d14 = snap35
-			d15 = snap36
-			d26 = snap37
-			d27 = snap38
+			ctx.RestoreAllocState(alloc48)
+			d1 = snap35
+			d2 = snap36
+			d3 = snap37
+			d4 = snap38
+			d5 = snap39
+			d6 = snap40
+			d7 = snap41
+			d8 = snap42
+			d18 = snap43
+			d19 = snap44
+			d20 = snap45
+			d33 = snap46
+			d34 = snap47
 		}
 		if !bbs[1].Rendered {
 			return bbs[1].Render()
@@ -1156,14 +1284,16 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl5)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		d40 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
-		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d40) {
-			return d40
+		d49 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d49) {
+			return d49
 		}
-		ctx.EnsureDesc(&d40)
-		ctx.EmitMovToReg(result.Reg, d40)
-		result.Type = d40.Type
+		ctx.EnsureDesc(&d49)
+		ctx.EmitMovToReg(result.Reg, d49)
+		result.Type = d49.Type
 		ctx.EmitJmp(lbl0)
 		return result
 	}
@@ -1177,65 +1307,71 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl6)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&d3)
-		if d3.Loc == LocImm {
-			d41 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d3.Imm.Int()) == uint64(0x0))}
+		ctx.EnsureDesc(&d6)
+		if d6.Loc == LocImm {
+			d50 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d6.Imm.Int()) == uint64(0x0))}
 		} else {
-			r3 := ctx.AllocRegExcept(d3.Reg)
-			ctx.EmitCmpRegImm32(d3.Reg, 0)
-			d41 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r3, Condition: CondEqual}
-			ctx.BindReg(r3, &d41)
+			r3 := ctx.AllocRegExcept(d6.Reg)
+			ctx.EmitCmpRegImm32(d6.Reg, 0)
+			d50 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r3, Condition: CondEqual}
+			ctx.BindReg(r3, &d50)
 		}
-		d42 = d41
-		ctx.SyncDesc(&d42)
-		if d42.Loc != LocImm && d42.Loc != LocFlags {
+		d51 = d50
+		ctx.SyncDesc(&d51)
+		if d51.Loc != LocImm && d51.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
-		if d42.Loc == LocImm {
-			if d42.Imm.Bool() {
+		if d51.Loc == LocImm {
+			if d51.Imm.Bool() {
 				return bbs[6].Render()
 			}
 			return bbs[7].Render()
 		}
-		ctx.EmitJump(d42.Condition, lbl7)
+		ctx.EmitJump(d51.Condition, lbl7)
 		if bbs[7].Rendered {
 			ctx.EmitJmp(lbl8)
 		}
-		ctx.FreeDesc(&d41)
+		ctx.FreeDesc(&d50)
 		ctx.FlushRegisterMoves()
 		if !bbs[7].Rendered {
-			snap43 := d0
-			snap44 := d1
-			snap45 := d2
-			snap46 := d3
-			snap47 := d4
-			snap48 := d5
-			snap49 := d13
-			snap50 := d14
-			snap51 := d15
-			snap52 := d26
-			snap53 := d27
-			snap54 := d40
-			snap55 := d41
-			snap56 := d42
-			alloc57 := ctx.SnapshotAllocState()
+			snap52 := d1
+			snap53 := d2
+			snap54 := d3
+			snap55 := d4
+			snap56 := d5
+			snap57 := d6
+			snap58 := d7
+			snap59 := d8
+			snap60 := d18
+			snap61 := d19
+			snap62 := d20
+			snap63 := d33
+			snap64 := d34
+			snap65 := d49
+			snap66 := d50
+			snap67 := d51
+			alloc68 := ctx.SnapshotAllocState()
 			bbs[7].Render()
-			ctx.RestoreAllocState(alloc57)
-			d0 = snap43
-			d1 = snap44
-			d2 = snap45
-			d3 = snap46
-			d4 = snap47
-			d5 = snap48
-			d13 = snap49
-			d14 = snap50
-			d15 = snap51
-			d26 = snap52
-			d27 = snap53
-			d40 = snap54
-			d41 = snap55
-			d42 = snap56
+			ctx.RestoreAllocState(alloc68)
+			d1 = snap52
+			d2 = snap53
+			d3 = snap54
+			d4 = snap55
+			d5 = snap56
+			d6 = snap57
+			d7 = snap58
+			d8 = snap59
+			d18 = snap60
+			d19 = snap61
+			d20 = snap62
+			d33 = snap63
+			d34 = snap64
+			d49 = snap65
+			d50 = snap66
+			d51 = snap67
 		}
 		if !bbs[6].Rendered {
 			return bbs[6].Render()
@@ -1253,14 +1389,16 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl7)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		d58 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
-		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d58) {
-			return d58
+		d69 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d69) {
+			return d69
 		}
-		ctx.EnsureDesc(&d58)
-		ctx.EmitMovToReg(result.Reg, d58)
-		result.Type = d58.Type
+		ctx.EnsureDesc(&d69)
+		ctx.EmitMovToReg(result.Reg, d69)
+		result.Type = d69.Type
 		ctx.EmitJmp(lbl0)
 		return result
 	}
@@ -1274,71 +1412,77 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl8)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&d1)
-		if d1.Loc == LocImm {
-			d59 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(0x10))}
+		ctx.EnsureDesc(&d4)
+		if d4.Loc == LocImm {
+			d70 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d4.Imm.Int()) == uint64(0x10))}
 		} else {
-			r4 := ctx.AllocRegExcept(d1.Reg)
-			ctx.EmitCmpRegImm32(d1.Reg, 16)
-			d59 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r4, Condition: CondEqual}
-			ctx.BindReg(r4, &d59)
+			r4 := ctx.AllocRegExcept(d4.Reg)
+			ctx.EmitCmpRegImm32(d4.Reg, 16)
+			d70 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r4, Condition: CondEqual}
+			ctx.BindReg(r4, &d70)
 		}
-		d60 = d59
-		ctx.SyncDesc(&d60)
-		if d60.Loc != LocImm && d60.Loc != LocFlags {
+		d71 = d70
+		ctx.SyncDesc(&d71)
+		if d71.Loc != LocImm && d71.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
-		if d60.Loc == LocImm {
-			if d60.Imm.Bool() {
+		if d71.Loc == LocImm {
+			if d71.Imm.Bool() {
 				return bbs[8].Render()
 			}
 			return bbs[10].Render()
 		}
-		ctx.EmitJump(d60.Condition, lbl9)
+		ctx.EmitJump(d71.Condition, lbl9)
 		if bbs[10].Rendered {
 			ctx.EmitJmp(lbl11)
 		}
-		ctx.FreeDesc(&d59)
+		ctx.FreeDesc(&d70)
 		ctx.FlushRegisterMoves()
 		if !bbs[10].Rendered {
-			snap61 := d0
-			snap62 := d1
-			snap63 := d2
-			snap64 := d3
-			snap65 := d4
-			snap66 := d5
-			snap67 := d13
-			snap68 := d14
-			snap69 := d15
-			snap70 := d26
-			snap71 := d27
-			snap72 := d40
-			snap73 := d41
-			snap74 := d42
-			snap75 := d58
-			snap76 := d59
-			snap77 := d60
-			alloc78 := ctx.SnapshotAllocState()
+			snap72 := d1
+			snap73 := d2
+			snap74 := d3
+			snap75 := d4
+			snap76 := d5
+			snap77 := d6
+			snap78 := d7
+			snap79 := d8
+			snap80 := d18
+			snap81 := d19
+			snap82 := d20
+			snap83 := d33
+			snap84 := d34
+			snap85 := d49
+			snap86 := d50
+			snap87 := d51
+			snap88 := d69
+			snap89 := d70
+			snap90 := d71
+			alloc91 := ctx.SnapshotAllocState()
 			bbs[10].Render()
-			ctx.RestoreAllocState(alloc78)
-			d0 = snap61
-			d1 = snap62
-			d2 = snap63
-			d3 = snap64
-			d4 = snap65
-			d5 = snap66
-			d13 = snap67
-			d14 = snap68
-			d15 = snap69
-			d26 = snap70
-			d27 = snap71
-			d40 = snap72
-			d41 = snap73
-			d42 = snap74
-			d58 = snap75
-			d59 = snap76
-			d60 = snap77
+			ctx.RestoreAllocState(alloc91)
+			d1 = snap72
+			d2 = snap73
+			d3 = snap74
+			d4 = snap75
+			d5 = snap76
+			d6 = snap77
+			d7 = snap78
+			d8 = snap79
+			d18 = snap80
+			d19 = snap81
+			d20 = snap82
+			d33 = snap83
+			d34 = snap84
+			d49 = snap85
+			d50 = snap86
+			d51 = snap87
+			d69 = snap88
+			d70 = snap89
+			d71 = snap90
 		}
 		if !bbs[8].Rendered {
 			return bbs[8].Render()
@@ -1356,75 +1500,81 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl9)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&d3)
-		if d3.Loc == LocImm {
-			d79 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d3.Imm.Int()) == uint64(0x1))}
+		ctx.EnsureDesc(&d6)
+		if d6.Loc == LocImm {
+			d92 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d6.Imm.Int()) == uint64(0x4))}
 		} else {
-			r5 := ctx.AllocRegExcept(d3.Reg)
-			ctx.EmitCmpRegImm32(d3.Reg, 1)
-			d79 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r5, Condition: CondEqual}
-			ctx.BindReg(r5, &d79)
+			r5 := ctx.AllocRegExcept(d6.Reg)
+			ctx.EmitCmpRegImm32(d6.Reg, 4)
+			d92 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r5, Condition: CondEqual}
+			ctx.BindReg(r5, &d92)
 		}
-		d80 = d79
-		ctx.SyncDesc(&d80)
-		if d80.Loc != LocImm && d80.Loc != LocFlags {
+		d93 = d92
+		ctx.SyncDesc(&d93)
+		if d93.Loc != LocImm && d93.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
-		if d80.Loc == LocImm {
-			if d80.Imm.Bool() {
+		if d93.Loc == LocImm {
+			if d93.Imm.Bool() {
 				return bbs[11].Render()
 			}
-			return bbs[13].Render()
+			return bbs[12].Render()
 		}
-		ctx.EmitJump(d80.Condition, lbl12)
-		if bbs[13].Rendered {
-			ctx.EmitJmp(lbl14)
+		ctx.EmitJump(d93.Condition, lbl12)
+		if bbs[12].Rendered {
+			ctx.EmitJmp(lbl13)
 		}
-		ctx.FreeDesc(&d79)
+		ctx.FreeDesc(&d92)
 		ctx.FlushRegisterMoves()
-		if !bbs[13].Rendered {
-			snap81 := d0
-			snap82 := d1
-			snap83 := d2
-			snap84 := d3
-			snap85 := d4
-			snap86 := d5
-			snap87 := d13
-			snap88 := d14
-			snap89 := d15
-			snap90 := d26
-			snap91 := d27
-			snap92 := d40
-			snap93 := d41
-			snap94 := d42
-			snap95 := d58
-			snap96 := d59
-			snap97 := d60
-			snap98 := d79
-			snap99 := d80
-			alloc100 := ctx.SnapshotAllocState()
-			bbs[13].Render()
-			ctx.RestoreAllocState(alloc100)
-			d0 = snap81
-			d1 = snap82
-			d2 = snap83
-			d3 = snap84
-			d4 = snap85
-			d5 = snap86
-			d13 = snap87
-			d14 = snap88
-			d15 = snap89
-			d26 = snap90
-			d27 = snap91
-			d40 = snap92
-			d41 = snap93
-			d42 = snap94
-			d58 = snap95
-			d59 = snap96
-			d60 = snap97
-			d79 = snap98
-			d80 = snap99
+		if !bbs[12].Rendered {
+			snap94 := d1
+			snap95 := d2
+			snap96 := d3
+			snap97 := d4
+			snap98 := d5
+			snap99 := d6
+			snap100 := d7
+			snap101 := d8
+			snap102 := d18
+			snap103 := d19
+			snap104 := d20
+			snap105 := d33
+			snap106 := d34
+			snap107 := d49
+			snap108 := d50
+			snap109 := d51
+			snap110 := d69
+			snap111 := d70
+			snap112 := d71
+			snap113 := d92
+			snap114 := d93
+			alloc115 := ctx.SnapshotAllocState()
+			bbs[12].Render()
+			ctx.RestoreAllocState(alloc115)
+			d1 = snap94
+			d2 = snap95
+			d3 = snap96
+			d4 = snap97
+			d5 = snap98
+			d6 = snap99
+			d7 = snap100
+			d8 = snap101
+			d18 = snap102
+			d19 = snap103
+			d20 = snap104
+			d33 = snap105
+			d34 = snap106
+			d49 = snap107
+			d50 = snap108
+			d51 = snap109
+			d69 = snap110
+			d70 = snap111
+			d71 = snap112
+			d92 = snap113
+			d93 = snap114
 		}
 		if !bbs[11].Rendered {
 			return bbs[11].Render()
@@ -1442,82 +1592,88 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl10)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&d3)
-		if d3.Loc == LocImm {
-			d101 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d3.Imm.Int()) == uint64(0x4))}
+		ctx.EnsureDesc(&d6)
+		if d6.Loc == LocImm {
+			d116 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d6.Imm.Int()) == uint64(0x10))}
 		} else {
-			r6 := ctx.AllocRegExcept(d3.Reg)
-			ctx.EmitCmpRegImm32(d3.Reg, 4)
-			d101 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r6, Condition: CondEqual}
-			ctx.BindReg(r6, &d101)
+			r6 := ctx.AllocRegExcept(d6.Reg)
+			ctx.EmitCmpRegImm32(d6.Reg, 16)
+			d116 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r6, Condition: CondEqual}
+			ctx.BindReg(r6, &d116)
 		}
-		d102 = d101
-		ctx.SyncDesc(&d102)
-		if d102.Loc != LocImm && d102.Loc != LocFlags {
+		d117 = d116
+		ctx.SyncDesc(&d117)
+		if d117.Loc != LocImm && d117.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
-		if d102.Loc == LocImm {
-			if d102.Imm.Bool() {
-				return bbs[17].Render()
+		if d117.Loc == LocImm {
+			if d117.Imm.Bool() {
+				return bbs[21].Render()
 			}
-			return bbs[18].Render()
+			return bbs[22].Render()
 		}
-		ctx.EmitJump(d102.Condition, lbl18)
-		if bbs[18].Rendered {
-			ctx.EmitJmp(lbl19)
+		ctx.EmitJump(d117.Condition, lbl22)
+		if bbs[22].Rendered {
+			ctx.EmitJmp(lbl23)
 		}
-		ctx.FreeDesc(&d101)
+		ctx.FreeDesc(&d116)
 		ctx.FlushRegisterMoves()
-		if !bbs[18].Rendered {
-			snap103 := d0
-			snap104 := d1
-			snap105 := d2
-			snap106 := d3
-			snap107 := d4
-			snap108 := d5
-			snap109 := d13
-			snap110 := d14
-			snap111 := d15
-			snap112 := d26
-			snap113 := d27
-			snap114 := d40
-			snap115 := d41
-			snap116 := d42
-			snap117 := d58
-			snap118 := d59
-			snap119 := d60
-			snap120 := d79
-			snap121 := d80
-			snap122 := d101
-			snap123 := d102
-			alloc124 := ctx.SnapshotAllocState()
-			bbs[18].Render()
-			ctx.RestoreAllocState(alloc124)
-			d0 = snap103
-			d1 = snap104
-			d2 = snap105
-			d3 = snap106
-			d4 = snap107
-			d5 = snap108
-			d13 = snap109
-			d14 = snap110
-			d15 = snap111
-			d26 = snap112
-			d27 = snap113
-			d40 = snap114
-			d41 = snap115
-			d42 = snap116
-			d58 = snap117
-			d59 = snap118
-			d60 = snap119
-			d79 = snap120
-			d80 = snap121
-			d101 = snap122
-			d102 = snap123
+		if !bbs[22].Rendered {
+			snap118 := d1
+			snap119 := d2
+			snap120 := d3
+			snap121 := d4
+			snap122 := d5
+			snap123 := d6
+			snap124 := d7
+			snap125 := d8
+			snap126 := d18
+			snap127 := d19
+			snap128 := d20
+			snap129 := d33
+			snap130 := d34
+			snap131 := d49
+			snap132 := d50
+			snap133 := d51
+			snap134 := d69
+			snap135 := d70
+			snap136 := d71
+			snap137 := d92
+			snap138 := d93
+			snap139 := d116
+			snap140 := d117
+			alloc141 := ctx.SnapshotAllocState()
+			bbs[22].Render()
+			ctx.RestoreAllocState(alloc141)
+			d1 = snap118
+			d2 = snap119
+			d3 = snap120
+			d4 = snap121
+			d5 = snap122
+			d6 = snap123
+			d7 = snap124
+			d8 = snap125
+			d18 = snap126
+			d19 = snap127
+			d20 = snap128
+			d33 = snap129
+			d34 = snap130
+			d49 = snap131
+			d50 = snap132
+			d51 = snap133
+			d69 = snap134
+			d70 = snap135
+			d71 = snap136
+			d92 = snap137
+			d93 = snap138
+			d116 = snap139
+			d117 = snap140
 		}
-		if !bbs[17].Rendered {
-			return bbs[17].Render()
+		if !bbs[21].Rendered {
+			return bbs[21].Render()
 		}
 		return result
 		return result
@@ -1532,83 +1688,89 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_10 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl11)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&d1)
-		if d1.Loc == LocImm {
-			d125 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(0x4))}
+		ctx.EnsureDesc(&d4)
+		if d4.Loc == LocImm {
+			d142 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d4.Imm.Int()) == uint64(0x4))}
 		} else {
-			r7 := ctx.AllocRegExcept(d1.Reg)
-			ctx.EmitCmpRegImm32(d1.Reg, 4)
-			d125 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r7, Condition: CondEqual}
-			ctx.BindReg(r7, &d125)
+			r7 := ctx.AllocRegExcept(d4.Reg)
+			ctx.EmitCmpRegImm32(d4.Reg, 4)
+			d142 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r7, Condition: CondEqual}
+			ctx.BindReg(r7, &d142)
 		}
-		d126 = d125
-		ctx.SyncDesc(&d126)
-		if d126.Loc != LocImm && d126.Loc != LocFlags {
+		d143 = d142
+		ctx.SyncDesc(&d143)
+		if d143.Loc != LocImm && d143.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
-		if d126.Loc == LocImm {
-			if d126.Imm.Bool() {
+		if d143.Loc == LocImm {
+			if d143.Imm.Bool() {
 				return bbs[9].Render()
 			}
-			return bbs[16].Render()
+			return bbs[20].Render()
 		}
-		ctx.EmitJump(d126.Condition, lbl10)
-		if bbs[16].Rendered {
-			ctx.EmitJmp(lbl17)
+		ctx.EmitJump(d143.Condition, lbl10)
+		if bbs[20].Rendered {
+			ctx.EmitJmp(lbl21)
 		}
-		ctx.FreeDesc(&d125)
+		ctx.FreeDesc(&d142)
 		ctx.FlushRegisterMoves()
-		if !bbs[16].Rendered {
-			snap127 := d0
-			snap128 := d1
-			snap129 := d2
-			snap130 := d3
-			snap131 := d4
-			snap132 := d5
-			snap133 := d13
-			snap134 := d14
-			snap135 := d15
-			snap136 := d26
-			snap137 := d27
-			snap138 := d40
-			snap139 := d41
-			snap140 := d42
-			snap141 := d58
-			snap142 := d59
-			snap143 := d60
-			snap144 := d79
-			snap145 := d80
-			snap146 := d101
-			snap147 := d102
-			snap148 := d125
-			snap149 := d126
-			alloc150 := ctx.SnapshotAllocState()
-			bbs[16].Render()
-			ctx.RestoreAllocState(alloc150)
-			d0 = snap127
-			d1 = snap128
-			d2 = snap129
-			d3 = snap130
-			d4 = snap131
-			d5 = snap132
-			d13 = snap133
-			d14 = snap134
-			d15 = snap135
-			d26 = snap136
-			d27 = snap137
-			d40 = snap138
-			d41 = snap139
-			d42 = snap140
-			d58 = snap141
-			d59 = snap142
-			d60 = snap143
-			d79 = snap144
-			d80 = snap145
-			d101 = snap146
-			d102 = snap147
-			d125 = snap148
-			d126 = snap149
+		if !bbs[20].Rendered {
+			snap144 := d1
+			snap145 := d2
+			snap146 := d3
+			snap147 := d4
+			snap148 := d5
+			snap149 := d6
+			snap150 := d7
+			snap151 := d8
+			snap152 := d18
+			snap153 := d19
+			snap154 := d20
+			snap155 := d33
+			snap156 := d34
+			snap157 := d49
+			snap158 := d50
+			snap159 := d51
+			snap160 := d69
+			snap161 := d70
+			snap162 := d71
+			snap163 := d92
+			snap164 := d93
+			snap165 := d116
+			snap166 := d117
+			snap167 := d142
+			snap168 := d143
+			alloc169 := ctx.SnapshotAllocState()
+			bbs[20].Render()
+			ctx.RestoreAllocState(alloc169)
+			d1 = snap144
+			d2 = snap145
+			d3 = snap146
+			d4 = snap147
+			d5 = snap148
+			d6 = snap149
+			d7 = snap150
+			d8 = snap151
+			d18 = snap152
+			d19 = snap153
+			d20 = snap154
+			d33 = snap155
+			d34 = snap156
+			d49 = snap157
+			d50 = snap158
+			d51 = snap159
+			d69 = snap160
+			d70 = snap161
+			d71 = snap162
+			d92 = snap163
+			d93 = snap164
+			d116 = snap165
+			d117 = snap166
+			d142 = snap167
+			d143 = snap168
 		}
 		if !bbs[9].Rendered {
 			return bbs[9].Render()
@@ -1626,139 +1788,71 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_11 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl12)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		d152 = args[1]
-		ctx.SyncDesc(&d152)
-		if d152.Loc == LocMem {
-			tmpScalar := JITValueDesc{Loc: LocReg, Type: d152.Type, Reg: ctx.AllocReg()}
-			scratch := ctx.AllocRegExcept(tmpScalar.Reg)
-			ctx.EmitMovRegImm64(scratch, uint64(d152.MemPtr))
-			ctx.EmitMovRegMem(tmpScalar.Reg, scratch, 0)
-			ctx.FreeReg(scratch)
-			ctx.BindReg(tmpScalar.Reg, &tmpScalar)
-			d152 = tmpScalar
+		args[0] = JITPrepareScmerGoArg(ctx, args[0])
+		ctx.SyncDesc(&args[0])
+		d170 = ctx.EmitGoCallScalar(jitGoABI_7b4abd9531444504, []JITValueDesc{args[0]}, 1)
+		d170.NoHeapPointer = true
+		ctx.BindReg(d170.Reg, &d170)
+		if args[1].Loc != LocImm {
+			ctx.EnsureDesc(&args[1])
 		}
-		d152 = JITPrepareScmerGoArg(ctx, d152)
-		if d152.Loc != LocRegPair && d152.Loc != LocStackPair && d152.Loc != LocInputPair {
-			panic("jit: Scmer.String receiver not materialized as pair")
+		if args[1].Loc == LocImm {
+			d171 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[1].Imm.Int())}
+		} else if args[1].Type == tagInt && args[1].Loc == LocRegPair {
+			ctx.FreeReg(args[1].Reg)
+			d171 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[1].Reg2}
+			ctx.BindReg(args[1].Reg2, &d171)
+		} else if args[1].Type == tagInt && args[1].Loc == LocReg {
+			d171 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[1].Reg}
+			ctx.BindReg(args[1].Reg, &d171)
+		} else {
+			boxed := JITPrepareScmerGoArg(ctx, args[1])
+			d171 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
+			d171.Type = tagInt
+			ctx.BindReg(d171.Reg, &d171)
 		}
-		d151 = ctx.EmitGoCallScalar(jitGoABI_0cbff6f55ee96f6d, []JITValueDesc{d152}, 2)
-		ctx.EnsureDesc(&d151)
-		if d151.Loc == LocImm {
-			tmpPair := JITValueDesc{Loc: LocRegPair, Type: d151.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-			ctx.TrackImm(d151.Imm)
-			ptrWord, _ := d151.Imm.RawWords()
-			ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-			ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d151.Imm.String())))
-			d151 = tmpPair
-		} else if d151.Loc == LocReg {
-			tmpPair := JITValueDesc{Loc: LocRegPair, Type: d151.Type, Reg: ctx.AllocRegExcept(d151.Reg), Reg2: ctx.AllocRegExcept(d151.Reg)}
-			switch d151.Type {
-			case tagBool:
-				ctx.EmitMakeBool(tmpPair, d151)
-			case tagInt:
-				ctx.EmitMakeInt(tmpPair, d151)
-			case tagFloat:
-				ctx.EmitMakeFloat(tmpPair, d151)
-			default:
-				panic("jit: generic call arg scalar type unknown for 2-word value")
+		ctx.EnsureDesc(&d170)
+		resultTarget172 := false
+		_ = resultTarget172
+		ctx.EnsureDesc(&d171)
+		ctx.EnsureDescsTogether(&d170, &d171)
+		if d170.Loc == LocImm && d171.Loc == LocImm {
+			d173 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d170.Imm.Int() < d171.Imm.Int())}
+		} else if d171.Loc == LocImm {
+			r8 := ctx.AllocReg()
+			if d171.Imm.Int() >= -2147483648 && d171.Imm.Int() <= 2147483647 {
+				ctx.EmitCmpRegImm32(d170.Reg, int32(d171.Imm.Int()))
+			} else {
+				ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d171.Imm.Int()))
+				ctx.EmitCmpInt64(d170.Reg, ctx.ScratchReg)
 			}
-			ctx.FreeDesc(&d151)
-			d151 = tmpPair
+			d173 = ctx.DeferBooleanFlags(r8, CondSignedLess)
+			ctx.BindReg(r8, &d173)
+		} else if d170.Loc == LocImm {
+			r9 := ctx.AllocReg()
+			ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d170.Imm.Int()))
+			ctx.EmitCmpInt64(ctx.ScratchReg, d171.Reg)
+			d173 = ctx.DeferBooleanFlags(r9, CondSignedLess)
+			ctx.BindReg(r9, &d173)
+		} else {
+			r10 := ctx.AllocReg()
+			ctx.EmitCmpInt64(d170.Reg, d171.Reg)
+			d173 = ctx.DeferBooleanFlags(r10, CondSignedLess)
+			ctx.BindReg(r10, &d173)
 		}
-		if d151.Loc != LocRegPair && d151.Loc != LocStackPair && d151.Loc != LocInputPair {
-			panic("jit: generic call arg expects 2-word value (ParseDateString arg0)")
+		ctx.FreeDesc(&d170)
+		ctx.FreeDesc(&d171)
+		ctx.SyncDesc(&d173)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d173) {
+			return d173
 		}
-		ctx.SyncDesc(&d151)
-		callResults153 := JITEmitGoCallResults(ctx, jitGoABI_3c7aea5ce0fcdece, []JITValueDesc{d151})
-		d154 = callResults153[0]
-		_ = d154
-		d155 = callResults153[1]
-		_ = d155
-		ctx.StabilizeDescForControlFlow(&d154)
-		d156 = d155
-		ctx.EnsureDesc(&d156)
-		if d156.Loc != LocImm && d156.Loc != LocReg {
-			panic("jit: If condition is neither LocImm nor LocReg")
-		}
-		if d156.Loc == LocImm {
-			if d156.Imm.Bool() {
-				return bbs[14].Render()
-			}
-			return bbs[12].Render()
-		}
-		ctx.EmitCmpRegImm32(d156.Reg, 0)
-		ctx.EmitJump(CondNotEqual, lbl15)
-		if bbs[12].Rendered {
-			ctx.EmitJmp(lbl13)
-		}
-		ctx.FlushRegisterMoves()
-		if !bbs[12].Rendered {
-			snap157 := d0
-			snap158 := d1
-			snap159 := d2
-			snap160 := d3
-			snap161 := d4
-			snap162 := d5
-			snap163 := d13
-			snap164 := d14
-			snap165 := d15
-			snap166 := d26
-			snap167 := d27
-			snap168 := d40
-			snap169 := d41
-			snap170 := d42
-			snap171 := d58
-			snap172 := d59
-			snap173 := d60
-			snap174 := d79
-			snap175 := d80
-			snap176 := d101
-			snap177 := d102
-			snap178 := d125
-			snap179 := d126
-			snap180 := d151
-			snap181 := d152
-			snap182 := d154
-			snap183 := d155
-			snap184 := d156
-			alloc185 := ctx.SnapshotAllocState()
-			bbs[12].Render()
-			ctx.RestoreAllocState(alloc185)
-			d0 = snap157
-			d1 = snap158
-			d2 = snap159
-			d3 = snap160
-			d4 = snap161
-			d5 = snap162
-			d13 = snap163
-			d14 = snap164
-			d15 = snap165
-			d26 = snap166
-			d27 = snap167
-			d40 = snap168
-			d41 = snap169
-			d42 = snap170
-			d58 = snap171
-			d59 = snap172
-			d60 = snap173
-			d79 = snap174
-			d80 = snap175
-			d101 = snap176
-			d102 = snap177
-			d125 = snap178
-			d126 = snap179
-			d151 = snap180
-			d152 = snap181
-			d154 = snap182
-			d155 = snap183
-			d156 = snap184
-		}
-		if !bbs[14].Rendered {
-			return bbs[14].Render()
-		}
-		return result
-		ctx.FreeDesc(&d155)
+		ctx.EnsureDesc(&d173)
+		ctx.EmitMovToReg(result.Reg, d173)
+		result.Type = d173.Type
+		ctx.EmitJmp(lbl0)
 		return result
 	}
 	bbs[12].Render = func() JITValueDesc {
@@ -1771,94 +1865,104 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_12 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl13)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		if args[0].Loc != LocImm {
-			ctx.EnsureDesc(&args[0])
-		}
-		if args[0].Loc == LocImm {
-			d186 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
-		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
-			ctx.FreeReg(args[0].Reg)
-			d186 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg2}
-			ctx.BindReg(args[0].Reg2, &d186)
-		} else if args[0].Type == tagInt && args[0].Loc == LocReg {
-			d186 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg}
-			ctx.BindReg(args[0].Reg, &d186)
+		ctx.EnsureDesc(&d6)
+		if d6.Loc == LocImm {
+			d174 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d6.Imm.Int()) == uint64(0x10))}
 		} else {
-			boxed := JITPrepareScmerGoArg(ctx, args[0])
-			d186 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
-			d186.Type = tagInt
-			ctx.BindReg(d186.Reg, &d186)
+			r11 := ctx.AllocRegExcept(d6.Reg)
+			ctx.EmitCmpRegImm32(d6.Reg, 16)
+			d174 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r11, Condition: CondEqual}
+			ctx.BindReg(r11, &d174)
 		}
-		ctx.EnsureDesc(&d186)
-		ctx.EnsureDesc(&d186)
-		if d186.Loc == LocImm {
-			d187 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(float64(d186.Imm.Int()))}
-		} else {
-			var r8 Reg
-			r8 = d186.Reg
-			d186.Loc = LocNone
-			ctx.EmitInt64ToFloatBits(r8)
-			d187 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r8}
-			ctx.BindReg(r8, &d187)
+		d175 = d174
+		ctx.SyncDesc(&d175)
+		if d175.Loc != LocImm && d175.Loc != LocFlags {
+			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
-		ctx.FreeDesc(&d186)
-		d188 = ctx.EmitFloatDesc(args[1])
-		ctx.EnsureDesc(&d187)
-		resultTarget189 := false
-		_ = resultTarget189
-		ctx.EnsureDesc(&d188)
-		ctx.EnsureDescsTogether(&d187, &d188)
-		if d187.Loc == LocImm && d188.Loc == LocImm {
-			d190 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d187.Imm.Float() < d188.Imm.Float())}
-		} else if d188.Loc == LocImm {
-			var r9 Reg
-			if result.Loc == LocReg && result.Reg != d187.Reg {
-				r9 = result.Reg
-				resultTarget189 = true
-			} else {
-				r9 = ctx.AllocRegExcept(d187.Reg)
+		if d175.Loc == LocImm {
+			if d175.Imm.Bool() {
+				return bbs[13].Render()
 			}
-			_, yBits := d188.Imm.RawWords()
-			ctx.EmitMovRegImm64(ctx.ScratchReg, yBits)
-			ctx.EmitCmpFloat64(ctx.ScratchReg, d187.Reg)
-			d190 = ctx.DeferBooleanFlags(r9, CondUnsignedAbove)
-			ctx.BindReg(r9, &d190)
-		} else if d187.Loc == LocImm {
-			var r10 Reg
-			if result.Loc == LocReg && result.Reg != d188.Reg {
-				r10 = result.Reg
-				resultTarget189 = true
-			} else {
-				r10 = ctx.AllocRegExcept(d188.Reg)
-			}
-			_, xBits := d187.Imm.RawWords()
-			ctx.EmitMovRegImm64(ctx.ScratchReg, xBits)
-			ctx.EmitCmpFloat64(d188.Reg, ctx.ScratchReg)
-			d190 = ctx.DeferBooleanFlags(r10, CondUnsignedAbove)
-			ctx.BindReg(r10, &d190)
-		} else {
-			var r11 Reg
-			if result.Loc == LocReg && result.Reg != d187.Reg && result.Reg != d188.Reg {
-				r11 = result.Reg
-				resultTarget189 = true
-			} else {
-				r11 = ctx.AllocRegExcept(d187.Reg, d188.Reg)
-			}
-			ctx.EmitCmpFloat64(d188.Reg, d187.Reg)
-			d190 = ctx.DeferBooleanFlags(r11, CondUnsignedAbove)
-			ctx.BindReg(r11, &d190)
+			return bbs[14].Render()
 		}
-		ctx.FreeDesc(&d187)
-		ctx.FreeDesc(&d188)
-		ctx.SyncDesc(&d190)
-		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d190) {
-			return d190
+		ctx.EmitJump(d175.Condition, lbl14)
+		if bbs[14].Rendered {
+			ctx.EmitJmp(lbl15)
 		}
-		ctx.EnsureDesc(&d190)
-		ctx.EmitMovToReg(result.Reg, d190)
-		result.Type = d190.Type
-		ctx.EmitJmp(lbl0)
+		ctx.FreeDesc(&d174)
+		ctx.FlushRegisterMoves()
+		if !bbs[14].Rendered {
+			snap176 := d1
+			snap177 := d2
+			snap178 := d3
+			snap179 := d4
+			snap180 := d5
+			snap181 := d6
+			snap182 := d7
+			snap183 := d8
+			snap184 := d18
+			snap185 := d19
+			snap186 := d20
+			snap187 := d33
+			snap188 := d34
+			snap189 := d49
+			snap190 := d50
+			snap191 := d51
+			snap192 := d69
+			snap193 := d70
+			snap194 := d71
+			snap195 := d92
+			snap196 := d93
+			snap197 := d116
+			snap198 := d117
+			snap199 := d142
+			snap200 := d143
+			snap201 := d170
+			snap202 := d171
+			snap203 := d173
+			snap204 := d174
+			snap205 := d175
+			alloc206 := ctx.SnapshotAllocState()
+			bbs[14].Render()
+			ctx.RestoreAllocState(alloc206)
+			d1 = snap176
+			d2 = snap177
+			d3 = snap178
+			d4 = snap179
+			d5 = snap180
+			d6 = snap181
+			d7 = snap182
+			d8 = snap183
+			d18 = snap184
+			d19 = snap185
+			d20 = snap186
+			d33 = snap187
+			d34 = snap188
+			d49 = snap189
+			d50 = snap190
+			d51 = snap191
+			d69 = snap192
+			d70 = snap193
+			d71 = snap194
+			d92 = snap195
+			d93 = snap196
+			d116 = snap197
+			d117 = snap198
+			d142 = snap199
+			d143 = snap200
+			d170 = snap201
+			d171 = snap202
+			d173 = snap203
+			d174 = snap204
+			d175 = snap205
+		}
+		if !bbs[13].Rendered {
+			return bbs[13].Render()
+		}
+		return result
 		return result
 	}
 	bbs[13].Render = func() JITValueDesc {
@@ -1871,110 +1975,36 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_13 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl14)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&d3)
-		if d3.Loc == LocImm {
-			d191 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d3.Imm.Int()) == uint64(0x2))}
+		args[0] = JITPrepareScmerGoArg(ctx, args[0])
+		args[1] = JITPrepareScmerGoArg(ctx, args[1])
+		ctx.SyncDesc(&args[0])
+		ctx.SyncDesc(&args[1])
+		d207 = ctx.EmitGoCallScalar(jitGoABI_d69f4c85104836f4, []JITValueDesc{args[0], args[1]}, 1)
+		d207.NoHeapPointer = true
+		ctx.BindReg(d207.Reg, &d207)
+		ctx.EnsureDesc(&d207)
+		resultTarget208 := false
+		_ = resultTarget208
+		if d207.Loc == LocImm {
+			d209 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d207.Imm.Int() < 0)}
 		} else {
-			r12 := ctx.AllocRegExcept(d3.Reg)
-			ctx.EmitCmpRegImm32(d3.Reg, 2)
-			d191 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r12, Condition: CondEqual}
-			ctx.BindReg(r12, &d191)
+			r12 := ctx.AllocReg()
+			ctx.EmitCmpRegImm32(d207.Reg, 0)
+			d209 = ctx.DeferBooleanFlags(r12, CondSignedLess)
+			ctx.BindReg(r12, &d209)
 		}
-		d192 = d191
-		ctx.SyncDesc(&d192)
-		if d192.Loc != LocImm && d192.Loc != LocFlags {
-			panic("jit: fused If condition is neither LocImm nor LocFlags")
+		ctx.FreeDesc(&d207)
+		ctx.SyncDesc(&d209)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d209) {
+			return d209
 		}
-		if d192.Loc == LocImm {
-			if d192.Imm.Bool() {
-				return bbs[11].Render()
-			}
-			return bbs[12].Render()
-		}
-		ctx.EmitJump(d192.Condition, lbl12)
-		if bbs[12].Rendered {
-			ctx.EmitJmp(lbl13)
-		}
-		ctx.FreeDesc(&d191)
-		ctx.FlushRegisterMoves()
-		if !bbs[12].Rendered {
-			snap193 := d0
-			snap194 := d1
-			snap195 := d2
-			snap196 := d3
-			snap197 := d4
-			snap198 := d5
-			snap199 := d13
-			snap200 := d14
-			snap201 := d15
-			snap202 := d26
-			snap203 := d27
-			snap204 := d40
-			snap205 := d41
-			snap206 := d42
-			snap207 := d58
-			snap208 := d59
-			snap209 := d60
-			snap210 := d79
-			snap211 := d80
-			snap212 := d101
-			snap213 := d102
-			snap214 := d125
-			snap215 := d126
-			snap216 := d151
-			snap217 := d152
-			snap218 := d154
-			snap219 := d155
-			snap220 := d156
-			snap221 := d186
-			snap222 := d187
-			snap223 := d188
-			snap224 := d190
-			snap225 := d191
-			snap226 := d192
-			alloc227 := ctx.SnapshotAllocState()
-			bbs[12].Render()
-			ctx.RestoreAllocState(alloc227)
-			d0 = snap193
-			d1 = snap194
-			d2 = snap195
-			d3 = snap196
-			d4 = snap197
-			d5 = snap198
-			d13 = snap199
-			d14 = snap200
-			d15 = snap201
-			d26 = snap202
-			d27 = snap203
-			d40 = snap204
-			d41 = snap205
-			d42 = snap206
-			d58 = snap207
-			d59 = snap208
-			d60 = snap209
-			d79 = snap210
-			d80 = snap211
-			d101 = snap212
-			d102 = snap213
-			d125 = snap214
-			d126 = snap215
-			d151 = snap216
-			d152 = snap217
-			d154 = snap218
-			d155 = snap219
-			d156 = snap220
-			d186 = snap221
-			d187 = snap222
-			d188 = snap223
-			d190 = snap224
-			d191 = snap225
-			d192 = snap226
-		}
-		if !bbs[11].Rendered {
-			return bbs[11].Render()
-		}
-		return result
+		ctx.EnsureDesc(&d209)
+		ctx.EmitMovToReg(result.Reg, d209)
+		result.Type = d209.Type
+		ctx.EmitJmp(lbl0)
 		return result
 	}
 	bbs[14].Render = func() JITValueDesc {
@@ -1987,63 +2017,112 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_14 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl15)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		if args[0].Loc != LocImm {
-			ctx.EnsureDesc(&args[0])
-		}
-		if args[0].Loc == LocImm {
-			d228 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
-		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
-			ctx.FreeReg(args[0].Reg)
-			d228 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg2}
-			ctx.BindReg(args[0].Reg2, &d228)
-		} else if args[0].Type == tagInt && args[0].Loc == LocReg {
-			d228 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg}
-			ctx.BindReg(args[0].Reg, &d228)
+		ctx.EnsureDesc(&d6)
+		if d6.Loc == LocImm {
+			d210 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d6.Imm.Int()) == uint64(0x1))}
 		} else {
-			boxed := JITPrepareScmerGoArg(ctx, args[0])
-			d228 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
-			d228.Type = tagInt
-			ctx.BindReg(d228.Reg, &d228)
+			r13 := ctx.AllocRegExcept(d6.Reg)
+			ctx.EmitCmpRegImm32(d6.Reg, 1)
+			d210 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r13, Condition: CondEqual}
+			ctx.BindReg(r13, &d210)
 		}
-		ctx.EnsureDesc(&d228)
-		resultTarget229 := false
-		_ = resultTarget229
-		ctx.EnsureDesc(&d154)
-		ctx.EnsureDescsTogether(&d228, &d154)
-		if d228.Loc == LocImm && d154.Loc == LocImm {
-			d230 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d228.Imm.Int() < d154.Imm.Int())}
-		} else if d154.Loc == LocImm {
-			r13 := ctx.AllocReg()
-			if d154.Imm.Int() >= -2147483648 && d154.Imm.Int() <= 2147483647 {
-				ctx.EmitCmpRegImm32(d228.Reg, int32(d154.Imm.Int()))
-			} else {
-				ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d154.Imm.Int()))
-				ctx.EmitCmpInt64(d228.Reg, ctx.ScratchReg)
+		d211 = d210
+		ctx.SyncDesc(&d211)
+		if d211.Loc != LocImm && d211.Loc != LocFlags {
+			panic("jit: fused If condition is neither LocImm nor LocFlags")
+		}
+		if d211.Loc == LocImm {
+			if d211.Imm.Bool() {
+				return bbs[15].Render()
 			}
-			d230 = ctx.DeferBooleanFlags(r13, CondSignedLess)
-			ctx.BindReg(r13, &d230)
-		} else if d228.Loc == LocImm {
-			r14 := ctx.AllocReg()
-			ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d228.Imm.Int()))
-			ctx.EmitCmpInt64(ctx.ScratchReg, d154.Reg)
-			d230 = ctx.DeferBooleanFlags(r14, CondSignedLess)
-			ctx.BindReg(r14, &d230)
-		} else {
-			r15 := ctx.AllocReg()
-			ctx.EmitCmpInt64(d228.Reg, d154.Reg)
-			d230 = ctx.DeferBooleanFlags(r15, CondSignedLess)
-			ctx.BindReg(r15, &d230)
+			return bbs[17].Render()
 		}
-		ctx.FreeDesc(&d228)
-		ctx.SyncDesc(&d230)
-		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d230) {
-			return d230
+		ctx.EmitJump(d211.Condition, lbl16)
+		if bbs[17].Rendered {
+			ctx.EmitJmp(lbl18)
 		}
-		ctx.EnsureDesc(&d230)
-		ctx.EmitMovToReg(result.Reg, d230)
-		result.Type = d230.Type
-		ctx.EmitJmp(lbl0)
+		ctx.FreeDesc(&d210)
+		ctx.FlushRegisterMoves()
+		if !bbs[17].Rendered {
+			snap212 := d1
+			snap213 := d2
+			snap214 := d3
+			snap215 := d4
+			snap216 := d5
+			snap217 := d6
+			snap218 := d7
+			snap219 := d8
+			snap220 := d18
+			snap221 := d19
+			snap222 := d20
+			snap223 := d33
+			snap224 := d34
+			snap225 := d49
+			snap226 := d50
+			snap227 := d51
+			snap228 := d69
+			snap229 := d70
+			snap230 := d71
+			snap231 := d92
+			snap232 := d93
+			snap233 := d116
+			snap234 := d117
+			snap235 := d142
+			snap236 := d143
+			snap237 := d170
+			snap238 := d171
+			snap239 := d173
+			snap240 := d174
+			snap241 := d175
+			snap242 := d207
+			snap243 := d209
+			snap244 := d210
+			snap245 := d211
+			alloc246 := ctx.SnapshotAllocState()
+			bbs[17].Render()
+			ctx.RestoreAllocState(alloc246)
+			d1 = snap212
+			d2 = snap213
+			d3 = snap214
+			d4 = snap215
+			d5 = snap216
+			d6 = snap217
+			d7 = snap218
+			d8 = snap219
+			d18 = snap220
+			d19 = snap221
+			d20 = snap222
+			d33 = snap223
+			d34 = snap224
+			d49 = snap225
+			d50 = snap226
+			d51 = snap227
+			d69 = snap228
+			d70 = snap229
+			d71 = snap230
+			d92 = snap231
+			d93 = snap232
+			d116 = snap233
+			d117 = snap234
+			d142 = snap235
+			d143 = snap236
+			d170 = snap237
+			d171 = snap238
+			d173 = snap239
+			d174 = snap240
+			d175 = snap241
+			d207 = snap242
+			d209 = snap243
+			d210 = snap244
+			d211 = snap245
+		}
+		if !bbs[15].Rendered {
+			return bbs[15].Render()
+		}
+		return result
 		return result
 	}
 	bbs[15].Render = func() JITValueDesc {
@@ -2056,64 +2135,163 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_15 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl16)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		d231 = ctx.EmitFloatDesc(args[0])
-		d232 = ctx.EmitFloatDesc(args[1])
-		ctx.EnsureDesc(&d231)
-		resultTarget233 := false
-		_ = resultTarget233
-		ctx.EnsureDesc(&d232)
-		ctx.EnsureDescsTogether(&d231, &d232)
-		if d231.Loc == LocImm && d232.Loc == LocImm {
-			d234 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d231.Imm.Float() < d232.Imm.Float())}
-		} else if d232.Loc == LocImm {
-			var r16 Reg
-			if result.Loc == LocReg && result.Reg != d231.Reg {
-				r16 = result.Reg
-				resultTarget233 = true
-			} else {
-				r16 = ctx.AllocRegExcept(d231.Reg)
-			}
-			_, yBits := d232.Imm.RawWords()
-			ctx.EmitMovRegImm64(ctx.ScratchReg, yBits)
-			ctx.EmitCmpFloat64(ctx.ScratchReg, d231.Reg)
-			d234 = ctx.DeferBooleanFlags(r16, CondUnsignedAbove)
-			ctx.BindReg(r16, &d234)
-		} else if d231.Loc == LocImm {
-			var r17 Reg
-			if result.Loc == LocReg && result.Reg != d232.Reg {
-				r17 = result.Reg
-				resultTarget233 = true
-			} else {
-				r17 = ctx.AllocRegExcept(d232.Reg)
-			}
-			_, xBits := d231.Imm.RawWords()
-			ctx.EmitMovRegImm64(ctx.ScratchReg, xBits)
-			ctx.EmitCmpFloat64(d232.Reg, ctx.ScratchReg)
-			d234 = ctx.DeferBooleanFlags(r17, CondUnsignedAbove)
-			ctx.BindReg(r17, &d234)
-		} else {
-			var r18 Reg
-			if result.Loc == LocReg && result.Reg != d231.Reg && result.Reg != d232.Reg {
-				r18 = result.Reg
-				resultTarget233 = true
-			} else {
-				r18 = ctx.AllocRegExcept(d231.Reg, d232.Reg)
-			}
-			ctx.EmitCmpFloat64(d232.Reg, d231.Reg)
-			d234 = ctx.DeferBooleanFlags(r18, CondUnsignedAbove)
-			ctx.BindReg(r18, &d234)
+		d248 = args[1]
+		ctx.SyncDesc(&d248)
+		if d248.Loc == LocMem {
+			tmpScalar := JITValueDesc{Loc: LocReg, Type: d248.Type, Reg: ctx.AllocReg()}
+			scratch := ctx.AllocRegExcept(tmpScalar.Reg)
+			ctx.EmitMovRegImm64(scratch, uint64(d248.MemPtr))
+			ctx.EmitMovRegMem(tmpScalar.Reg, scratch, 0)
+			ctx.FreeReg(scratch)
+			ctx.BindReg(tmpScalar.Reg, &tmpScalar)
+			d248 = tmpScalar
 		}
-		ctx.FreeDesc(&d231)
-		ctx.FreeDesc(&d232)
-		ctx.SyncDesc(&d234)
-		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d234) {
-			return d234
+		d248 = JITPrepareScmerGoArg(ctx, d248)
+		if d248.Loc != LocRegPair && d248.Loc != LocStackPair && d248.Loc != LocInputPair {
+			panic("jit: Scmer.String receiver not materialized as pair")
 		}
-		ctx.EnsureDesc(&d234)
-		ctx.EmitMovToReg(result.Reg, d234)
-		result.Type = d234.Type
-		ctx.EmitJmp(lbl0)
+		d247 = ctx.EmitGoCallScalar(jitGoABI_0cbff6f55ee96f6d, []JITValueDesc{d248}, 2)
+		ctx.EnsureDesc(&d247)
+		if d247.Loc == LocImm {
+			tmpPair := JITValueDesc{Loc: LocRegPair, Type: d247.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			ctx.TrackImm(d247.Imm)
+			ptrWord, _ := d247.Imm.RawWords()
+			ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+			ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d247.Imm.String())))
+			d247 = tmpPair
+		} else if d247.Loc == LocReg {
+			tmpPair := JITValueDesc{Loc: LocRegPair, Type: d247.Type, Reg: ctx.AllocRegExcept(d247.Reg), Reg2: ctx.AllocRegExcept(d247.Reg)}
+			switch d247.Type {
+			case tagBool:
+				ctx.EmitMakeBool(tmpPair, d247)
+			case tagInt:
+				ctx.EmitMakeInt(tmpPair, d247)
+			case tagFloat:
+				ctx.EmitMakeFloat(tmpPair, d247)
+			default:
+				panic("jit: generic call arg scalar type unknown for 2-word value")
+			}
+			ctx.FreeDesc(&d247)
+			d247 = tmpPair
+		}
+		if d247.Loc != LocRegPair && d247.Loc != LocStackPair && d247.Loc != LocInputPair {
+			panic("jit: generic call arg expects 2-word value (ParseDateValue arg0)")
+		}
+		ctx.SyncDesc(&d247)
+		callResults249 := JITEmitGoCallResults(ctx, jitGoABI_58434e8dfe39c263, []JITValueDesc{d247})
+		d250 = callResults249[0]
+		_ = d250
+		d251 = callResults249[1]
+		_ = d251
+		ctx.StabilizeDescForControlFlow(&d250)
+		d252 = d251
+		ctx.EnsureDesc(&d252)
+		if d252.Loc != LocImm && d252.Loc != LocReg {
+			panic("jit: If condition is neither LocImm nor LocReg")
+		}
+		if d252.Loc == LocImm {
+			if d252.Imm.Bool() {
+				return bbs[18].Render()
+			}
+			return bbs[16].Render()
+		}
+		ctx.EmitCmpRegImm32(d252.Reg, 0)
+		ctx.EmitJump(CondNotEqual, lbl19)
+		if bbs[16].Rendered {
+			ctx.EmitJmp(lbl17)
+		}
+		ctx.FlushRegisterMoves()
+		if !bbs[16].Rendered {
+			snap253 := d1
+			snap254 := d2
+			snap255 := d3
+			snap256 := d4
+			snap257 := d5
+			snap258 := d6
+			snap259 := d7
+			snap260 := d8
+			snap261 := d18
+			snap262 := d19
+			snap263 := d20
+			snap264 := d33
+			snap265 := d34
+			snap266 := d49
+			snap267 := d50
+			snap268 := d51
+			snap269 := d69
+			snap270 := d70
+			snap271 := d71
+			snap272 := d92
+			snap273 := d93
+			snap274 := d116
+			snap275 := d117
+			snap276 := d142
+			snap277 := d143
+			snap278 := d170
+			snap279 := d171
+			snap280 := d173
+			snap281 := d174
+			snap282 := d175
+			snap283 := d207
+			snap284 := d209
+			snap285 := d210
+			snap286 := d211
+			snap287 := d247
+			snap288 := d248
+			snap289 := d250
+			snap290 := d251
+			snap291 := d252
+			alloc292 := ctx.SnapshotAllocState()
+			bbs[16].Render()
+			ctx.RestoreAllocState(alloc292)
+			d1 = snap253
+			d2 = snap254
+			d3 = snap255
+			d4 = snap256
+			d5 = snap257
+			d6 = snap258
+			d7 = snap259
+			d8 = snap260
+			d18 = snap261
+			d19 = snap262
+			d20 = snap263
+			d33 = snap264
+			d34 = snap265
+			d49 = snap266
+			d50 = snap267
+			d51 = snap268
+			d69 = snap269
+			d70 = snap270
+			d71 = snap271
+			d92 = snap272
+			d93 = snap273
+			d116 = snap274
+			d117 = snap275
+			d142 = snap276
+			d143 = snap277
+			d170 = snap278
+			d171 = snap279
+			d173 = snap280
+			d174 = snap281
+			d175 = snap282
+			d207 = snap283
+			d209 = snap284
+			d210 = snap285
+			d211 = snap286
+			d247 = snap287
+			d248 = snap288
+			d250 = snap289
+			d251 = snap290
+			d252 = snap291
+		}
+		if !bbs[18].Rendered {
+			return bbs[18].Render()
+		}
+		return result
+		ctx.FreeDesc(&d251)
 		return result
 	}
 	bbs[16].Render = func() JITValueDesc {
@@ -2126,124 +2304,66 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_16 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl17)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&d1)
-		if d1.Loc == LocImm {
-			d235 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(0x3))}
-		} else {
-			r19 := ctx.AllocRegExcept(d1.Reg)
-			ctx.EmitCmpRegImm32(d1.Reg, 3)
-			d235 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r19, Condition: CondEqual}
-			ctx.BindReg(r19, &d235)
-		}
-		d236 = d235
-		ctx.SyncDesc(&d236)
-		if d236.Loc != LocImm && d236.Loc != LocFlags {
-			panic("jit: fused If condition is neither LocImm nor LocFlags")
-		}
-		if d236.Loc == LocImm {
-			if d236.Imm.Bool() {
-				return bbs[15].Render()
+		d293 = ctx.EmitFloatDesc(args[0])
+		d294 = ctx.EmitFloatDesc(args[1])
+		ctx.EnsureDesc(&d293)
+		resultTarget295 := false
+		_ = resultTarget295
+		ctx.EnsureDesc(&d294)
+		ctx.EnsureDescsTogether(&d293, &d294)
+		if d293.Loc == LocImm && d294.Loc == LocImm {
+			d296 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d293.Imm.Float() < d294.Imm.Float())}
+		} else if d294.Loc == LocImm {
+			var r14 Reg
+			if result.Loc == LocReg && result.Reg != d293.Reg {
+				r14 = result.Reg
+				resultTarget295 = true
+			} else {
+				r14 = ctx.AllocRegExcept(d293.Reg)
 			}
-			return bbs[20].Render()
+			_, yBits := d294.Imm.RawWords()
+			ctx.EmitMovRegImm64(ctx.ScratchReg, yBits)
+			ctx.EmitCmpFloat64(ctx.ScratchReg, d293.Reg)
+			d296 = ctx.DeferBooleanFlags(r14, CondUnsignedAbove)
+			ctx.BindReg(r14, &d296)
+		} else if d293.Loc == LocImm {
+			var r15 Reg
+			if result.Loc == LocReg && result.Reg != d294.Reg {
+				r15 = result.Reg
+				resultTarget295 = true
+			} else {
+				r15 = ctx.AllocRegExcept(d294.Reg)
+			}
+			_, xBits := d293.Imm.RawWords()
+			ctx.EmitMovRegImm64(ctx.ScratchReg, xBits)
+			ctx.EmitCmpFloat64(d294.Reg, ctx.ScratchReg)
+			d296 = ctx.DeferBooleanFlags(r15, CondUnsignedAbove)
+			ctx.BindReg(r15, &d296)
+		} else {
+			var r16 Reg
+			if result.Loc == LocReg && result.Reg != d293.Reg && result.Reg != d294.Reg {
+				r16 = result.Reg
+				resultTarget295 = true
+			} else {
+				r16 = ctx.AllocRegExcept(d293.Reg, d294.Reg)
+			}
+			ctx.EmitCmpFloat64(d294.Reg, d293.Reg)
+			d296 = ctx.DeferBooleanFlags(r16, CondUnsignedAbove)
+			ctx.BindReg(r16, &d296)
 		}
-		ctx.EmitJump(d236.Condition, lbl16)
-		if bbs[20].Rendered {
-			ctx.EmitJmp(lbl21)
+		ctx.FreeDesc(&d293)
+		ctx.FreeDesc(&d294)
+		ctx.SyncDesc(&d296)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d296) {
+			return d296
 		}
-		ctx.FreeDesc(&d235)
-		ctx.FlushRegisterMoves()
-		if !bbs[20].Rendered {
-			snap237 := d0
-			snap238 := d1
-			snap239 := d2
-			snap240 := d3
-			snap241 := d4
-			snap242 := d5
-			snap243 := d13
-			snap244 := d14
-			snap245 := d15
-			snap246 := d26
-			snap247 := d27
-			snap248 := d40
-			snap249 := d41
-			snap250 := d42
-			snap251 := d58
-			snap252 := d59
-			snap253 := d60
-			snap254 := d79
-			snap255 := d80
-			snap256 := d101
-			snap257 := d102
-			snap258 := d125
-			snap259 := d126
-			snap260 := d151
-			snap261 := d152
-			snap262 := d154
-			snap263 := d155
-			snap264 := d156
-			snap265 := d186
-			snap266 := d187
-			snap267 := d188
-			snap268 := d190
-			snap269 := d191
-			snap270 := d192
-			snap271 := d228
-			snap272 := d230
-			snap273 := d231
-			snap274 := d232
-			snap275 := d234
-			snap276 := d235
-			snap277 := d236
-			alloc278 := ctx.SnapshotAllocState()
-			bbs[20].Render()
-			ctx.RestoreAllocState(alloc278)
-			d0 = snap237
-			d1 = snap238
-			d2 = snap239
-			d3 = snap240
-			d4 = snap241
-			d5 = snap242
-			d13 = snap243
-			d14 = snap244
-			d15 = snap245
-			d26 = snap246
-			d27 = snap247
-			d40 = snap248
-			d41 = snap249
-			d42 = snap250
-			d58 = snap251
-			d59 = snap252
-			d60 = snap253
-			d79 = snap254
-			d80 = snap255
-			d101 = snap256
-			d102 = snap257
-			d125 = snap258
-			d126 = snap259
-			d151 = snap260
-			d152 = snap261
-			d154 = snap262
-			d155 = snap263
-			d156 = snap264
-			d186 = snap265
-			d187 = snap266
-			d188 = snap267
-			d190 = snap268
-			d191 = snap269
-			d192 = snap270
-			d228 = snap271
-			d230 = snap272
-			d231 = snap273
-			d232 = snap274
-			d234 = snap275
-			d235 = snap276
-			d236 = snap277
-		}
-		if !bbs[15].Rendered {
-			return bbs[15].Render()
-		}
-		return result
+		ctx.EnsureDesc(&d296)
+		ctx.EmitMovToReg(result.Reg, d296)
+		result.Type = d296.Type
+		ctx.EmitJmp(lbl0)
 		return result
 	}
 	bbs[17].Render = func() JITValueDesc {
@@ -2256,82 +2376,132 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_17 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl18)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		if args[0].Loc != LocImm {
-			ctx.EnsureDesc(&args[0])
-		}
-		if args[0].Loc == LocImm {
-			d279 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
-		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
-			ctx.FreeReg(args[0].Reg)
-			d279 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg2}
-			ctx.BindReg(args[0].Reg2, &d279)
-		} else if args[0].Type == tagInt && args[0].Loc == LocReg {
-			d279 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg}
-			ctx.BindReg(args[0].Reg, &d279)
+		ctx.EnsureDesc(&d6)
+		if d6.Loc == LocImm {
+			d297 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d6.Imm.Int()) == uint64(0x2))}
 		} else {
-			boxed := JITPrepareScmerGoArg(ctx, args[0])
-			d279 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
-			d279.Type = tagInt
-			ctx.BindReg(d279.Reg, &d279)
+			r17 := ctx.AllocRegExcept(d6.Reg)
+			ctx.EmitCmpRegImm32(d6.Reg, 2)
+			d297 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r17, Condition: CondEqual}
+			ctx.BindReg(r17, &d297)
 		}
-		if args[1].Loc != LocImm {
-			ctx.EnsureDesc(&args[1])
+		d298 = d297
+		ctx.SyncDesc(&d298)
+		if d298.Loc != LocImm && d298.Loc != LocFlags {
+			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
-		if args[1].Loc == LocImm {
-			d280 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[1].Imm.Int())}
-		} else if args[1].Type == tagInt && args[1].Loc == LocRegPair {
-			ctx.FreeReg(args[1].Reg)
-			d280 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[1].Reg2}
-			ctx.BindReg(args[1].Reg2, &d280)
-		} else if args[1].Type == tagInt && args[1].Loc == LocReg {
-			d280 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[1].Reg}
-			ctx.BindReg(args[1].Reg, &d280)
-		} else {
-			boxed := JITPrepareScmerGoArg(ctx, args[1])
-			d280 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
-			d280.Type = tagInt
-			ctx.BindReg(d280.Reg, &d280)
-		}
-		ctx.EnsureDesc(&d279)
-		resultTarget281 := false
-		_ = resultTarget281
-		ctx.EnsureDesc(&d280)
-		ctx.EnsureDescsTogether(&d279, &d280)
-		if d279.Loc == LocImm && d280.Loc == LocImm {
-			d282 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d279.Imm.Int() < d280.Imm.Int())}
-		} else if d280.Loc == LocImm {
-			r20 := ctx.AllocReg()
-			if d280.Imm.Int() >= -2147483648 && d280.Imm.Int() <= 2147483647 {
-				ctx.EmitCmpRegImm32(d279.Reg, int32(d280.Imm.Int()))
-			} else {
-				ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d280.Imm.Int()))
-				ctx.EmitCmpInt64(d279.Reg, ctx.ScratchReg)
+		if d298.Loc == LocImm {
+			if d298.Imm.Bool() {
+				return bbs[15].Render()
 			}
-			d282 = ctx.DeferBooleanFlags(r20, CondSignedLess)
-			ctx.BindReg(r20, &d282)
-		} else if d279.Loc == LocImm {
-			r21 := ctx.AllocReg()
-			ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d279.Imm.Int()))
-			ctx.EmitCmpInt64(ctx.ScratchReg, d280.Reg)
-			d282 = ctx.DeferBooleanFlags(r21, CondSignedLess)
-			ctx.BindReg(r21, &d282)
-		} else {
-			r22 := ctx.AllocReg()
-			ctx.EmitCmpInt64(d279.Reg, d280.Reg)
-			d282 = ctx.DeferBooleanFlags(r22, CondSignedLess)
-			ctx.BindReg(r22, &d282)
+			return bbs[16].Render()
 		}
-		ctx.FreeDesc(&d279)
-		ctx.FreeDesc(&d280)
-		ctx.SyncDesc(&d282)
-		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d282) {
-			return d282
+		ctx.EmitJump(d298.Condition, lbl16)
+		if bbs[16].Rendered {
+			ctx.EmitJmp(lbl17)
 		}
-		ctx.EnsureDesc(&d282)
-		ctx.EmitMovToReg(result.Reg, d282)
-		result.Type = d282.Type
-		ctx.EmitJmp(lbl0)
+		ctx.FreeDesc(&d297)
+		ctx.FlushRegisterMoves()
+		if !bbs[16].Rendered {
+			snap299 := d1
+			snap300 := d2
+			snap301 := d3
+			snap302 := d4
+			snap303 := d5
+			snap304 := d6
+			snap305 := d7
+			snap306 := d8
+			snap307 := d18
+			snap308 := d19
+			snap309 := d20
+			snap310 := d33
+			snap311 := d34
+			snap312 := d49
+			snap313 := d50
+			snap314 := d51
+			snap315 := d69
+			snap316 := d70
+			snap317 := d71
+			snap318 := d92
+			snap319 := d93
+			snap320 := d116
+			snap321 := d117
+			snap322 := d142
+			snap323 := d143
+			snap324 := d170
+			snap325 := d171
+			snap326 := d173
+			snap327 := d174
+			snap328 := d175
+			snap329 := d207
+			snap330 := d209
+			snap331 := d210
+			snap332 := d211
+			snap333 := d247
+			snap334 := d248
+			snap335 := d250
+			snap336 := d251
+			snap337 := d252
+			snap338 := d293
+			snap339 := d294
+			snap340 := d296
+			snap341 := d297
+			snap342 := d298
+			alloc343 := ctx.SnapshotAllocState()
+			bbs[16].Render()
+			ctx.RestoreAllocState(alloc343)
+			d1 = snap299
+			d2 = snap300
+			d3 = snap301
+			d4 = snap302
+			d5 = snap303
+			d6 = snap304
+			d7 = snap305
+			d8 = snap306
+			d18 = snap307
+			d19 = snap308
+			d20 = snap309
+			d33 = snap310
+			d34 = snap311
+			d49 = snap312
+			d50 = snap313
+			d51 = snap314
+			d69 = snap315
+			d70 = snap316
+			d71 = snap317
+			d92 = snap318
+			d93 = snap319
+			d116 = snap320
+			d117 = snap321
+			d142 = snap322
+			d143 = snap323
+			d170 = snap324
+			d171 = snap325
+			d173 = snap326
+			d174 = snap327
+			d175 = snap328
+			d207 = snap329
+			d209 = snap330
+			d210 = snap331
+			d211 = snap332
+			d247 = snap333
+			d248 = snap334
+			d250 = snap335
+			d251 = snap336
+			d252 = snap337
+			d293 = snap338
+			d294 = snap339
+			d296 = snap340
+			d297 = snap341
+			d298 = snap342
+		}
+		if !bbs[15].Rendered {
+			return bbs[15].Render()
+		}
+		return result
 		return result
 	}
 	bbs[18].Render = func() JITValueDesc {
@@ -2344,93 +2514,35 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_18 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl19)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		if args[0].Loc != LocImm {
-			ctx.EnsureDesc(&args[0])
-		}
-		if args[0].Loc == LocImm {
-			d283 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
-		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
-			ctx.FreeReg(args[0].Reg)
-			d283 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg2}
-			ctx.BindReg(args[0].Reg2, &d283)
-		} else if args[0].Type == tagInt && args[0].Loc == LocReg {
-			d283 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg}
-			ctx.BindReg(args[0].Reg, &d283)
+		args[0] = JITPrepareScmerGoArg(ctx, args[0])
+		d250 = JITPrepareScmerGoArg(ctx, d250)
+		ctx.SyncDesc(&args[0])
+		ctx.SyncDesc(&d250)
+		d344 = ctx.EmitGoCallScalar(jitGoABI_d69f4c85104836f4, []JITValueDesc{args[0], d250}, 1)
+		d344.NoHeapPointer = true
+		ctx.BindReg(d344.Reg, &d344)
+		ctx.EnsureDesc(&d344)
+		resultTarget345 := false
+		_ = resultTarget345
+		if d344.Loc == LocImm {
+			d346 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d344.Imm.Int() < 0)}
 		} else {
-			boxed := JITPrepareScmerGoArg(ctx, args[0])
-			d283 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
-			d283.Type = tagInt
-			ctx.BindReg(d283.Reg, &d283)
+			r18 := ctx.AllocReg()
+			ctx.EmitCmpRegImm32(d344.Reg, 0)
+			d346 = ctx.DeferBooleanFlags(r18, CondSignedLess)
+			ctx.BindReg(r18, &d346)
 		}
-		ctx.EnsureDesc(&d283)
-		ctx.EnsureDesc(&d283)
-		if d283.Loc == LocImm {
-			d284 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(float64(d283.Imm.Int()))}
-		} else {
-			var r23 Reg
-			r23 = d283.Reg
-			d283.Loc = LocNone
-			ctx.EmitInt64ToFloatBits(r23)
-			d284 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r23}
-			ctx.BindReg(r23, &d284)
+		ctx.FreeDesc(&d344)
+		ctx.SyncDesc(&d346)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d346) {
+			return d346
 		}
-		ctx.FreeDesc(&d283)
-		d285 = ctx.EmitFloatDesc(args[1])
-		ctx.EnsureDesc(&d284)
-		resultTarget286 := false
-		_ = resultTarget286
-		ctx.EnsureDesc(&d285)
-		ctx.EnsureDescsTogether(&d284, &d285)
-		if d284.Loc == LocImm && d285.Loc == LocImm {
-			d287 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d284.Imm.Float() < d285.Imm.Float())}
-		} else if d285.Loc == LocImm {
-			var r24 Reg
-			if result.Loc == LocReg && result.Reg != d284.Reg {
-				r24 = result.Reg
-				resultTarget286 = true
-			} else {
-				r24 = ctx.AllocRegExcept(d284.Reg)
-			}
-			_, yBits := d285.Imm.RawWords()
-			ctx.EmitMovRegImm64(ctx.ScratchReg, yBits)
-			ctx.EmitCmpFloat64(ctx.ScratchReg, d284.Reg)
-			d287 = ctx.DeferBooleanFlags(r24, CondUnsignedAbove)
-			ctx.BindReg(r24, &d287)
-		} else if d284.Loc == LocImm {
-			var r25 Reg
-			if result.Loc == LocReg && result.Reg != d285.Reg {
-				r25 = result.Reg
-				resultTarget286 = true
-			} else {
-				r25 = ctx.AllocRegExcept(d285.Reg)
-			}
-			_, xBits := d284.Imm.RawWords()
-			ctx.EmitMovRegImm64(ctx.ScratchReg, xBits)
-			ctx.EmitCmpFloat64(d285.Reg, ctx.ScratchReg)
-			d287 = ctx.DeferBooleanFlags(r25, CondUnsignedAbove)
-			ctx.BindReg(r25, &d287)
-		} else {
-			var r26 Reg
-			if result.Loc == LocReg && result.Reg != d284.Reg && result.Reg != d285.Reg {
-				r26 = result.Reg
-				resultTarget286 = true
-			} else {
-				r26 = ctx.AllocRegExcept(d284.Reg, d285.Reg)
-			}
-			ctx.EmitCmpFloat64(d285.Reg, d284.Reg)
-			d287 = ctx.DeferBooleanFlags(r26, CondUnsignedAbove)
-			ctx.BindReg(r26, &d287)
-		}
-		ctx.FreeDesc(&d284)
-		ctx.FreeDesc(&d285)
-		ctx.SyncDesc(&d287)
-		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d287) {
-			return d287
-		}
-		ctx.EnsureDesc(&d287)
-		ctx.EmitMovToReg(result.Reg, d287)
-		result.Type = d287.Type
+		ctx.EnsureDesc(&d346)
+		ctx.EmitMovToReg(result.Reg, d346)
+		result.Type = d346.Type
 		ctx.EmitJmp(lbl0)
 		return result
 	}
@@ -2444,81 +2556,65 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_19 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl20)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		if args[0].Loc != LocImm {
-			ctx.EnsureDesc(&args[0])
-		}
-		if args[0].Loc == LocImm {
-			d288 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
-		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
-			ctx.FreeReg(args[0].Reg)
-			d288 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg2}
-			ctx.BindReg(args[0].Reg2, &d288)
-		} else if args[0].Type == tagInt && args[0].Loc == LocReg {
-			d288 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg}
-			ctx.BindReg(args[0].Reg, &d288)
-		} else {
-			boxed := JITPrepareScmerGoArg(ctx, args[0])
-			d288 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
-			d288.Type = tagInt
-			ctx.BindReg(d288.Reg, &d288)
-		}
-		if args[1].Loc != LocImm {
-			ctx.EnsureDesc(&args[1])
-		}
-		if args[1].Loc == LocImm {
-			d289 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[1].Imm.Int())}
-		} else if args[1].Type == tagInt && args[1].Loc == LocRegPair {
-			ctx.FreeReg(args[1].Reg)
-			d289 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[1].Reg2}
-			ctx.BindReg(args[1].Reg2, &d289)
-		} else if args[1].Type == tagInt && args[1].Loc == LocReg {
-			d289 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[1].Reg}
-			ctx.BindReg(args[1].Reg, &d289)
-		} else {
-			boxed := JITPrepareScmerGoArg(ctx, args[1])
-			d289 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
-			d289.Type = tagInt
-			ctx.BindReg(d289.Reg, &d289)
-		}
-		ctx.EnsureDesc(&d288)
-		resultTarget290 := false
-		_ = resultTarget290
-		ctx.EnsureDesc(&d289)
-		ctx.EnsureDescsTogether(&d288, &d289)
-		if d288.Loc == LocImm && d289.Loc == LocImm {
-			d291 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d288.Imm.Int() < d289.Imm.Int())}
-		} else if d289.Loc == LocImm {
-			r27 := ctx.AllocReg()
-			if d289.Imm.Int() >= -2147483648 && d289.Imm.Int() <= 2147483647 {
-				ctx.EmitCmpRegImm32(d288.Reg, int32(d289.Imm.Int()))
+		d347 = ctx.EmitFloatDesc(args[0])
+		d348 = ctx.EmitFloatDesc(args[1])
+		ctx.EnsureDesc(&d347)
+		resultTarget349 := false
+		_ = resultTarget349
+		ctx.EnsureDesc(&d348)
+		ctx.EnsureDescsTogether(&d347, &d348)
+		if d347.Loc == LocImm && d348.Loc == LocImm {
+			d350 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d347.Imm.Float() < d348.Imm.Float())}
+		} else if d348.Loc == LocImm {
+			var r19 Reg
+			if result.Loc == LocReg && result.Reg != d347.Reg {
+				r19 = result.Reg
+				resultTarget349 = true
 			} else {
-				ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d289.Imm.Int()))
-				ctx.EmitCmpInt64(d288.Reg, ctx.ScratchReg)
+				r19 = ctx.AllocRegExcept(d347.Reg)
 			}
-			d291 = ctx.DeferBooleanFlags(r27, CondSignedLess)
-			ctx.BindReg(r27, &d291)
-		} else if d288.Loc == LocImm {
-			r28 := ctx.AllocReg()
-			ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d288.Imm.Int()))
-			ctx.EmitCmpInt64(ctx.ScratchReg, d289.Reg)
-			d291 = ctx.DeferBooleanFlags(r28, CondSignedLess)
-			ctx.BindReg(r28, &d291)
+			_, yBits := d348.Imm.RawWords()
+			ctx.EmitMovRegImm64(ctx.ScratchReg, yBits)
+			ctx.EmitCmpFloat64(ctx.ScratchReg, d347.Reg)
+			d350 = ctx.DeferBooleanFlags(r19, CondUnsignedAbove)
+			ctx.BindReg(r19, &d350)
+		} else if d347.Loc == LocImm {
+			var r20 Reg
+			if result.Loc == LocReg && result.Reg != d348.Reg {
+				r20 = result.Reg
+				resultTarget349 = true
+			} else {
+				r20 = ctx.AllocRegExcept(d348.Reg)
+			}
+			_, xBits := d347.Imm.RawWords()
+			ctx.EmitMovRegImm64(ctx.ScratchReg, xBits)
+			ctx.EmitCmpFloat64(d348.Reg, ctx.ScratchReg)
+			d350 = ctx.DeferBooleanFlags(r20, CondUnsignedAbove)
+			ctx.BindReg(r20, &d350)
 		} else {
-			r29 := ctx.AllocReg()
-			ctx.EmitCmpInt64(d288.Reg, d289.Reg)
-			d291 = ctx.DeferBooleanFlags(r29, CondSignedLess)
-			ctx.BindReg(r29, &d291)
+			var r21 Reg
+			if result.Loc == LocReg && result.Reg != d347.Reg && result.Reg != d348.Reg {
+				r21 = result.Reg
+				resultTarget349 = true
+			} else {
+				r21 = ctx.AllocRegExcept(d347.Reg, d348.Reg)
+			}
+			ctx.EmitCmpFloat64(d348.Reg, d347.Reg)
+			d350 = ctx.DeferBooleanFlags(r21, CondUnsignedAbove)
+			ctx.BindReg(r21, &d350)
 		}
-		ctx.FreeDesc(&d288)
-		ctx.FreeDesc(&d289)
-		ctx.SyncDesc(&d291)
-		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d291) {
-			return d291
+		ctx.FreeDesc(&d347)
+		ctx.FreeDesc(&d348)
+		ctx.SyncDesc(&d350)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d350) {
+			return d350
 		}
-		ctx.EnsureDesc(&d291)
-		ctx.EmitMovToReg(result.Reg, d291)
-		result.Type = d291.Type
+		ctx.EnsureDesc(&d350)
+		ctx.EmitMovToReg(result.Reg, d350)
+		result.Type = d350.Type
 		ctx.EmitJmp(lbl0)
 		return result
 	}
@@ -2532,143 +2628,141 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_20 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl21)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
-		ctx.EnsureDesc(&d1)
-		if d1.Loc == LocImm {
-			d292 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d1.Imm.Int()) == uint64(0x5))}
+		ctx.EnsureDesc(&d4)
+		if d4.Loc == LocImm {
+			d351 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d4.Imm.Int()) == uint64(0x3))}
 		} else {
-			r30 := ctx.AllocRegExcept(d1.Reg)
-			ctx.EmitCmpRegImm32(d1.Reg, 5)
-			d292 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r30, Condition: CondEqual}
-			ctx.BindReg(r30, &d292)
+			r22 := ctx.AllocRegExcept(d4.Reg)
+			ctx.EmitCmpRegImm32(d4.Reg, 3)
+			d351 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r22, Condition: CondEqual}
+			ctx.BindReg(r22, &d351)
 		}
-		d293 = d292
-		ctx.SyncDesc(&d293)
-		if d293.Loc != LocImm && d293.Loc != LocFlags {
+		d352 = d351
+		ctx.SyncDesc(&d352)
+		if d352.Loc != LocImm && d352.Loc != LocFlags {
 			panic("jit: fused If condition is neither LocImm nor LocFlags")
 		}
-		if d293.Loc == LocImm {
-			if d293.Imm.Bool() {
+		if d352.Loc == LocImm {
+			if d352.Imm.Bool() {
 				return bbs[19].Render()
 			}
-			return bbs[21].Render()
+			return bbs[30].Render()
 		}
-		ctx.EmitJump(d293.Condition, lbl20)
-		if bbs[21].Rendered {
-			ctx.EmitJmp(lbl22)
+		ctx.EmitJump(d352.Condition, lbl20)
+		if bbs[30].Rendered {
+			ctx.EmitJmp(lbl31)
 		}
-		ctx.FreeDesc(&d292)
+		ctx.FreeDesc(&d351)
 		ctx.FlushRegisterMoves()
-		if !bbs[21].Rendered {
-			snap294 := d0
-			snap295 := d1
-			snap296 := d2
-			snap297 := d3
-			snap298 := d4
-			snap299 := d5
-			snap300 := d13
-			snap301 := d14
-			snap302 := d15
-			snap303 := d26
-			snap304 := d27
-			snap305 := d40
-			snap306 := d41
-			snap307 := d42
-			snap308 := d58
-			snap309 := d59
-			snap310 := d60
-			snap311 := d79
-			snap312 := d80
-			snap313 := d101
-			snap314 := d102
-			snap315 := d125
-			snap316 := d126
-			snap317 := d151
-			snap318 := d152
-			snap319 := d154
-			snap320 := d155
-			snap321 := d156
-			snap322 := d186
-			snap323 := d187
-			snap324 := d188
-			snap325 := d190
-			snap326 := d191
-			snap327 := d192
-			snap328 := d228
-			snap329 := d230
-			snap330 := d231
-			snap331 := d232
-			snap332 := d234
-			snap333 := d235
-			snap334 := d236
-			snap335 := d279
-			snap336 := d280
-			snap337 := d282
-			snap338 := d283
-			snap339 := d284
-			snap340 := d285
-			snap341 := d287
-			snap342 := d288
-			snap343 := d289
-			snap344 := d291
-			snap345 := d292
-			snap346 := d293
-			alloc347 := ctx.SnapshotAllocState()
-			bbs[21].Render()
-			ctx.RestoreAllocState(alloc347)
-			d0 = snap294
-			d1 = snap295
-			d2 = snap296
-			d3 = snap297
-			d4 = snap298
-			d5 = snap299
-			d13 = snap300
-			d14 = snap301
-			d15 = snap302
-			d26 = snap303
-			d27 = snap304
-			d40 = snap305
-			d41 = snap306
-			d42 = snap307
-			d58 = snap308
-			d59 = snap309
-			d60 = snap310
-			d79 = snap311
-			d80 = snap312
-			d101 = snap313
-			d102 = snap314
-			d125 = snap315
-			d126 = snap316
-			d151 = snap317
-			d152 = snap318
-			d154 = snap319
-			d155 = snap320
-			d156 = snap321
-			d186 = snap322
-			d187 = snap323
-			d188 = snap324
-			d190 = snap325
-			d191 = snap326
-			d192 = snap327
-			d228 = snap328
-			d230 = snap329
-			d231 = snap330
-			d232 = snap331
-			d234 = snap332
-			d235 = snap333
-			d236 = snap334
-			d279 = snap335
-			d280 = snap336
-			d282 = snap337
-			d283 = snap338
-			d284 = snap339
-			d285 = snap340
-			d287 = snap341
-			d288 = snap342
-			d289 = snap343
-			d291 = snap344
-			d292 = snap345
-			d293 = snap346
+		if !bbs[30].Rendered {
+			snap353 := d1
+			snap354 := d2
+			snap355 := d3
+			snap356 := d4
+			snap357 := d5
+			snap358 := d6
+			snap359 := d7
+			snap360 := d8
+			snap361 := d18
+			snap362 := d19
+			snap363 := d20
+			snap364 := d33
+			snap365 := d34
+			snap366 := d49
+			snap367 := d50
+			snap368 := d51
+			snap369 := d69
+			snap370 := d70
+			snap371 := d71
+			snap372 := d92
+			snap373 := d93
+			snap374 := d116
+			snap375 := d117
+			snap376 := d142
+			snap377 := d143
+			snap378 := d170
+			snap379 := d171
+			snap380 := d173
+			snap381 := d174
+			snap382 := d175
+			snap383 := d207
+			snap384 := d209
+			snap385 := d210
+			snap386 := d211
+			snap387 := d247
+			snap388 := d248
+			snap389 := d250
+			snap390 := d251
+			snap391 := d252
+			snap392 := d293
+			snap393 := d294
+			snap394 := d296
+			snap395 := d297
+			snap396 := d298
+			snap397 := d344
+			snap398 := d346
+			snap399 := d347
+			snap400 := d348
+			snap401 := d350
+			snap402 := d351
+			snap403 := d352
+			alloc404 := ctx.SnapshotAllocState()
+			bbs[30].Render()
+			ctx.RestoreAllocState(alloc404)
+			d1 = snap353
+			d2 = snap354
+			d3 = snap355
+			d4 = snap356
+			d5 = snap357
+			d6 = snap358
+			d7 = snap359
+			d8 = snap360
+			d18 = snap361
+			d19 = snap362
+			d20 = snap363
+			d33 = snap364
+			d34 = snap365
+			d49 = snap366
+			d50 = snap367
+			d51 = snap368
+			d69 = snap369
+			d70 = snap370
+			d71 = snap371
+			d92 = snap372
+			d93 = snap373
+			d116 = snap374
+			d117 = snap375
+			d142 = snap376
+			d143 = snap377
+			d170 = snap378
+			d171 = snap379
+			d173 = snap380
+			d174 = snap381
+			d175 = snap382
+			d207 = snap383
+			d209 = snap384
+			d210 = snap385
+			d211 = snap386
+			d247 = snap387
+			d248 = snap388
+			d250 = snap389
+			d251 = snap390
+			d252 = snap391
+			d293 = snap392
+			d294 = snap393
+			d296 = snap394
+			d297 = snap395
+			d298 = snap396
+			d344 = snap397
+			d346 = snap398
+			d347 = snap399
+			d348 = snap400
+			d350 = snap401
+			d351 = snap402
+			d352 = snap403
 		}
 		if !bbs[19].Rendered {
 			return bbs[19].Render()
@@ -2686,33 +2780,1398 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 		bbpos_0_21 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 		ctx.MarkLabel(lbl22)
 		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
+		ctx.ReclaimUntrackedRegs()
+		args[1] = JITPrepareScmerGoArg(ctx, args[1])
+		ctx.SyncDesc(&args[1])
+		d405 = ctx.EmitGoCallScalar(jitGoABI_7b4abd9531444504, []JITValueDesc{args[1]}, 1)
+		d405.NoHeapPointer = true
+		ctx.BindReg(d405.Reg, &d405)
+		ctx.StabilizeDescForControlFlow(&d405)
+		if args[0].Loc != LocImm {
+			ctx.EnsureDesc(&args[0])
+		}
+		if args[0].Loc == LocImm {
+			d406 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
+		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
+			ctx.FreeReg(args[0].Reg)
+			d406 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg2}
+			ctx.BindReg(args[0].Reg2, &d406)
+		} else if args[0].Type == tagInt && args[0].Loc == LocReg {
+			d406 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg}
+			ctx.BindReg(args[0].Reg, &d406)
+		} else {
+			boxed := JITPrepareScmerGoArg(ctx, args[0])
+			d406 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
+			d406.Type = tagInt
+			ctx.BindReg(d406.Reg, &d406)
+		}
+		ctx.StabilizeDescForControlFlow(&d406)
+		ctx.EnsureDesc(&d406)
+		ctx.EnsureDesc(&d405)
+		ctx.EnsureDescsTogether(&d406, &d405)
+		if d406.Loc == LocImm && d405.Loc == LocImm {
+			d407 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d406.Imm.Int() < d405.Imm.Int())}
+		} else if d405.Loc == LocImm {
+			r23 := ctx.AllocRegExcept(d406.Reg)
+			if d405.Imm.Int() >= -2147483648 && d405.Imm.Int() <= 2147483647 {
+				ctx.EmitCmpRegImm32(d406.Reg, int32(d405.Imm.Int()))
+			} else {
+				ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d405.Imm.Int()))
+				ctx.EmitCmpInt64(d406.Reg, ctx.ScratchReg)
+			}
+			d407 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r23, Condition: CondSignedLess}
+			ctx.BindReg(r23, &d407)
+		} else if d406.Loc == LocImm {
+			r24 := ctx.AllocReg()
+			ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d406.Imm.Int()))
+			ctx.EmitCmpInt64(ctx.ScratchReg, d405.Reg)
+			d407 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r24, Condition: CondSignedLess}
+			ctx.BindReg(r24, &d407)
+		} else {
+			r25 := ctx.AllocRegExcept(d406.Reg)
+			ctx.EmitCmpInt64(d406.Reg, d405.Reg)
+			d407 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r25, Condition: CondSignedLess}
+			ctx.BindReg(r25, &d407)
+		}
+		d408 = d407
+		ctx.SyncDesc(&d408)
+		if d408.Loc != LocImm && d408.Loc != LocFlags {
+			panic("jit: fused If condition is neither LocImm nor LocFlags")
+		}
+		if d408.Loc == LocImm {
+			if d408.Imm.Bool() {
+				ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, int32(bbs[24].PhiBase)+int32(0))
+				return bbs[24].Render()
+			}
+			return bbs[23].Render()
+		}
+		lbl33 := ctx.ReserveLabel()
+		ctx.EmitJump(d408.Condition, lbl33)
+		ctx.EmitJmp(lbl24)
+		ctx.FreeDesc(&d407)
+		snap409 := d1
+		snap410 := d2
+		snap411 := d3
+		snap412 := d4
+		snap413 := d5
+		snap414 := d6
+		snap415 := d7
+		snap416 := d8
+		snap417 := d18
+		snap418 := d19
+		snap419 := d20
+		snap420 := d33
+		snap421 := d34
+		snap422 := d49
+		snap423 := d50
+		snap424 := d51
+		snap425 := d69
+		snap426 := d70
+		snap427 := d71
+		snap428 := d92
+		snap429 := d93
+		snap430 := d116
+		snap431 := d117
+		snap432 := d142
+		snap433 := d143
+		snap434 := d170
+		snap435 := d171
+		snap436 := d173
+		snap437 := d174
+		snap438 := d175
+		snap439 := d207
+		snap440 := d209
+		snap441 := d210
+		snap442 := d211
+		snap443 := d247
+		snap444 := d248
+		snap445 := d250
+		snap446 := d251
+		snap447 := d252
+		snap448 := d293
+		snap449 := d294
+		snap450 := d296
+		snap451 := d297
+		snap452 := d298
+		snap453 := d344
+		snap454 := d346
+		snap455 := d347
+		snap456 := d348
+		snap457 := d350
+		snap458 := d351
+		snap459 := d352
+		snap460 := d405
+		snap461 := d406
+		snap462 := d407
+		snap463 := d408
+		alloc464 := ctx.SnapshotAllocState()
+		ctx.MarkLabel(lbl33)
+		ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(1)}, int32(bbs[24].PhiBase)+int32(0))
+		ctx.EmitJmp(lbl25)
+		ctx.RestoreAllocState(alloc464)
+		d1 = snap409
+		d2 = snap410
+		d3 = snap411
+		d4 = snap412
+		d5 = snap413
+		d6 = snap414
+		d7 = snap415
+		d8 = snap416
+		d18 = snap417
+		d19 = snap418
+		d20 = snap419
+		d33 = snap420
+		d34 = snap421
+		d49 = snap422
+		d50 = snap423
+		d51 = snap424
+		d69 = snap425
+		d70 = snap426
+		d71 = snap427
+		d92 = snap428
+		d93 = snap429
+		d116 = snap430
+		d117 = snap431
+		d142 = snap432
+		d143 = snap433
+		d170 = snap434
+		d171 = snap435
+		d173 = snap436
+		d174 = snap437
+		d175 = snap438
+		d207 = snap439
+		d209 = snap440
+		d210 = snap441
+		d211 = snap442
+		d247 = snap443
+		d248 = snap444
+		d250 = snap445
+		d251 = snap446
+		d252 = snap447
+		d293 = snap448
+		d294 = snap449
+		d296 = snap450
+		d297 = snap451
+		d298 = snap452
+		d344 = snap453
+		d346 = snap454
+		d347 = snap455
+		d348 = snap456
+		d350 = snap457
+		d351 = snap458
+		d352 = snap459
+		d405 = snap460
+		d406 = snap461
+		d407 = snap462
+		d408 = snap463
+		if !bbs[24].Rendered {
+			snap465 := d1
+			snap466 := d2
+			snap467 := d3
+			snap468 := d4
+			snap469 := d5
+			snap470 := d6
+			snap471 := d7
+			snap472 := d8
+			snap473 := d18
+			snap474 := d19
+			snap475 := d20
+			snap476 := d33
+			snap477 := d34
+			snap478 := d49
+			snap479 := d50
+			snap480 := d51
+			snap481 := d69
+			snap482 := d70
+			snap483 := d71
+			snap484 := d92
+			snap485 := d93
+			snap486 := d116
+			snap487 := d117
+			snap488 := d142
+			snap489 := d143
+			snap490 := d170
+			snap491 := d171
+			snap492 := d173
+			snap493 := d174
+			snap494 := d175
+			snap495 := d207
+			snap496 := d209
+			snap497 := d210
+			snap498 := d211
+			snap499 := d247
+			snap500 := d248
+			snap501 := d250
+			snap502 := d251
+			snap503 := d252
+			snap504 := d293
+			snap505 := d294
+			snap506 := d296
+			snap507 := d297
+			snap508 := d298
+			snap509 := d344
+			snap510 := d346
+			snap511 := d347
+			snap512 := d348
+			snap513 := d350
+			snap514 := d351
+			snap515 := d352
+			snap516 := d405
+			snap517 := d406
+			snap518 := d407
+			snap519 := d408
+			alloc520 := ctx.SnapshotAllocState()
+			bbs[24].Render()
+			ctx.RestoreAllocState(alloc520)
+			d1 = snap465
+			d2 = snap466
+			d3 = snap467
+			d4 = snap468
+			d5 = snap469
+			d6 = snap470
+			d7 = snap471
+			d8 = snap472
+			d18 = snap473
+			d19 = snap474
+			d20 = snap475
+			d33 = snap476
+			d34 = snap477
+			d49 = snap478
+			d50 = snap479
+			d51 = snap480
+			d69 = snap481
+			d70 = snap482
+			d71 = snap483
+			d92 = snap484
+			d93 = snap485
+			d116 = snap486
+			d117 = snap487
+			d142 = snap488
+			d143 = snap489
+			d170 = snap490
+			d171 = snap491
+			d173 = snap492
+			d174 = snap493
+			d175 = snap494
+			d207 = snap495
+			d209 = snap496
+			d210 = snap497
+			d211 = snap498
+			d247 = snap499
+			d248 = snap500
+			d250 = snap501
+			d251 = snap502
+			d252 = snap503
+			d293 = snap504
+			d294 = snap505
+			d296 = snap506
+			d297 = snap507
+			d298 = snap508
+			d344 = snap509
+			d346 = snap510
+			d347 = snap511
+			d348 = snap512
+			d350 = snap513
+			d351 = snap514
+			d352 = snap515
+			d405 = snap516
+			d406 = snap517
+			d407 = snap518
+			d408 = snap519
+		}
+		if !bbs[23].Rendered {
+			return bbs[23].Render()
+		}
+		return result
+		return result
+	}
+	bbs[22].Render = func() JITValueDesc {
+		if bbs[22].Rendered {
+			ctx.EmitJmp(lbl23)
+			return result
+		}
+		bbs[22].Rendered = true
+		ctx.FlushRegisterMoves()
+		bbpos_0_22 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+		ctx.MarkLabel(lbl23)
+		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
+		ctx.ReclaimUntrackedRegs()
+		ctx.EnsureDesc(&d6)
+		if d6.Loc == LocImm {
+			d521 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d6.Imm.Int()) == uint64(0x4))}
+		} else {
+			r26 := ctx.AllocRegExcept(d6.Reg)
+			ctx.EmitCmpRegImm32(d6.Reg, 4)
+			d521 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r26, Condition: CondEqual}
+			ctx.BindReg(r26, &d521)
+		}
+		d522 = d521
+		ctx.SyncDesc(&d522)
+		if d522.Loc != LocImm && d522.Loc != LocFlags {
+			panic("jit: fused If condition is neither LocImm nor LocFlags")
+		}
+		if d522.Loc == LocImm {
+			if d522.Imm.Bool() {
+				return bbs[27].Render()
+			}
+			return bbs[28].Render()
+		}
+		ctx.EmitJump(d522.Condition, lbl28)
+		if bbs[28].Rendered {
+			ctx.EmitJmp(lbl29)
+		}
+		ctx.FreeDesc(&d521)
+		ctx.FlushRegisterMoves()
+		if !bbs[28].Rendered {
+			snap523 := d1
+			snap524 := d2
+			snap525 := d3
+			snap526 := d4
+			snap527 := d5
+			snap528 := d6
+			snap529 := d7
+			snap530 := d8
+			snap531 := d18
+			snap532 := d19
+			snap533 := d20
+			snap534 := d33
+			snap535 := d34
+			snap536 := d49
+			snap537 := d50
+			snap538 := d51
+			snap539 := d69
+			snap540 := d70
+			snap541 := d71
+			snap542 := d92
+			snap543 := d93
+			snap544 := d116
+			snap545 := d117
+			snap546 := d142
+			snap547 := d143
+			snap548 := d170
+			snap549 := d171
+			snap550 := d173
+			snap551 := d174
+			snap552 := d175
+			snap553 := d207
+			snap554 := d209
+			snap555 := d210
+			snap556 := d211
+			snap557 := d247
+			snap558 := d248
+			snap559 := d250
+			snap560 := d251
+			snap561 := d252
+			snap562 := d293
+			snap563 := d294
+			snap564 := d296
+			snap565 := d297
+			snap566 := d298
+			snap567 := d344
+			snap568 := d346
+			snap569 := d347
+			snap570 := d348
+			snap571 := d350
+			snap572 := d351
+			snap573 := d352
+			snap574 := d405
+			snap575 := d406
+			snap576 := d407
+			snap577 := d408
+			snap578 := d521
+			snap579 := d522
+			alloc580 := ctx.SnapshotAllocState()
+			bbs[28].Render()
+			ctx.RestoreAllocState(alloc580)
+			d1 = snap523
+			d2 = snap524
+			d3 = snap525
+			d4 = snap526
+			d5 = snap527
+			d6 = snap528
+			d7 = snap529
+			d8 = snap530
+			d18 = snap531
+			d19 = snap532
+			d20 = snap533
+			d33 = snap534
+			d34 = snap535
+			d49 = snap536
+			d50 = snap537
+			d51 = snap538
+			d69 = snap539
+			d70 = snap540
+			d71 = snap541
+			d92 = snap542
+			d93 = snap543
+			d116 = snap544
+			d117 = snap545
+			d142 = snap546
+			d143 = snap547
+			d170 = snap548
+			d171 = snap549
+			d173 = snap550
+			d174 = snap551
+			d175 = snap552
+			d207 = snap553
+			d209 = snap554
+			d210 = snap555
+			d211 = snap556
+			d247 = snap557
+			d248 = snap558
+			d250 = snap559
+			d251 = snap560
+			d252 = snap561
+			d293 = snap562
+			d294 = snap563
+			d296 = snap564
+			d297 = snap565
+			d298 = snap566
+			d344 = snap567
+			d346 = snap568
+			d347 = snap569
+			d348 = snap570
+			d350 = snap571
+			d351 = snap572
+			d352 = snap573
+			d405 = snap574
+			d406 = snap575
+			d407 = snap576
+			d408 = snap577
+			d521 = snap578
+			d522 = snap579
+		}
+		if !bbs[27].Rendered {
+			return bbs[27].Render()
+		}
+		return result
+		return result
+	}
+	bbs[23].Render = func() JITValueDesc {
+		if bbs[23].Rendered {
+			ctx.EmitJmp(lbl24)
+			return result
+		}
+		bbs[23].Rendered = true
+		ctx.FlushRegisterMoves()
+		bbpos_0_23 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+		ctx.MarkLabel(lbl24)
+		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
+		ctx.ReclaimUntrackedRegs()
+		ctx.EnsureDesc(&d406)
+		ctx.EnsureDesc(&d405)
+		ctx.EnsureDescsTogether(&d406, &d405)
+		if d406.Loc == LocImm && d405.Loc == LocImm {
+			d581 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d406.Imm.Int() == d405.Imm.Int())}
+		} else if d405.Loc == LocImm {
+			r27 := ctx.AllocRegExcept(d406.Reg)
+			if d405.Imm.Int() >= -2147483648 && d405.Imm.Int() <= 2147483647 {
+				ctx.EmitCmpRegImm32(d406.Reg, int32(d405.Imm.Int()))
+			} else {
+				ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d405.Imm.Int()))
+				ctx.EmitCmpInt64(d406.Reg, ctx.ScratchReg)
+			}
+			d581 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r27, Condition: CondEqual}
+			ctx.BindReg(r27, &d581)
+		} else if d406.Loc == LocImm {
+			r28 := ctx.AllocReg()
+			ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d406.Imm.Int()))
+			ctx.EmitCmpInt64(ctx.ScratchReg, d405.Reg)
+			d581 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r28, Condition: CondEqual}
+			ctx.BindReg(r28, &d581)
+		} else {
+			r29 := ctx.AllocRegExcept(d406.Reg)
+			ctx.EmitCmpInt64(d406.Reg, d405.Reg)
+			d581 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r29, Condition: CondEqual}
+			ctx.BindReg(r29, &d581)
+		}
+		d582 = d581
+		ctx.SyncDesc(&d582)
+		if d582.Loc != LocImm && d582.Loc != LocFlags {
+			panic("jit: fused If condition is neither LocImm nor LocFlags")
+		}
+		if d582.Loc == LocImm {
+			if d582.Imm.Bool() {
+				return bbs[25].Render()
+			}
+			ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(0)}, int32(bbs[26].PhiBase)+int32(0))
+			return bbs[26].Render()
+		}
+		lbl34 := ctx.ReserveLabel()
+		ctx.EmitJump(d582.Condition, lbl26)
+		ctx.EmitJmp(lbl34)
+		ctx.FreeDesc(&d581)
+		snap583 := d1
+		snap584 := d2
+		snap585 := d3
+		snap586 := d4
+		snap587 := d5
+		snap588 := d6
+		snap589 := d7
+		snap590 := d8
+		snap591 := d18
+		snap592 := d19
+		snap593 := d20
+		snap594 := d33
+		snap595 := d34
+		snap596 := d49
+		snap597 := d50
+		snap598 := d51
+		snap599 := d69
+		snap600 := d70
+		snap601 := d71
+		snap602 := d92
+		snap603 := d93
+		snap604 := d116
+		snap605 := d117
+		snap606 := d142
+		snap607 := d143
+		snap608 := d170
+		snap609 := d171
+		snap610 := d173
+		snap611 := d174
+		snap612 := d175
+		snap613 := d207
+		snap614 := d209
+		snap615 := d210
+		snap616 := d211
+		snap617 := d247
+		snap618 := d248
+		snap619 := d250
+		snap620 := d251
+		snap621 := d252
+		snap622 := d293
+		snap623 := d294
+		snap624 := d296
+		snap625 := d297
+		snap626 := d298
+		snap627 := d344
+		snap628 := d346
+		snap629 := d347
+		snap630 := d348
+		snap631 := d350
+		snap632 := d351
+		snap633 := d352
+		snap634 := d405
+		snap635 := d406
+		snap636 := d407
+		snap637 := d408
+		snap638 := d521
+		snap639 := d522
+		snap640 := d581
+		snap641 := d582
+		alloc642 := ctx.SnapshotAllocState()
+		ctx.MarkLabel(lbl34)
+		ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewInt(0)}, int32(bbs[26].PhiBase)+int32(0))
+		ctx.EmitJmp(lbl27)
+		ctx.RestoreAllocState(alloc642)
+		d1 = snap583
+		d2 = snap584
+		d3 = snap585
+		d4 = snap586
+		d5 = snap587
+		d6 = snap588
+		d7 = snap589
+		d8 = snap590
+		d18 = snap591
+		d19 = snap592
+		d20 = snap593
+		d33 = snap594
+		d34 = snap595
+		d49 = snap596
+		d50 = snap597
+		d51 = snap598
+		d69 = snap599
+		d70 = snap600
+		d71 = snap601
+		d92 = snap602
+		d93 = snap603
+		d116 = snap604
+		d117 = snap605
+		d142 = snap606
+		d143 = snap607
+		d170 = snap608
+		d171 = snap609
+		d173 = snap610
+		d174 = snap611
+		d175 = snap612
+		d207 = snap613
+		d209 = snap614
+		d210 = snap615
+		d211 = snap616
+		d247 = snap617
+		d248 = snap618
+		d250 = snap619
+		d251 = snap620
+		d252 = snap621
+		d293 = snap622
+		d294 = snap623
+		d296 = snap624
+		d297 = snap625
+		d298 = snap626
+		d344 = snap627
+		d346 = snap628
+		d347 = snap629
+		d348 = snap630
+		d350 = snap631
+		d351 = snap632
+		d352 = snap633
+		d405 = snap634
+		d406 = snap635
+		d407 = snap636
+		d408 = snap637
+		d521 = snap638
+		d522 = snap639
+		d581 = snap640
+		d582 = snap641
+		if !bbs[26].Rendered {
+			snap643 := d1
+			snap644 := d2
+			snap645 := d3
+			snap646 := d4
+			snap647 := d5
+			snap648 := d6
+			snap649 := d7
+			snap650 := d8
+			snap651 := d18
+			snap652 := d19
+			snap653 := d20
+			snap654 := d33
+			snap655 := d34
+			snap656 := d49
+			snap657 := d50
+			snap658 := d51
+			snap659 := d69
+			snap660 := d70
+			snap661 := d71
+			snap662 := d92
+			snap663 := d93
+			snap664 := d116
+			snap665 := d117
+			snap666 := d142
+			snap667 := d143
+			snap668 := d170
+			snap669 := d171
+			snap670 := d173
+			snap671 := d174
+			snap672 := d175
+			snap673 := d207
+			snap674 := d209
+			snap675 := d210
+			snap676 := d211
+			snap677 := d247
+			snap678 := d248
+			snap679 := d250
+			snap680 := d251
+			snap681 := d252
+			snap682 := d293
+			snap683 := d294
+			snap684 := d296
+			snap685 := d297
+			snap686 := d298
+			snap687 := d344
+			snap688 := d346
+			snap689 := d347
+			snap690 := d348
+			snap691 := d350
+			snap692 := d351
+			snap693 := d352
+			snap694 := d405
+			snap695 := d406
+			snap696 := d407
+			snap697 := d408
+			snap698 := d521
+			snap699 := d522
+			snap700 := d581
+			snap701 := d582
+			alloc702 := ctx.SnapshotAllocState()
+			bbs[26].Render()
+			ctx.RestoreAllocState(alloc702)
+			d1 = snap643
+			d2 = snap644
+			d3 = snap645
+			d4 = snap646
+			d5 = snap647
+			d6 = snap648
+			d7 = snap649
+			d8 = snap650
+			d18 = snap651
+			d19 = snap652
+			d20 = snap653
+			d33 = snap654
+			d34 = snap655
+			d49 = snap656
+			d50 = snap657
+			d51 = snap658
+			d69 = snap659
+			d70 = snap660
+			d71 = snap661
+			d92 = snap662
+			d93 = snap663
+			d116 = snap664
+			d117 = snap665
+			d142 = snap666
+			d143 = snap667
+			d170 = snap668
+			d171 = snap669
+			d173 = snap670
+			d174 = snap671
+			d175 = snap672
+			d207 = snap673
+			d209 = snap674
+			d210 = snap675
+			d211 = snap676
+			d247 = snap677
+			d248 = snap678
+			d250 = snap679
+			d251 = snap680
+			d252 = snap681
+			d293 = snap682
+			d294 = snap683
+			d296 = snap684
+			d297 = snap685
+			d298 = snap686
+			d344 = snap687
+			d346 = snap688
+			d347 = snap689
+			d348 = snap690
+			d350 = snap691
+			d351 = snap692
+			d352 = snap693
+			d405 = snap694
+			d406 = snap695
+			d407 = snap696
+			d408 = snap697
+			d521 = snap698
+			d522 = snap699
+			d581 = snap700
+			d582 = snap701
+		}
+		if !bbs[25].Rendered {
+			return bbs[25].Render()
+		}
+		return result
+		return result
+	}
+	bbs[24].Render = func() JITValueDesc {
+		if bbs[24].Rendered {
+			ctx.EmitJmp(lbl25)
+			return result
+		}
+		bbs[24].Rendered = true
+		ctx.FlushRegisterMoves()
+		bbpos_0_24 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+		ctx.MarkLabel(lbl25)
+		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
+		ctx.ReclaimUntrackedRegs()
+		ctx.SyncDesc(&d1)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d1) {
+			return d1
+		}
+		ctx.EnsureDesc(&d1)
+		ctx.EmitMovToReg(result.Reg, d1)
+		result.Type = d1.Type
+		ctx.EmitJmp(lbl0)
+		return result
+	}
+	bbs[25].Render = func() JITValueDesc {
+		if bbs[25].Rendered {
+			ctx.EmitJmp(lbl26)
+			return result
+		}
+		bbs[25].Rendered = true
+		ctx.FlushRegisterMoves()
+		bbpos_0_25 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+		ctx.MarkLabel(lbl26)
+		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
+		ctx.ReclaimUntrackedRegs()
+		args[1] = JITPrepareScmerGoArg(ctx, args[1])
+		ctx.SyncDesc(&args[1])
+		d703 = ctx.EmitGoCallScalar(jitGoABI_973b6d6b19b704fd, []JITValueDesc{args[1]}, 1)
+		d703.NoHeapPointer = true
+		ctx.BindReg(d703.Reg, &d703)
+		ctx.EnsureDesc(&d703)
+		if d703.Loc == LocImm {
+			d704 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d703.Imm.Int() > 0)}
+		} else {
+			ctx.EmitCmpRegImm32(d703.Reg, 0)
+			r30 := ctx.AllocRegExcept(d703.Reg)
+			ctx.EmitSetcc(r30, CondSignedGreater)
+			d704 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r30}
+			ctx.BindReg(r30, &d704)
+		}
+		ctx.EnsureDesc(&d704)
+		ctx.EmitStoreToStack(d704, int32(bbs[26].PhiBase)+int32(0))
+		ctx.StabilizeDescForControlFlow(&d704)
+		ctx.FreeDesc(&d703)
+		return bbs[26].Render()
+		return result
+	}
+	bbs[26].Render = func() JITValueDesc {
+		if bbs[26].Rendered {
+			ctx.EmitJmp(lbl27)
+			return result
+		}
+		bbs[26].Rendered = true
+		ctx.FlushRegisterMoves()
+		bbpos_0_26 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+		ctx.MarkLabel(lbl27)
+		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
+		ctx.ReclaimUntrackedRegs()
+		ctx.StabilizeDescForControlFlow(&d2)
+		ctx.SyncDesc(&d2)
+		if d2.Loc == LocReg || d2.Loc == LocFPReg {
+			ctx.ProtectReg(d2.Reg)
+		} else if d2.Loc == LocRegPair {
+			ctx.ProtectReg(d2.Reg)
+			ctx.ProtectReg(d2.Reg2)
+		}
+		d705 = d2
+		if d705.Loc == LocNone {
+			panic("jit: phi source has no location")
+		}
+		ctx.EnsureDesc(&d705)
+		ctx.EmitStoreToStack(d705, int32(bbs[24].PhiBase)+int32(0))
+		if d2.Loc == LocReg || d2.Loc == LocFPReg {
+			ctx.UnprotectReg(d2.Reg)
+		} else if d2.Loc == LocRegPair {
+			ctx.UnprotectReg(d2.Reg)
+			ctx.UnprotectReg(d2.Reg2)
+		}
+		return bbs[24].Render()
+		return result
+	}
+	bbs[27].Render = func() JITValueDesc {
+		if bbs[27].Rendered {
+			ctx.EmitJmp(lbl28)
+			return result
+		}
+		bbs[27].Rendered = true
+		ctx.FlushRegisterMoves()
+		bbpos_0_27 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+		ctx.MarkLabel(lbl28)
+		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
+		ctx.ReclaimUntrackedRegs()
+		if args[0].Loc != LocImm {
+			ctx.EnsureDesc(&args[0])
+		}
+		if args[0].Loc == LocImm {
+			d706 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
+		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
+			ctx.FreeReg(args[0].Reg)
+			d706 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg2}
+			ctx.BindReg(args[0].Reg2, &d706)
+		} else if args[0].Type == tagInt && args[0].Loc == LocReg {
+			d706 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg}
+			ctx.BindReg(args[0].Reg, &d706)
+		} else {
+			boxed := JITPrepareScmerGoArg(ctx, args[0])
+			d706 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
+			d706.Type = tagInt
+			ctx.BindReg(d706.Reg, &d706)
+		}
+		if args[1].Loc != LocImm {
+			ctx.EnsureDesc(&args[1])
+		}
+		if args[1].Loc == LocImm {
+			d707 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[1].Imm.Int())}
+		} else if args[1].Type == tagInt && args[1].Loc == LocRegPair {
+			ctx.FreeReg(args[1].Reg)
+			d707 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[1].Reg2}
+			ctx.BindReg(args[1].Reg2, &d707)
+		} else if args[1].Type == tagInt && args[1].Loc == LocReg {
+			d707 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[1].Reg}
+			ctx.BindReg(args[1].Reg, &d707)
+		} else {
+			boxed := JITPrepareScmerGoArg(ctx, args[1])
+			d707 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
+			d707.Type = tagInt
+			ctx.BindReg(d707.Reg, &d707)
+		}
+		ctx.EnsureDesc(&d706)
+		resultTarget708 := false
+		_ = resultTarget708
+		ctx.EnsureDesc(&d707)
+		ctx.EnsureDescsTogether(&d706, &d707)
+		if d706.Loc == LocImm && d707.Loc == LocImm {
+			d709 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d706.Imm.Int() < d707.Imm.Int())}
+		} else if d707.Loc == LocImm {
+			r31 := ctx.AllocReg()
+			if d707.Imm.Int() >= -2147483648 && d707.Imm.Int() <= 2147483647 {
+				ctx.EmitCmpRegImm32(d706.Reg, int32(d707.Imm.Int()))
+			} else {
+				ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d707.Imm.Int()))
+				ctx.EmitCmpInt64(d706.Reg, ctx.ScratchReg)
+			}
+			d709 = ctx.DeferBooleanFlags(r31, CondSignedLess)
+			ctx.BindReg(r31, &d709)
+		} else if d706.Loc == LocImm {
+			r32 := ctx.AllocReg()
+			ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d706.Imm.Int()))
+			ctx.EmitCmpInt64(ctx.ScratchReg, d707.Reg)
+			d709 = ctx.DeferBooleanFlags(r32, CondSignedLess)
+			ctx.BindReg(r32, &d709)
+		} else {
+			r33 := ctx.AllocReg()
+			ctx.EmitCmpInt64(d706.Reg, d707.Reg)
+			d709 = ctx.DeferBooleanFlags(r33, CondSignedLess)
+			ctx.BindReg(r33, &d709)
+		}
+		ctx.FreeDesc(&d706)
+		ctx.FreeDesc(&d707)
+		ctx.SyncDesc(&d709)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d709) {
+			return d709
+		}
+		ctx.EnsureDesc(&d709)
+		ctx.EmitMovToReg(result.Reg, d709)
+		result.Type = d709.Type
+		ctx.EmitJmp(lbl0)
+		return result
+	}
+	bbs[28].Render = func() JITValueDesc {
+		if bbs[28].Rendered {
+			ctx.EmitJmp(lbl29)
+			return result
+		}
+		bbs[28].Rendered = true
+		ctx.FlushRegisterMoves()
+		bbpos_0_28 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+		ctx.MarkLabel(lbl29)
+		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
+		ctx.ReclaimUntrackedRegs()
+		if args[0].Loc != LocImm {
+			ctx.EnsureDesc(&args[0])
+		}
+		if args[0].Loc == LocImm {
+			d710 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
+		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
+			ctx.FreeReg(args[0].Reg)
+			d710 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg2}
+			ctx.BindReg(args[0].Reg2, &d710)
+		} else if args[0].Type == tagInt && args[0].Loc == LocReg {
+			d710 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg}
+			ctx.BindReg(args[0].Reg, &d710)
+		} else {
+			boxed := JITPrepareScmerGoArg(ctx, args[0])
+			d710 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
+			d710.Type = tagInt
+			ctx.BindReg(d710.Reg, &d710)
+		}
+		ctx.EnsureDesc(&d710)
+		ctx.EnsureDesc(&d710)
+		if d710.Loc == LocImm {
+			d711 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(float64(d710.Imm.Int()))}
+		} else {
+			var r34 Reg
+			r34 = d710.Reg
+			d710.Loc = LocNone
+			ctx.EmitInt64ToFloatBits(r34)
+			d711 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r34}
+			ctx.BindReg(r34, &d711)
+		}
+		ctx.FreeDesc(&d710)
+		d712 = ctx.EmitFloatDesc(args[1])
+		ctx.EnsureDesc(&d711)
+		resultTarget713 := false
+		_ = resultTarget713
+		ctx.EnsureDesc(&d712)
+		ctx.EnsureDescsTogether(&d711, &d712)
+		if d711.Loc == LocImm && d712.Loc == LocImm {
+			d714 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d711.Imm.Float() < d712.Imm.Float())}
+		} else if d712.Loc == LocImm {
+			var r35 Reg
+			if result.Loc == LocReg && result.Reg != d711.Reg {
+				r35 = result.Reg
+				resultTarget713 = true
+			} else {
+				r35 = ctx.AllocRegExcept(d711.Reg)
+			}
+			_, yBits := d712.Imm.RawWords()
+			ctx.EmitMovRegImm64(ctx.ScratchReg, yBits)
+			ctx.EmitCmpFloat64(ctx.ScratchReg, d711.Reg)
+			d714 = ctx.DeferBooleanFlags(r35, CondUnsignedAbove)
+			ctx.BindReg(r35, &d714)
+		} else if d711.Loc == LocImm {
+			var r36 Reg
+			if result.Loc == LocReg && result.Reg != d712.Reg {
+				r36 = result.Reg
+				resultTarget713 = true
+			} else {
+				r36 = ctx.AllocRegExcept(d712.Reg)
+			}
+			_, xBits := d711.Imm.RawWords()
+			ctx.EmitMovRegImm64(ctx.ScratchReg, xBits)
+			ctx.EmitCmpFloat64(d712.Reg, ctx.ScratchReg)
+			d714 = ctx.DeferBooleanFlags(r36, CondUnsignedAbove)
+			ctx.BindReg(r36, &d714)
+		} else {
+			var r37 Reg
+			if result.Loc == LocReg && result.Reg != d711.Reg && result.Reg != d712.Reg {
+				r37 = result.Reg
+				resultTarget713 = true
+			} else {
+				r37 = ctx.AllocRegExcept(d711.Reg, d712.Reg)
+			}
+			ctx.EmitCmpFloat64(d712.Reg, d711.Reg)
+			d714 = ctx.DeferBooleanFlags(r37, CondUnsignedAbove)
+			ctx.BindReg(r37, &d714)
+		}
+		ctx.FreeDesc(&d711)
+		ctx.FreeDesc(&d712)
+		ctx.SyncDesc(&d714)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d714) {
+			return d714
+		}
+		ctx.EnsureDesc(&d714)
+		ctx.EmitMovToReg(result.Reg, d714)
+		result.Type = d714.Type
+		ctx.EmitJmp(lbl0)
+		return result
+	}
+	bbs[29].Render = func() JITValueDesc {
+		if bbs[29].Rendered {
+			ctx.EmitJmp(lbl30)
+			return result
+		}
+		bbs[29].Rendered = true
+		ctx.FlushRegisterMoves()
+		bbpos_0_29 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+		ctx.MarkLabel(lbl30)
+		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
+		ctx.ReclaimUntrackedRegs()
+		if args[0].Loc != LocImm {
+			ctx.EnsureDesc(&args[0])
+		}
+		if args[0].Loc == LocImm {
+			d715 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[0].Imm.Int())}
+		} else if args[0].Type == tagInt && args[0].Loc == LocRegPair {
+			ctx.FreeReg(args[0].Reg)
+			d715 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg2}
+			ctx.BindReg(args[0].Reg2, &d715)
+		} else if args[0].Type == tagInt && args[0].Loc == LocReg {
+			d715 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[0].Reg}
+			ctx.BindReg(args[0].Reg, &d715)
+		} else {
+			boxed := JITPrepareScmerGoArg(ctx, args[0])
+			d715 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
+			d715.Type = tagInt
+			ctx.BindReg(d715.Reg, &d715)
+		}
+		if args[1].Loc != LocImm {
+			ctx.EnsureDesc(&args[1])
+		}
+		if args[1].Loc == LocImm {
+			d716 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(args[1].Imm.Int())}
+		} else if args[1].Type == tagInt && args[1].Loc == LocRegPair {
+			ctx.FreeReg(args[1].Reg)
+			d716 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[1].Reg2}
+			ctx.BindReg(args[1].Reg2, &d716)
+		} else if args[1].Type == tagInt && args[1].Loc == LocReg {
+			d716 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: args[1].Reg}
+			ctx.BindReg(args[1].Reg, &d716)
+		} else {
+			boxed := JITPrepareScmerGoArg(ctx, args[1])
+			d716 = ctx.EmitGoCallScalar(jitGoABI_5bd1d0f41a4e4914, []JITValueDesc{boxed}, 1)
+			d716.Type = tagInt
+			ctx.BindReg(d716.Reg, &d716)
+		}
+		ctx.EnsureDesc(&d715)
+		resultTarget717 := false
+		_ = resultTarget717
+		ctx.EnsureDesc(&d716)
+		ctx.EnsureDescsTogether(&d715, &d716)
+		if d715.Loc == LocImm && d716.Loc == LocImm {
+			d718 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d715.Imm.Int() < d716.Imm.Int())}
+		} else if d716.Loc == LocImm {
+			r38 := ctx.AllocReg()
+			if d716.Imm.Int() >= -2147483648 && d716.Imm.Int() <= 2147483647 {
+				ctx.EmitCmpRegImm32(d715.Reg, int32(d716.Imm.Int()))
+			} else {
+				ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d716.Imm.Int()))
+				ctx.EmitCmpInt64(d715.Reg, ctx.ScratchReg)
+			}
+			d718 = ctx.DeferBooleanFlags(r38, CondSignedLess)
+			ctx.BindReg(r38, &d718)
+		} else if d715.Loc == LocImm {
+			r39 := ctx.AllocReg()
+			ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(d715.Imm.Int()))
+			ctx.EmitCmpInt64(ctx.ScratchReg, d716.Reg)
+			d718 = ctx.DeferBooleanFlags(r39, CondSignedLess)
+			ctx.BindReg(r39, &d718)
+		} else {
+			r40 := ctx.AllocReg()
+			ctx.EmitCmpInt64(d715.Reg, d716.Reg)
+			d718 = ctx.DeferBooleanFlags(r40, CondSignedLess)
+			ctx.BindReg(r40, &d718)
+		}
+		ctx.FreeDesc(&d715)
+		ctx.FreeDesc(&d716)
+		ctx.SyncDesc(&d718)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d718) {
+			return d718
+		}
+		ctx.EnsureDesc(&d718)
+		ctx.EmitMovToReg(result.Reg, d718)
+		result.Type = d718.Type
+		ctx.EmitJmp(lbl0)
+		return result
+	}
+	bbs[30].Render = func() JITValueDesc {
+		if bbs[30].Rendered {
+			ctx.EmitJmp(lbl31)
+			return result
+		}
+		bbs[30].Rendered = true
+		ctx.FlushRegisterMoves()
+		bbpos_0_30 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+		ctx.MarkLabel(lbl31)
+		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
+		ctx.ReclaimUntrackedRegs()
+		ctx.EnsureDesc(&d4)
+		if d4.Loc == LocImm {
+			d719 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d4.Imm.Int()) == uint64(0x5))}
+		} else {
+			r41 := ctx.AllocRegExcept(d4.Reg)
+			ctx.EmitCmpRegImm32(d4.Reg, 5)
+			d719 = JITValueDesc{Loc: LocFlags, Type: tagBool, Reg: r41, Condition: CondEqual}
+			ctx.BindReg(r41, &d719)
+		}
+		d720 = d719
+		ctx.SyncDesc(&d720)
+		if d720.Loc != LocImm && d720.Loc != LocFlags {
+			panic("jit: fused If condition is neither LocImm nor LocFlags")
+		}
+		if d720.Loc == LocImm {
+			if d720.Imm.Bool() {
+				return bbs[29].Render()
+			}
+			return bbs[31].Render()
+		}
+		ctx.EmitJump(d720.Condition, lbl30)
+		if bbs[31].Rendered {
+			ctx.EmitJmp(lbl32)
+		}
+		ctx.FreeDesc(&d719)
+		ctx.FlushRegisterMoves()
+		if !bbs[31].Rendered {
+			snap721 := d1
+			snap722 := d2
+			snap723 := d3
+			snap724 := d4
+			snap725 := d5
+			snap726 := d6
+			snap727 := d7
+			snap728 := d8
+			snap729 := d18
+			snap730 := d19
+			snap731 := d20
+			snap732 := d33
+			snap733 := d34
+			snap734 := d49
+			snap735 := d50
+			snap736 := d51
+			snap737 := d69
+			snap738 := d70
+			snap739 := d71
+			snap740 := d92
+			snap741 := d93
+			snap742 := d116
+			snap743 := d117
+			snap744 := d142
+			snap745 := d143
+			snap746 := d170
+			snap747 := d171
+			snap748 := d173
+			snap749 := d174
+			snap750 := d175
+			snap751 := d207
+			snap752 := d209
+			snap753 := d210
+			snap754 := d211
+			snap755 := d247
+			snap756 := d248
+			snap757 := d250
+			snap758 := d251
+			snap759 := d252
+			snap760 := d293
+			snap761 := d294
+			snap762 := d296
+			snap763 := d297
+			snap764 := d298
+			snap765 := d344
+			snap766 := d346
+			snap767 := d347
+			snap768 := d348
+			snap769 := d350
+			snap770 := d351
+			snap771 := d352
+			snap772 := d405
+			snap773 := d406
+			snap774 := d407
+			snap775 := d408
+			snap776 := d521
+			snap777 := d522
+			snap778 := d581
+			snap779 := d582
+			snap780 := d703
+			snap781 := d704
+			snap782 := d705
+			snap783 := d706
+			snap784 := d707
+			snap785 := d709
+			snap786 := d710
+			snap787 := d711
+			snap788 := d712
+			snap789 := d714
+			snap790 := d715
+			snap791 := d716
+			snap792 := d718
+			snap793 := d719
+			snap794 := d720
+			alloc795 := ctx.SnapshotAllocState()
+			bbs[31].Render()
+			ctx.RestoreAllocState(alloc795)
+			d1 = snap721
+			d2 = snap722
+			d3 = snap723
+			d4 = snap724
+			d5 = snap725
+			d6 = snap726
+			d7 = snap727
+			d8 = snap728
+			d18 = snap729
+			d19 = snap730
+			d20 = snap731
+			d33 = snap732
+			d34 = snap733
+			d49 = snap734
+			d50 = snap735
+			d51 = snap736
+			d69 = snap737
+			d70 = snap738
+			d71 = snap739
+			d92 = snap740
+			d93 = snap741
+			d116 = snap742
+			d117 = snap743
+			d142 = snap744
+			d143 = snap745
+			d170 = snap746
+			d171 = snap747
+			d173 = snap748
+			d174 = snap749
+			d175 = snap750
+			d207 = snap751
+			d209 = snap752
+			d210 = snap753
+			d211 = snap754
+			d247 = snap755
+			d248 = snap756
+			d250 = snap757
+			d251 = snap758
+			d252 = snap759
+			d293 = snap760
+			d294 = snap761
+			d296 = snap762
+			d297 = snap763
+			d298 = snap764
+			d344 = snap765
+			d346 = snap766
+			d347 = snap767
+			d348 = snap768
+			d350 = snap769
+			d351 = snap770
+			d352 = snap771
+			d405 = snap772
+			d406 = snap773
+			d407 = snap774
+			d408 = snap775
+			d521 = snap776
+			d522 = snap777
+			d581 = snap778
+			d582 = snap779
+			d703 = snap780
+			d704 = snap781
+			d705 = snap782
+			d706 = snap783
+			d707 = snap784
+			d709 = snap785
+			d710 = snap786
+			d711 = snap787
+			d712 = snap788
+			d714 = snap789
+			d715 = snap790
+			d716 = snap791
+			d718 = snap792
+			d719 = snap793
+			d720 = snap794
+		}
+		if !bbs[29].Rendered {
+			return bbs[29].Render()
+		}
+		return result
+		return result
+	}
+	bbs[31].Render = func() JITValueDesc {
+		if bbs[31].Rendered {
+			ctx.EmitJmp(lbl32)
+			return result
+		}
+		bbs[31].Rendered = true
+		ctx.FlushRegisterMoves()
+		bbpos_0_31 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+		ctx.MarkLabel(lbl32)
+		ctx.ResolveFixups()
+		d1 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(0)}
+		d2 = JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 		ctx.ReclaimUntrackedRegs()
 		args[0] = JITPrepareScmerGoArg(ctx, args[0])
 		args[1] = JITPrepareScmerGoArg(ctx, args[1])
-		if d1.Loc == LocRegPair || d1.Loc == LocStackPair || d1.Loc == LocRegTriple || d1.Loc == LocStackTriple {
+		if d4.Loc == LocRegPair || d4.Loc == LocStackPair || d4.Loc == LocRegTriple || d4.Loc == LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}
-		if d3.Loc == LocRegPair || d3.Loc == LocStackPair || d3.Loc == LocRegTriple || d3.Loc == LocStackTriple {
+		if d6.Loc == LocRegPair || d6.Loc == LocStackPair || d6.Loc == LocRegTriple || d6.Loc == LocStackTriple {
 			panic("jit: generic call arg expects 1-word value")
 		}
 		ctx.SyncDesc(&args[0])
 		ctx.SyncDesc(&args[1])
-		ctx.SyncDesc(&d1)
-		ctx.SyncDesc(&d3)
-		d348 = ctx.EmitGoCallScalar(GoFuncAddr(lessNonNumeric), []JITValueDesc{args[0], args[1], d1, d3}, 1)
-		d348.NoHeapPointer = true
-		ctx.EmitAndRegImm32(d348.Reg, 1)
-		d348.Type = tagBool
-		ctx.BindReg(d348.Reg, &d348)
+		ctx.SyncDesc(&d4)
+		ctx.SyncDesc(&d6)
+		d796 = ctx.EmitGoCallScalar(GoFuncAddr(lessNonNumeric), []JITValueDesc{args[0], args[1], d4, d6}, 1)
+		d796.NoHeapPointer = true
+		ctx.EmitAndRegImm32(d796.Reg, 1)
+		d796.Type = tagBool
+		ctx.BindReg(d796.Reg, &d796)
 		ctx.FreeDesc(&args[0])
 		ctx.FreeDesc(&args[1])
-		ctx.SyncDesc(&d348)
-		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d348) {
-			return d348
+		ctx.SyncDesc(&d796)
+		if ctx.branchSerial == branchSerial && ctx.hasBooleanFlags(d796) {
+			return d796
 		}
-		ctx.EnsureDesc(&d348)
-		ctx.EmitMovToReg(result.Reg, d348)
-		result.Type = d348.Type
+		ctx.EnsureDesc(&d796)
+		ctx.EmitMovToReg(result.Reg, d796)
+		result.Type = d796.Type
 		ctx.EmitJmp(lbl0)
 		return result
 	}
@@ -2734,11 +4193,17 @@ func jitEmitLess(ctx *JITContext, args []JITValueDesc, result JITValueDesc) JITV
 
 // BEGIN jitgen prepared Go ABI entries
 var jitGoABI_0cbff6f55ee96f6d uint64
-var jitGoABI_3c7aea5ce0fcdece uint64
+var jitGoABI_58434e8dfe39c263 uint64
 var jitGoABI_5bd1d0f41a4e4914 uint64
+var jitGoABI_7b4abd9531444504 uint64
+var jitGoABI_973b6d6b19b704fd uint64
+var jitGoABI_d69f4c85104836f4 uint64
 
 func init() {
 	jitGoABI_0cbff6f55ee96f6d = GoFuncAddr(Scmer.String)
-	jitGoABI_3c7aea5ce0fcdece = GoFuncAddr(ParseDateString)
+	jitGoABI_58434e8dfe39c263 = GoFuncAddr(ParseDateValue)
 	jitGoABI_5bd1d0f41a4e4914 = GoFuncAddr(Scmer.Int)
+	jitGoABI_7b4abd9531444504 = GoFuncAddr(nativeDateSeconds)
+	jitGoABI_973b6d6b19b704fd = GoFuncAddr((Scmer).DateNanosecond)
+	jitGoABI_d69f4c85104836f4 = GoFuncAddr(compareDates)
 }
