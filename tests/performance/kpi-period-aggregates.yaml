@@ -22,9 +22,10 @@ metadata:
   isolated: true
   reuse_fixture: true
   restart_after_setup: true
-  # A fresh A/B pair takes about four minutes on CI; keep this large
-  # fixture separate so other suites retain their required verification pairs.
-  performance_shard_weight: 96
+  # Recorded preparation plus a fresh A/B pair takes about 314 seconds on CI.
+  # Keep this import separate from suites requiring seven verification pairs;
+  # every case, result, repetition and the 15-minute job limit stays unchanged.
+  performance_shard_weight: 320
   ci: false
   perf_ci: true
   performance_rows: 10000
