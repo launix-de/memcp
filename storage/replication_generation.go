@@ -1217,9 +1217,11 @@ func (r *replicationManager) abortImports(source string) {
 // Completed data placement names safety copies independently of RAM ownership.
 func replicationBackupRecords(db *database) []replicaRecord {
 	r := replication.Load()
-	if r == nil || !r.master {
+	if r == nil {
 		return nil
 	}
+	// Completed generations are durability roots on slaves too, even before
+	// their topology checkpoint. Retaining bytes establishes no MOSI rights.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var records []replicaRecord

@@ -79,17 +79,17 @@ func (r *replicationManager) recoveryInventory(auth replicaAuth) []replicaRecord
 			}
 		}
 	}
+	return r.recoveryInventorySnapshot(resources, allowed)
+}
+
+// Join the collected topology with live coherence publications.
+func (r *replicationManager) recoveryInventorySnapshot(resources map[string]replicaRecord, allowed func(string) bool) []replicaRecord {
 	r.mu.Lock()
 	for key, record := range r.directory.Records {
 		if !allowed(record.Resource.Database) {
 			continue
 		}
 		inventory, active := resources[key]
-		if !active {
-			continue
-		}
-		record.Resource = inventory.Resource
-		content := inventory.Content
 		cell := r.cells[key]
 		if cell == nil {
 			continue
@@ -110,6 +110,17 @@ func (r *replicationManager) recoveryInventory(auth replicaAuth) []replicaRecord
 				phase = mosi.IO
 			}
 		}
+		if !active {
+			// A split can publish a UUID after topology collection. Only its
+			// existing live rights may supplement the inventory; placement alone
+			// must never become authority.
+			if !phase.Readable() && record.Handoff == "" {
+				continue
+			}
+			inventory.Resource, inventory.Content = record.Resource, record.Content
+		}
+		record.Resource = inventory.Resource
+		content := inventory.Content
 		record.State = phase.String()
 		record.Readers = maps.Clone(record.Readers)
 		record.Requests = nil
@@ -130,6 +141,41 @@ func (r *replicationManager) recoveryInventory(auth replicaAuth) []replicaRecord
 		result = append(result, resource)
 	}
 	return result
+}
+
+func (r *replicationManager) createdResourceInventory(name string) []replicaRecord {
+	var created []replicaRecord
+	for _, record := range r.recoveryInventorySnapshot(make(map[string]replicaRecord), func(database string) bool { return database == name }) {
+		if record.Resource.Shard != "" && record.Owner == r.id && record.State == "M" && !record.InitialClaimed {
+			record.InitialClaimed = true
+			created = append(created, record)
+		}
+	}
+	return created
+}
+
+func (r *replicationManager) announceCreatedResources(peer *mosiPeer, name, user string, auth replicaAuth) error {
+	for _, record := range r.createdResourceInventory(name) {
+		ctx, cancel := mosiPacketContext(peer)
+		var reply replicaRecovery
+		err := peer.request(ctx, "hello", replicaRequest{Boot: r.boot, User: user, Hash: auth.Hash, Resources: []replicaRecord{record}}, &reply)
+		cancel()
+		if err != nil {
+			return err
+		}
+		for _, accepted := range reply.Resources {
+			if r.resourceKey(accepted.Resource) == r.resourceKey(record.Resource) && accepted.Owner == r.id && accepted.Epoch == record.Epoch && accepted.InitialClaimed {
+				r.updateRecord(record.Resource, func(current *replicaRecord) bool {
+					if current.Owner != r.id || current.Epoch != accepted.Epoch || current.InitialClaimed {
+						return false
+					}
+					current.InitialClaimed = true
+					return true
+				})
+			}
+		}
+	}
+	return nil
 }
 
 func (r *replicationManager) recoverCached(peer *mosiPeer) {
