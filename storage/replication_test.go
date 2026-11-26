@@ -1160,6 +1160,7 @@ func TestReplicationBackupBackpressureDoesNotHoldActiveWriter(t *testing.T) {
 	r.directory.Users["root"] = replicaAuth{Admin: true}
 	cell := r.declareShard(table.ActiveShards()[0], r.id, true)
 	resource := *cell.resource.Load()
+	r.updateRecord(resource, func(record *replicaRecord) bool { record.InitialClaimed = true; return true })
 	// The queue is deliberately unbuffered: receiving begin proves preparation
 	// finished; stopping consumption then holds the transport at its next packet.
 	peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}

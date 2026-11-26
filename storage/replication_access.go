@@ -559,6 +559,12 @@ func (r *replicationManager) backupDatabase(name, user string) {
 	if err != nil {
 		return
 	}
+	// A schema checkpoint must not introduce partitions whose live creator
+	// authority the receiver has never acknowledged.
+	if err := r.announceCreatedResources(peer, name, user, auth); err != nil {
+		scm.PrintError(err)
+		return
+	}
 	r.mu.Lock()
 	resources := make([]mosiResource, 0)
 	for _, record := range r.directory.Records {
@@ -576,6 +582,12 @@ func (r *replicationManager) backupDatabase(name, user string) {
 		resources = append(resources, schema)
 	}
 	for index, resource := range resources {
+		if resource.Shard == "" {
+			if err := r.announceCreatedResources(peer, name, user, auth); err != nil {
+				scm.PrintError(err)
+				return
+			}
+		}
 		cell := r.resourceCell(resource)
 		resource = *cell.resource.Load() // schema publication may have renamed its table
 		sent := func() bool {
