@@ -76,3 +76,84 @@ func BenchmarkDeltaIndexPrefixWithUnboundedSuffix(b *testing.B) {
 		}
 	}
 }
+
+// Cold source counts, rather than index length or directory order, decide
+// between complete prefix matches. Logical input dependencies are deduplicated.
+func TestIndexPrefixMinimizesColumnLoads(t *testing.T) {
+	tbl := &table{Columns: []*column{
+		{Name: "id"}, {Name: "a"}, {Name: "b"}, {Name: "c"}, {Name: "d"},
+		{Name: "computed", ComputorInputCols: []string{"b", "c"}},
+	}}
+	shard := &storageShard{t: tbl, columns: map[string]ColumnStorage{
+		"id": new(StorageSparse), "a": nil, "b": nil,
+		"c": new(StorageSparse), "d": new(StorageSparse), "computed": new(StorageSparse),
+	}}
+	makeIndex := func(names ...string) *StorageIndex {
+		index := &StorageIndex{t: shard, Cols: names, ColOrderMeta: make([]string, len(names))}
+		for i := range names {
+			index.ColOrderMeta[i] = "bin:asc"
+		}
+		return index
+	}
+	access := runtimeScanAccess(analyzedBoundaries{
+		{col: "id", matcher: EqualMatcher, lower: scm.NewInt(1), upper: scm.NewInt(1), lowerInclusive: true, upperInclusive: true},
+	})
+	coldShort := makeIndex("id", "a")
+	coldWide := makeIndex("id", "a", "b")
+	warmWide := makeIndex("id", "c", "d")
+	oneColdWide := makeIndex("id", "b", "c", "d")
+	mapped := makeIndex("id", ".mapped")
+	mapped.ColMapFn = []scm.Scmer{scm.NewNil(), scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[0] })}
+	mapped.ColMapCols = [][]string{nil, {"b", "b", "c"}}
+	computed := makeIndex("id", "computed")
+	wrongOrder := makeIndex("id", "c")
+	wrongOrder.ColOrderMeta[0] = "bin:desc"
+	wrongMatcher := makeIndex("id", "c")
+	wrongMatcher.ColMatchers = []IndexAnalyzer{RecSetMatcher}
+	for _, tc := range []struct {
+		name    string
+		indexes []*StorageIndex
+		want    *StorageIndex
+		missing int
+	}{
+		{"warm wide beats cold short", []*StorageIndex{coldShort, warmWide}, warmWide, 0},
+		{"fewer loads beats shorter key", []*StorageIndex{coldWide, oneColdWide}, oneColdWide, 1},
+		{"mapped inputs count once", []*StorageIndex{coldWide, mapped}, mapped, 1},
+		{"computed inputs count", []*StorageIndex{coldWide, computed}, computed, 1},
+		{"incompatible order rejected", []*StorageIndex{wrongOrder, coldShort}, coldShort, 1},
+		{"incompatible matcher rejected", []*StorageIndex{wrongMatcher, coldShort}, coldShort, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shard.mu.RLock()
+			defer shard.mu.RUnlock()
+			got, missing := shard.leastColdIndex(access, 1, tc.indexes)
+			if got != tc.want || missing != tc.missing {
+				t.Fatalf("index=%p missing=%d; want index=%p missing=%d", got, missing, tc.want, tc.missing)
+			}
+		})
+	}
+	full := runtimeScanAccess(analyzedBoundaries{
+		{col: "id", matcher: EqualMatcher, lower: scm.NewInt(1), upper: scm.NewInt(1), lowerInclusive: true, upperInclusive: true},
+		{col: "a", matcher: EqualMatcher, lower: scm.NewInt(2), upper: scm.NewInt(2), lowerInclusive: true, upperInclusive: true},
+	})
+	if got, _ := shard.leastColdIndex(full, 2, []*StorageIndex{makeIndex("id"), warmWide, coldWide}); got != coldWide {
+		t.Fatal("selected an index that did not cover the complete requested prefix")
+	}
+
+	// No zero-load candidate exists: prepare the cheaper wide key only.
+	tbl.PersistencyMode = Memory
+	tbl.schema = &database{Name: "memcp-tests"}
+	shard.setState(SHARED)
+	shard.main_count = 1
+	shard.plannerMainRows.Store(1)
+	shard.Indexes = []*StorageIndex{coldWide, oneColdWide}
+	lease := shard.GetRead(nil, false)
+	defer lease.Release()
+	shard.prepareIndexColumns(access, false, nil)
+	if shard.columns["b"] == nil || shard.columns["a"] != nil || len(shard.Indexes) != 2 {
+		t.Fatal("preparation loaded an avoidable column or created a duplicate index")
+	}
+	if got, missing := shard.leastColdIndex(access, 1, shard.Indexes); got != oneColdWide || missing != 0 {
+		t.Fatal("iteration did not retain a fully prepared covering index")
+	}
+}

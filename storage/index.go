@@ -839,11 +839,121 @@ func effectiveBoundaryInclusiveness(cols scanAccess, indexBounds *scanIndexBound
 	return true, true
 }
 
-func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
-	indexBounds := newScanIndexBounds(cols)
-	if exactMain != nil {
-		*exactMain = false
+// coversAccessPrefix requires the complete requested key, including matcher
+// and collation contracts. A shorter key is never a candidate.
+func (index *StorageIndex) coversAccessPrefix(cols scanAccess, prefix int) bool {
+	if len(index.Cols) < prefix {
+		return false
 	}
+	for i := 0; i < prefix; i++ {
+		if cols.boundaryColumn(i) != index.Cols[i] {
+			return false
+		}
+		var matcher IndexAnalyzer
+		if i < len(index.ColMatchers) {
+			matcher = index.ColMatchers[i]
+		}
+		if !indexMatcherCompatible(cols.boundaryAnalyzer(i), matcher) ||
+			(cols.boundaryAnalyzer(i).IsSorted() && !indexOrderMatchesScanAccess(index.t.t, index, i, cols)) {
+			return false
+		}
+	}
+	return true
+}
+
+// appendColumnSources includes recursive computed inputs and deduplicates
+// dependencies, so one physical column contributes at most one load.
+func (t *storageShard) appendColumnSources(columns []string, name string) []string {
+	if isScanPseudoColName(name) {
+		return columns
+	}
+	for _, existing := range columns {
+		if existing == name {
+			return columns
+		}
+	}
+	columns = append(columns, name)
+	if column := t.schemaColumn(name); column != nil {
+		for _, input := range column.ComputorInputCols {
+			columns = t.appendColumnSources(columns, input)
+		}
+	}
+	return columns
+}
+
+// sourceColumns uses caller-provided stack scratch for ordinary index keys.
+func (index *StorageIndex) sourceColumns(columns []string) []string {
+	for i, name := range index.Cols {
+		if i < len(index.ColMapFn) && !index.ColMapFn[i].IsNil() {
+			for _, source := range index.ColMapCols[i] {
+				columns = index.t.appendColumnSources(columns, source)
+			}
+		} else {
+			columns = index.t.appendColumnSources(columns, name)
+		}
+	}
+	return columns
+}
+
+// leastColdIndex runs under the shard lock. Equal-cost candidates retain their
+// existing order. Column residency is protected by the caller's GetRead lease;
+// index payload warmth is independent and does not change the loading cost.
+func (t *storageShard) leastColdIndex(cols scanAccess, prefix int, indexes []*StorageIndex) (*StorageIndex, int) {
+	var best *StorageIndex
+	bestMissing := int(^uint(0) >> 1)
+	for _, index := range indexes {
+		if !index.coversAccessPrefix(cols, prefix) {
+			continue
+		}
+		var inline [16]string
+		missing := 0
+		for _, name := range index.sourceColumns(inline[:0]) {
+			if t.columns[name] == nil {
+				missing++
+			}
+		}
+		if missing < bestMissing {
+			best, bestMissing = index, missing
+			if missing == 0 {
+				break
+			}
+		}
+	}
+	return best, bestMissing
+}
+
+// prepareIndexColumns loads the minimum missing source set before row readers
+// acquire their shard lock. It never creates a shorter duplicate index. The
+// existing GetRead lease keeps this directory resident through iteration.
+// A concurrently appended covering definition is safe too: publication occurs
+// only after its requesting scan has loaded every source under its own lease.
+func (t *storageShard) prepareIndexColumns(cols scanAccess, alreadyLocked bool, tx *TxContext) {
+	_, prefix := t.indexAccess(cols)
+	if prefix == 0 {
+		return
+	}
+	var index *StorageIndex
+	var missing int
+	func() {
+		if !alreadyLocked {
+			t.mu.RLock()
+			defer t.mu.RUnlock()
+		}
+		index, missing = t.leastColdIndex(cols, prefix, t.indexDirectorySnapshot())
+	}()
+	if index == nil || missing == 0 {
+		return
+	}
+	var inline [16]string
+	for _, name := range index.sourceColumns(inline[:0]) {
+		t.getColumnStorageOrPanic(name, alreadyLocked, tx)
+	}
+}
+
+// indexAccess describes the complete reusable key prefix, excluding query-local
+// hooks. Preparation and iteration must agree on which definitions cover it.
+func (t *storageShard) indexAccess(cols scanAccess) (scanIndexBounds, int) {
+	indexBounds := newScanIndexBounds(cols)
 	// cols is already sorted by 1st rank: equality before range; 2nd rank alphabet
 	// A complete unique point prefix yields at most one live row. Building or
 	// retaining a full-column candidate hook cannot narrow that driver further;
@@ -858,11 +968,6 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 		}
 	}
 
-	// The index view may shorten access when more than one range column is
-	// present because an ordered index can use only one range suffix. Read the
-	// flags from that effective last boundary, not from a later condition that
-	// is evaluated only by the scan predicate.
-	lowerIncl, upperIncl := effectiveBoundaryInclusiveness(cols, &indexBounds)
 	// Exact RecSet membership is a query-bound overlay. A prepared base index
 	// needs to cover only the sorted/access prefix; RecSetMatcher binds to that
 	// index at invocation time and must not create one index identity per source
@@ -872,6 +977,16 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 	for indexCols > 1 && indexCols <= cols.len() && matcherKindEqual(cols.boundaryAnalyzer(indexCols-1), RecSetMatcher) {
 		indexCols--
 	}
+
+	return indexBounds, indexCols
+}
+
+func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+	indexBounds, indexCols := t.indexAccess(cols)
+	if exactMain != nil {
+		*exactMain = false
+	}
+	lowerIncl, upperIncl := effectiveBoundaryInclusiveness(cols, &indexBounds)
 
 	// check if we found conditions
 	if indexBounds.len() > 0 {
@@ -885,72 +1000,20 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 		old_indexes := t.Indexes
 		oldIndexCount := len(old_indexes)
 		t.indexMutex.Unlock()
-		for _, index := range old_indexes {
-			// naive index search algo; TODO: improve
-			if len(index.Cols) >= indexCols {
-				for i := 0; i < indexCols; i++ {
-					if cols.boundaryColumn(i) != index.Cols[i] {
-						goto skip_index // column mismatch
-					}
-					var indexedMatcher IndexAnalyzer
-					if len(index.ColMatchers) > i {
-						indexedMatcher = index.ColMatchers[i]
-					}
-					if !indexMatcherCompatible(cols.boundaryAnalyzer(i), indexedMatcher) {
-						goto skip_index // matcher kind mismatch
-					}
-					if cols.boundaryAnalyzer(i).IsSorted() {
-						if !indexOrderMatchesScanAccess(t.t, index, i, cols) {
-							goto skip_index
-						}
-					}
-				}
-				// this index fits!
-				index.iterate(tx, cols, indexBounds, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, candidateSpan, selected, callback)
-				return
-			}
-		skip_index:
+		index, _ := t.leastColdIndex(cols, indexCols, old_indexes)
+		if index != nil {
+			index.iterate(tx, cols, indexBounds, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, candidateSpan, selected, callback)
+			return
 		}
 
-		// otherwise: create new index (but first check for prefix coverage)
+		// A concurrent publisher may have supplied a covering index. Recheck
+		// before creating a definition; cold suffixes never justify duplicates.
 		t.indexMutex.Lock()
 		if oldIndexCount != len(t.Indexes) {
 			t.indexMutex.Unlock()
-			goto retry_indexscan // someone has added a index in the meantime: recheck
+			goto retry_indexscan
 		}
-		// check if an existing longer index already covers these columns as a prefix
-		for _, index := range t.Indexes {
-			if len(index.Cols) >= indexCols {
-				covered := true
-				for i := 0; i < indexCols; i++ {
-					if cols.boundaryColumn(i) != index.Cols[i] {
-						covered = false
-						break
-					}
-					var indexedMatcher IndexAnalyzer
-					if len(index.ColMatchers) > i {
-						indexedMatcher = index.ColMatchers[i]
-					}
-					if !indexMatcherCompatible(cols.boundaryAnalyzer(i), indexedMatcher) {
-						covered = false
-						break
-					}
-					if cols.boundaryAnalyzer(i).IsSorted() {
-						if !indexOrderMatchesScanAccess(t.t, index, i, cols) {
-							covered = false
-							break
-						}
-					}
-				}
-				if covered {
-					// longer index covers this query; use it instead of creating a shorter one
-					t.indexMutex.Unlock()
-					index.iterate(tx, cols, indexBounds, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, candidateSpan, selected, callback)
-					return
-				}
-			}
-		}
-		index := new(StorageIndex)
+		index = new(StorageIndex)
 		index.Cols = make([]string, indexCols)
 		index.ColMapCols = make([][]string, indexCols)
 		index.ColMapFn = make([]scm.Scmer, indexCols)

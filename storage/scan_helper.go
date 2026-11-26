@@ -230,4 +230,5 @@ func (t *storageShard) ensureScanAccessColumns(access scanAccess, alreadyLocked 
 		}
 		t.getColumnStorageOrPanic(column, alreadyLocked, currentTx)
 	}
+	t.prepareIndexColumns(access, alreadyLocked, currentTx)
 }

@@ -749,6 +749,9 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	for _, s := range shards {
 		go func(s *storageShard) {
 			defer wg.Done()
+			access := s.GetRead(nil, false)
+			defer access.Release()
+
 			s.mu.RLock()
 			cs := s.columns[colName]
 			sortCSs := make([]ColumnStorage, nCols)
@@ -762,6 +765,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			}
 			s.ensureLoaded()
 			s.ensureMainCount(false, nil)
+			s.ensureScanAccessColumns(runtimeScanAccess(bounds), false, nil)
 			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
 			// Retain index and column-directory ownership during invalidation.

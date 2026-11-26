@@ -355,6 +355,8 @@ func (t *storageShard) scanLookupMapOne(access scanAccess, mapCols []string, cur
 
 	var values []scm.Scmer
 	matches := 0
+	t.prepareIndexColumns(access, false, currentTx)
+
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	mainCount := t.main_count
@@ -514,6 +516,8 @@ func (t *storageShard) scanLookupOne(access scanAccess, resultCol string, return
 
 	result := scm.NewBool(false)
 	matches := 0
+
+	t.prepareIndexColumns(access, false, currentTx)
 
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -680,6 +684,8 @@ func (t *storageShard) scanLookupMany(access scanAccess, resultCol string, retur
 
 	result := scm.NewBool(false)
 	matches := 0
+	t.prepareIndexColumns(access, false, currentTx)
+
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	mainCount := t.main_count
@@ -822,6 +828,8 @@ func (t *storageShard) scanLookupMapMany(access scanAccess, mapCols []string, cu
 
 	var values []scm.Scmer
 	matches := 0
+	t.prepareIndexColumns(access, false, currentTx)
+
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	mainCount := t.main_count

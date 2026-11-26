@@ -3751,6 +3751,8 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 	} else {
 		mcols = make([]ColumnStorage, columns)
 	}
+	t.prepareIndexColumns(access, false, currentTx)
+
 	t.mu.RLock()
 	ready := true
 	if t.main_count == 0 {

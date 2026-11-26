@@ -1225,6 +1225,17 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 		}
 	}
 
+	if !alreadyLocked && keys.count() > 0 {
+		key := keys.tuple(0)
+		bounds := make(analyzedBoundaries, len(targetKeyCols))
+		for i, col := range targetKeyCols {
+			bounds[i] = analyzedBoundary{col: col, matcher: EqualMatcher,
+				lower: key[i], upper: key[i], lowerInclusive: true, upperInclusive: true}
+		}
+		reorderByFrequency(bounds, t.t)
+		t.prepareIndexColumns(runtimeScanAccess(bounds), skipShardReadLock, currentTx)
+	}
+
 	locked := false
 	if !skipShardReadLock {
 		t.mu.RLock()
