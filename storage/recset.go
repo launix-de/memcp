@@ -569,7 +569,7 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock, currentTx)
-	access = t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
+	preparedIndex := t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(access, t.t, conditionCols, condition)
 
 	var ccols []ColumnStorage
@@ -690,7 +690,7 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 	var mainRows []uint32
 	var positions []int
 	var prepared []scm.Scmer
-	t.iterateIndexMatchAware(currentTx, access, maxInsertIndex, buf, true, &exactLikeMain, func(batch []uint32) bool {
+	t.iterateIndexMatchAware(currentTx, access, preparedIndex, maxInsertIndex, buf, true, &exactLikeMain, func(batch []uint32) bool {
 		feedbackCandidates += int64(len(batch))
 		mainRows = mainRows[:0]
 		prepareMain := batchPreparation && !conditionAlwaysTrue &&
@@ -1314,8 +1314,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 			bounds[i].lower, bounds[i].upper = key[slot], key[slot]
 		}
 		access := runtimeScanAccess(bounds)
-		access.preparedIndex = preparedIndex
-		t.iterateIndexForce(currentTx, access, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
+		t.iterateIndexForce(currentTx, access, preparedIndex, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
 			for _, idx := range batch {
 				if idx >= visibleUpper {
 					continue
@@ -1639,7 +1638,7 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock, currentTx)
-	access = t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
+	preparedIndex := t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	// Keep RecSet narrowing on the ordinary index-boundary path. The exact
 	// RecSet matcher and approximate hooks such as Bigram LIKE then prune the
 	// same candidate batches before the residual predicate reads any columns.
@@ -1739,7 +1738,7 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 	// residual has already been removed by the planner.
 	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
 	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
-	t.iterateIndexMatchAware(currentTx, access, len(t.deltaRows()), buf, true, nil, evaluateBatch)
+	t.iterateIndexMatchAware(currentTx, access, preparedIndex, len(t.deltaRows()), buf, true, nil, evaluateBatch)
 	return builder.finish()
 }
 

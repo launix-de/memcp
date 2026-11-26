@@ -3783,7 +3783,7 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 		t.mu.RLock()
 	}
 	defer t.mu.RUnlock()
-	access.preparedIndex = t.prepareIndexReadLocked(access, currentTx)
+	preparedIndex := t.prepareIndexReadLocked(access, currentTx)
 
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 
@@ -3791,7 +3791,7 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 
 	// Use iterateIndex for O(log n) lookup (builds index lazily if needed)
 	// Small buffer for existence check: stop early after first match
-	t.iterateIndex(currentTx, access, len(t.deltaRows()), scratch.ids[:], 1, nil, func(batch []uint32) bool {
+	t.iterateIndex(currentTx, access, preparedIndex, len(t.deltaRows()), scratch.ids[:], 1, nil, func(batch []uint32) bool {
 		for _, idx := range batch {
 			visible := !t.deletions.Get(uint(idx))
 			if acidMode {
@@ -3868,7 +3868,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	if bounds.impossible() {
 		return filteredRowEstimate{population: "shard_rows", coverage: "exact"}
 	}
-	bounds = t.ensureScanAccessColumns(bounds, false, currentTx)
+	preparedIndex := t.ensureScanAccessColumns(bounds, false, currentTx)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(bounds, t.t, conditionCols, condition)
 	for i, col := range conditionCols {
 		if col == "$recset_contains" {
@@ -3904,7 +3904,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	var buf [256]uint32
 	access := bounds
 	indexBounds := newScanIndexBounds(access)
-	t.iterateIndexEstimate(currentTx, access, len(t.deltaRows()), buf[:], &candidateSpan, func(index *StorageIndex, active bool) {
+	t.iterateIndexEstimate(currentTx, access, preparedIndex, len(t.deltaRows()), buf[:], &candidateSpan, func(index *StorageIndex, active bool) {
 		// Cold-index fallback now enforces the same exact sorted prefix before
 		// invoking the sampling callback, so its candidates have the same
 		// population semantics as an active index range.

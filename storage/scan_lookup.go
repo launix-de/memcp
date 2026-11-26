@@ -357,11 +357,11 @@ func (t *storageShard) scanLookupMapOne(access scanAccess, mapCols []string, cur
 	matches := 0
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	access.preparedIndex = t.prepareIndexReadLocked(access, currentTx)
+	preparedIndex := t.prepareIndexReadLocked(access, currentTx)
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, access, len(t.deltaRows()), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, access, preparedIndex, len(t.deltaRows()), ids[:], true, func(batch []uint32) bool {
 		for _, recid := range batch {
 			var actual scm.Scmer
 			if recid < mainCount {
@@ -518,11 +518,11 @@ func (t *storageShard) scanLookupOne(access scanAccess, resultCol string, return
 
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	access.preparedIndex = t.prepareIndexReadLocked(access, currentTx)
+	preparedIndex := t.prepareIndexReadLocked(access, currentTx)
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, access, len(t.deltaRows()), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, access, preparedIndex, len(t.deltaRows()), ids[:], true, func(batch []uint32) bool {
 		for _, recid := range batch {
 			var actual scm.Scmer
 			if recid < mainCount {
@@ -684,11 +684,11 @@ func (t *storageShard) scanLookupMany(access scanAccess, resultCol string, retur
 	matches := 0
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	access.preparedIndex = t.prepareIndexReadLocked(access, currentTx)
+	preparedIndex := t.prepareIndexReadLocked(access, currentTx)
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, access, len(t.deltaRows()), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, access, preparedIndex, len(t.deltaRows()), ids[:], true, func(batch []uint32) bool {
 		if stop.Load() {
 			return false
 		}
@@ -827,11 +827,11 @@ func (t *storageShard) scanLookupMapMany(access scanAccess, mapCols []string, cu
 	matches := 0
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	access.preparedIndex = t.prepareIndexReadLocked(access, currentTx)
+	preparedIndex := t.prepareIndexReadLocked(access, currentTx)
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
-	t.iterateIndexForce(currentTx, access, len(t.deltaRows()), ids[:], true, func(batch []uint32) bool {
+	t.iterateIndexForce(currentTx, access, preparedIndex, len(t.deltaRows()), ids[:], true, func(batch []uint32) bool {
 		if stop.Load() {
 			return false
 		}

@@ -796,35 +796,37 @@ func (s *StorageIndex) prepareCollationKeys(state *storageIndexState, pair index
 // The callback receives batches of record IDs and returns false to stop iteration.
 // Buffer size controls early-out granularity: use small buffers (e.g. [8]uint32)
 // for existence checks, large buffers (e.g. [1024]uint32) for full scans.
-func (t *storageShard) iterateIndex(tx *TxContext, cols scanAccess, maxInsertIndex int, buf []uint32, usageWeight float64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
-	t.iterateIndexEx(tx, cols, maxInsertIndex, buf, usageWeight, false, nil, nil, nil, selected, callback)
+// preparedIndex belongs to this shard's held GetRead capability, never a cached
+// plan. Nil lets the first invocation publish a missing index definition.
+func (t *storageShard) iterateIndex(tx *TxContext, cols scanAccess, preparedIndex *StorageIndex, maxInsertIndex int, buf []uint32, usageWeight float64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+	t.iterateIndexEx(tx, cols, preparedIndex, maxInsertIndex, buf, usageWeight, false, nil, nil, nil, selected, callback)
 }
 
 // iterateIndexEstimate additionally reports the complete candidate range found
 // by an active sorted index. Delta rows are included conservatively because
 // they are merged after the main range and may still satisfy the predicate.
-func (t *storageShard) iterateIndexEstimate(tx *TxContext, cols scanAccess, maxInsertIndex int, buf []uint32, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
-	t.iterateIndexEx(tx, cols, maxInsertIndex, buf, 0, false, nil, nil, candidateSpan, selected, callback)
+func (t *storageShard) iterateIndexEstimate(tx *TxContext, cols scanAccess, preparedIndex *StorageIndex, maxInsertIndex int, buf []uint32, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+	t.iterateIndexEx(tx, cols, preparedIndex, maxInsertIndex, buf, 0, false, nil, nil, candidateSpan, selected, callback)
 }
 
-func (t *storageShard) iterateIndexOrdered(tx *TxContext, cols scanAccess, maxInsertIndex int, buf []uint32, usageWeight float64, limit int, boundaryCoveredLimit bool, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
-	t.iterateIndexEx(tx, cols, maxInsertIndex, buf, usageWeight, false, nil, &indexIterationOptions{orderedLimit: limit, boundaryCoveredLimit: boundaryCoveredLimit}, nil, selected, callback)
+func (t *storageShard) iterateIndexOrdered(tx *TxContext, cols scanAccess, preparedIndex *StorageIndex, maxInsertIndex int, buf []uint32, usageWeight float64, limit int, boundaryCoveredLimit bool, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+	t.iterateIndexEx(tx, cols, preparedIndex, maxInsertIndex, buf, usageWeight, false, nil, &indexIterationOptions{orderedLimit: limit, boundaryCoveredLimit: boundaryCoveredLimit}, nil, selected, callback)
 }
 
-func (t *storageShard) iterateIndexForce(tx *TxContext, cols scanAccess, maxInsertIndex int, buf []uint32, countUsage bool, callback func([]uint32) bool) {
+func (t *storageShard) iterateIndexForce(tx *TxContext, cols scanAccess, preparedIndex *StorageIndex, maxInsertIndex int, buf []uint32, countUsage bool, callback func([]uint32) bool) {
 	usageWeight := 0.0
 	if countUsage {
 		usageWeight = 1.0
 	}
-	t.iterateIndexEx(tx, cols, maxInsertIndex, buf, usageWeight, true, nil, nil, nil, nil, callback)
+	t.iterateIndexEx(tx, cols, preparedIndex, maxInsertIndex, buf, usageWeight, true, nil, nil, nil, nil, callback)
 }
 
-func (t *storageShard) iterateIndexMatchAware(tx *TxContext, cols scanAccess, maxInsertIndex int, buf []uint32, countUsage bool, exactMain *bool, callback func([]uint32) bool) {
+func (t *storageShard) iterateIndexMatchAware(tx *TxContext, cols scanAccess, preparedIndex *StorageIndex, maxInsertIndex int, buf []uint32, countUsage bool, exactMain *bool, callback func([]uint32) bool) {
 	usageWeight := 0.0
 	if countUsage {
 		usageWeight = 1.0
 	}
-	t.iterateIndexEx(tx, cols, maxInsertIndex, buf, usageWeight, false, exactMain, nil, nil, nil, callback)
+	t.iterateIndexEx(tx, cols, preparedIndex, maxInsertIndex, buf, usageWeight, false, exactMain, nil, nil, nil, callback)
 }
 
 func effectiveBoundaryInclusiveness(cols scanAccess, indexBounds *scanIndexBounds) (bool, bool) {
@@ -1006,7 +1008,7 @@ func (t *storageShard) indexAccess(cols scanAccess) (scanIndexBounds, int) {
 	return indexBounds, indexCols
 }
 
-func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, preparedIndex *StorageIndex, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
 	indexBounds, indexCols := t.indexAccess(cols)
 	if exactMain != nil {
 		*exactMain = false
@@ -1015,7 +1017,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 
 	// Preparation already chose and loaded this shard's cheapest covering key.
 	// Retain it locally instead of locking and searching the directory twice.
-	if index := cols.preparedIndex; index != nil {
+	if index := preparedIndex; index != nil {
 		index.iterate(tx, cols, indexBounds, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, candidateSpan, selected, callback)
 		return
 	}

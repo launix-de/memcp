@@ -238,14 +238,12 @@ func (t *storageShard) scanAccessColumnsReady(access scanAccess) bool {
 }
 
 // ensureScanAccessColumns loads every physical source column referenced by an
-// access plan before row iteration and retains the selected index in the returned
-// shard-local access view. Exact predicates may
-// be absent from the residual filter, so its column preflight is intentionally
-// not relied upon here.
-func (t *storageShard) ensureScanAccessColumns(access scanAccess, alreadyLocked bool, currentTx *TxContext) scanAccess {
-	access.preparedIndex = nil
+// access plan before row iteration and returns the selected shard-local index.
+// Exact predicates may be absent from the residual filter, so its column
+// preflight is intentionally not relied upon here.
+func (t *storageShard) ensureScanAccessColumns(access scanAccess, alreadyLocked bool, currentTx *TxContext) *StorageIndex {
 	if access.len() == 0 {
-		return access
+		return nil
 	}
 	if !alreadyLocked {
 		t.mu.RLock()
@@ -254,13 +252,12 @@ func (t *storageShard) ensureScanAccessColumns(access scanAccess, alreadyLocked 
 			_, prefix := t.indexAccess(access)
 			if prefix == 0 {
 				t.mu.RUnlock()
-				return access
+				return nil
 			}
 			index, missing := t.leastColdIndex(access, prefix, t.indexDirectorySnapshot())
 			if index == nil || missing == 0 {
-				access.preparedIndex = index
 				t.mu.RUnlock()
-				return access
+				return index
 			}
 		}
 		t.mu.RUnlock()
@@ -280,6 +277,5 @@ func (t *storageShard) ensureScanAccessColumns(access scanAccess, alreadyLocked 
 		}
 		t.getColumnStorageOrPanic(column, alreadyLocked, currentTx)
 	}
-	access.preparedIndex = t.prepareIndexColumns(access, alreadyLocked, currentTx)
-	return access
+	return t.prepareIndexColumns(access, alreadyLocked, currentTx)
 }

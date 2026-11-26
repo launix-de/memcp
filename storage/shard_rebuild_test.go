@@ -2903,7 +2903,7 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 				lower: scm.NewString("row-00000001"), lowerInclusive: true,
 				upper: scm.NewString("row-00000001"), upperInclusive: true,
 			}})
-			access = shard.ensureScanAccessColumns(access, false, nil)
+			shard.ensureScanAccessColumns(access, false, nil)
 			// The manual cleanup below exercises CacheManager-owned ledger
 			// internals. Pause/resume its existing worker, as other ownership
 			// tests do, so this test is the sole eviction caller.
@@ -2930,7 +2930,7 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 			}
 			if engine == Safe {
 				release = shard.GetRead(nil, false)
-				access = shard.ensureScanAccessColumns(access, false, nil)
+				shard.ensureScanAccessColumns(access, false, nil)
 				if got := shard.ColumnReaderTx(nil, "payload", false, ReadAuto).GetValue(0).String(); got != "row-00000001" {
 					t.Fatalf("durable value after eviction/reload = %q", got)
 				}
@@ -3247,11 +3247,11 @@ func TestColdIndexSuffixReloadsForPrefixRead(t *testing.T) {
 			func() {
 				access := shard.GetRead(nil, false)
 				defer access.Release()
-				wide = shard.ensureScanAccessColumns(wide, false, nil)
+				preparedIndex := shard.ensureScanAccessColumns(wide, false, nil)
 				shard.mu.RLock()
 				defer shard.mu.RUnlock()
 				var buf [8]uint32
-				shard.iterateIndexForce(nil, wide, len(shard.deltaRows()), buf[:], false, func([]uint32) bool { return true })
+				shard.iterateIndexForce(nil, wide, preparedIndex, len(shard.deltaRows()), buf[:], false, func([]uint32) bool { return true })
 			}()
 			if len(shard.Indexes) != 1 || len(shard.Indexes[0].Cols) != 2 {
 				t.Fatal("fixture did not create a compound index")

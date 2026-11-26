@@ -37,7 +37,7 @@ func deltaPrefixSeek(shard *storageShard, parent int64, inclusive bool) []uint32
 	})
 	var buf [8]uint32
 	var rows []uint32
-	shard.iterateIndexForce(nil, bounds, len(shard.deltaRows()), buf[:], false, func(batch []uint32) bool { rows = append(rows, batch...); return true })
+	shard.iterateIndexForce(nil, bounds, nil, len(shard.deltaRows()), buf[:], false, func(batch []uint32) bool { rows = append(rows, batch...); return true })
 	return rows
 }
 
@@ -149,8 +149,8 @@ func TestIndexPrefixMinimizesColumnLoads(t *testing.T) {
 	shard.Indexes = []*StorageIndex{coldWide, oneColdWide}
 	lease := shard.GetRead(nil, false)
 	defer lease.Release()
-	access.preparedIndex = shard.prepareIndexColumns(access, false, nil)
-	if access.preparedIndex != oneColdWide {
+	preparedIndex := shard.prepareIndexColumns(access, false, nil)
+	if preparedIndex != oneColdWide {
 		t.Fatal("preparation did not retain its selected covering key")
 	}
 	if shard.columns["b"] == nil || shard.columns["a"] != nil || len(shard.Indexes) != 2 {

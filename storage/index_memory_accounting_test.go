@@ -60,7 +60,7 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 	bounds := analyzedBoundaries{{col: "id", matcher: EqualMatcher, lower: scm.NewInt(5), lowerInclusive: true, upper: scm.NewInt(5), upperInclusive: true}}
 	var buf [8]uint32
 	shard.mu.RLock()
-	shard.iterateIndex(nil, runtimeScanAccess(bounds), len(shard.deltaRows()), buf[:], 0, nil, func(batch []uint32) bool {
+	shard.iterateIndex(nil, runtimeScanAccess(bounds), nil, len(shard.deltaRows()), buf[:], 0, nil, func(batch []uint32) bool {
 		return true
 	})
 	shard.mu.RUnlock()
@@ -221,7 +221,7 @@ func TestIndexInvocationRetainsOrderingAfterOwnerEviction(t *testing.T) {
 	var buffer [8]uint32
 	var selectedIndex *StorageIndex
 	count, sum := 0, int64(0)
-	shard.iterateIndexEx(nil, access, len(shard.deltaRows()), buffer[:], 1, true, nil, nil, nil,
+	shard.iterateIndexEx(nil, access, nil, len(shard.deltaRows()), buffer[:], 1, true, nil, nil, nil,
 		func(index *StorageIndex, indexed bool) {
 			if !indexed || !indexCleanup(index, nil) {
 				t.Fatal("fixture did not evict the selected index after invocation setup")

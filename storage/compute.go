@@ -761,7 +761,8 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			if !ok {
 				return
 			}
-			scanAccess := s.ensureScanAccessColumns(runtimeScanAccess(bounds), false, nil)
+			scanAccess := runtimeScanAccess(bounds)
+			preparedIndex := s.ensureScanAccessColumns(scanAccess, false, nil)
 			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
 			// Retain index and column-directory ownership during invalidation.
@@ -771,7 +772,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			for i := 0; i < nCols; i++ {
 				sortCSs[i] = s.columns[col.OrcSortCols[i]]
 			}
-			s.iterateIndex(nil, scanAccess, len(s.deltaRows()), buf[:], 1, nil, func(batch []uint32) bool {
+			s.iterateIndex(nil, scanAccess, preparedIndex, len(s.deltaRows()), buf[:], 1, nil, func(batch []uint32) bool {
 				for _, idx := range batch {
 					if s.deletions.Get(uint(idx)) {
 						continue

@@ -2050,7 +2050,7 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock, currentTx)
-	access = t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
+	preparedIndex := t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(access, t.t, conditionCols, condition)
 
 	var ccols []ColumnStorage
@@ -2114,7 +2114,7 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 
 	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(uniquePointScanBufferSize)
 	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
-	t.iterateIndex(currentTx, access, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
+	t.iterateIndex(currentTx, access, preparedIndex, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 		if stop != nil && stop.Load() {
 			return false
 		}
@@ -2245,7 +2245,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	// ensureMainCount then loads at least one column to initialize main_count.
 	t.ensureLoaded()
 	t.ensureMainCount(false, currentTx)
-	access = t.ensureScanAccessColumns(access, false, currentTx)
+	preparedIndex := t.ensureScanAccessColumns(access, false, currentTx)
 	// Most scans do not read an ordered computed column. Keep discovery on the
 	// caller's stack and inspect the two existing column slices directly, so the
 	// correctness preflight below adds no heap work to an ordinary scan.
@@ -2449,7 +2449,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 		candidateSpan = &filterHorizon.span
 		selectedIndex = func(_ *StorageIndex, active bool) { filterHorizon.active = active }
 	}
-	t.iterateIndexEx(currentTx, access, maxInsertIndex, buf, 1, false, nil, nil, candidateSpan,
+	t.iterateIndexEx(currentTx, access, preparedIndex, maxInsertIndex, buf, 1, false, nil, nil, candidateSpan,
 		selectedIndex, func(batch []uint32) bool {
 			if filterHorizon != nil && !filterHorizon.attempted {
 				filterHorizon.attempted = true
@@ -2653,7 +2653,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
 	t.ensureMainCount(skipShardReadLock, currentTx)
-	access = t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
+	preparedIndex := t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(access, t.t, conditionCols, condition)
 
 	var ccols []ColumnStorage
@@ -2747,7 +2747,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 		}
 		currentBoundaries := access.withBatch(stride, batchdata, batchid)
 
-		t.iterateIndex(currentTx, currentBoundaries, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
+		t.iterateIndex(currentTx, currentBoundaries, preparedIndex, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 			candidateCount += int64(len(batch))
 			outN := t.filterVisibleBatchedScanBatch(batch, batchBuf[:], uint32(batchid), visibleUpper, hasMutationCallback, currentTx, mutationSeen)
 			if !conditionAlwaysTrue {
