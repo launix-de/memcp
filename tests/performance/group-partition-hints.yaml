@@ -25,9 +25,9 @@ setup:
 
 test_cases:
   - name: Correlated ID and time group initialization
-    # Eleven fresh targets retain the original first cold initialization.
-    # Existing targets would be warm no-ops and must return false, failing
-    # the complete result vector. Keep zero warmups and the same total budget.
+    # 101 fresh targets retain the original first cold initialization.
+    # Existing targets return false, so any warm no-op fails the complete
+    # result vector. Keep zero warmups and the same total budget.
     performance_rows: 60000
     warmup: 0
     timing_samples: 1
@@ -37,7 +37,7 @@ test_cases:
     setup:
       - scm: '(settings "ShardSize" 12000)'
       - scm: |
-          (map (produceN 10) (lambda (i)
+          (map (produceN 100) (lambda (i)
             (createtable "memcp-tests" (concat "partition_hint_diagonal_cold_" (+ i 1))
               (map '("k0" "k1") (lambda (key)
                 (list "column" key "INT" '() '())))
@@ -45,21 +45,21 @@ test_cases:
     scm: |
       (begin
         (define cold_results
-          (map (produceN 11) (lambda (i)
+          (map (produceN 101) (lambda (i)
             (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
               '("s" "memcp-tests" "partition_hint_source" false true)
               (if (equal? i 0) "partition_hint_diagonal" (concat "partition_hint_diagonal_cold_" i))
               (list (list 'get_column "s" false "id" false) (list 'get_column "s" false "event_time" false))
               '("k0" "k1")))
           )))
-        (if (equal? cold_results '(true true true true true true true true true true true))
+        (if (equal? cold_results (map (produceN 101) (lambda (i) true)))
           true (error "cold group initialization reused or failed a target")))
     expect: {data: [true]}
 
   - name: Independent three-dimensional group initialization
-    # Eleven fresh targets retain the original first cold initialization.
-    # Existing targets would be warm no-ops and must return false, failing
-    # the complete result vector. Keep zero warmups and the same total budget.
+    # 101 fresh targets retain the original first cold initialization.
+    # Existing targets return false, so any warm no-op fails the complete
+    # result vector. Keep zero warmups and the same total budget.
     performance_rows: 60000
     warmup: 0
     timing_samples: 1
@@ -69,7 +69,7 @@ test_cases:
     setup:
       - scm: '(settings "ShardSize" 12000)'
       - scm: |
-          (map (produceN 10) (lambda (i)
+          (map (produceN 100) (lambda (i)
             (createtable "memcp-tests" (concat "partition_hint_uniform_cold_" (+ i 1))
               (map '("k0" "k1" "k2") (lambda (key)
                 (list "column" key "INT" '() '())))
@@ -77,21 +77,21 @@ test_cases:
     scm: |
       (begin
         (define cold_results
-          (map (produceN 11) (lambda (i)
+          (map (produceN 101) (lambda (i)
             (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
               '("s" "memcp-tests" "partition_hint_source" false true)
               (if (equal? i 0) "partition_hint_uniform" (concat "partition_hint_uniform_cold_" i))
               (list (list 'get_column "s" false "a" false) (list 'get_column "s" false "b" false) (list 'get_column "s" false "c" false))
               '("k0" "k1" "k2")))
           )))
-        (if (equal? cold_results '(true true true true true true true true true true true))
+        (if (equal? cold_results (map (produceN 101) (lambda (i) true)))
           true (error "cold group initialization reused or failed a target")))
     expect: {data: [true]}
 
   - name: Oversized three-dimensional group initialization
-    # Eleven fresh targets retain the original first cold initialization.
-    # Existing targets would be warm no-ops and must return false, failing
-    # the complete result vector. Keep zero warmups and the same total budget.
+    # 101 fresh targets retain the original first cold initialization.
+    # Existing targets return false, so any warm no-op fails the complete
+    # result vector. Keep zero warmups and the same total budget.
     performance_rows: 60000
     warmup: 0
     timing_samples: 1
@@ -101,7 +101,7 @@ test_cases:
     setup:
       - scm: '(settings "ShardSize" 4000)'
       - scm: |
-          (map (produceN 10) (lambda (i)
+          (map (produceN 100) (lambda (i)
             (createtable "memcp-tests" (concat "partition_hint_oversized_cold_" (+ i 1))
               (map '("k0" "k1" "k2") (lambda (key)
                 (list "column" key "INT" '() '())))
@@ -109,21 +109,21 @@ test_cases:
     scm: |
       (begin
         (define cold_results
-          (map (produceN 11) (lambda (i)
+          (map (produceN 101) (lambda (i)
             (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
               '("s" "memcp-tests" "partition_hint_source" false true)
               (if (equal? i 0) "partition_hint_oversized" (concat "partition_hint_oversized_cold_" i))
               (list (list 'get_column "s" false "a" false) (list 'get_column "s" false "b" false) (list 'get_column "s" false "c" false))
               '("k0" "k1" "k2")))
           )))
-        (if (equal? cold_results '(true true true true true true true true true true true))
+        (if (equal? cold_results (map (produceN 101) (lambda (i) true)))
           true (error "cold group initialization reused or failed a target")))
     expect: {data: [true]}
 
 cleanup:
   - scm: |
       (map '("partition_hint_diagonal" "partition_hint_uniform" "partition_hint_oversized")
-        (lambda (prefix) (map (produceN 10) (lambda (i)
+        (lambda (prefix) (map (produceN 100) (lambda (i)
           (droptable "memcp-tests" (concat prefix "_cold_" (+ i 1)) true)))))
   - scm: '(settings "ShardSize" 60000)'
   - sql: DROP TABLE IF EXISTS partition_hint_oversized
