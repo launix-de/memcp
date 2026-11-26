@@ -11,10 +11,12 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 
 package storage
 
+import "io"
 import "os"
 import "fmt"
 import "sync"
 import "time"
+import "bytes"
 import "testing"
 import "context"
 import "encoding/json"
@@ -1457,5 +1459,128 @@ func TestReplicationConnectionReadyAfterAllCachedBindings(t *testing.T) {
 		if peer.outgoing.len() != 0 {
 			t.Fatal("completed binding was sent again")
 		}
+	}
+}
+
+// A split can publish an additional UUID after the native topology was
+// collected. Its own live rights must still cross the reconnect handshake.
+func TestReplicationRecoveryInventoryIncludesNewPartitionAuthority(t *testing.T) {
+	r := replicaRecoveryFixture()
+	r.master = false
+	resource := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	cell := r.resourceCell(resource)
+	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, Owner: r.id, Epoch: 1, State: "M"}
+	cell.clusterstate.Initialize(mosi.M)
+	cell.current.Store(&storageShard{uuid: uuid.MustParse(resource.Shard)})
+	cell.ownstate.Publish(mosi.IO) // delegated local executor; outward M survives
+	records := r.recoveryInventorySnapshot(map[string]replicaRecord{}, func(name string) bool { return name == "tenant" })
+	if len(records) != 1 || records[0].Resource != resource || records[0].Owner != r.id || records[0].State != "M" || records[0].Content != resource.Shard {
+		t.Fatalf("new native partition lost its independent authority: %+v", records)
+	}
+	if cell.ownstate.Phase() != mosi.IO {
+		t.Fatal("inventory acquired local read rights")
+	}
+}
+
+func TestReplicationRecoveryInventoryDoesNotPromoteUnlistedPlacements(t *testing.T) {
+	r := replicaRecoveryFixture()
+	resource := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	cell := r.resourceCell(resource)
+	cell.current.Store(&storageShard{uuid: uuid.MustParse(resource.Shard)})
+	r.backups[resource.key()] = replicaBackup{Resource: resource, Content: resource.Shard}
+	r.directory.Records[resource.key()] = replicaRecord{Resource: resource, Owner: r.id, Epoch: 7, Content: resource.Shard}
+	records := r.recoveryInventorySnapshot(map[string]replicaRecord{}, func(name string) bool { return name == "tenant" })
+	if len(records) != 0 {
+		t.Fatalf("placement became an authority report: %+v", records)
+	}
+	cell.clusterstate.Initialize(mosi.M)
+	records = r.recoveryInventorySnapshot(map[string]replicaRecord{}, func(string) bool { return false })
+	if len(records) != 0 {
+		t.Fatalf("inventory bypassed database authentication: %+v", records)
+	}
+}
+
+func TestReplicationSlaveCleanupRetainsCompletedLocalGeneration(t *testing.T) {
+	table, engine := createDurabilityTestTable(t, "treplication_slave_gc", 3)
+	table.schema.rebuild(true, false, false, table)
+	original := table.ActiveShards()[0]
+	private := NewShard(table)
+	table.mu.Lock()
+	table.Shards = []*storageShard{private}
+	table.publishTopologyLocked()
+	table.mu.Unlock()
+	table.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(703), scm.NewString("acknowledged")}}, nil, scm.NewNil(), false, nil)
+	completed := private.rebuild(true)
+	table.mu.Lock()
+	table.Shards = []*storageShard{original}
+	table.publishTopologyLocked()
+	table.mu.Unlock()
+	r := replicaRecoveryFixture()
+	r.master = false
+	resource := r.shardResource(completed)
+	if err := r.saveBackup(resource, completed.uuid.String()); err != nil {
+		t.Fatal(err)
+	}
+	read := func() []byte {
+		reader := engine.ReadColumn(completed.uuid.String(), "id")
+		defer reader.Close()
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			t.Fatal("completed local generation is unreadable", err)
+		}
+		return data
+	}
+	before := read()
+	previous := replication.Swap(r)
+	defer replication.Store(previous)
+	cleanShards(table.schema)
+	if after := read(); !bytes.Equal(before, after) || len(after) == 0 {
+		t.Fatal("slave cleanup removed independently completed data before catalog checkpoint")
+	}
+	if r.resourceCell(resource).ownstate.Initialized() {
+		t.Fatal("placement retention manufactured MOSI authority")
+	}
+}
+
+func TestReplicationCreatedResourceAnnouncementUsesLiveRights(t *testing.T) {
+	leaf := replicaRecoveryFixture()
+	leaf.master = false
+	data := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	cell := leaf.resourceCell(data)
+	cell.clusterstate.Initialize(mosi.M)
+	leaf.directory.Records[data.key()] = replicaRecord{Resource: data, Owner: leaf.id, State: "M", Epoch: 1}
+	master := replicaRecoveryFixture()
+	master.restoring[data.Database] = true
+	master.directory.Records[data.key()] = replicaRecord{Resource: data, State: "IO", Epoch: 1}
+	placement := replicaRecord{Resource: data, Content: data.Shard}
+	auth := replicaAuth{Databases: map[string]bool{data.Database: true}}
+	if _, err := master.recoverPeer(context.Background(), leaf.id, replicaRequest{Boot: leaf.boot, Resources: []replicaRecord{placement}}, auth); err != nil {
+		t.Fatal(err)
+	}
+	if master.resourceKnown(data) {
+		t.Fatal("placement report established authority")
+	}
+	reports := leaf.createdResourceInventory(data.Database)
+	if len(reports) != 1 || reports[0].Resource != data || reports[0].State != "M" || !reports[0].InitialClaimed {
+		t.Fatalf("missing live creation proof: %+v", reports)
+	}
+	reply, err := master.recoverPeer(context.Background(), leaf.id, replicaRequest{Boot: leaf.boot, Resources: reports}, auth)
+	if err != nil || len(reply.Resources) != 1 || reply.Resources[0].Owner != leaf.id || !reply.Resources[0].InitialClaimed {
+		t.Fatal("creation report was not accepted", reply, err)
+	}
+	if !master.resourceKnown(data) || master.resourceCell(data).ownstate.Phase() != mosi.IO {
+		t.Fatal("owner was omitted or its backup was promoted")
+	}
+	if len(leaf.createdResourceInventory("another_tenant")) != 0 {
+		t.Fatal("creation report crossed database scope")
+	}
+	leaf.updateRecord(data, func(record *replicaRecord) bool { record.InitialClaimed = true; return true })
+	if len(leaf.createdResourceInventory(data.Database)) != 0 {
+		t.Fatal("acknowledged creation was repeatedly announced")
+	}
+	leaf.updateRecord(data, func(record *replicaRecord) bool { record.InitialClaimed = false; return true })
+	leaf.resourceCell(data).clusterstate.Publish(mosi.IO)
+	if len(leaf.createdResourceInventory(data.Database)) != 0 {
+		t.Fatal("invalid placement became a creation proof")
 	}
 }
