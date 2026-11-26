@@ -927,10 +927,10 @@ func (t *storageShard) leastColdIndex(cols scanAccess, prefix int, indexes []*St
 // existing GetRead lease keeps this directory resident through iteration.
 // A concurrently appended covering definition is safe too: publication occurs
 // only after its requesting scan has loaded every source under its own lease.
-func (t *storageShard) prepareIndexColumns(cols scanAccess, alreadyLocked bool, tx *TxContext) {
+func (t *storageShard) prepareIndexColumns(cols scanAccess, alreadyLocked bool, tx *TxContext) *StorageIndex {
 	_, prefix := t.indexAccess(cols)
 	if prefix == 0 {
-		return
+		return nil
 	}
 	var index *StorageIndex
 	var missing int
@@ -942,12 +942,37 @@ func (t *storageShard) prepareIndexColumns(cols scanAccess, alreadyLocked bool, 
 		index, missing = t.leastColdIndex(cols, prefix, t.indexDirectorySnapshot())
 	}()
 	if index == nil || missing == 0 {
-		return
+		return index
 	}
 	var inline [16]string
 	for _, name := range index.sourceColumns(inline[:0]) {
 		t.getColumnStorageOrPanic(name, alreadyLocked, tx)
 	}
+	return index
+}
+
+// prepareIndexReadLocked is the point-probe preparation boundary. The caller
+// holds its row read lock but has not observed row extents or started iteration.
+// Reuse that lock for selection; a cold load temporarily releases it while the
+// existing GetRead lease retains all already-bound source storages.
+func (t *storageShard) prepareIndexReadLocked(cols scanAccess, tx *TxContext) *StorageIndex {
+	_, prefix := t.indexAccess(cols)
+	if prefix == 0 {
+		return nil
+	}
+	index, missing := t.leastColdIndex(cols, prefix, t.indexDirectorySnapshot())
+	if index != nil && missing > 0 {
+		func() {
+			t.mu.RUnlock()
+			// Restore the caller's lock even if loading is cancelled or fails.
+			defer t.mu.RLock()
+			var inline [16]string
+			for _, name := range index.sourceColumns(inline[:0]) {
+				t.getColumnStorageOrPanic(name, false, tx)
+			}
+		}()
+	}
+	return index
 }
 
 // indexAccess describes the complete reusable key prefix, excluding query-local
@@ -987,6 +1012,13 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols scanAccess, maxInsertI
 		*exactMain = false
 	}
 	lowerIncl, upperIncl := effectiveBoundaryInclusiveness(cols, &indexBounds)
+
+	// Preparation already chose and loaded this shard's cheapest covering key.
+	// Retain it locally instead of locking and searching the directory twice.
+	if index := cols.preparedIndex; index != nil {
+		index.iterate(tx, cols, indexBounds, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, candidateSpan, selected, callback)
+		return
+	}
 
 	// check if we found conditions
 	if indexBounds.len() > 0 {

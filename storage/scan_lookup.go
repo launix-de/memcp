@@ -355,10 +355,9 @@ func (t *storageShard) scanLookupMapOne(access scanAccess, mapCols []string, cur
 
 	var values []scm.Scmer
 	matches := 0
-	t.prepareIndexColumns(access, false, currentTx)
-
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+	access.preparedIndex = t.prepareIndexReadLocked(access, currentTx)
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
@@ -517,10 +516,9 @@ func (t *storageShard) scanLookupOne(access scanAccess, resultCol string, return
 	result := scm.NewBool(false)
 	matches := 0
 
-	t.prepareIndexColumns(access, false, currentTx)
-
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+	access.preparedIndex = t.prepareIndexReadLocked(access, currentTx)
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
@@ -684,10 +682,9 @@ func (t *storageShard) scanLookupMany(access scanAccess, resultCol string, retur
 
 	result := scm.NewBool(false)
 	matches := 0
-	t.prepareIndexColumns(access, false, currentTx)
-
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+	access.preparedIndex = t.prepareIndexReadLocked(access, currentTx)
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32
@@ -828,10 +825,9 @@ func (t *storageShard) scanLookupMapMany(access scanAccess, mapCols []string, cu
 
 	var values []scm.Scmer
 	matches := 0
-	t.prepareIndexColumns(access, false, currentTx)
-
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+	access.preparedIndex = t.prepareIndexReadLocked(access, currentTx)
 	mainCount := t.main_count
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	var ids [8]uint32

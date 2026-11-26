@@ -3751,8 +3751,6 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 	} else {
 		mcols = make([]ColumnStorage, columns)
 	}
-	t.prepareIndexColumns(access, false, currentTx)
-
 	t.mu.RLock()
 	ready := true
 	if t.main_count == 0 {
@@ -3785,6 +3783,7 @@ func (t *storageShard) GetRecordidForUnique(access scanAccess, currentTx *TxCont
 		t.mu.RLock()
 	}
 	defer t.mu.RUnlock()
+	access.preparedIndex = t.prepareIndexReadLocked(access, currentTx)
 
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 
@@ -3869,7 +3868,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	if bounds.impossible() {
 		return filteredRowEstimate{population: "shard_rows", coverage: "exact"}
 	}
-	t.ensureScanAccessColumns(bounds, false, currentTx)
+	bounds = t.ensureScanAccessColumns(bounds, false, currentTx)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(bounds, t.t, conditionCols, condition)
 	for i, col := range conditionCols {
 		if col == "$recset_contains" {

@@ -211,11 +211,61 @@ func touchTempColumns(t *table, colSets ...[]string) {
 	}
 }
 
+// scanAccessColumnsReady runs inside the caller's existing preparation snapshot.
+// Warm preparation needs one shard read lock, not a lock per source column.
+func (t *storageShard) scanAccessColumnsReady(access scanAccess) bool {
+	for i := 0; i < access.len(); i++ {
+		mapCols, _ := access.boundaryMap(i)
+		if len(mapCols) > 0 {
+			for _, name := range mapCols {
+				column := t.columns[name]
+				if column == nil || t.needsRuntimeAttach(name, column) {
+					return false
+				}
+			}
+			continue
+		}
+		name := access.boundaryColumn(i)
+		if name == "" || name[0] == '$' {
+			continue
+		}
+		column := t.columns[name]
+		if column == nil || t.needsRuntimeAttach(name, column) {
+			return false
+		}
+	}
+	return true
+}
+
 // ensureScanAccessColumns loads every physical source column referenced by an
-// access plan before the scan takes the shard read lock. Exact predicates may
+// access plan before row iteration and retains the selected index in the returned
+// shard-local access view. Exact predicates may
 // be absent from the residual filter, so its column preflight is intentionally
 // not relied upon here.
-func (t *storageShard) ensureScanAccessColumns(access scanAccess, alreadyLocked bool, currentTx *TxContext) {
+func (t *storageShard) ensureScanAccessColumns(access scanAccess, alreadyLocked bool, currentTx *TxContext) scanAccess {
+	access.preparedIndex = nil
+	if access.len() == 0 {
+		return access
+	}
+	if !alreadyLocked {
+		t.mu.RLock()
+		ready := t.scanAccessColumnsReady(access)
+		if ready {
+			_, prefix := t.indexAccess(access)
+			if prefix == 0 {
+				t.mu.RUnlock()
+				return access
+			}
+			index, missing := t.leastColdIndex(access, prefix, t.indexDirectorySnapshot())
+			if index == nil || missing == 0 {
+				access.preparedIndex = index
+				t.mu.RUnlock()
+				return access
+			}
+		}
+		t.mu.RUnlock()
+	}
+
 	for i := 0; i < access.len(); i++ {
 		mapCols, _ := access.boundaryMap(i)
 		if len(mapCols) > 0 {
@@ -230,5 +280,6 @@ func (t *storageShard) ensureScanAccessColumns(access scanAccess, alreadyLocked 
 		}
 		t.getColumnStorageOrPanic(column, alreadyLocked, currentTx)
 	}
-	t.prepareIndexColumns(access, alreadyLocked, currentTx)
+	access.preparedIndex = t.prepareIndexColumns(access, alreadyLocked, currentTx)
+	return access
 }

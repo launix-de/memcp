@@ -1995,7 +1995,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 	result.shard = t
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
-	t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
+	access = t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}

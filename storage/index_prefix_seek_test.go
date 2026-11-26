@@ -149,7 +149,10 @@ func TestIndexPrefixMinimizesColumnLoads(t *testing.T) {
 	shard.Indexes = []*StorageIndex{coldWide, oneColdWide}
 	lease := shard.GetRead(nil, false)
 	defer lease.Release()
-	shard.prepareIndexColumns(access, false, nil)
+	access.preparedIndex = shard.prepareIndexColumns(access, false, nil)
+	if access.preparedIndex != oneColdWide {
+		t.Fatal("preparation did not retain its selected covering key")
+	}
 	if shard.columns["b"] == nil || shard.columns["a"] != nil || len(shard.Indexes) != 2 {
 		t.Fatal("preparation loaded an avoidable column or created a duplicate index")
 	}

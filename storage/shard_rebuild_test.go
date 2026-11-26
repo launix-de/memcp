@@ -2903,7 +2903,7 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 				lower: scm.NewString("row-00000001"), lowerInclusive: true,
 				upper: scm.NewString("row-00000001"), upperInclusive: true,
 			}})
-			shard.ensureScanAccessColumns(access, false, nil)
+			access = shard.ensureScanAccessColumns(access, false, nil)
 			// The manual cleanup below exercises CacheManager-owned ledger
 			// internals. Pause/resume its existing worker, as other ownership
 			// tests do, so this test is the sole eviction caller.
@@ -2930,7 +2930,7 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 			}
 			if engine == Safe {
 				release = shard.GetRead(nil, false)
-				shard.ensureScanAccessColumns(access, false, nil)
+				access = shard.ensureScanAccessColumns(access, false, nil)
 				if got := shard.ColumnReaderTx(nil, "payload", false, ReadAuto).GetValue(0).String(); got != "row-00000001" {
 					t.Fatalf("durable value after eviction/reload = %q", got)
 				}
@@ -3230,10 +3230,10 @@ func TestEnsureMainCountDoesNotRaceColdColumnLoad(t *testing.T) {
 }
 
 // Eviction keeps consolidated definitions but unloads their source columns.
-// A later prefix read must load the chosen suffix before acquiring its row lock,
+// A later prefix read must load the chosen suffix before binding index getters,
 // even though that read correctly holds GetRead throughout preparation and use.
 func TestColdIndexSuffixReloadsForPrefixRead(t *testing.T) {
-	for _, mode := range []string{"exists", "lookup", "lookup-many", "map", "map-many", "unique", "warm-prefix"} {
+	for _, mode := range []string{"exists", "lookup", "lookup-many", "map", "map-many", "unique", "warm-prefix", "cancelled-lookup", "cancelled-unique"} {
 		t.Run(mode, func(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
 			if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
@@ -3247,7 +3247,7 @@ func TestColdIndexSuffixReloadsForPrefixRead(t *testing.T) {
 			func() {
 				access := shard.GetRead(nil, false)
 				defer access.Release()
-				shard.ensureScanAccessColumns(wide, false, nil)
+				wide = shard.ensureScanAccessColumns(wide, false, nil)
 				shard.mu.RLock()
 				defer shard.mu.RUnlock()
 				var buf [8]uint32
@@ -3279,6 +3279,35 @@ func TestColdIndexSuffixReloadsForPrefixRead(t *testing.T) {
 			prefix := runtimeScanAccess(analyzedBoundaries{
 				{col: "id", matcher: EqualMatcher, lower: scm.NewInt(1), upper: scm.NewInt(1), lowerInclusive: true, upperInclusive: true},
 			})
+			if strings.HasPrefix(mode, "cancelled-") {
+				ss := &scm.SessionState{}
+				seq := ss.BeginQuery("Query", "cancelled cold index suffix")
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				ss.SetQueryContext(seq, ctx)
+				tx := NewTxContext(TxCursorStability)
+				tx.beginQuery(ss, seq, "cancelled cold index suffix")
+				defer tx.endQuery(seq)
+				defer ss.EndQuery(seq, "Sleep", "")
+				cancel()
+				var failure any
+				func() {
+					defer func() { failure = recover() }()
+					if mode == "cancelled-unique" {
+						shard.GetRecordidForUnique(prefix, tx, false)
+					} else {
+						shard.scanLookupOne(prefix, "", false, tx)
+					}
+				}()
+				if failure != "query killed" {
+					t.Fatalf("cancelled suffix load = %v, want query killed", failure)
+				}
+				if !shard.mu.TryLock() {
+					t.Fatal("cancelled suffix load leaked the caller's shard read lock")
+				}
+				shard.mu.Unlock()
+				return
+			}
 			count := 0
 			switch mode {
 			case "exists", "warm-prefix":

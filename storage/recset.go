@@ -569,7 +569,7 @@ func (t *storageShard) collectRecSet(access scanAccess, conditionCols []string, 
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock, currentTx)
-	t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
+	access = t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(access, t.t, conditionCols, condition)
 
 	var ccols []ColumnStorage
@@ -1225,15 +1225,31 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 		}
 	}
 
-	if !alreadyLocked && keys.count() > 0 {
+	// All tuples use one physical prefix. Freeze its column order once so
+	// preparation and every probe use the same definition and loaded sources.
+	var bounds analyzedBoundaries
+	var keyOrder []int
+	var preparedIndex *StorageIndex
+	if keys.count() > 0 {
 		key := keys.tuple(0)
-		bounds := make(analyzedBoundaries, len(targetKeyCols))
+		bounds = make(analyzedBoundaries, len(targetKeyCols))
+		keyOrder = make([]int, len(targetKeyCols))
 		for i, col := range targetKeyCols {
 			bounds[i] = analyzedBoundary{col: col, matcher: EqualMatcher,
 				lower: key[i], upper: key[i], lowerInclusive: true, upperInclusive: true}
 		}
 		reorderByFrequency(bounds, t.t)
-		t.prepareIndexColumns(runtimeScanAccess(bounds), skipShardReadLock, currentTx)
+		for i, boundary := range bounds {
+			for j, column := range targetKeyCols {
+				if boundary.col == column {
+					keyOrder[i] = j
+					break
+				}
+			}
+		}
+		if !alreadyLocked {
+			preparedIndex = t.prepareIndexColumns(runtimeScanAccess(bounds), skipShardReadLock, currentTx)
+		}
 	}
 
 	locked := false
@@ -1294,19 +1310,12 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 	var buf [1024]uint32
 	for keyIndex := 0; keyIndex < keys.count(); keyIndex++ {
 		key := keys.tuple(keyIndex)
-		bounds := make(analyzedBoundaries, len(targetKeyCols))
-		for i, col := range targetKeyCols {
-			bounds[i] = analyzedBoundary{
-				col:            col,
-				matcher:        EqualMatcher,
-				lower:          key[i],
-				lowerInclusive: true,
-				upper:          key[i],
-				upperInclusive: true,
-			}
+		for i, slot := range keyOrder {
+			bounds[i].lower, bounds[i].upper = key[slot], key[slot]
 		}
-		reorderByFrequency(bounds, t.t)
-		t.iterateIndexForce(currentTx, runtimeScanAccess(bounds), maxInsertIndex, buf[:], true, func(batch []uint32) bool {
+		access := runtimeScanAccess(bounds)
+		access.preparedIndex = preparedIndex
+		t.iterateIndexForce(currentTx, access, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
 			for _, idx := range batch {
 				if idx >= visibleUpper {
 					continue
@@ -1630,7 +1639,7 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock, currentTx)
-	t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
+	access = t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	// Keep RecSet narrowing on the ordinary index-boundary path. The exact
 	// RecSet matcher and approximate hooks such as Bigram LIKE then prune the
 	// same candidate batches before the residual predicate reads any columns.

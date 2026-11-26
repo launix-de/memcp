@@ -2050,7 +2050,7 @@ func (t *storageShard) scanFirstRecord(access scanAccess, conditionCols []string
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock, currentTx)
-	t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
+	access = t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(access, t.t, conditionCols, condition)
 
 	var ccols []ColumnStorage
@@ -2245,7 +2245,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	// ensureMainCount then loads at least one column to initialize main_count.
 	t.ensureLoaded()
 	t.ensureMainCount(false, currentTx)
-	t.ensureScanAccessColumns(access, false, currentTx)
+	access = t.ensureScanAccessColumns(access, false, currentTx)
 	// Most scans do not read an ordered computed column. Keep discovery on the
 	// caller's stack and inspect the two existing column slices directly, so the
 	// correctness preflight below adds no heap work to an ordinary scan.
@@ -2653,7 +2653,7 @@ func (t *storageShard) scanBatch(access scanAccess, conditionCols []string, cond
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
 	t.ensureMainCount(skipShardReadLock, currentTx)
-	t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
+	access = t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(access, t.t, conditionCols, condition)
 
 	var ccols []ColumnStorage
