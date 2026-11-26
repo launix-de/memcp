@@ -1,0 +1,211 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Execution-local physical table bindings and reusable query lifetimes
+setup:
+- sql: DROP TABLE IF EXISTS handle_left
+- sql: DROP TABLE IF EXISTS handle_right
+- sql: CREATE TABLE handle_left (id INT, k INT)
+- sql: CREATE TABLE handle_right (k INT, value INT)
+- sql: INSERT INTO handle_left VALUES (1,10),(2,20),(3,10)
+- sql: INSERT INTO handle_right VALUES (10,100),(10,101),(20,200)
+cleanup:
+- sql: DROP TABLE IF EXISTS handle_left
+- sql: DROP TABLE IF EXISTS handle_right
+- sql: DROP TABLE IF EXISTS handle_renamed
+test_cases:
+- name: literal sources bind once outside nested row callbacks
+  scm: |
+    (begin
+      (define source (list (symbol "table") "memcp-tests" false "handle_right" false))
+      (define handle (physical_table_binding_name source))
+      (define mapper (scheme "(lambda (v) v)"))
+      (define inner (list (symbol "scan") (symbol "tx") source nil nil mapper))
+      (define input (list (symbol "scan") (symbol "tx") source nil nil (list (symbol "lambda") (list (symbol "row")) inner)))
+      (define expected (list (symbol "!begin") (list (symbol "define") handle source)
+        (list (symbol "scan") (symbol "tx") handle nil nil
+          (list (symbol "lambda") (list (symbol "row"))
+            (list (symbol "scan") (symbol "tx") handle nil nil mapper)))))
+      (if (expression_equal? (expression_syntax (bind_physical_table_handles input)) expected) "ok" (error "unbound or duplicated source")))
+  expect: {data: [ok]}
+- name: native operator heads receive the same invocation-local treatment
+  scm: |
+    (begin
+      (define source (list table "memcp-tests" false "handle_right" false))
+      (define mapper (scheme "(lambda (v) v)"))
+      (define inner (list scan nil source nil nil mapper))
+      (define input (list scan nil source nil nil (list (symbol "lambda") (list (symbol "row")) inner)))
+      (define bound (bind_physical_table_handles input))
+      (if (and (equal? (count bound) 3)
+        (expression_equal? (nth (nth bound 1) 1) (physical_table_binding_name source)))
+        "ok" (error "native source was not bound")))
+  expect: {data: [ok]}
+- name: optimized nested scans resolve a shared source once per invocation
+  scm: |
+    (begin
+      (define calls (newsession))
+      (define lookup (lambda (db db_ci name name_ci) (begin
+        (calls "n" (+ (coalesceNil (calls "n") 0) 1))
+        (table db db_ci name name_ci))))
+      (define source (list (symbol "table") "memcp-tests" false "handle_left" false))
+      (define filter (scheme "(lambda () true)"))
+      (define inner (list scan nil source '() '() '() filter (list (symbol "quote") '("id"))
+        (scheme "(lambda (acc id) (+ acc 1))") 0 + false))
+      (define mapper (list (symbol "lambda") (map '("acc" "id") symbol) (list + (symbol "acc") inner)))
+      (define plan (list scan nil source '() '() '() filter (list (symbol "quote") '("id")) mapper 0 + false))
+      (define compile (lambda (body) (eval (optimize (list (symbol "lambda") (list (symbol "table")) body)))))
+      (define immediate_plan (list scan nil source '() '() '() filter (list (symbol "quote") '("id"))
+        (list (symbol "lambda") (map '("acc" "id") symbol)
+          (list + (symbol "acc") (list (list (symbol "lambda") '() inner)))) 0 + false))
+      (define immediate (compile (bind_physical_table_handles immediate_plan)))
+      (define original (compile plan))
+      (define bound (compile (bind_physical_table_handles plan)))
+      (define original_result (original lookup))
+      (define original_calls (calls "n"))
+      (calls "n" 0)
+      (define first (bound lookup))
+      (define first_calls (calls "n"))
+      (define second (bound lookup))
+      (define repeated_calls (calls "n"))
+      (calls "n" 0)
+      (define immediate_result (immediate lookup))
+      (if (and (equal? immediate_result 9) (equal? (calls "n") 1)
+        (equal? original_result 9) (equal? original_calls 4)
+        (equal? first 9) (equal? first_calls 1) (equal? second 9) (equal? repeated_calls 2))
+        "ok" (error (concat "lookup counts: " original_calls " / " first_calls " / " (calls "n")))))
+  expect: {data: [ok]}
+- name: dynamic and generated sources retain their evaluation scope
+  scm: |
+    (begin
+      (define input (list (symbol "scan") (symbol "tx")
+        (list (symbol "table") (symbol "schema") false (symbol "name") false) nil nil
+        (list (symbol "lambda") (list (symbol "row"))
+          (list (symbol "scan") (symbol "tx")
+            (list (symbol "table") "memcp-tests" false ".generated" false) nil nil (scheme "(lambda (v) v)")))))
+      (if (expression_equal? (expression_syntax (bind_physical_table_handles input)) input) "ok" (error "dynamic source was moved")))
+  expect: {data: [ok]}
+- name: quoted code remains inert and stored recipes own their handles
+  scm: |
+    (begin
+      (define quoted (scheme "(quote (scan tx (table \"memcp-tests\" false \"handle_right\" false)))"))
+      (define scan_expr (list (symbol "scan") (symbol "tx")
+        (list (symbol "table") "memcp-tests" false "handle_right" false) nil nil (scheme "(lambda (v) v)")))
+      (define nested (list (symbol "scan") (symbol "tx")
+        (list (symbol "table") "memcp-tests" false "handle_right" false) nil nil
+        (list (symbol "lambda") (list (symbol "row")) scan_expr)))
+      (define recipe (list (symbol "lambda") '() nested 2 nil))
+      (define expected (list (symbol "lambda") '() (bind_physical_table_handles nested) 2 nil))
+      (if (and (expression_equal? (bind_physical_table_handles quoted) quoted)
+        (expression_equal? (expression_syntax (bind_physical_table_handles recipe)) (expression_syntax expected)))
+        "ok" (error "escaping recipe captured caller handles")))
+  expect: {data: [ok]}
+- name: metadata cost expressions retain their planner scope
+  scm: |
+    (begin
+      (define metadata (list (symbol "scan_estimate")
+        (list (symbol "table") "memcp-tests" false "handle_right" false)))
+      (define plan (list (symbol "scan") (symbol "tx")
+        (list (symbol "table") "memcp-tests" false "handle_left" false) nil nil
+        (list (symbol "lambda") (list (symbol "row")) metadata)))
+      (if (expression_equal? (expression_syntax (bind_physical_table_handles plan)) plan)
+        "ok" (error "metadata lookup introduced a query capture")))
+  expect: {data: [ok]}
+- name: compiled callback retains its captured environment
+  scm: |
+    (begin
+      (define callback ((lambda (captured) (lambda (value) (+ captured value))) 7))
+      (define retained (bind_physical_table_handles callback))
+      (if (and (expression_equal? retained callback) (equal? (retained 3) 10))
+        "ok" (error "compiled callback lost its environment")))
+  expect: {data: [ok]}
+- name: simple scalar scan keeps its existing physical compilation path
+  sql: EXPLAIN SELECT COUNT(*) AS n FROM handle_left WHERE id>=1
+  expect:
+    rows: 1
+    result_not_contains: [__query_table_handle_]
+- name: independent flat union branches retain direct source compilation
+  sql: EXPLAIN SELECT COUNT(*) AS n FROM handle_left UNION ALL SELECT COUNT(*) FROM handle_right
+  expect:
+    rows: 1
+    result_not_contains: [__query_table_handle_]
+- name: correlated membership binds sources in the emitted filter callback
+  scm: |
+    (begin
+      (define calls (newsession))
+      (define seen (newsession))
+      (define lookup (lambda (db db_ci name name_ci) (begin
+        (calls "n" (+ (coalesceNil (calls "n") 0) 1))
+        (table db db_ci name name_ci))))
+      (define plan (parse_sql "memcp-tests"
+        "SELECT l.id FROM handle_left l WHERE EXISTS (SELECT 1 FROM handle_right r WHERE r.k=l.k)"
+        (lambda (schema name write) true) (newsession) nil))
+      (define execute (eval (optimize (list (symbol "lambda")
+        (map '("table" "tx" "resultrow" "resultfields") symbol) plan))))
+      (define output (lambda (row) (begin (seen (concat (get_assoc row "id")) row) true)))
+      (execute lookup nil output (lambda (fields) true))
+      (define first_calls (calls "n"))
+      (calls "n" 0)
+      (execute lookup nil output (lambda (fields) true))
+      (if (and (equal? first_calls 2) (equal? (calls "n") 2)
+        (not (physical_table_binding_needed? plan 0 false false))
+        (equal? (seen "1") '("id" 1)) (equal? (seen "2") '("id" 2))
+        (equal? (seen "3") '("id" 3)))
+        "ok" (error (concat "emitted membership lookups: " first_calls " / " (calls "n")))))
+  expect: {data: [ok]}
+- name: correlated membership preserves complete SQL results
+  sql: SELECT l.id FROM handle_left l WHERE EXISTS (SELECT 1 FROM handle_right r WHERE r.k=l.k) ORDER BY l.id
+  expect: {rows: 3, data: [{id: 1}, {id: 2}, {id: 3}]}
+- name: prepared join first execution
+  session_id: table-handles
+  sql: SELECT l.id,r.value FROM handle_left l JOIN handle_right r ON l.k=r.k WHERE l.id>=? ORDER BY l.id,r.value
+  params: [2]
+  expect: {rows: 3, data: [{id: 2, value: 200}, {id: 3, value: 100}, {id: 3, value: 101}]}
+- name: prepared join repeated execution
+  session_id: table-handles
+  sql: SELECT l.id,r.value FROM handle_left l JOIN handle_right r ON l.k=r.k WHERE l.id>=? ORDER BY l.id,r.value
+  params: [3]
+  expect: {rows: 2, data: [{id: 3, value: 100}, {id: 3, value: 101}]}
+- name: replacement table receives fresh handles in cached query
+  session_id: table-handles
+  setup:
+  - sql: DROP TABLE handle_right
+  - sql: CREATE TABLE handle_right (k INT, value INT)
+  - sql: INSERT INTO handle_right VALUES (10,999),(20,888)
+  sql: SELECT l.id,r.value FROM handle_left l JOIN handle_right r ON l.k=r.k WHERE l.id>=? ORDER BY l.id,r.value
+  params: [2]
+  expect: {rows: 2, data: [{id: 2, value: 888}, {id: 3, value: 999}]}
+- name: rollback preserves query definitions and discards data updates
+  session_id: table-handles
+  setup:
+  - sql: BEGIN
+  - sql: UPDATE handle_right SET value=0
+  - sql: ROLLBACK
+  sql: SELECT l.id,r.value FROM handle_left l JOIN handle_right r ON l.k=r.k WHERE l.id>=? ORDER BY l.id,r.value
+  params: [2]
+  expect: {rows: 2, data: [{id: 2, value: 888}, {id: 3, value: 999}]}
+- name: rename and name reuse bind the current relation
+  session_id: table-handles
+  setup:
+  - sql: RENAME TABLE handle_right TO handle_renamed
+  - sql: CREATE TABLE handle_right (k INT, value INT)
+  - sql: INSERT INTO handle_right VALUES (10,555),(20,444)
+  sql: SELECT l.id,r.value FROM handle_left l JOIN handle_right r ON l.k=r.k WHERE l.id>=? ORDER BY l.id,r.value
+  params: [2]
+  expect: {rows: 2, data: [{id: 2, value: 444}, {id: 3, value: 555}]}
+- name: renamed relation retains its original rows
+  sql: SELECT k,value FROM handle_renamed ORDER BY k
+  expect: {rows: 2, data: [{k: 10, value: 999}, {k: 20, value: 888}]}
+- name: restart releases invocation bindings
+  action: restart
+- name: restarted query binds persisted replacement
+  session_id: table-handles
+  sql: SELECT l.id,r.value FROM handle_left l JOIN handle_right r ON l.k=r.k WHERE l.id>=? ORDER BY l.id,r.value
+  params: [2]
+  expect: {rows: 2, data: [{id: 2, value: 444}, {id: 3, value: 555}]}
+- name: cached query rejects dropped source
+  session_id: table-handles
+  setup:
+  - sql: DROP TABLE handle_right
+  sql: SELECT l.id,r.value FROM handle_left l JOIN handle_right r ON l.k=r.k WHERE l.id>=? ORDER BY l.id,r.value
+  params: [2]
+  expect: {error: true}

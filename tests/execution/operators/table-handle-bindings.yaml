@@ -1,0 +1,23 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+metadata:
+  description: Invocation-local relation handles in delegated nested callbacks
+  cluster:
+    fixture: shared_analytics
+    rows_per_shard: 5000
+    shards: 64
+    columns: 8
+    nodes: 4
+    ram_limit_bytes: 8388608
+    coordinator_ram_limit_bytes: 131072
+    shard_ram_percent: 50
+    coordinator_shard_ram_percent: 1
+    gomaxprocs: 16
+test_cases:
+- name: nested-range-join-with-worker-local-handles
+  sql: SELECT COUNT(*) AS n,SUM(a.id+b.id) AS total FROM big_items a JOIN big_items b
+    ON b.id >= a.id AND b.id <= a.id WHERE a.id < 3 AND b.id < 3
+  expect:
+    rows: 1
+    data: [{n: 3, total: 6}]
+    cluster: {min_remote_shards: 1}
