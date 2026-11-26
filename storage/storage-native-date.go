@@ -81,7 +81,10 @@ func (s *storageSCMERExact) deserializeNativeDates(f io.Reader) uint {
 			panic("native date component row counts disagree")
 		}
 	}
-	s.values = make([]scm.Scmer, 0, min(count, 1024))
+	// All complete component frames and their common row count are validated.
+	// Reserve the result once instead of retaining successive growing arrays
+	// during cold query and index construction.
+	s.values = make([]scm.Scmer, count)
 	for row := uint32(0); uint64(row) < count; row++ {
 		seconds := components[0].GetValue(row)
 		nanoseconds := components[1].GetValue(row)
@@ -90,9 +93,9 @@ func (s *storageSCMERExact) deserializeNativeDates(f io.Reader) uint {
 			if !seconds.IsNil() || !nanoseconds.IsNil() || !zone.IsNil() {
 				panic("native date component NULL masks disagree")
 			}
-			s.values = append(s.values, scm.NewNil())
+			s.values[row] = scm.NewNil()
 		} else {
-			s.values = append(s.values, scm.NewDateNanoWithZone(seconds.Int(), int(nanoseconds.Int()), int(zone.Int())))
+			s.values[row] = scm.NewDateNanoWithZone(seconds.Int(), int(nanoseconds.Int()), int(zone.Int()))
 		}
 	}
 	return uint(count)

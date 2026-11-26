@@ -13327,12 +13327,12 @@ persisted computors and OnInit recipes must not capture this query's pointers. *
 	(symbol (concat "__query_table_handle_" (stable_structural_hash (cons (symbol "table") (cdr expr)) true)))))
 
 (define physical_table_binding_head? (lambda (head name value)
-	(or (expression_equal? head (symbol name)) (expression_equal? head value))))
+	(if (symbol? head) (expression_equal? head (symbol name)) (identical? head value))))
 
 (define physical_table_binding_source? (lambda (expr)
 	(match expr
 		'(head schema schema_ci name name_ci)
-		(and (physical_table_binding_head? head "table" table) (string? schema) (string? name)
+		(and (physical_table_binding_head? (expression_syntax head) "table" table) (string? schema) (string? name)
 			(not (equal? (substr name 0 1) "."))
 			(or (expression_equal? schema_ci false) (expression_equal? schema_ci true))
 			(or (expression_equal? name_ci false) (expression_equal? name_ci true)))
@@ -13344,8 +13344,9 @@ persisted computors and OnInit recipes must not capture this query's pointers. *
 	"scan_recset" "scan_recmap" "scan_exists" "scan_lookup" "scan_batch" "scan_order_keys" "scan_order_batch_accept" "scan_order_recset") symbol))
 (define physical_table_binding_loop? (lambda (head)
 	(if (symbol? head) (contains? physical_table_binding_operator_names head)
-		(reduce physical_table_binding_operators
-			(lambda (found operator) (or found (expression_equal? head operator))) false))))
+		(if (list? head) false
+			(reduce physical_table_binding_operators
+				(lambda (found operator) (or found (identical? head operator))) false)))))
 
 /* Only native scan input positions need query-local source bindings. Metadata
 expressions such as scan_estimate retain their direct planner expression. The
@@ -13354,11 +13355,15 @@ in argument nine. A list in an input position carries the same source scope. */
 (define physical_table_binding_source_slot? (lambda (scan_input recmap input_list index)
 	(or input_list (and scan_input (or (equal? index 1) (and recmap (equal? index 8)))))))
 
-/* Probe before copying code: complex cache recipes frequently contain no
+/* Normalize scalar operator heads only: an immediate lambda head is a code
+subtree which the recursive visit already handles once. Native operators have
+identity; their classification does not need structural-expression traversal.
+
+Probe before copying code: complex cache recipes frequently contain no
 repeated native scan source. An unchanged plan keeps its existing code graph. */
 (define physical_table_binding_needed? (lambda (expr depth shared_lambda source_slot)
 	(if (or (not (list? expr)) (empty_list? expr)) false
-		(match (cons (expression_syntax (car expr)) (cdr expr))
+		(match (cons (if (list? (car expr)) (car expr) (expression_syntax (car expr))) (cdr expr))
 			((symbol quote) _value) false
 			(cons (symbol lambda) (cons _params (cons body _metadata)))
 			(physical_table_binding_needed? body (if shared_lambda depth 0) false false)
@@ -13387,7 +13392,7 @@ that can escape is rewritten independently and contributes no outer bindings. */
 	/* match can expose a compiled procedure as lambda data. Its captured
 	environment is opaque here, so only traverse actual expression lists. */
 	(if (or (not (list? expr)) (empty_list? expr)) (list expr '())
-		(match (cons (expression_syntax (car expr)) (cdr expr))
+		(match (cons (if (list? (car expr)) (car expr) (expression_syntax (car expr))) (cdr expr))
 			((symbol quote) _value) (list expr '())
 			(cons (symbol lambda) (cons params (cons body metadata)))
 			(if shared_lambda
