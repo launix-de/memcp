@@ -40,6 +40,24 @@ test_cases:
         (expression_equal? (nth (nth bound 1) 1) (physical_table_binding_name source)))
         "ok" (error "native source was not bound")))
   expect: {data: [ok]}
+- name: source lists and RecMap targets retain their scan argument positions
+  scm: |
+    (begin
+      (define source (list table "memcp-tests" false "handle_right" false))
+      (define generated (list table "memcp-tests" false ".generated" false))
+      (define inputs (list
+        (list scan_join_order nil (list list source source) nil nil)
+        (list scan_recmap nil generated nil nil nil nil nil nil source)))
+      (define wrap (lambda (inner) (list scan nil generated nil nil
+        (list (symbol "lambda") '() inner))))
+      (if (reduce inputs (lambda (valid inner)
+        (begin
+          (define bound (bind_physical_table_handles (wrap inner)))
+          (and valid (equal? (count bound) 3)
+            (expression_equal? (nth (nth bound 1) 2) source)
+            (not (physical_table_binding_needed? bound 0 false))))) true)
+        "ok" (error "source list or RecMap target lost its binding")))
+  expect: {data: [ok]}
 - name: optimized nested scans resolve a shared source once per invocation
   scm: |
     (begin
@@ -147,7 +165,7 @@ test_cases:
       (calls "n" 0)
       (execute lookup nil output (lambda (fields) true))
       (if (and (equal? first_calls 2) (equal? (calls "n") 2)
-        (not (physical_table_binding_needed? plan 0 false false))
+        (not (physical_table_binding_needed? plan 0 false))
         (equal? (seen "1") '("id" 1)) (equal? (seen "2") '("id" 2))
         (equal? (seen "3") '("id" 3)))
         "ok" (error (concat "emitted membership lookups: " first_calls " / " (calls "n")))))

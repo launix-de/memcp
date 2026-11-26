@@ -13460,35 +13460,49 @@ recognizing its scope must not normalize that entire nested body.
 
 Probe before copying code: complex cache recipes frequently contain no
 repeated native scan source. An unchanged plan keeps its existing code graph. */
-/* Pass traversal state explicitly. A probe that retains its original plan
-must not construct a fresh captured visitor procedure at every AST node. */
-(define physical_table_binding_needed_children? (lambda (remaining index depth loop scan_input recmap input_list)
+/* Examine source slots directly, before discarding scalar children. Only a
+literal list constructor propagates an input-list slot to its elements. */
+(define physical_table_binding_input_needed? (lambda (input)
+	(and (list? input) (not (empty_list? input))
+		(or (physical_table_binding_source? input)
+			(and (not (list? (car input)))
+				(physical_table_binding_head? (expression_syntax (car input)) "list" list)
+				(not (nil? (find (cdr input) physical_table_binding_input_needed?))))))))
+
+/* The native filter skips scalar leaves without allocating one interpreted
+seven-argument recursion frame per argument. Traversal state belongs to actual
+code subtrees; source-position checks above retain the original argument slots. */
+(define physical_table_binding_needed_children? (lambda (remaining depth loop)
 	(match remaining
 		(cons child rest)
-		(or (and (list? child) (physical_table_binding_needed? child
+		(or (physical_table_binding_needed? child
 			(+ depth (if (and loop (not (empty_list? child)) (not (list? (car child)))
-				(expression_equal? (expression_syntax (car child)) (symbol "lambda"))) 1 0)) loop
-			(physical_table_binding_source_slot? scan_input recmap input_list index)))
-			(physical_table_binding_needed_children? rest (+ index 1) depth loop scan_input recmap input_list))
+				(expression_equal? (expression_syntax (car child)) (symbol "lambda"))) 1 0)) loop)
+			(physical_table_binding_needed_children? rest depth loop))
 		_ false)))
 
-(define physical_table_binding_needed? (lambda (expr depth shared_lambda source_slot)
+(define physical_table_binding_needed? (lambda (expr depth shared_lambda)
 	(if (or (not (list? expr)) (empty_list? expr)) false
 		(begin
 			/* Inspect the head directly; probing must not copy each expression
 			into a normalized cons merely to classify quote/lambda forms. */
+			(define children (filter (cdr expr) list?))
 			(define head (if (list? (car expr)) (car expr) (expression_syntax (car expr))))
-			(if (and (symbol? head) (expression_equal? head (symbol "quote")) (equal? (count expr) 2)) false
+			/* A source binding always occurs below a code-list child. Literal
+			arguments and scalar-only expressions cannot contain one. */
+			(if (and (empty_list? children) (not (list? head))) false
+				(and (symbol? head) (expression_equal? head (symbol "quote")) (equal? (count expr) 2)) false
 				(and (symbol? head) (expression_equal? head (symbol "lambda")) (>= (count expr) 3))
-				(physical_table_binding_needed? (nth expr 2) (if shared_lambda depth 0) false false)
-				(and source_slot (> depth 0) (physical_table_binding_source? expr)) true
+				(physical_table_binding_needed? (nth expr 2) (if shared_lambda depth 0) false)
 				(begin
 					(define scan_input (physical_table_binding_loop? head))
-					(define input_list (and source_slot (physical_table_binding_head? head "list" list)))
-					(define recmap (physical_table_binding_head? head "scan_recmap" scan_recmap))
 					(define loop (or scan_input (and shared_lambda (physical_table_binding_head? head "list" list))))
-					(or (and (list? (car expr)) (physical_table_binding_needed? (car expr) depth true false))
-						(physical_table_binding_needed_children? (cdr expr) 0 depth loop scan_input recmap input_list))))))))
+					(or (and scan_input (> depth 0)
+						(or (physical_table_binding_input_needed? (nth expr 2))
+							(and (physical_table_binding_head? head "scan_recmap" scan_recmap)
+								(physical_table_binding_input_needed? (nth expr 9)))))
+						(and (list? (car expr)) (physical_table_binding_needed? (car expr) depth true))
+						(physical_table_binding_needed_children? children depth loop))))))))
 
 /* Return rewritten code and its invocation-local definitions together. A lambda
 that can escape is rewritten independently and contributes no outer bindings. */
@@ -13522,7 +13536,7 @@ that can escape is rewritten independently and contributes no outer bindings. */
 			_ (list expr '())))))
 
 (define bind_physical_table_handles (lambda (plan)
-	(if (not (physical_table_binding_needed? plan 0 false false)) plan
+	(if (not (physical_table_binding_needed? plan 0 false)) plan
 		(match (physical_table_binding_walk plan 0 false false) '(rewritten sources)
 			(if (empty_list? sources) rewritten
 				/* Once a nested source needs a binding, reuse it in the outer scans too.
