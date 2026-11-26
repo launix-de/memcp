@@ -13465,29 +13465,30 @@ must not construct a fresh captured visitor procedure at every AST node. */
 (define physical_table_binding_needed_children? (lambda (remaining index depth loop scan_input recmap input_list)
 	(match remaining
 		(cons child rest)
-		(or (physical_table_binding_needed? child
-			(+ depth (if (and loop (list? child) (not (empty_list? child)) (not (list? (car child)))
+		(or (and (list? child) (physical_table_binding_needed? child
+			(+ depth (if (and loop (not (empty_list? child)) (not (list? (car child)))
 				(expression_equal? (expression_syntax (car child)) (symbol "lambda"))) 1 0)) loop
-			(physical_table_binding_source_slot? scan_input recmap input_list index))
+			(physical_table_binding_source_slot? scan_input recmap input_list index)))
 			(physical_table_binding_needed_children? rest (+ index 1) depth loop scan_input recmap input_list))
 		_ false)))
 
 (define physical_table_binding_needed? (lambda (expr depth shared_lambda source_slot)
 	(if (or (not (list? expr)) (empty_list? expr)) false
-		(match (cons (if (list? (car expr)) (car expr) (expression_syntax (car expr))) (cdr expr))
-			((symbol quote) _value) false
-			(cons (symbol lambda) (cons _params (cons body _metadata)))
-			(physical_table_binding_needed? body (if shared_lambda depth 0) false false)
-			(cons head tail)
-			(or (and source_slot (> depth 0) (physical_table_binding_source? expr))
+		(begin
+			/* Inspect the head directly; probing must not copy each expression
+			into a normalized cons merely to classify quote/lambda forms. */
+			(define head (if (list? (car expr)) (car expr) (expression_syntax (car expr))))
+			(if (and (symbol? head) (expression_equal? head (symbol "quote")) (equal? (count expr) 2)) false
+				(and (symbol? head) (expression_equal? head (symbol "lambda")) (>= (count expr) 3))
+				(physical_table_binding_needed? (nth expr 2) (if shared_lambda depth 0) false false)
+				(and source_slot (> depth 0) (physical_table_binding_source? expr)) true
 				(begin
 					(define scan_input (physical_table_binding_loop? head))
 					(define input_list (and source_slot (physical_table_binding_head? head "list" list)))
 					(define recmap (physical_table_binding_head? head "scan_recmap" scan_recmap))
 					(define loop (or scan_input (and shared_lambda (physical_table_binding_head? head "list" list))))
-					(or (physical_table_binding_needed? (car expr) depth true false)
-						(physical_table_binding_needed_children? tail 0 depth loop scan_input recmap input_list))))
-			_ false))))
+					(or (and (list? (car expr)) (physical_table_binding_needed? (car expr) depth true false))
+						(physical_table_binding_needed_children? (cdr expr) 0 depth loop scan_input recmap input_list))))))))
 
 /* Return rewritten code and its invocation-local definitions together. A lambda
 that can escape is rewritten independently and contributes no outer bindings. */
