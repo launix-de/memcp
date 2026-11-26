@@ -43,14 +43,18 @@ test_cases:
                 (list "column" key "INT" '() '())))
               '("engine" "memory") false)))
     scm: |
-      (map (produceN 11) (lambda (i)
-        (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
-          '("s" "memcp-tests" "partition_hint_source" false true)
-          (if (equal? i 0) "partition_hint_diagonal" (concat "partition_hint_diagonal_cold_" i))
-          (list (list 'get_column "s" false "id" false) (list 'get_column "s" false "event_time" false))
-          '("k0" "k1")))
-      ))
-    expect: {result: [true, true, true, true, true, true, true, true, true, true, true]}
+      (begin
+        (define cold_results
+          (map (produceN 11) (lambda (i)
+            (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
+              '("s" "memcp-tests" "partition_hint_source" false true)
+              (if (equal? i 0) "partition_hint_diagonal" (concat "partition_hint_diagonal_cold_" i))
+              (list (list 'get_column "s" false "id" false) (list 'get_column "s" false "event_time" false))
+              '("k0" "k1")))
+          )))
+        (if (equal? cold_results '(true true true true true true true true true true true))
+          true (error "cold group initialization reused or failed a target")))
+    expect: {data: [true]}
 
   - name: Independent three-dimensional group initialization
     # Eleven fresh targets retain the original first cold initialization.
@@ -71,14 +75,18 @@ test_cases:
                 (list "column" key "INT" '() '())))
               '("engine" "memory") false)))
     scm: |
-      (map (produceN 11) (lambda (i)
-        (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
-          '("s" "memcp-tests" "partition_hint_source" false true)
-          (if (equal? i 0) "partition_hint_uniform" (concat "partition_hint_uniform_cold_" i))
-          (list (list 'get_column "s" false "a" false) (list 'get_column "s" false "b" false) (list 'get_column "s" false "c" false))
-          '("k0" "k1" "k2")))
-      ))
-    expect: {result: [true, true, true, true, true, true, true, true, true, true, true]}
+      (begin
+        (define cold_results
+          (map (produceN 11) (lambda (i)
+            (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
+              '("s" "memcp-tests" "partition_hint_source" false true)
+              (if (equal? i 0) "partition_hint_uniform" (concat "partition_hint_uniform_cold_" i))
+              (list (list 'get_column "s" false "a" false) (list 'get_column "s" false "b" false) (list 'get_column "s" false "c" false))
+              '("k0" "k1" "k2")))
+          )))
+        (if (equal? cold_results '(true true true true true true true true true true true))
+          true (error "cold group initialization reused or failed a target")))
+    expect: {data: [true]}
 
   - name: Oversized three-dimensional group initialization
     # Eleven fresh targets retain the original first cold initialization.
@@ -99,14 +107,18 @@ test_cases:
                 (list "column" key "INT" '() '())))
               '("engine" "memory") false)))
     scm: |
-      (map (produceN 11) (lambda (i)
-        (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
-          '("s" "memcp-tests" "partition_hint_source" false true)
-          (if (equal? i 0) "partition_hint_oversized" (concat "partition_hint_oversized_cold_" i))
-          (list (list 'get_column "s" false "a" false) (list 'get_column "s" false "b" false) (list 'get_column "s" false "c" false))
-          '("k0" "k1" "k2")))
-      ))
-    expect: {result: [true, true, true, true, true, true, true, true, true, true, true]}
+      (begin
+        (define cold_results
+          (map (produceN 11) (lambda (i)
+            (eval (group_cache_partition_plan "memcp-tests" "partition_hint_source" "s"
+              '("s" "memcp-tests" "partition_hint_source" false true)
+              (if (equal? i 0) "partition_hint_oversized" (concat "partition_hint_oversized_cold_" i))
+              (list (list 'get_column "s" false "a" false) (list 'get_column "s" false "b" false) (list 'get_column "s" false "c" false))
+              '("k0" "k1" "k2")))
+          )))
+        (if (equal? cold_results '(true true true true true true true true true true true))
+          true (error "cold group initialization reused or failed a target")))
+    expect: {data: [true]}
 
 cleanup:
   - scm: |
