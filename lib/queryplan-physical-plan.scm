@@ -13490,7 +13490,9 @@ across branches. Keep their scalar compilation path as direct as a flat block. *
 		/* Flat source blocks and their aggregate/UNION wrappers have no
 		row-dependent ordinary source lookup. Preserve their direct compilation. */
 		(define checked (if (or
-			(and (query_block? (ir_root ir)) (empty_list? (ir_stages ir))
+			(and (query_block? (ir_root ir))
+				(or (empty_list? (ir_stages ir))
+					(reduce (ir_stages ir) (lambda (flat stage) (and flat (group_stage? stage))) true))
 				(<= (count (qb_sources (ir_root ir))) 1)
 				(or (empty_list? (qb_sources (ir_root ir)))
 					(string? (source_relation (car (qb_sources (ir_root ir)))))))
