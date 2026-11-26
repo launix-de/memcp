@@ -918,3 +918,99 @@ func TestOrderedKeysetScanRetainsTargetAndProducerDependencies(t *testing.T) {
 		t.Fatal("ordered keyset was not recognized as a scan")
 	}
 }
+
+// Literal historical frames exercise the reader independently of its writer.
+func TestComputeProxyHistoricalV3RoundTrip(t *testing.T) {
+	const recipe = `{"scmer_custom":10,"value":[1,[{"symbol":"lambda"},[{"symbol":"value"}],[{"scmer_custom":8,"value":[1,"*"]},{"var":0},2],1]]}`
+	const payload = `{"scmer_bson_v1":[16,"KgAAAA=="]}`
+	var frame bytes.Buffer
+	for _, field := range []any{uint8(3), uint32(1), uint16(1), uint16(5)} {
+		if err := binary.Write(&frame, binary.LittleEndian, field); err != nil {
+			t.Fatal(err)
+		}
+	}
+	frame.WriteString("value")
+	binary.Write(&frame, binary.LittleEndian, uint64(len(recipe)))
+	frame.WriteString(recipe)
+	frame.Write([]byte{0, 0}) // uncompressed sparse delta
+	binary.Write(&frame, binary.LittleEndian, uint32(1))
+	binary.Write(&frame, binary.LittleEndian, uint32(0))
+	binary.Write(&frame, binary.LittleEndian, uint64(len(payload)))
+	frame.WriteString(payload)
+	binary.Write(&frame, binary.LittleEndian, uint32(1))
+	binary.Write(&frame, binary.LittleEndian, uint32(0))
+	frame.WriteByte(0)
+	original := append([]byte(nil), frame.Bytes()...)
+	var proxy StorageComputeProxy
+	if got := proxy.Deserialize(&frame); got != 1 || frame.Len() != 0 {
+		t.Fatalf("extent=%d trailing=%d", got, frame.Len())
+	}
+	assert := func(p *StorageComputeProxy) {
+		if !scm.Equal(scm.Apply(p.computor, scm.NewInt(9)), scm.NewInt(18)) {
+			t.Fatal("native procedure did not restore")
+		}
+		kind, raw := p.delta[0].BSONRaw()
+		if kind != 16 || !bytes.Equal(raw, []byte{42, 0, 0, 0}) {
+			t.Fatal("native BSON identity was lost")
+		}
+	}
+	assert(&proxy)
+	var encoded bytes.Buffer
+	proxy.Serialize(&encoded)
+	if bytes := encoded.Bytes(); bytes[0] != 50 || bytes[1] != 3 {
+		t.Fatal("historical v3 was downgraded on rewrite")
+	}
+	var restored StorageComputeProxy
+	restored.Deserialize(bytes.NewReader(encoded.Bytes()[1:]))
+	assert(&restored)
+	// A shortened payload must fail before creating a partially initialized proxy.
+	for _, end := range []int{1, 7, 17, len(original) - 1} {
+		t.Run(fmt.Sprintf("truncated-%d", end), func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("truncated v3 frame accepted")
+				}
+			}()
+			new(StorageComputeProxy).Deserialize(bytes.NewReader(original[:end]))
+		})
+	}
+}
+
+func TestHistoricalExactScalarFrameAndNestedProxy(t *testing.T) {
+	payloads := []string{`{"$memcp.scmer":"bson-v1","type":16,"payload":"KgAAAA"}`, `{"scmer_date_v1":[1700000000,0,0]}`}
+	var frame bytes.Buffer
+	frame.WriteByte(1) // magic 3 already consumed, historical version 1
+	binary.Write(&frame, binary.LittleEndian, uint64(len(payloads)))
+	for _, payload := range payloads {
+		binary.Write(&frame, binary.LittleEndian, uint64(len(payload)))
+		frame.WriteString(payload)
+	}
+	frame.WriteString("tail")
+	var exact storageSCMERExact
+	if count := exact.Deserialize(&frame); count != 2 || frame.String() != "tail" {
+		t.Fatal("exact scalar reader consumed enclosing trailer")
+	}
+	if !exact.values[0].IsBSON() || !exact.values[1].IsDate() {
+		t.Fatal("native scalar identities were not restored")
+	}
+	var saved bytes.Buffer
+	exact.Serialize(&saved)
+	if saved.Bytes()[0] != 3 || saved.Bytes()[1] != 1 {
+		t.Fatal("loaded exact scalar frame was downgraded")
+	}
+	var reread storageSCMERExact
+	reread.Deserialize(bytes.NewReader(saved.Bytes()[1:]))
+	if !reread.values[0].IsBSON() || !reread.values[1].IsDate() {
+		t.Fatal("rewrite changed native scalar identities")
+	}
+	proxy := &StorageComputeProxy{main: &exact, compressed: true, count: 2, persistedVersion: 3}
+	proxy.validMask.AtomicSet(0, true)
+	proxy.validMask.AtomicSet(1, true)
+	saved.Reset()
+	proxy.Serialize(&saved)
+	var restored StorageComputeProxy
+	restored.Deserialize(bytes.NewReader(saved.Bytes()[1:]))
+	if !restored.validMask.Get(0) || !restored.validMask.Get(1) || !restored.main.GetValue(0).IsBSON() || !restored.main.GetValue(1).IsDate() {
+		t.Fatal("nested frame lost payload or outer validity")
+	}
+}

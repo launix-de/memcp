@@ -389,3 +389,52 @@ func TestDatabaseNameBuiltinUsesPublishedDirectory(t *testing.T) {
 		t.Fatal("compiled lookup retained a dropped database")
 	}
 }
+
+func TestPersistedNilTransactionTableCallUpgrade(t *testing.T) {
+	legacy := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString("memcp-tests"), scm.NewBool(false), scm.NewString("items"), scm.NewBool(false), scm.NewNil()})
+	restored := upgradePersistedTableCalls(legacy)
+	if !restored.IsSlice() || len(restored.Slice()) != 5 || len(legacy.Slice()) != 6 {
+		t.Fatal("nil transaction constructor did not migrate immutably")
+	}
+	quoted := scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), legacy})
+	if upgradePersistedTableCalls(quoted) != quoted {
+		t.Fatal("quoted data was rewritten")
+	}
+	dynamic := append([]scm.Scmer(nil), legacy.Slice()...)
+	dynamic[5] = scm.NewSymbol("current_tx")
+	value := scm.NewSlice(dynamic)
+	if upgradePersistedTableCalls(value) != value {
+		t.Fatal("dynamic transaction expression was discarded")
+	}
+	local := scm.NewProcStruct(scm.Proc{Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("table")}), Body: legacy, En: &scm.Globalenv})
+	if upgradePersistedTableCalls(local) != local {
+		t.Fatal("local function named table was rewritten")
+	}
+}
+
+func TestORCSelfTriggersRestoreWithoutRewritingUserCode(t *testing.T) {
+	db := newDatabase()
+	db.Name = "restore_orc_metadata"
+	db.tables = NonLockingReadMap.NewReadMap[string, *table]()
+	legacy := scm.NewSymbol("obsolete_generation_attested_code")
+	owner := &table{schema: db, Name: "items", Columns: []*column{{Name: "running", OrcSortCols: []string{"id"}}}, Triggers: []TriggerDescription{
+		{Name: ".orc:items:running|AFTER UPDATE", IsSystem: true, Timing: AfterUpdate, Func: legacy},
+		{Name: "user_update", Timing: AfterUpdate, Func: legacy},
+	}}
+	db.tables.Set(owner.Name, owner)
+	rebuildORCSelfTriggersAfterLoad(db)
+	generated, user := 0, 0
+	for _, trigger := range owner.Triggers {
+		if trigger.IsSystem && strings.HasPrefix(trigger.Name, ".orc:") {
+			generated++
+			if trigger.Func == legacy {
+				t.Fatal("obsolete generated code survived")
+			}
+		} else if trigger.Name == "user_update" && trigger.Func == legacy {
+			user++
+		}
+	}
+	if generated != 3 || user != 1 {
+		t.Fatalf("self invalidation=%d user code=%d", generated, user)
+	}
+}

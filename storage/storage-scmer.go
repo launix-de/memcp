@@ -458,3 +458,103 @@ func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
 }
 
 func (s *StorageSCMER) DistinctCount() uint { return uint(len(s.values)) }
+
+// storageSCMERExact preserves the historical magic-3 v1 native scalar frame.
+// Magic 1 retains its original reader/writer; decoding one cannot reinterpret
+// the other, and rewriting a loaded exact frame retains its exact envelopes.
+type storageSCMERExact struct{ StorageSCMER }
+
+func (s *storageSCMERExact) Serialize(f io.Writer) {
+	// Magic 3 v1: header, uint64 row count, then uint64 byte length and
+	// complete private JSON for each scalar. Exact framing composes inside
+	// containers that have their own trailing fields; no stream read-ahead.
+	if err := binary.Write(f, binary.LittleEndian, [2]byte{3, 1}); err != nil {
+		panic(err)
+	}
+	if err := binary.Write(f, binary.LittleEndian, uint64(len(s.values))); err != nil {
+		panic(err)
+	}
+	for i := 0; i < len(s.values); i++ {
+		value := s.values[i]
+		var v []byte
+		var err error
+		if value.IsBSON() {
+			typ, payload := value.BSONRaw()
+			v, err = json.Marshal(map[string]any{
+				"$memcp.scmer": "bson-v1",
+				"type":         typ,
+				"payload":      base64.RawStdEncoding.EncodeToString(payload),
+			})
+		} else {
+			v, err = scm.MarshalPersistentJSON(value)
+		}
+		if err != nil {
+			panic(err)
+		}
+		if err := binary.Write(f, binary.LittleEndian, uint64(len(v))); err != nil {
+			panic(err)
+		}
+		if count, err := f.Write(v); err != nil {
+			panic(err)
+		} else if count != len(v) {
+			panic(io.ErrShortWrite)
+		}
+	}
+}
+func (s *storageSCMERExact) Deserialize(f io.Reader) uint {
+	var version [1]byte
+	readStorageBytes(f, version[:])
+	if version[0] != 1 {
+		panic("unknown generic scalar column version")
+	}
+	var count uint64
+	if err := binary.Read(f, binary.LittleEndian, &count); err != nil {
+		panic(err)
+	}
+	if count > uint64(^uint32(0)) {
+		panic("scalar column count exceeds row identifier domain")
+	}
+	s.values = make([]scm.Scmer, 0, min(count, 1024))
+	for index := uint64(0); index < count; index++ {
+		var length uint64
+		if err := binary.Read(f, binary.LittleEndian, &length); err != nil {
+			panic(err)
+		}
+		if length > uint64(int(^uint(0)>>1)) {
+			panic("scalar column record exceeds addressable memory")
+		}
+		payload := make([]byte, int(length))
+		if _, err := io.ReadFull(f, payload); err != nil {
+			panic(err)
+		}
+		s.values = append(s.values, decodePersistentColumnValue(payload))
+	}
+	return uint(count)
+}
+
+func decodePersistentColumnValue(line []byte) scm.Scmer {
+	if !json.Valid(line) {
+		panic("invalid persistent scalar column JSON")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(line))
+	decoder.UseNumber()
+	var decoded any
+	if err := decoder.Decode(&decoded); err != nil {
+		panic(err)
+	}
+	// This opaque envelope is shared with the permanent magic-1 BSON writer.
+	if envelope, ok := decoded.(map[string]any); ok && len(envelope) == 3 && envelope["$memcp.scmer"] == "bson-v1" {
+		kind := scm.TransformFromJSON(envelope["type"])
+		payload, ok := envelope["payload"].(string)
+		data, err := base64.RawStdEncoding.DecodeString(payload)
+		if !kind.IsInt() || kind.Int() < 0 || kind.Int() > 255 || !ok || err != nil {
+			panic("invalid BSON envelope in scalar column")
+		}
+		return scm.NewBSONRaw(byte(kind.Int()), data)
+	}
+	var value scm.Scmer
+	if err := scm.UnmarshalPersistentJSON(line, &value); err != nil {
+		panic(err)
+	}
+	return value
+}
