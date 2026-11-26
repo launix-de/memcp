@@ -66,6 +66,13 @@ func ParseDateValue(text string) (Scmer, bool) {
 	return NewNil(), false
 }
 
+// nativeDateSeconds accepts a boxed date at the JIT-to-Go ABI boundary.
+//
+//jitgen:noinline
+func nativeDateSeconds(value Scmer) int64 {
+	return TagDateDecodeUnix(auxVal(value.aux))
+}
+
 // Both operands are native dates. Decode their known payload directly; the
 // generic Int accessor takes its coercion path for every non-integer scalar.
 func compareDates(left, right Scmer) int {

@@ -369,6 +369,37 @@ func TestJITLessHelperEmitsKnownIntegerComparison(t *testing.T) {
 	}
 }
 
+// Date payload helpers must cross the native Go ABI as complete Scmer values.
+// Compile both operand orders, including fractional and negative timestamps.
+func TestJITLessHelperKnownDateIntegerComparison(t *testing.T) {
+	for _, date := range []Scmer{NewDate(1), NewDateNanoWithZone(1, 1, 17), NewDateNanoWithZone(-1, 999999999, 2047)} {
+		for _, dateFirst := range []bool{false, true} {
+			fn := CompileJITStorageGetValue(func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
+				source.Type = tagInt
+				args := []JITValueDesc{source, {Loc: LocImm, Type: tagDate, Imm: date}}
+				if dateFirst {
+					args[0], args[1] = args[1], args[0]
+				}
+				comparison := jitEmitLess(ctx, args, JITValueDesc{Loc: LocReg, Type: tagBool, Reg: target.Reg2})
+				ctx.EmitMakeBool(target, comparison)
+				return target
+			})
+			if fn == nil {
+				t.Fatal("known Date/integer Less helper did not compile")
+			}
+			for value := uint32(0); value < 3; value++ {
+				left, right := NewInt(int64(value)), date
+				if dateFirst {
+					left, right = right, left
+				}
+				if got, want := fn(value).Bool(), Less(left, right); got != want {
+					t.Fatalf("Date comparison %v < %v = %v, want %v", left, right, got, want)
+				}
+			}
+		}
+	}
+}
+
 func TestJITStorageReadersSharePackedCodeLifetime(t *testing.T) {
 	scalar, ranged, multi := CompileJITStorageReaders(
 		func(ctx *JITContext, source, target JITValueDesc) JITValueDesc {
