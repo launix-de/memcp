@@ -82,8 +82,11 @@ test_cases:
       (define quoted (scheme "(quote (scan tx (table \"memcp-tests\" false \"handle_right\" false)))"))
       (define scan_expr (list (symbol "scan") (symbol "tx")
         (list (symbol "table") "memcp-tests" false "handle_right" false) nil nil (scheme "(lambda (v) v)")))
-      (define recipe (list (symbol "lambda") '() scan_expr))
-      (define expected (list (symbol "lambda") '() (bind_physical_table_handles scan_expr)))
+      (define nested (list (symbol "scan") (symbol "tx")
+        (list (symbol "table") "memcp-tests" false "handle_right" false) nil nil
+        (list (symbol "lambda") (list (symbol "row")) scan_expr)))
+      (define recipe (list (symbol "lambda") '() nested 2 nil))
+      (define expected (list (symbol "lambda") '() (bind_physical_table_handles nested) 2 nil))
       (if (and (expression_equal? (bind_physical_table_handles quoted) quoted)
         (expression_equal? (expression_syntax (bind_physical_table_handles recipe)) (expression_syntax expected)))
         "ok" (error "escaping recipe captured caller handles")))
