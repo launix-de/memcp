@@ -74,10 +74,21 @@ start_server base base-fill
 "${mysql_args[@]}" -D memcp-tests < candidate/tests/storage/persistence/upgrade-fill.sql
 curl --max-time 30 -fsS "http://127.0.0.1:$API_PORT/scm" -u root:admin -d '
   (begin
-    /* This adapter runs only against predecessor binaries. The candidate has
-    one four-argument table interface; old releases had two arguments. */
+    /* Only predecessor fixture setup uses this adapter. Historical writers
+    used five (native transaction), four, or two table arguments. Some reject
+    an unknown arity while older writers return nil. Preserve all writers and
+    their original oracles; the candidate keeps its four-argument interface. */
+    (define fixture_table_try (lambda (arguments)
+      (try (lambda () (apply table arguments))
+        (lambda (err)
+          (if (and (string? err) (or
+            (equal? err "table expects 5 arguments: database, database_ignorecase, name, name_ignorecase and native transaction")
+            (equal? err "table expects database, database_ignorecase, name, name_ignorecase")))
+            nil (error err))))))
     (define fixture_table (lambda (database name)
-      (coalesceNil (apply table (list database false name false))
+      (coalesceNil
+        (fixture_table_try (list database false name false nil))
+        (fixture_table_try (list database false name false))
         (apply table (list database name)))))
     (createcolumn (fixture_table "memcp-tests" "up_compute") "doubled" "INT" (quote ()) (quote ())
       (quote ("val")) (lambda (val) (* val 2)))
