@@ -104,6 +104,11 @@ test_cases:
   expect:
     rows: 1
     result_not_contains: [__query_table_handle_]
+- name: independent flat union branches retain direct source compilation
+  sql: EXPLAIN SELECT COUNT(*) AS n FROM handle_left UNION ALL SELECT COUNT(*) FROM handle_right
+  expect:
+    rows: 1
+    result_not_contains: [__query_table_handle_]
 - name: prepared join first execution
   session_id: table-handles
   sql: SELECT l.id,r.value FROM handle_left l JOIN handle_right r ON l.k=r.k WHERE l.id>=? ORDER BY l.id,r.value

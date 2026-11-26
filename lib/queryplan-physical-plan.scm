@@ -13388,6 +13388,20 @@ that can escape is rewritten independently and contributes no outer bindings. */
 						(extract_assoc bindings (lambda (name expr) (list (quote define) name expr)))
 						complete))))))))
 
+/* Independent flat UNION branches have no row-dependent source resolution
+across branches. Keep their scalar compilation path as direct as a flat block. */
+(define physical_table_binding_flat_root? (lambda (root)
+	(if (query_block? root)
+		(and (<= (count (qb_sources root)) 1)
+			(reduce (qb_sources root) (lambda (flat src)
+				(and flat (string? (source_relation src)))) true)
+			(reduce (qb_stages root) (lambda (flat stage)
+				(and flat (group_stage? stage))) true))
+		(if (union_block? root)
+			(reduce (union_branches root) (lambda (flat branch)
+				(and flat (physical_table_binding_flat_root? branch))) true)
+			false))))
+
 (define emit_physical_queryplan (lambda (ir)
 	(begin
 		(define candidate (if (equal? (ir_return ir) (quote rows)) (semijoin_carrier_spec (ir_root ir)) nil))
@@ -13435,10 +13449,11 @@ that can escape is rewritten independently and contributes no outer bindings. */
 				(<= (count (qb_sources (ir_root ir))) 1)))
 			memoized_plan (lower_ordered_keyset_scans memoized_plan)))
 		(define checked (require_physical_scan_relations fused_plan))
-		/* A single source without stages cannot contain a lowered inner scan.
-		Keep its established scalar/scan compilation path allocation-free. */
-		(define checked (if (and (query_block? (ir_root ir))
-			(empty_list? (ir_stages ir)) (<= (count (qb_sources (ir_root ir))) 1))
+		/* Flat source blocks and their aggregate/UNION wrappers have no
+		row-dependent ordinary source lookup. Preserve their direct compilation. */
+		(define checked (if (and
+			(reduce (ir_stages ir) (lambda (flat stage) (and flat (group_stage? stage))) true)
+			(physical_table_binding_flat_root? (ir_root ir)))
 			checked (bind_physical_table_handles checked)))
 		(if (and (not (nil? carrier)) (and (not (nth carrier 5))
 			(qassoc_get (qb_facts (ir_root ir)) (quote sql_calc_found_rows) false)))
