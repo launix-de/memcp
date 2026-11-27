@@ -749,25 +749,30 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 	for _, s := range shards {
 		go func(s *storageShard) {
 			defer wg.Done()
+			// Maintenance includes rebuild shadows; retain this exact generation
+			// rather than following replication's current read generation.
+			access := s.acquireSnapshotRead(nil)
+			defer access.Release()
+
 			s.mu.RLock()
 			cs := s.columns[colName]
-			sortCSs := make([]ColumnStorage, nCols)
-			for i := 0; i < nCols; i++ {
-				sortCSs[i] = s.columns[col.OrcSortCols[i]]
-			}
 			s.mu.RUnlock()
 			proxy, ok := cs.(*StorageComputeProxy)
 			if !ok {
 				return
 			}
-			s.ensureLoaded()
-			s.ensureMainCount(false, nil)
+			scanAccess := runtimeScanAccess(bounds)
+			preparedIndex := s.ensureScanAccessColumns(scanAccess, false, nil)
 			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
 			// Retain index and column-directory ownership during invalidation.
 			// Delta rows and deletion bits have independent atomic publication.
 			s.mu.RLock()
-			s.iterateIndex(nil, runtimeScanAccess(bounds), len(s.deltaRows()), buf[:], 1, nil, func(batch []uint32) bool {
+			sortCSs := make([]ColumnStorage, nCols)
+			for i := 0; i < nCols; i++ {
+				sortCSs[i] = s.columns[col.OrcSortCols[i]]
+			}
+			s.iterateIndex(nil, scanAccess, preparedIndex, len(s.deltaRows()), buf[:], 1, nil, func(batch []uint32) bool {
 				for _, idx := range batch {
 					if s.deletions.Get(uint(idx)) {
 						continue

@@ -1995,7 +1995,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 	result.shard = t
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
-	t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
+	preparedIndex := t.ensureScanAccessColumns(access, skipShardReadLock, currentTx)
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
@@ -2130,7 +2130,7 @@ func (t *storageShard) scan_order(access scanAccess, conditionCols []string, con
 		acceptColBufs := make([][]scm.Scmer, len(acceptCols))
 		boundaryCoveredLimit := acceptProgram == nil && conditionAlwaysTrue
 		indexBounds := newScanIndexBounds(access)
-		t.iterateIndexOrdered(currentTx, access, maxInsertIndex, buf, usageWeight, limit, boundaryCoveredLimit, func(index *StorageIndex, active bool) {
+		t.iterateIndexOrdered(currentTx, access, preparedIndex, maxInsertIndex, buf, usageWeight, limit, boundaryCoveredLimit, func(index *StorageIndex, active bool) {
 			if len(sortcols) > 0 {
 				resultAlreadySorted = indexCoversBoundaryOrder(index, active, access, indexBounds.len())
 			}

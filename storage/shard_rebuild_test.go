@@ -3228,3 +3228,142 @@ func TestEnsureMainCountDoesNotRaceColdColumnLoad(t *testing.T) {
 		t.Fatalf("main_count = %d, want 64", count)
 	}
 }
+
+// Eviction keeps consolidated definitions but unloads their source columns.
+// A later prefix read must load the chosen suffix before binding index getters,
+// even though that read correctly holds GetRead throughout preparation and use.
+func TestColdIndexSuffixReloadsForPrefixRead(t *testing.T) {
+	for _, mode := range []string{"exists", "lookup", "lookup-many", "map", "map-many", "unique", "warm-prefix", "cancelled-lookup", "cancelled-unique"} {
+		t.Run(mode, func(t *testing.T) {
+			tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
+			if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+				t.Fatal(result)
+			}
+			shard := tbl.ActiveShards()[0]
+			wide := runtimeScanAccess(analyzedBoundaries{
+				{col: "id", matcher: EqualMatcher, lower: scm.NewInt(1), upper: scm.NewInt(1), lowerInclusive: true, upperInclusive: true},
+				{col: "payload", matcher: EqualMatcher, lower: scm.NewString("row-00000001"), upper: scm.NewString("row-00000001"), lowerInclusive: true, upperInclusive: true},
+			})
+			func() {
+				access := shard.GetRead(nil, false)
+				defer access.Release()
+				preparedIndex := shard.ensureScanAccessColumns(wide, false, nil)
+				shard.mu.RLock()
+				defer shard.mu.RUnlock()
+				var buf [8]uint32
+				shard.iterateIndexForce(nil, wide, preparedIndex, len(shard.deltaRows()), buf[:], false, func([]uint32) bool { return true })
+			}()
+			if len(shard.Indexes) != 1 || len(shard.Indexes[0].Cols) != 2 {
+				t.Fatal("fixture did not create a compound index")
+			}
+			if mode == "warm-prefix" {
+				// A shorter definition can predate consolidation. Put it after
+				// the wide key so directory order cannot accidentally decide.
+				shard.mu.Lock()
+				shard.Indexes = append(shard.Indexes, &StorageIndex{t: shard,
+					Cols: []string{"id"}, ColOrder: shard.Indexes[0].ColOrder[:1],
+					ColOrderMeta: shard.Indexes[0].ColOrderMeta[:1]})
+				shard.mu.Unlock()
+			}
+			GlobalCache.Stop()
+			defer resumeOwnershipTestCache()
+			var freed [numEvictableTypes]int64
+			if !shardCleanup(shard, &freed) {
+				t.Fatal("fixture eviction failed")
+			}
+			access := shard.GetRead(nil, false)
+			defer access.Release()
+			if shard.columns["payload"] != nil {
+				t.Fatal("fixture suffix was unexpectedly loaded")
+			}
+			prefix := runtimeScanAccess(analyzedBoundaries{
+				{col: "id", matcher: EqualMatcher, lower: scm.NewInt(1), upper: scm.NewInt(1), lowerInclusive: true, upperInclusive: true},
+			})
+			if strings.HasPrefix(mode, "cancelled-") {
+				ss := &scm.SessionState{}
+				seq := ss.BeginQuery("Query", "cancelled cold index suffix")
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				ss.SetQueryContext(seq, ctx)
+				tx := NewTxContext(TxCursorStability)
+				tx.beginQuery(ss, seq, "cancelled cold index suffix")
+				defer tx.endQuery(seq)
+				defer ss.EndQuery(seq, "Sleep", "")
+				cancel()
+				var failure any
+				func() {
+					defer func() { failure = recover() }()
+					if mode == "cancelled-unique" {
+						shard.GetRecordidForUnique(prefix, tx, false)
+					} else {
+						shard.scanLookupOne(prefix, "", false, tx)
+					}
+				}()
+				if failure != "query killed" {
+					t.Fatalf("cancelled suffix load = %v, want query killed", failure)
+				}
+				if !shard.mu.TryLock() {
+					t.Fatal("cancelled suffix load leaked the caller's shard read lock")
+				}
+				shard.mu.Unlock()
+				return
+			}
+			count := 0
+			switch mode {
+			case "exists", "warm-prefix":
+				_, found := shard.scanFirstRecord(prefix, nil, scm.NewBool(true), nil, nil, nil)
+				if found {
+					count = 1
+				}
+			case "lookup":
+				_, count = shard.scanLookupOne(prefix, "", false, nil)
+			case "lookup-many":
+				_, count = shard.scanLookupMany(prefix, "", false, nil, &atomic.Bool{})
+			case "map":
+				_, count = shard.scanLookupMapOne(prefix, []string{"id"}, nil)
+			case "map-many":
+				_, count = shard.scanLookupMapMany(prefix, []string{"id"}, nil, &atomic.Bool{})
+			case "unique":
+				_, found := shard.GetRecordidForUnique(prefix, nil, false)
+				if found {
+					count = 1
+				}
+			}
+			wantIndexes := 1
+			wantSuffix := mode != "warm-prefix"
+			if !wantSuffix {
+				wantIndexes = 2
+			}
+			if count != 1 || (shard.columns["payload"] != nil) != wantSuffix {
+				t.Fatalf("count=%d, suffix loaded=%t; want count=1 loaded=%t", count, shard.columns["payload"] != nil, wantSuffix)
+			}
+			if len(shard.Indexes) != wantIndexes {
+				t.Fatal("cold suffix created an unnecessary prefix index")
+			}
+		})
+	}
+}
+
+func TestORCInvalidationReadsReloadedSortColumn(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
+	tbl.CreateColumn("running", "INT", nil, nil)
+	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+		t.Fatal(result)
+	}
+	tbl.Columns[2].OrcSortCols = []string{"payload"}
+	tbl.Columns[2].OrcSortDirs = []bool{false}
+	shard := tbl.ActiveShards()[0]
+	proxy := &StorageComputeProxy{shard: shard, colName: "running", count: 2,
+		isOrdered: true, delta: map[uint32]scm.Scmer{0: scm.NewInt(10), 1: scm.NewInt(30)}}
+	proxy.validMask.Set(0, true)
+	proxy.validMask.Set(1, true)
+	shard.mu.Lock()
+	shard.columns["running"] = proxy
+	shard.columns["payload"] = nil
+	shard.mu.Unlock()
+
+	tbl.invalidateORCFromSortKey("running", []scm.Scmer{scm.NewString("row-00000002")})
+	if !proxy.validMask.AtomicGet(0) || proxy.validMask.AtomicGet(1) {
+		t.Fatal("invalidation did not compare the reloaded sort values against the suffix boundary")
+	}
+}
