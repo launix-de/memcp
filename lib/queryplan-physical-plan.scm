@@ -13426,11 +13426,17 @@ persisted computors and OnInit recipes must not capture this query's pointers. *
 
 (define physical_table_binding_source? (lambda (expr)
 	(match expr
-		'(head schema schema_ci name name_ci)
+		(cons head (cons schema (cons schema_ci (cons name (cons name_ci transaction)))))
 		(and (not (list? head)) (physical_table_binding_head? (expression_syntax head) "table" table) (string? schema) (string? name)
 			(not (equal? (substr name 0 1) "."))
 			(or (expression_equal? schema_ci false) (expression_equal? schema_ci true))
-			(or (expression_equal? name_ci false) (expression_equal? name_ci true)))
+			(or (expression_equal? name_ci false) (expression_equal? name_ci true))
+			/* Keep the native transaction expression with its table binding.
+			Only the invocation's tx or nil is invariant across row callbacks. */
+			(or (empty_list? transaction)
+				(and (equal? (count transaction) 1)
+					(or (nil? (car transaction))
+						(expression_equal? (car transaction) (physical_query_tx_symbol))))))
 		_ false)))
 
 (define physical_table_binding_operators (list scan scan_order scan_order_multi scan_join_order
@@ -13493,7 +13499,12 @@ code subtrees; source-position checks above retain the original argument slots. 
 			(if (and (empty_list? children) (not (list? head))) false
 				(and (symbol? head) (expression_equal? head (symbol "quote")) (equal? (count expr) 2)) false
 				(and (symbol? head) (expression_equal? head (symbol "lambda")) (>= (count expr) 3))
-				(physical_table_binding_needed? (nth expr 2) (if shared_lambda depth 0) false)
+				(begin
+					(define params (nth expr 1))
+					(physical_table_binding_needed? (nth expr 2)
+						(if (and shared_lambda
+							(not (or (expression_equal? params (physical_query_tx_symbol))
+								(and (list? params) (contains? params (physical_query_tx_symbol)))))) depth 0) false))
 				(begin
 					(define scan_input (physical_table_binding_loop? head))
 					(define loop (or scan_input (and shared_lambda (physical_table_binding_head? head "list" list))))
@@ -13513,7 +13524,11 @@ that can escape is rewritten independently and contributes no outer bindings. */
 		(match (cons (if (list? (car expr)) (car expr) (expression_syntax (car expr))) (cdr expr))
 			((symbol quote) _value) (list expr '())
 			(cons (symbol lambda) (cons params (cons body metadata)))
-			(if shared_lambda
+			/* A callback parameter named tx owns the transaction binding even
+			when the callback itself cannot escape. */
+			(if (and shared_lambda
+				(not (or (expression_equal? params (physical_query_tx_symbol))
+					(and (list? params) (contains? params (physical_query_tx_symbol))))))
 				(match (physical_table_binding_walk body depth false false) '(rewritten sources)
 					(list (cons (car expr) (cons params (cons rewritten metadata))) sources))
 				(list (cons (car expr) (cons params (cons (bind_physical_table_handles body) metadata))) '()))

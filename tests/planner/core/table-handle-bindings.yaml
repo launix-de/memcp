@@ -58,6 +58,26 @@ test_cases:
             (not (physical_table_binding_needed? bound 0 false))))) true)
         "ok" (error "source list or RecMap target lost its binding")))
   expect: {data: [ok]}
+- name: table bindings preserve the invocation transaction and retain dynamic transaction scope
+  scm: |
+    (begin
+      (define source (list table "memcp-tests" false "handle_right" false))
+      (define transactional (append source (symbol "tx")))
+      (define dynamic (append source (list (symbol "row_transaction"))))
+      (define wrap (lambda (input) (list scan (symbol "tx") input nil nil
+        (list (symbol "lambda") '() (list scan (symbol "tx") input nil nil)))))
+      (define bound (bind_physical_table_handles (wrap transactional)))
+      (define shadowed (list scan nil source nil nil
+        (list (symbol "lambda") (list (symbol "tx"))
+          (list scan (symbol "tx") transactional nil nil))))
+      (if (and (equal? (count bound) 3)
+        (expression_equal? (nth (nth bound 1) 2) transactional)
+        (physical_table_binding_source? (append source nil))
+        (not (physical_table_binding_source? (append transactional nil)))
+        (expression_equal? (bind_physical_table_handles shadowed) shadowed)
+        (expression_equal? (bind_physical_table_handles (wrap dynamic)) (wrap dynamic)))
+        "ok" (error "transaction expression escaped its invocation or row scope")))
+  expect: {data: [ok]}
 - name: optimized nested scans resolve a shared source once per invocation
   scm: |
     (begin
@@ -151,9 +171,9 @@ test_cases:
     (begin
       (define calls (newsession))
       (define seen (newsession))
-      (define lookup (lambda (db db_ci name name_ci) (begin
+      (define lookup (lambda (db db_ci name name_ci tx) (begin
         (calls "n" (+ (coalesceNil (calls "n") 0) 1))
-        (table db db_ci name name_ci))))
+        (table db db_ci name name_ci tx))))
       (define plan (parse_sql "memcp-tests"
         "SELECT l.id FROM handle_left l WHERE EXISTS (SELECT 1 FROM handle_right r WHERE r.k=l.k)"
         (lambda (schema name write) true) (newsession) nil))
