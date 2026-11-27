@@ -169,8 +169,8 @@ func setupUniqueContentionTable(t *testing.T, layout string) *table {
 	t.Helper()
 	layout = strings.TrimSuffix(layout, "-main")
 	tbl := setupScanParallelTestTable(t, "tuniquecontention")
-	tbl.CreateColumn("bucket", "INT", nil, nil)
-	tbl.CreateColumn("val", "INT", nil, nil)
+	tbl.CreateColumn(nil, "bucket", "INT", nil, nil)
+	tbl.CreateColumn(nil, "val", "INT", nil, nil)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	if layout != "free" {
 		tbl.ShardMode = ShardModePartition
@@ -334,9 +334,9 @@ func TestInsertCollisionDifferentUniqueKeysShareRow(t *testing.T) {
 	previous := runtime.GOMAXPROCS(32)
 	defer runtime.GOMAXPROCS(previous)
 	tbl := setupScanParallelTestTable(t, "tuniquecollisionaliases")
-	tbl.CreateColumn("name", "TEXT", nil, nil)
-	tbl.CreateColumn("code", "TEXT", nil, nil)
-	tbl.CreateColumn("val", "INT", nil, nil)
+	tbl.CreateColumn(nil, "name", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "code", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "val", "INT", nil, nil)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}, {Id: "code", Cols: []string{"code"}}}
 	columns := []string{"id", "name", "code", "val"}
 	tbl.Insert(columns, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("same-name"), scm.NewString("same-code"), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
@@ -408,7 +408,7 @@ func TestInsertCollisionMutationPanicReleasesKeys(t *testing.T) {
 
 func TestInsertCollisionKeyChangeConflictRestoresRow(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tuniquekeychangeconflict")
-	tbl.CreateColumn("name", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "name", "TEXT", nil, nil)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
 	columns := []string{"id", "name"}
 	row := [][]scm.Scmer{{scm.NewInt(7), scm.NewString("original")}}
@@ -511,7 +511,7 @@ func TestInsertCollisionIndependentKeyProgress(t *testing.T) {
 
 func TestInsertCollisionCallbackRechecksEarlierKeys(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tinsertcallbackrecheck")
-	tbl.CreateColumn("name", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "name", "TEXT", nil, nil)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "name", Cols: []string{"name"}}}
 	columns := []string{"id", "name"}
 	tbl.Insert(columns, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("taken")}}, nil, scm.NewNil(), false, nil)
@@ -553,7 +553,7 @@ func TestUniqueTypedHashMatchesEquality(t *testing.T) {
 	} {
 		t.Run(definition.typ+"-"+definition.collation, func(t *testing.T) {
 			tbl := setupScanParallelTestTable(t, "t_unique_typed_hash")
-			tbl.CreateColumn("value", definition.typ, []int{40}, nil)
+			tbl.CreateColumn(nil, "value", definition.typ, []int{40}, nil)
 			column := tbl.Columns[len(tbl.Columns)-1]
 			column.Collation = definition.collation
 			column.UpdateSanitizer()
@@ -612,15 +612,15 @@ func TestInsertBalancedShardsSurviveWALReplay(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "tinsertbalancedrecovery", 0)
 	topology := tbl.pinActiveTopology()
 	defer func() { topology.releaseOperation() }()
-	first, releaseFirst, _ := tbl.routeFreeInsert(topology, 1)
+	first, releaseFirst, _ := tbl.routeFreeInsert(nil, topology, 1)
 	defer releaseFirst()
-	_, _, next := tbl.routeFreeInsert(topology, 1)
+	_, _, next := tbl.routeFreeInsert(nil, topology, 1)
 	if next == topology || next == nil {
 		t.Fatal("busy routing did not publish a writer lane")
 	}
 	topology.releaseOperation()
 	topology = tbl.pinActiveTopology()
-	second, releaseSecond, _ := tbl.routeFreeInsert(topology, 1)
+	second, releaseSecond, _ := tbl.routeFreeInsert(nil, topology, 1)
 	defer releaseSecond()
 	if first == second {
 		t.Fatal("writers share a shard")
@@ -789,9 +789,7 @@ func TestInsertAutoIncrementWALReplayPreservesSignedIDs(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			name := "tautoidreplay" + test.name
 			tbl, persistence := createDurabilityTestTable(t, name, 0)
-			tbl.Columns[0].AutoIncrement = true
-			tbl.publishShowColumnsSnapshot(false)
-			tbl.schema.save()
+			tbl.AlterColumn(nil, "id", "auto_increment", scm.NewBool(true))
 			rows := make([][]scm.Scmer, len(test.ids))
 			for i, id := range test.ids {
 				rows[i] = []scm.Scmer{scm.NewInt(id), scm.NewString("explicit")}
@@ -877,7 +875,7 @@ func TestUniqueCollatedIndexLookup(t *testing.T) {
 	for _, pair := range [][2]string{{"Alpha", "ALPHA"}, {"ſail", "sail"}, {"Key", "key"}} {
 		t.Run(pair[0], func(t *testing.T) {
 			tbl := setupScanParallelTestTable(t, "t_unique_collated_lookup")
-			tbl.CreateColumn("label", "VARCHAR", []int{40}, nil)
+			tbl.CreateColumn(nil, "label", "VARCHAR", []int{40}, nil)
 			col := tbl.Columns[len(tbl.Columns)-1]
 			col.Collation = "utf8mb4_general_ci"
 			col.UpdateSanitizer()
@@ -895,7 +893,7 @@ func TestUniqueCollatedIndexLookup(t *testing.T) {
 
 func TestUniqueTextProbeDuringGlobalDefinitions(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "t_unique_bootstrap_lookup")
-	tbl.CreateColumn("label", "VARCHAR", []int{40}, nil)
+	tbl.CreateColumn(nil, "label", "VARCHAR", []int{40}, nil)
 	tbl.Unique = []uniqueKey{{Id: "label", Cols: []string{"label"}}}
 	tbl.Insert([]string{"label"}, [][]scm.Scmer{{scm.NewString("key")}}, nil, scm.NewNil(), false, nil)
 	shard := tbl.ActiveShards()[0]
@@ -950,7 +948,7 @@ func TestUniqueProbePrunesKnownPartitionDimensions(t *testing.T) {
 
 func TestUniqueCollatedPartitionProbePreservesOtherDimensions(t *testing.T) {
 	tbl := setupUniqueContentionTable(t, "extra")
-	tbl.CreateColumn("label", "VARCHAR", []int{40}, []scm.Scmer{scm.NewString("collate"), scm.NewString("utf8mb4_general_ci")})
+	tbl.CreateColumn(nil, "label", "VARCHAR", []int{40}, []scm.Scmer{scm.NewString("collate"), scm.NewString("utf8mb4_general_ci")})
 	active := tbl.activeTopology()
 	topology := tableShardTopology{mode: ShardModePartition, shards: active.shards, dimensions: []shardDimension{
 		{Column: "label", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewString("M")}},
@@ -966,7 +964,7 @@ func TestUniqueNullRowAcquiresFirstConcreteKey(t *testing.T) {
 	for _, main := range []bool{false, true} {
 		t.Run(fmt.Sprint(main), func(t *testing.T) {
 			tbl := setupScanParallelTestTable(t, "t_unique_null_to_concrete")
-			tbl.CreateColumn("value", "INT", nil, nil)
+			tbl.CreateColumn(nil, "value", "INT", nil, nil)
 			tbl.Unique = []uniqueKey{{Id: "value", Cols: []string{"value"}}}
 			tbl.Insert([]string{"value"}, [][]scm.Scmer{{scm.NewNil()}}, nil, scm.NewNil(), false, nil)
 			if main {
@@ -1106,7 +1104,7 @@ func TestUniqueProbeDomainRetainsOnlyDistinctShards(t *testing.T) {
 
 func TestUniqueCoercingCollationHashPreservesEquality(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "t_unique_coercing_collation_hash")
-	tbl.CreateColumn("value", "ANY", nil, nil)
+	tbl.CreateColumn(nil, "value", "ANY", nil, nil)
 	declaration := tbl.uniqueColumnDeclaration("value")
 	declaration.Collation = "utf8mb4_general_ci"
 	values := []scm.Scmer{scm.NewNil(), scm.NewBool(false), scm.NewBool(true), scm.NewInt(0), scm.NewInt(3), scm.NewInt(1000), scm.NewInt(9007199254740993), scm.NewFloat(3), scm.NewFloat(3.5), scm.NewDate(1700000000)}
@@ -1159,11 +1157,11 @@ func TestUniqueNodePoolReleasesIdleTables(t *testing.T) {
 // write when the two tables happen to hash into the same stripe.
 func TestUniqueNodePoolNestedTriggerHashCollision(t *testing.T) {
 	outer := setupScanParallelTestTable(t, "tunique_node_trigger")
-	outer.CreateColumn("val", "INT", nil, nil)
+	outer.CreateColumn(nil, "val", "INT", nil, nil)
 	outer.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
-	inner, _ := CreateTable(outer.schema.Name, "trigger_target", Memory, false)
-	inner.CreateColumn("id", "INT", nil, nil)
-	inner.CreateColumn("val", "INT", nil, nil)
+	inner, _ := CreateTable(nil, outer.schema.Name, "trigger_target", Memory, false)
+	inner.CreateColumn(nil, "id", "INT", nil, nil)
+	inner.CreateColumn(nil, "val", "INT", nil, nil)
 	inner.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	columns := []string{"id", "val"}
 	outerRow := [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0)}}
@@ -1230,9 +1228,9 @@ func BenchmarkUniqueNodeThroughput(b *testing.B) {
 			tables := make([]*table, count)
 			columns := []string{"id", "val"}
 			for i := range tables {
-				tbl, _ := CreateTable("tunique_node_bench", fmt.Sprint("items_", i), Memory, false)
-				tbl.CreateColumn("id", "INT", nil, nil)
-				tbl.CreateColumn("val", "INT", nil, nil)
+				tbl, _ := CreateTable(nil, "tunique_node_bench", fmt.Sprint("items_", i), Memory, false)
+				tbl.CreateColumn(nil, "id", "INT", nil, nil)
+				tbl.CreateColumn(nil, "val", "INT", nil, nil)
 				tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 				rows := make([][]scm.Scmer, 64)
 				for key := range rows {

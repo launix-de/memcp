@@ -39,11 +39,18 @@ test_cases:
   - name: "mysqldump repeatable-read session isolation"
     sql: "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"
   - name: "mysqldump savepoint"
+    session_id: mysqldump-savepoint
+    setup:
+      - sql: START TRANSACTION
     sql: "SAVEPOINT sp"
   - name: "mysqldump rollback to savepoint"
+    session_id: mysqldump-savepoint
     sql: "ROLLBACK TO SAVEPOINT sp"
   - name: "mysqldump release savepoint"
+    session_id: mysqldump-savepoint
     sql: "RELEASE SAVEPOINT sp"
+    cleanup:
+      - sql: COMMIT
 
   # --- SHOW operations ---
   - name: "SHOW TABLES"

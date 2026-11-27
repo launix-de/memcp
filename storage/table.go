@@ -35,6 +35,7 @@ import "unicode/utf8"
 import "encoding/json"
 import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage/mosi"
 import "github.com/launix-de/go-mysqlstack/sqldb"
 
 // TagTable is the custom Scmer tag for *table pointers.
@@ -132,6 +133,7 @@ type column struct {
 	OnUpdate          scm.Scmer
 	AllowNull         bool
 	IsTemp            bool // cache-owned storage; computed recipes remain table metadata
+	RuntimeOnly       bool `json:"-"` // physical planner program, not a user declaration
 	cacheOwner        *table
 	cachePayloadEmpty atomic.Bool
 	Collation         string
@@ -355,6 +357,7 @@ type tableShardTopology struct {
 	retired            atomic.Bool
 	operationsDrained  chan struct{}
 	drained            chan struct{}
+	previousDrained    <-chan struct{}
 	operationDrainOnce sync.Once
 	drainOnce          sync.Once
 }
@@ -399,7 +402,20 @@ func (topology *tableShardTopology) closeDrains() {
 	if topology.operations.Load() == 0 {
 		topology.operationDrainOnce.Do(func() { close(topology.operationsDrained) })
 		if topology.transactions.Load() == 0 {
-			topology.drainOnce.Do(func() { close(topology.drained) })
+			topology.drainOnce.Do(func() {
+				// A publication can retain shards from older generations. Its
+				// retirement proof includes those readers, even after a retained
+				// shard's generation pointer advances to this newer publication.
+				if previous := topology.previousDrained; previous != nil {
+					select {
+					case <-previous:
+					default:
+						go func() { <-previous; close(topology.drained) }()
+						return
+					}
+				}
+				close(topology.drained)
+			})
 		}
 	}
 }
@@ -610,6 +626,7 @@ func (initializer *atomicTableInitializer) UnmarshalJSON(data []byte) error {
 }
 
 type table struct {
+	retired atomic.Bool
 	// Published only when this table crosses its share of the node's shard RAM.
 	shardRAMFull atomic.Bool
 	// Query-local contribution reuse checks these atomics outside row loops.
@@ -619,21 +636,30 @@ type table struct {
 	contributionRevision atomic.Uint64
 	cacheDataRevision    atomic.Uint64 // logical mutation batches only; topology publication does not advance it
 	contributionWriters  atomic.Int64
+	// Native mutation overlays include retained/rebuilt generations. A cold
+	// cache must not miss a decision whose DML predates its maintenance edges.
+	pendingCacheMutations atomic.Int32
 
 	// Immutable, bounded filter observations, published after complete scans.
 	filterFeedback  atomic.Pointer[tableFilterFeedback]
 	schema          *database
 	Name            string
+	RuntimeIdentity string `json:"runtime_identity,omitempty"`
 	Columns         []*column
 	Unique          []uniqueKey            // unique keys
 	Foreign         []foreignKey           // foreign keys
 	Triggers        []TriggerDescription   // triggers on this table
 	PersistencyMode PersistencyMode        /* 0 = safe (default), 1 = sloppy, 2 = memory */
+	RuntimeOnly     bool                   `json:"-"`                // physical query workspace; no durable declaration
 	OnInit          atomicTableInitializer `json:"oninit,omitempty"` // immutable closed callback, atomically published
 	cacheUsers      int64                  // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
 	// Immutable reverse dependency list, published by registration with CAS.
 	// Eviction visits only these sources; it never scans the whole catalog.
 	cacheTriggerSources atomic.Pointer[cacheTriggerSource]
+	// Native row-cache admission is separate from payload epoch invalidation.
+	cacheTracksSourceRows  atomic.Bool
+	cacheRowsInvalidated   atomic.Bool
+	cacheRetirementPending atomic.Bool
 	// LOCK ORDER CONTRACT:
 	//   1. db.schemalock
 	//   2. t.ddlMu
@@ -867,6 +893,9 @@ func (t *table) waitForTransactions(ctx context.Context, shards []*storageShard)
 // without data, so their closed oninit callback runs again on the first
 // createtable guard after every restart.
 func (t *table) awaitCreationInitialization(tx scm.Scmer) {
+	if t.cacheRowsInvalidated.Load() {
+		panic(cachePreparationDeferred{})
+	}
 	if !t.creationMu.TryLock() {
 		t.creationMu.Lock()
 	}
@@ -896,7 +925,7 @@ func (t *table) awaitCreationInitialization(tx scm.Scmer) {
 			// even though a fresh attempt would very likely succeed. Only
 			// deterministic OnInit failures are cached and replayed to
 			// later callers; "query killed" always gets a fresh retry.
-			if thisCallPanic != nil && thisCallPanic != "query killed" {
+			if thisCallPanic != nil && thisCallPanic != "query killed" && !deferredCachePreparation(thisCallPanic) {
 				t.creationPanic = thisCallPanic
 			}
 		}()
@@ -949,6 +978,9 @@ func (t *table) publishTopologyLocked() *tableShardTopology {
 		dimensions:        append([]shardDimension(nil), t.PDimensions...),
 		operationsDrained: make(chan struct{}),
 		drained:           make(chan struct{}),
+	}
+	if previous := t.topology.Load(); previous != nil {
+		topology.previousDrained = previous.drained
 	}
 	for _, shard := range topology.shards {
 		if shard != nil {
@@ -1065,9 +1097,47 @@ func (t *table) publishSchemaTopology(mode ShardMode, shards []*storageShard, di
 	return t.schemaTopology.Swap(next)
 }
 
+// persistedColumn and persistedTable are the declaration records of the
+// legacy schema.json format. The system_schema catalog derives its columns
+// from exactly these records, so every persisted field has a catalog cell.
+type persistedColumn struct {
+	*column
+	PartitioningScore int
+	InitialValue      *scm.Scmer                     `json:"initial_value,omitempty"`
+	InitialValues     map[string]columnInitialExtent `json:"initial_values,omitempty"`
+}
+
+type persistedTable struct {
+	RuntimeIdentity    string            `json:"runtime_identity,omitempty"`
+	ShardForwards      map[string]string `json:"shard_forwards,omitempty"`
+	Name               string
+	Columns            []persistedColumn
+	DroppedColumns     map[string]bool `json:"dropped_columns"`
+	Unique             []uniqueKey
+	Foreign            []foreignKey
+	Triggers           []TriggerDescription
+	PersistencyMode    PersistencyMode
+	OnInit             *scm.Scmer `json:"oninit,omitempty"`
+	AutoIncrement      uint64     `json:"Auto_increment"`
+	Collation          string
+	Charset            string
+	Comment            string
+	PlannerRowEstimate uint64                   `json:"planner_row_estimate"`
+	KeyFrequencies     *persistedKeyFrequencies `json:"key_frequencies,omitempty"`
+	FilterFeedback     *persistedFilterFeedback `json:"filter_feedback,omitempty"`
+	ShardMode          ShardMode
+	Shards             []*storageShard
+	PShards            []*storageShard
+	PDimensions        []shardDimension
+}
+
 // MarshalJSON reads topology only from an immutable, atomically published
 // generation. Database schema locking keeps the remaining DDL fields stable.
 func (t *table) MarshalJSON() ([]byte, error) {
+	return json.Marshal(t.persistedDeclaration())
+}
+
+func (t *table) persistedDeclaration() *persistedTable {
 	// Reservations publish once per batch; snapshot the same counter without
 	// acquiring the topology mutex during schema persistence.
 	autoIncrement := atomic.LoadUint64(&t.Auto_increment)
@@ -1094,12 +1164,6 @@ func (t *table) MarshalJSON() ([]byte, error) {
 	// topology. A rebuilt generation has materialized its column values before
 	// publication. Filter only the serialized view: failed schema publication
 	// can restore its previous topology without losing the original extents.
-	type persistedColumn struct {
-		*column
-		PartitioningScore int
-		InitialValue      *scm.Scmer                     `json:"initial_value,omitempty"`
-		InitialValues     map[string]columnInitialExtent `json:"initial_values,omitempty"`
-	}
 	columns := make([]persistedColumn, len(t.Columns))
 	for i, c := range t.Columns {
 		columns[i].column = c
@@ -1121,28 +1185,6 @@ func (t *table) MarshalJSON() ([]byte, error) {
 			}
 		}
 	}
-	type persistedTable struct {
-		ShardForwards      map[string]string `json:"shard_forwards,omitempty"`
-		Name               string
-		Columns            []persistedColumn
-		DroppedColumns     map[string]bool `json:"dropped_columns"`
-		Unique             []uniqueKey
-		Foreign            []foreignKey
-		Triggers           []TriggerDescription
-		PersistencyMode    PersistencyMode
-		OnInit             *scm.Scmer `json:"oninit,omitempty"`
-		AutoIncrement      uint64     `json:"Auto_increment"`
-		Collation          string
-		Charset            string
-		Comment            string
-		PlannerRowEstimate uint64                   `json:"planner_row_estimate"`
-		KeyFrequencies     *persistedKeyFrequencies `json:"key_frequencies,omitempty"`
-		FilterFeedback     *persistedFilterFeedback `json:"filter_feedback,omitempty"`
-		ShardMode          ShardMode
-		Shards             []*storageShard
-		PShards            []*storageShard
-		PDimensions        []shardDimension
-	}
 	// Lazy compilation updates runtime trigger fields under t.mu, independently
 	// of schema ownership. Copy the declarations before encoding outside the lock.
 	t.mu.Lock()
@@ -1160,7 +1202,8 @@ func (t *table) MarshalJSON() ([]byte, error) {
 			}
 		}
 	}
-	return json.Marshal(&persistedTable{
+	return &persistedTable{
+		RuntimeIdentity:    t.RuntimeIdentity,
 		ShardForwards:      topology.forwards,
 		Name:               t.Name,
 		Columns:            columns,
@@ -1181,7 +1224,7 @@ func (t *table) MarshalJSON() ([]byte, error) {
 		Shards:             shards,
 		PShards:            partitionedShards,
 		PDimensions:        topology.dimensions,
-	})
+	}
 }
 
 // contributionTableID distinguishes replacement tables with the same SQL name.
@@ -1602,8 +1645,14 @@ func (t *table) schemaSaveMode() schemaSaveMode {
 	return schemaSaveModeForDurability(t.PersistencyMode == Safe)
 }
 
-func (t *table) finishSchemaMutationLocked(mode schemaSaveMode) {
-	t.schema.saveLockedAndUnlock(mode)
+func (t *table) finishSchemaMutationLocked(tx *TxContext, mode schemaSaveMode, definitionChanged bool) {
+	if definitionChanged && !t.RuntimeOnly {
+		t.schema.saveLockedAndUnlock(tx, mode, t)
+	} else {
+		// A physical program does not dirty logical schema metadata. A later
+		// user checkpoint still retains any independently buffered declarations.
+		t.schema.schemalock.Unlock()
+	}
 }
 
 // isHiddenFromShowTables implements the SQL metadata contract for internal
@@ -2957,7 +3006,7 @@ func validateInsertColumns(columns []string, declarations []*column) {
 // shard locks, retained until the caller attaches the complete declaration,
 // so an overlapping INSERT cannot publish an uninitialized new-column slot.
 // No ordinary reader or INSERT needs to inspect these initialization records.
-func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique, nullsNotDistinct bool) (release func()) {
+func (t *table) initializeColumnRowsLocked(tx *TxContext, c *column, fillExisting, unique, nullsNotDistinct bool) (release func()) {
 	value := scm.NewNil()
 	if c.hasDefault() {
 		declared := c.defaultValue()
@@ -3009,19 +3058,26 @@ func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique, null
 		authoritative[shard] = true
 	}
 	for i, shard := range shards {
-		access := shard.GetWrite(nil)
+		access := shard.GetWrite(tx)
 		shard, shards[i] = access.shard, access.shard
 		releases = append(releases, access.Release)
-		shard.ensureMainCount(false, nil)
+		shard.ensureMainCount(false, tx)
 	}
 	for _, shard := range shards {
 		shard.mu.Lock()
 		locked++
 		rows := uint64(shard.main_count) + uint64(len(shard.deltaRows()))
-		if deleted := uint64(shard.deletions.Count()); authoritative[shard] && rows > deleted {
-			visibleRows += rows - deleted
+		visible := rows - uint64(shard.deletions.Count())
+		if tx != nil && tx.Mode == TxACID {
+			if overlay := tx.getShardTx(shard); overlay != nil {
+				visible += uint64(overlay.UndeleteMask.Count())
+				visible -= uint64(overlay.DeleteMask.Count())
+			}
 		}
-		if value.IsNil() && !c.AllowNull && (rows > uint64(shard.deletions.Count()) || shard.rollbackProtected.Count() != 0) {
+		if authoritative[shard] {
+			visibleRows += visible
+		}
+		if value.IsNil() && !c.AllowNull && visible != 0 {
 			panic("column " + c.Name + " cannot be NULL for existing rows")
 		}
 	}
@@ -3075,7 +3131,7 @@ func (t *table) initializeColumnRowsLocked(c *column, fillExisting, unique, null
 // createColumnLocked mutates table metadata while the database schemalock is
 // held. It does not persist schema.json yet; callers must follow up with a
 // single saveLockedAndUnlock once the whole DDL mutation is complete.
-func (t *table) createColumnLocked(name string, typ string, typdimensions []int, extrainfo []scm.Scmer, initializeExisting bool) (*column, bool) {
+func (t *table) createColumnLocked(name string, typ string, typdimensions []int, extrainfo []scm.Scmer, initializeExisting bool, tx *TxContext) (*column, bool) {
 	ignoreCase := false
 	for i := 0; i+1 < len(extrainfo); i += 2 {
 		if scm.String(extrainfo[i]) == "name_ignorecase" {
@@ -3140,6 +3196,8 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.Collation = scm.String(extrainfo[i+1])
 		case "temp":
 			c.IsTemp = scm.ToBool(extrainfo[i+1])
+		case "runtime_only":
+			c.RuntimeOnly = scm.ToBool(extrainfo[i+1])
 		case "filtercols", "filter", "dependencies":
 			// handled by createcolumn builtin, not a column property
 		case "sortcols", "sortdirs", "partitioncount", "mapcols", "mapreducefn", "reduceinit":
@@ -3147,6 +3205,9 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 		default:
 			panic("unknown column attribute: " + key)
 		}
+	}
+	if c.RuntimeOnly && !c.IsTemp {
+		panic("runtime-only columns must be temporary")
 	}
 	for i := range uniqueKeys {
 		uniqueKeys[i].NullsNotDistinct = nullsNotDistinct
@@ -3184,7 +3245,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 	}
 	cp := &c
 	if initializeExisting && !c.IsTemp && !c.AutoIncrement {
-		release := t.initializeColumnRowsLocked(cp, fillExisting, len(uniqueKeys) != 0, nullsNotDistinct)
+		release := t.initializeColumnRowsLocked(tx, cp, fillExisting, len(uniqueKeys) != 0, nullsNotDistinct)
 		defer release()
 		if len(uniqueKeys) != 0 {
 			t.Unique = append(t.Unique, uniqueKeys...)
@@ -3334,19 +3395,21 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 		// Overflow append also owns maintenanceMu before schema publication.
 		// Repartition may own it while waiting for ddlMu: relinquish only our
 		// local DDL ownership while waiting, then recheck below after reacquiring.
-		for !t.maintenanceMu.TryLock() {
-			t.ddlMu.Unlock()
-			t.maintenanceMu.Lock()
-			t.maintenanceMu.Unlock()
-			t.ddlMu.Lock()
+		if !queryTx.ownsSchemaMaintenance(t) {
+			for !t.maintenanceMu.TryLock() {
+				t.ddlMu.Unlock()
+				t.maintenanceMu.Lock()
+				t.maintenanceMu.Unlock()
+				t.ddlMu.Lock()
+			}
+			defer t.maintenanceMu.Unlock()
 		}
-		defer t.maintenanceMu.Unlock()
 		for _, shard := range t.ActiveShards() {
 			if shard != nil {
 				func() {
-					release := shard.GetWrite(nil).Release
+					release := shard.GetWrite(queryTx).Release
 					defer release()
-					shard.ensureMainCount(false, nil)
+					shard.ensureMainCount(false, queryTx)
 				}()
 			}
 		}
@@ -3372,7 +3435,7 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 			return false
 		}
 	}
-	cp, ok := t.createColumnLocked(name, typ, typdimensions, extrainfo, initializeExisting)
+	cp, ok := t.createColumnLocked(name, typ, typdimensions, extrainfo, initializeExisting, queryTx)
 	if !ok {
 		metadataLocked = false
 		t.schema.schemalock.Unlock()
@@ -3393,28 +3456,39 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 		mode = schemaSaveBuffered
 	}
 	metadataLocked = false // finishSchemaMutationLocked always releases ownership.
-	t.finishSchemaMutationLocked(mode)
+	t.finishSchemaMutationLocked(queryTx, mode, !cp.RuntimeOnly)
 	if cp.IsTemp {
 		t.registerTempColumn(cp)
 	}
 	return true
 }
 
-func (t *table) CreateColumn(name string, typ string, typdimensions []int, extrainfo []scm.Scmer) bool {
+func (t *table) CreateColumn(tx *TxContext, name string, typ string, typdimensions []int, extrainfo []scm.Scmer) bool {
 	temporary := false
 	for i := 0; i+1 < len(extrainfo); i += 2 {
 		if scm.String(extrainfo[i]) == "temp" && scm.ToBool(extrainfo[i+1]) {
 			temporary = true
 		}
 	}
+	if tx == nil && !temporary && !t.RuntimeOnly && !t.isEphemeralQueryTable() {
+		var result bool
+		schemaAutocommit(func(current *TxContext) { result = t.CreateColumn(current, name, typ, typdimensions, extrainfo) })
+		return result
+	}
 	var schemaAccess WriteAccess
 	if !temporary {
-		t, schemaAccess = t.schemaWrite()
+		if tx != nil {
+			tx.writeSchema(t.schema)
+		}
+		t, schemaAccess = t.schemaWrite(tx)
 		defer schemaAccess.Release()
+		if tx != nil {
+			tx.recordSchema(t, false)
+		}
 	}
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
-	return t.createColumnDDLLocked(name, typ, typdimensions, extrainfo, nil)
+	return t.createColumnDDLLocked(name, typ, typdimensions, extrainfo, tx)
 }
 
 // cloneStoredColumnDeclaration preserves immutable persistence/default data.
@@ -3444,11 +3518,19 @@ func cloneStoredColumnDeclaration(current *column) *column {
 // AlterColumn keeps the existing single-property API while using the same
 // schema owner and immutable stored-column publication as complete declarations.
 // Cache/computed columns retain their existing descriptor/lifecycle identity.
-func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
+func (t *table) AlterColumn(tx *TxContext, name, operation string, value scm.Scmer) scm.Scmer {
 	if operation == "drop" {
-		return scm.NewBool(t.DropColumn(name))
+		return scm.NewBool(t.DropColumn(tx, name))
 	}
-	t, schemaAccess := t.schemaWrite()
+	if tx == nil && !t.RuntimeOnly {
+		var result scm.Scmer
+		schemaAutocommit(func(current *TxContext) { result = t.AlterColumn(current, name, operation, value) })
+		return result
+	}
+	if tx != nil && !t.RuntimeOnly {
+		tx.recordSchema(t, false)
+	}
+	t, schemaAccess := t.schemaWrite(tx)
 	defer schemaAccess.Release()
 	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
 	t.ddlMu.Lock()
@@ -3503,7 +3585,7 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 		}
 		t.publishShowColumnsSnapshot(true)
 		metadataLocked = false
-		t.finishSchemaMutationLocked(t.schemaSaveMode())
+		t.finishSchemaMutationLocked(tx, t.schemaSaveMode(), !current.RuntimeOnly)
 		return result
 	}
 	if operation == "drop_default" {
@@ -3519,8 +3601,16 @@ func (t *table) AlterColumn(name, operation string, value scm.Scmer) scm.Scmer {
 // descriptor. Physical storages, native keys and the table ID allocator are not
 // replaced. Runtime statistics and partitioning traffic are advisory snapshots;
 // late observations on the old descriptor may be discarded.
-func (t *table) AlterColumnDeclaration(name string, declaration, expected scm.Scmer) bool {
-	t, schemaAccess := t.schemaWrite()
+func (t *table) AlterColumnDeclaration(tx *TxContext, name string, declaration, expected scm.Scmer) bool {
+	if tx == nil && !t.RuntimeOnly {
+		var result bool
+		schemaAutocommit(func(current *TxContext) { result = t.AlterColumnDeclaration(current, name, declaration, expected) })
+		return result
+	}
+	if tx != nil && !t.RuntimeOnly {
+		tx.recordSchema(t, false)
+	}
+	t, schemaAccess := t.schemaWrite(tx)
 	defer schemaAccess.Release()
 	decode := func(value scm.Scmer) (string, []int, bool, string) {
 		if !value.IsSlice() || len(value.Slice()) != 4 {
@@ -3590,13 +3680,13 @@ func (t *table) AlterColumnDeclaration(name string, declaration, expected scm.Sc
 		t.Columns = columns
 		t.publishShowColumnsSnapshot(true)
 		metadataLocked = false // finishSchemaMutationLocked releases schema ownership.
-		t.finishSchemaMutationLocked(t.schemaSaveMode())
+		t.finishSchemaMutationLocked(tx, t.schemaSaveMode(), !replacement.RuntimeOnly)
 		return true
 	}
 	panic("column " + t.schema.Name + "." + t.Name + "." + name + " does not exist")
 }
 
-func (t *table) dropColumnDDLLocked(name string) bool {
+func (t *table) dropColumnDDLLocked(tx *TxContext, name string) bool {
 	t.schema.schemalock.Lock()
 	var removedCol *column
 	for i, c := range t.Columns {
@@ -3625,7 +3715,7 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 			} else {
 				t.publishShowColumnsSnapshot(true)
 			}
-			t.finishSchemaMutationLocked(t.schemaSaveMode())
+			t.finishSchemaMutationLocked(tx, t.schemaSaveMode(), !c.RuntimeOnly)
 			// deregister temp column AFTER releasing schemalock
 			if removedCol.IsTemp {
 				GlobalCache.Remove(removedCol)
@@ -3637,49 +3727,134 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 	panic("drop column does not exist: " + t.Name + "." + name)
 }
 
-func (t *table) DropColumn(name string) bool {
+func (t *table) DropColumn(tx *TxContext, name string) bool {
 	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
-	return t.dropColumnForMigration(name)
+	return t.dropColumnForMigration(tx, name)
 }
 
-func (t *table) dropColumnForMigration(name string) bool {
+func (t *table) dropColumnForMigration(tx *TxContext, name string) bool {
+	if tx == nil && !t.RuntimeOnly {
+		var result bool
+		schemaAutocommit(func(current *TxContext) { result = t.dropColumnForMigration(current, name) })
+		return result
+	}
+	if tx != nil && !t.RuntimeOnly {
+		tx.recordSchema(t, false)
+	}
 	dropped := func() bool {
 		var schemaAccess WriteAccess
-		t, schemaAccess = t.schemaWrite()
+		t, schemaAccess = t.schemaWrite(tx)
 		defer schemaAccess.Release()
 		t.ddlMu.Lock()
 		defer t.ddlMu.Unlock()
-		return t.dropColumnDDLLocked(name)
+		return t.dropColumnDDLLocked(tx, name)
 	}()
 	// Dependency callbacks can retire other columns on this same table.
 	// Publication and persistence finish first; callbacks own neither schema
 	// nor table DDL rights, so their existing native DDL cannot self-deadlock.
 	if dropped {
-		t.ExecuteTableLifecycleTriggers(AfterDropColumn, nil)
+		t.ExecuteTableLifecycleTriggers(AfterDropColumn, tx)
 	}
 	return dropped
 }
 
-func (t *table) DropColumnIfExists(name string) bool {
-	t.schema.GetRead(nil)
+func (t *table) ChangeEngine(tx *TxContext, mode PersistencyMode) bool {
+	if t.RuntimeOnly {
+		panic("physical query workspace cannot change its engine")
+	}
+	return schemaMutation(tx, []*table{t}, func(tx *TxContext) bool {
+		requireTableMaintenance(t.schema.Name, t.Name, maintenanceChangeEngine)
+		var access WriteAccess
+		t, access = t.schemaWrite(tx)
+		defer access.Release()
+		tx.claimSchemaMaintenance(t)
+		t.ddlMu.Lock()
+		defer t.ddlMu.Unlock()
+		previous := t.PersistencyMode
+		if mode == previous {
+			return true
+		}
+		tx.recordEngineChange(t)
+		t.schema.persistenceLifecycle.RLock()
+		defer t.schema.persistenceLifecycle.RUnlock()
+		shards := append([]*storageShard(nil), t.ActiveShards()...)
+		// Load under the predecessor engine. A later MEMORY definition must
+		// never reinterpret an unloaded persistent column as an empty column.
+		for _, shard := range shards {
+			shard.ensureLoaded()
+			tx.mu.Lock()
+			tx.getOrCreateShardTxLocked(shard)
+			tx.mu.Unlock()
+			for _, col := range t.Columns {
+				shard.getColumnStorageOrPanic(col.Name, false, tx)
+			}
+		}
+		t.PersistencyMode = mode
+		if mode == Safe || mode == Logged {
+			for _, shard := range shards {
+				shard.mu.Lock()
+				func() {
+					defer shard.mu.Unlock()
+					if shard.logfile == nil {
+						shard.logfile = shard.home().persistence.OpenLog(shard.uuid.String())
+					}
+					shard.logfile.Flush(mode == Safe)
+				}()
+			}
+			t.schema.persistence.SyncNamespace()
+		}
+		t.publishShowColumnsSnapshot(true)
+		t.schema.schemalock.Lock()
+		t.schema.saveLockedAndUnlock(tx, schemaSaveFsync, t)
+		return true
+	})
+}
+
+func (t *table) DropColumnIfExists(tx *TxContext, name string) bool {
+	tx.readSchema(t.schema)
+	t.schema.GetRead(tx)
 	t.schema.schemalock.Lock()
 	for _, c := range t.Columns {
 		if c.Name == name {
 			t.schema.schemalock.Unlock()
-			return t.DropColumn(name)
+			return t.DropColumn(tx, name)
 		}
 	}
 	t.schema.schemalock.Unlock()
 	return false
 }
 
-func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *storageShard, incoming uint, balance bool) (*tableShardTopology, *storageShard) {
+func (t *table) appendFreeShardDurably(currentTx *TxContext, topology *tableShardTopology, source *storageShard, incoming uint, balance bool) (*tableShardTopology, *storageShard) {
+	if currentTx.hasSchemaWriter(t.schema) {
+		// Pending DDL owns this table's maintenance boundary. The existing
+		// overflow route can keep rows in its live generation until acceptance.
+		return t.topology.Load(), nil
+	}
+	// Acquire before maintenanceMu or shard locks. The background rebuild
+	// inherits this capability, so DDL cannot overtake its final checkpoint.
+	t.schema.definitionMu.RLock()
+	definitionHeld := true
+	defer func() {
+		if definitionHeld {
+			t.schema.definitionMu.RUnlock()
+		}
+	}()
 	if r := activeReplication(t.schema); r != nil && validReplicaDatabase(t.schema.Name) && !t.isEphemeralQueryTable() {
+		if r.cluster != nil && r.resourceCell(mosiResource{Database: t.schema.Name}).ownstate.Phase() != mosi.M {
+			// Existing lanes remain valid while another statement retains the
+			// declarations. A physical split may wait for a later insertion.
+			return t.topology.Load(), nil
+		}
 		// Adding a lane changes the database's shard directory. Invalidate
 		// shared schema copies before publication, without affecting ordinary
 		// INSERTs which can use an existing lane.
-		access := t.schema.GetWrite(nil)
-		defer access.Release()
+		_, release, acquired := r.writeResource(mosiResource{Database: t.schema.Name}, currentTx, false)
+		if !acquired {
+			// A peer may start recalling M after the opportunistic preflight.
+			// Never join that flight while this insertion retains its S proof.
+			return t.topology.Load(), nil
+		}
+		defer release()
 		if t.schema.tables.Get(t.Name) != t {
 			panic("replication schema changed; retry statement")
 		}
@@ -3715,7 +3890,7 @@ func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *sto
 	var savePanic any
 	func() {
 		defer func() { savePanic = recover() }()
-		t.schema.save()
+		t.schema.save(currentTx, nil, t)
 	}()
 	if savePanic != nil {
 		t.mu.Lock()
@@ -3749,7 +3924,11 @@ func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *sto
 		return published, newShard
 	}
 	t.overflowRebuilds.Add(1)
-	go t.finishOverflowRebuild(sourceIndex, source)
+	definitionHeld = false
+	go func() {
+		defer t.schema.definitionMu.RUnlock()
+		t.finishOverflowRebuild(sourceIndex, source)
+	}()
 	return published, newShard
 }
 
@@ -3795,7 +3974,7 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 	var savePanic any
 	func() {
 		defer func() { savePanic = recover() }()
-		t.schema.save()
+		t.schema.save(nil, nil, t)
 	}()
 	if savePanic != nil {
 		t.mu.Lock()
@@ -3849,6 +4028,13 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	if len(currentTxArgs) != 0 {
 		tx = currentTxArgs[0]
 	}
+	if !t.RuntimeOnly {
+		tx.readSchema(t.schema)
+	}
+	if t.retired.Load() {
+		panic("table handle belongs to a rolled-back or dropped definition")
+	}
+	requireCatalogDML(t)
 	replicationCheckWriteTable(t, tx)
 	if count, handled := t.placeInsert(columns, values, onCollisionCols, onCollision, mergeNull, onFirstInsertId, tx); handled {
 		return count
@@ -3916,7 +4102,7 @@ func (t *table) insertLocal(columns []string, values [][]scm.Scmer, onCollisionC
 		// Helper to get or create a shard with capacity for n rows
 		getShardWithCapacity := func(n int64) (*storageShard, func()) {
 			for {
-				shard, release, next := t.routeFreeInsert(topology, n)
+				shard, release, next := t.routeFreeInsert(currentTx, topology, n)
 				if next == nil {
 					continue // reservation contention; keep the existing topology pin
 				}

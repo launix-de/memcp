@@ -52,39 +52,63 @@ func (r *replicationManager) recoveryInventory(auth replicaAuth) []replicaRecord
 		if !validReplicaDatabase(db.Name) || !allowed(db.Name) {
 			continue
 		}
-		db.ensureLoaded()
+		// Inventory describes completed local bytes before the hello replies
+		// restore authority. Native GetRead here would recursively request the
+		// very permissions this handshake is reconstructing. Published query
+		// descriptors still require MOSI after this private snapshot is decoded.
+		db.loadOnce.Do(func() { db.initializeSchemaSnapshot(nil, true) })
 		schema := mosiResource{Database: db.Name}
 		content, err := r.schemaDigest(db.persistence.ReadSchema())
 		if err != nil {
 			panic(err)
 		}
 		resources[schema.key()] = replicaRecord{Resource: schema, Content: content}
-		for _, table := range db.tables.GetAll() {
-			if table.isEphemeralQueryTable() {
-				continue
+		// Native catalog partitions live on the system backend but belong to
+		// this tenant's authority domain, including during reconnect recovery.
+		for _, shard := range db.replicationShards() {
+			if shard.catalogOwner == "" {
+				r.restoreTableRoutes(shard.t)
 			}
-			r.restoreTableRoutes(table)
-			for _, shard := range table.ActiveShards() {
-				if shard == nil {
-					continue
+			resource := shard.replicationResource()
+			if shard.catalogOwner == "" {
+				if published := shard.t.publishedName.Load(); published != nil {
+					resource.Table = *published
 				}
-				name := ""
-				if published := table.publishedName.Load(); published != nil {
-					name = *published
-				} else {
-					name = table.Name
-				}
-				resource := r.canonicalResource(mosiResource{Database: db.Name, Table: name, Shard: shard.uuid.String()})
-				resources[resource.key()] = replicaRecord{Resource: resource, Content: shard.uuid.String()}
 			}
+			resource = r.canonicalResource(resource)
+			cell := r.resourceCell(resource)
+			if shard.catalogOwner == "" && !cell.ownstate.Initialized() {
+				r.mu.Lock()
+				backup, completed := r.backups[resource.key()]
+				r.mu.Unlock()
+				if completed && backup.Content == resource.Shard && backup.Content != shard.uuid.String() {
+					// The durable root can retain the rebuild predecessor. Bind
+					// its completed local successor (including later WAL), without
+					// claiming rights or reporting the predecessor as current data.
+					if err := r.restoreBackup(replicaRecord{Resource: resource, Content: backup.Content}); err != nil {
+						panic(err)
+					}
+					shard = cell.current.Load()
+				}
+			}
+			resources[resource.key()] = replicaRecord{Resource: resource, Content: shard.uuid.String(), Forwards: r.shardRoutes(resource)}
 		}
 	}
 	return r.recoveryInventorySnapshot(resources, allowed)
 }
 
-// Join the collected topology with live coherence publications.
 func (r *replicationManager) recoveryInventorySnapshot(resources map[string]replicaRecord, allowed func(string) bool) []replicaRecord {
 	r.mu.Lock()
+	// Native topology collection can race a rebuild. Forwarding moves both the
+	// directory record and cell to the successor UUID under this mutex. Join
+	// the collected payloads to that same publication, otherwise an old native
+	// key omits its live owner's proof from the outgoing inventory.
+	canonical := make(map[string]replicaRecord, len(resources))
+	for _, inventory := range resources {
+		inventory.Resource = r.canonicalResource(inventory.Resource)
+		canonical[inventory.Resource.key()] = inventory
+	}
+	resources = canonical
 	for key, record := range r.directory.Records {
 		if !allowed(record.Resource.Database) {
 			continue
@@ -111,9 +135,10 @@ func (r *replicationManager) recoveryInventorySnapshot(resources map[string]repl
 			}
 		}
 		if !active {
-			// A split can publish a UUID after topology collection. Only its
-			// existing live rights may supplement the inventory; placement alone
-			// must never become authority.
+			// Native topology was collected before taking this publication
+			// snapshot. A concurrent split can add another UUID, not merely
+			// forward an existing one. Report its own live outward rights;
+			// an uninitialized placement/backup supplies no such proof.
 			if !phase.Readable() && record.Handoff == "" {
 				continue
 			}
@@ -143,6 +168,9 @@ func (r *replicationManager) recoveryInventorySnapshot(resources map[string]repl
 	return result
 }
 
+// A newly created partition can postdate the connection's hello snapshot.
+// Introduce its own live M proof before a catalog checkpoint can name it on
+// the backup. Catalog ownership alone never supplies data-shard ownership.
 func (r *replicationManager) createdResourceInventory(name string) []replicaRecord {
 	var created []replicaRecord
 	for _, record := range r.recoveryInventorySnapshot(make(map[string]replicaRecord), func(database string) bool { return database == name }) {
@@ -164,7 +192,7 @@ func (r *replicationManager) announceCreatedResources(peer *mosiPeer, name, user
 			return err
 		}
 		for _, accepted := range reply.Resources {
-			if r.resourceKey(accepted.Resource) == r.resourceKey(record.Resource) && accepted.Owner == r.id && accepted.Epoch == record.Epoch && accepted.InitialClaimed {
+			if accepted.Owner == r.id && accepted.Epoch == record.Epoch && accepted.InitialClaimed {
 				r.updateRecord(record.Resource, func(current *replicaRecord) bool {
 					if current.Owner != r.id || current.Epoch != accepted.Epoch || current.InitialClaimed {
 						return false
@@ -258,7 +286,10 @@ func (r *replicationManager) recoverConnection(peer *mosiPeer, user string, auth
 		}
 		cell := r.resourceCell(record.Resource)
 		r.mu.Lock()
-		if _, exists := r.directory.Records[r.resourceKey(record.Resource)]; !exists {
+		// Cold native declarations can introduce an older placeholder before
+		// hello completes. Retain newer wire decisions, but install the master's
+		// recovered epoch instead of keeping that placeholder's initial epoch.
+		if current, exists := r.directory.Records[r.resourceKey(record.Resource)]; !exists || current.Epoch < record.Epoch {
 			r.directory.Records[r.resourceKey(record.Resource)] = record
 		}
 		r.mu.Unlock()
@@ -368,7 +399,9 @@ func (r *replicationManager) recoverPeer(ctx context.Context, id string, req rep
 }
 
 func (r *replicationManager) recoverResource(ctx context.Context, id string, reported replicaRecord) (replicaRecord, bool, error) {
-	r.restoreResourceRoutes(reported.Resource)
+	// The authenticated inventory supplies its native UUID routes. Loading Go
+	// declarations here would acquire catalog readers while the same reconnect
+	// is still reconstructing their authority, and turn a backup into a reader.
 	for _, route := range reported.Forwards {
 		if route.From.Database != reported.Resource.Database || route.To != reported.Resource {
 			return replicaRecord{}, false, fmt.Errorf("invalid recovery forwarding")
@@ -388,9 +421,9 @@ func (r *replicationManager) recoverResource(ctx context.Context, id string, rep
 	localGeneration := ""
 	if reported.State == "IO" && reported.Handoff == r.id {
 		r.mu.Lock()
-		_, backup := r.backups[r.resourceKey(resource)]
+		backup, known := r.backups[r.resourceKey(resource)]
 		r.mu.Unlock()
-		if !backup {
+		if !known || backup.Content != reported.Content {
 			var err error
 			localGeneration, err = r.completeLocalShard(resource)
 			if err != nil {
@@ -420,8 +453,11 @@ func (r *replicationManager) recoverResource(ctx context.Context, id string, rep
 		// Bind a readable recovered slot to its completed local copy before publishing
 		// authority; ordinary COLD loading then uses the correct native content.
 		if local.Readable() && resource.Shard != "" && record.Content != "" {
-			if db := databases.Get(resource.Database); db != nil {
-				db.ensureLoaded()
+			if db := databases.Get(resource.Database); db != nil && !isCatalogResource(resource) {
+				// This data report can arrive before the independent native
+				// catalog reports. Decode only completed local declarations;
+				// recovery must not acquire their still-unconfirmed query rights.
+				db.loadOnce.Do(func() { db.initializeSchemaSnapshot(nil, true) })
 			}
 			if err := r.restoreBackup(record); err != nil {
 				return replicaRecord{}, false, err

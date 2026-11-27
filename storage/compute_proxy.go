@@ -106,17 +106,16 @@ func (r *orderedComputeProxyReader) GetValueMulti(recids []uint32, target []scm.
 // values the StorageComputeProxy represents.
 type StorageComputeProxy struct {
 	storageJITFunctions
-	main             ColumnStorage                       // after Compress() — typically StorageSCMER or compressed type
-	delta            map[uint32]scm.Scmer                // sparse overwrites (lazy-computed values before Compress)
-	validMask        NonLockingReadMap.NonBlockingBitMap // 1=valid, 0=needs compute
-	compressed       bool                                // true after Compress() → skip validMask, read from main
-	computor         scm.Scmer                           // computation lambda
-	inputCols        []string                            // column names the computor reads
-	shard            *storageShard                       // back-reference for reading input columns
-	colName          string                              // own column name (for cycle protection)
-	mu               sync.RWMutex                        // protects delta, main, compressed and retained byte counters
-	count            uint32                              // total row count at creation
-	persistedVersion uint8                               // preserve version-3 native scalar identity on rewrites
+	main       ColumnStorage                       // after Compress() — typically StorageSCMER or compressed type
+	delta      map[uint32]scm.Scmer                // sparse overwrites (lazy-computed values before Compress)
+	validMask  NonLockingReadMap.NonBlockingBitMap // 1=valid, 0=needs compute
+	compressed bool                                // true after Compress() → skip validMask, read from main
+	computor   scm.Scmer                           // computation lambda
+	inputCols  []string                            // column names the computor reads
+	shard      *storageShard                       // back-reference for reading input columns
+	colName    string                              // own column name (for cycle protection)
+	mu         sync.RWMutex                        // protects delta, main, compressed and retained byte counters
+	count      uint32                              // total row count at creation
 	// ORC support: when isOrdered=true, single-row lazy compute is disabled.
 	// Validity is tracked per-row via validMask (1=valid, 0=needs compute).
 	// Invalidation sets bits to 0; on-demand recompute sets them back to 1.
@@ -175,9 +174,6 @@ func appendComputeProxyRows(newProxy *StorageComputeProxy, oldProxy *StorageComp
 	}
 	oldProxy.mu.RLock()
 	defer oldProxy.mu.RUnlock()
-	if oldProxy.persistedVersion == 3 {
-		newProxy.persistedVersion = 3
-	}
 	newIdx := startIdx
 	for _, oldIdx := range oldRowIDs {
 		val, inDelta := oldProxy.delta[oldIdx]
@@ -1093,7 +1089,7 @@ func (p *StorageComputeProxy) finish() {
 // storageComputeProxyVersion is the current binary format version for StorageComputeProxy.
 // Increment this constant and add a new deserializeComputeProxyV* helper whenever the
 // layout after the magic byte changes. Never delete old helpers.
-const storageComputeProxyVersion = 2
+const storageComputeProxyVersion = 3
 
 // StorageComputeProxy binary layout (magic byte 50 consumed by shard loader):
 //
@@ -1101,47 +1097,25 @@ const storageComputeProxyVersion = 2
 //	[count uint32]
 //	[numCols uint16]
 //	[inputCols: numCols × (uint16 length + bytes)]
-//	[computorLen uint32]
+//	[computorLen uint64]
 //	[computorJSON: computorLen bytes]
 //	[compressed uint8]      ← 1=compressed, 0=delta only
 //	[hasMain uint8]         ← 1=has main storage, 0=delta map
 //	  if hasMain: [magic uint8 + full serialized main storage]
-//	  else:       [deltaLen uint32] [delta: deltaLen × (uint32 idx + uint32 valLen + JSON bytes)]
+//	  else:       [deltaLen uint32] [delta: deltaLen × (uint32 idx + uint64 valLen + JSON bytes)]
 //	[validCount uint32]     ← number of set bits in validMask
 //	[validMask: validCount × uint32 indices]
 //
 // Version history:
 //
-//	0: layout as above.
+//	0: original layout with uint32 JSON lengths.
 //	1: adds [isOrdered uint8] after validMask, but validMask indices were written
 //	   via binary.Write(uint), so persisted data may miss the bitmap payload.
 //	2: writes validMask indices as uint32 and keeps the trailing isOrdered byte.
-//	3: historical uint64-framed private native values; loaded v3 proxies retain
-//	   this encoding on rewrite, while new proxies keep the current v2 format.
+//	3: uint64 JSON lengths and exact persistent scalar envelopes.
 func (p *StorageComputeProxy) Serialize(f io.Writer) {
-	version := uint8(storageComputeProxyVersion)
-	if p.persistedVersion == 3 || scm.HasNativeDate(p.computor) {
-		version = 3
-	}
-	for _, value := range p.delta {
-		if scm.HasNativeDate(value) {
-			version = 3
-			break
-		}
-	}
-	binary.Write(f, binary.LittleEndian, uint8(50)) // magic byte
-	binary.Write(f, binary.LittleEndian, version)
-	marshal := json.Marshal
-	if version == 3 {
-		marshal = func(v any) ([]byte, error) { return scm.MarshalPersistentJSON(v.(scm.Scmer)) }
-	}
-	writeLength := func(length int) {
-		if version == 3 {
-			binary.Write(f, binary.LittleEndian, uint64(length))
-		} else {
-			binary.Write(f, binary.LittleEndian, uint32(length))
-		}
-	}
+	binary.Write(f, binary.LittleEndian, uint8(50))                         // magic byte
+	binary.Write(f, binary.LittleEndian, uint8(storageComputeProxyVersion)) // version byte
 	binary.Write(f, binary.LittleEndian, p.count)
 
 	// inputCols
@@ -1153,11 +1127,11 @@ func (p *StorageComputeProxy) Serialize(f io.Writer) {
 	}
 
 	// computor as JSON
-	computorJSON, err := marshal(p.computor)
+	computorJSON, err := scm.MarshalPersistentJSON(p.computor)
 	if err != nil {
 		panic(err)
 	}
-	writeLength(len(computorJSON))
+	binary.Write(f, binary.LittleEndian, uint64(len(computorJSON)))
 	f.Write(computorJSON)
 
 	// compressed flag
@@ -1177,11 +1151,11 @@ func (p *StorageComputeProxy) Serialize(f io.Writer) {
 		binary.Write(f, binary.LittleEndian, uint32(len(p.delta)))
 		for idx, val := range p.delta {
 			binary.Write(f, binary.LittleEndian, idx)
-			valJSON, err := marshal(val)
+			valJSON, err := scm.MarshalPersistentJSON(val)
 			if err != nil {
 				panic(err)
 			}
-			writeLength(len(valJSON))
+			binary.Write(f, binary.LittleEndian, uint64(len(valJSON)))
 			f.Write(valJSON)
 		}
 	}
@@ -1344,8 +1318,6 @@ func (p *StorageComputeProxy) deserializeComputeProxyV2(f io.Reader) uint {
 	return n
 }
 
-// readComputeProxyValue consumes exactly one v3 payload. In particular it cannot
-// borrow bytes belonging to a nested format or an enclosing trailer.
 func readComputeProxyValue(reader io.Reader) scm.Scmer {
 	var length uint64
 	if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
@@ -1358,13 +1330,12 @@ func readComputeProxyValue(reader io.Reader) scm.Scmer {
 	readStorageBytes(reader, payload)
 	var value scm.Scmer
 	if err := scm.UnmarshalPersistentJSON(payload, &value); err != nil {
-		panic(err)
+		panic(fmt.Errorf("StorageComputeProxy: decode computed scalar: %w", err))
 	}
 	return value
 }
 
 func (p *StorageComputeProxy) deserializeComputeProxyV3(reader io.Reader) uint {
-	p.persistedVersion = 3
 	if err := binary.Read(reader, binary.LittleEndian, &p.count); err != nil {
 		panic(err)
 	}

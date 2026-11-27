@@ -30,7 +30,7 @@ func TestAwaitCreationInitializationRetriesAfterQueryKilled(t *testing.T) {
 	defer databases.Remove("tcreationretry")
 
 	CreateDatabase("tcreationretry", false)
-	tbl, _ := CreateTable("tcreationretry", "items", Memory, false)
+	tbl, _ := CreateTable(nil, "tcreationretry", "items", Memory, false)
 
 	calls := 0
 	onInit := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
@@ -89,7 +89,7 @@ func TestAwaitCreationInitializationCachesGenuineFailure(t *testing.T) {
 	defer databases.Remove("tcreationfailure")
 
 	CreateDatabase("tcreationfailure", false)
-	tbl, _ := CreateTable("tcreationfailure", "items", Memory, false)
+	tbl, _ := CreateTable(nil, "tcreationfailure", "items", Memory, false)
 
 	calls := 0
 	onInit := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
@@ -126,8 +126,8 @@ func TestCreateTableAmbiguousNameReleasesSchemaOwnership(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			base, _ := createDurabilityTestTable(t, "tcreateambiguous", 0)
 			db := base.schema
-			first, _ := CreateTable(db.Name, "Foo", Memory, false)
-			second, _ := CreateTable(db.Name, "foo", Memory, false)
+			first, _ := CreateTable(nil, db.Name, "Foo", Memory, false)
+			second, _ := CreateTable(nil, db.Name, "foo", Memory, false)
 			create := scm.Globalenv.Vars[scm.Symbol("createtable")]
 			var failure any
 			func() {

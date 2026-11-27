@@ -1449,7 +1449,7 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, accessSchem
 	for i := 0; i < executionAccess.len(); i++ {
 		t.AddPartitioningScore([]string{executionAccess.boundaryColumn(i)}, executionAccess.boundaryAnalyzer(i) != EqualMatcher)
 	}
-	if topology, shard, single := t.pinSingleShardForScan(executionAccess); single {
+	if topology, shard, single := t.pinSingleShardForScan(currentTx, executionAccess); single {
 		found, scanErr := runDirectSingleShardExists(currentTx, topology, shard, executionAccess, conditionCols, condition, ss, querySeq)
 		if scanErr.r != nil {
 			panic(scanErr)
@@ -1675,7 +1675,7 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, accessSc
 	akkumulator := scm.ApplyOnce(neutral, nil)
 	hadValue := false
 	var scanErr scanError
-	if topology, shard, single := t.pinSingleShardForScan(executionAccess); single {
+	if topology, shard, single := t.pinSingleShardForScan(currentTx, executionAccess); single {
 		msg := runDirectSingleShardScan(currentTx, topology, shard, executionAccess, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, source, ss, querySeq)
 		if msg.err.r != nil {
 			scanErr = msg.err
@@ -1897,7 +1897,7 @@ type typedScanFilter struct {
 	pooled     *mapReducerBulkBuffer
 }
 
-func (t *storageShard) prepareTypedScanFilter(condition scm.Scmer, ccols []ColumnStorage, cReaders []ColumnReader, estimatedRows int) *typedScanFilter {
+func (t *storageShard) prepareTypedScanFilter(condition scm.Scmer, ccols []ColumnStorage, cReaders []ColumnReader, estimatedRows int, interpreted bool) *typedScanFilter {
 	if len(ccols) == 0 || estimatedRows <= 0 {
 		return nil
 	}
@@ -1905,7 +1905,7 @@ func (t *storageShard) prepareTypedScanFilter(condition scm.Scmer, ccols []Colum
 	if proc == nil {
 		return nil
 	}
-	minimumRows := scm.CurrentJITCosts().FilterBufferBreakEven(scm.JITExpressionCost(proc.Body), len(ccols))
+	minimumRows := scm.CurrentJITCosts().FilterBufferBreakEven(scm.JITExpressionCost(proc.Body), len(ccols), interpreted)
 	if minimumRows > estimatedRows {
 		return nil
 	}
@@ -2366,9 +2366,10 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 	// Shard population is not an estimate of an index range's candidates.
 	// Only full scans can use it to amortize a scan-local compilation.
 	if !conditionAlwaysTrue && access.len() == 0 && estimatedFilterRows > defaultScanBufferSize {
-		minimumFilterRows := scm.CurrentJITCosts().FilterBufferMinimumRows
-		if minimumFilterRows > 0 && estimatedFilterRows >= minimumFilterRows {
-			typedFilter = t.prepareTypedScanFilter(condition, ccols, cReaders, estimatedFilterRows)
+		calibration := scm.CurrentJITCosts()
+		interpreted := conditionProgram.Kind == scm.SerialProcGeneral
+		if calibration.Enabled && (interpreted || estimatedFilterRows >= calibration.FilterBufferMinimumRows) {
+			typedFilter = t.prepareTypedScanFilter(condition, ccols, cReaders, estimatedFilterRows, interpreted)
 		}
 	}
 	defer func() { typedFilter.close() }()
@@ -2462,7 +2463,7 @@ func (t *storageShard) scan(access scanAccess, conditionCols []string, condition
 					horizon = max(int64(0), filterHorizon.span-int64(maxInsertIndex))
 				}
 				if horizon > defaultScanBufferSize {
-					typedFilter = t.prepareTypedScanFilter(condition, ccols, cReaders, int(horizon))
+					typedFilter = t.prepareTypedScanFilter(condition, ccols, cReaders, int(horizon), conditionProgram.Kind == scm.SerialProcGeneral)
 				}
 			}
 			candidateCount += int64(len(batch))

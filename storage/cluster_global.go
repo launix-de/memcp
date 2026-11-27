@@ -224,7 +224,7 @@ func (tx *TxContext) ensureClusterIdentity() {
 func (cluster *nodeCluster) reserveIDBlock(ctx context.Context) {
 	for {
 		cell := cluster.obtain(ctx, globalResource, mosi.M)
-		writer, wait := cell.ownstate.TryWrite(nil, false)
+		writer, wait := cell.ownstate.TryWrite(nil, false, nil)
 		if writer == nil {
 			if wait != nil {
 				select {

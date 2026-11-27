@@ -80,11 +80,14 @@ specialization without a fresh candidate cost comparison. */
 				(entry "parameter_observation" observation)
 				(define info (qassoc_set (qassoc_set (nth generic 3)
 					(quote recompile_ns) budget) (quote observation) observation))
-				(define candidate (list (car generic) (cadr generic) (nth generic 2) info))
+				(define candidate (list (car generic) (cadr generic) (nth generic 2) info (nth generic 4)))
 				(if (and (not (nil? (sql_parameter_candidate_cost candidate false)))
 					(sql_parameter_reusable? info)
 					(not (sql_parameter_specialization_preferred? specialized candidate false)))
-					(list (list (quote and) (car generic)
-						(list (quote sql_parameter_reusable?) (list (quote quote) info)))
-						(cadr generic) (nth generic 2) info)
+					(begin
+						(define guard (list (quote and) (car generic)
+							(list (quote sql_parameter_reusable?) (list (quote quote) info))))
+						(list guard (cadr generic) (nth generic 2) info
+							(sql_queryplan_compile_formula tx
+								(clone_optimizer_expression guard))))
 					specialized))))))

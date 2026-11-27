@@ -1457,6 +1457,9 @@ test_cases:
 - name: Set query parenthesized ordered TOP keeps its local boundary
   sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL (SELECT TOP(1) id AS value FROM tsql_data ORDER BY id DESC) ORDER BY value
   expect: {rows: 2, data: [{value: 4},{value: 7}]}
+- name: Set query nested materialized orders keep independent collectors
+  sql: SELECT 7 AS value FROM tsql_data WHERE id=1 UNION ALL (SELECT TOP(1) id AS value FROM tsql_data WHERE id=1 UNION ALL SELECT TOP(1) id AS value FROM tsql_data WHERE id=3 ORDER BY value DESC) ORDER BY value
+  expect: {rows: 3, data: [{value: 1},{value: 3},{value: 7}]}
 - name: Set query rejects order before an unparenthesized union
   sql: SELECT id AS value FROM tsql_data ORDER BY value UNION ALL SELECT 7 AS value FROM tsql_data WHERE id=1
   expect: {error: true}

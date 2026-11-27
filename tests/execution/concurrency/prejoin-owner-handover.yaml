@@ -1,0 +1,241 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  version: '1.0'
+  description: Canonical prejoin membership across real shard-owner changes and remote transaction decisions
+  cluster:
+    nodes: 2
+    ram_limit_bytes: 33554432
+    coordinator_ram_limit_bytes: 33554432
+    shard_ram_percent: 50
+    coordinator_shard_ram_percent: 50
+    gomaxprocs: 4
+test_cases:
+- name: handover-prejoin-starts-with-complete-values
+  setup:
+  - sql: DROP TABLE IF EXISTS pj_peer_b
+  - sql: DROP TABLE IF EXISTS pj_peer_a
+  - sql: CREATE TABLE pj_peer_a(id INT PRIMARY KEY) ENGINE=SAFE
+  - sql: CREATE TABLE pj_peer_b(id INT PRIMARY KEY,aid INT,v INT) ENGINE=SAFE
+  - sql: INSERT INTO pj_peer_a VALUES(1)
+  - sql: INSERT INTO pj_peer_b VALUES(10,1,3)
+  - scm: (rebuild (table "memcp-tests" false "pj_peer_b" false) true false)
+  sql: SELECT a.id,SUM(b.v) AS total,COUNT(*) AS n FROM pj_peer_a a JOIN pj_peer_b b ON b.aid=a.id GROUP BY a.id ORDER BY
+    total
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      total: 3
+      n: 1
+- name: other-peer-reads-the-published-source-generation
+  cluster_node: 1
+  sql: SELECT id,aid,v FROM pj_peer_b ORDER BY id
+  expect:
+    rows: 1
+    data:
+    - id: 10
+      aid: 1
+      v: 3
+- name: other-peer-insertion-11
+  cluster_node: 1
+  sql: INSERT INTO pj_peer_b VALUES(11,1,7)
+  expect:
+    affected_rows: 1
+    cluster:
+      min_remote_shards: 1
+      min_remote_nodes: 1
+- name: other-peer-insertion-12
+  cluster_node: 1
+  sql: INSERT INTO pj_peer_b VALUES(12,1,7)
+  expect:
+    affected_rows: 1
+- name: other-peer-insertion-13
+  cluster_node: 1
+  sql: INSERT INTO pj_peer_b VALUES(13,1,7)
+  expect:
+    affected_rows: 1
+- name: other-peer-insertion-14
+  cluster_node: 1
+  sql: INSERT INTO pj_peer_b VALUES(14,1,7)
+  expect:
+    affected_rows: 1
+- name: other-peer-insertion-15
+  cluster_node: 1
+  sql: INSERT INTO pj_peer_b VALUES(15,1,7)
+  expect:
+    affected_rows: 1
+- name: other-peer-insertion-16
+  cluster_node: 1
+  sql: INSERT INTO pj_peer_b VALUES(16,1,7)
+  expect:
+    affected_rows: 1
+- name: other-peer-insertion-17
+  cluster_node: 1
+  sql: INSERT INTO pj_peer_b VALUES(17,1,7)
+  expect:
+    affected_rows: 1
+- name: other-peer-insertion-18
+  cluster_node: 1
+  sql: INSERT INTO pj_peer_b VALUES(18,1,7)
+  expect:
+    affected_rows: 1
+- name: other-peer-insertion-19
+  cluster_node: 1
+  sql: INSERT INTO pj_peer_b VALUES(19,1,7)
+  expect:
+    affected_rows: 1
+- name: other-peer-insertion-20
+  cluster_node: 1
+  sql: INSERT INTO pj_peer_b VALUES(20,1,7)
+  expect:
+    affected_rows: 1
+- name: other-peer-insertion-21
+  cluster_node: 1
+  sql: INSERT INTO pj_peer_b VALUES(21,1,7)
+  expect:
+    affected_rows: 1
+- name: other-peer-insertion-22
+  cluster_node: 1
+  sql: INSERT INTO pj_peer_b VALUES(22,1,7)
+  expect:
+    affected_rows: 1
+- name: other-peer-really-claims-the-source
+  cluster_node: 1
+  scm: |-
+    (begin
+      (define state (cluster_status true))
+      (if (nil? state) true
+        (begin
+          (define snapshot (get_assoc (json_decode state) "resources"))
+          (reduce_assoc (get_assoc snapshot "records")
+            (lambda (found key record)
+              (or found (and
+                (equal? (get_assoc (get_assoc record "resource") "table") "pj_peer_b")
+                (or (equal? (get_assoc record "state") "M") (equal? (get_assoc record "state") "O"))
+                (equal? (get_assoc record "owner") (get_assoc snapshot "id"))))) false))))
+  expect:
+    result: true
+- name: shared-prejoin-recovers-all-inserted-members-after-owner-change
+  sql: SELECT a.id,SUM(b.v) AS total,COUNT(*) AS n FROM pj_peer_a a JOIN pj_peer_b b ON b.aid=a.id GROUP BY a.id ORDER BY
+    total
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      total: 87
+      n: 13
+- name: subsequent-query-recreates-shared-prejoin-after-retirement
+  sql: SELECT a.id,SUM(b.v) AS total,COUNT(*) AS n FROM pj_peer_a a JOIN pj_peer_b b ON b.aid=a.id GROUP BY a.id ORDER BY
+    total
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      total: 87
+      n: 13
+- name: recreated-prejoin-registers-shared-maintenance
+  scm: |-
+    (begin
+      (define state (cluster_status true))
+      (if (nil? state) true
+        (begin
+          (define database (reduce_assoc
+            (get_assoc (get_assoc (json_decode state) "resources") "records")
+            (lambda (found key record)
+              (if (equal? (get_assoc (get_assoc record "resource") "table") "pj_peer_b")
+                (get_assoc (get_assoc record "resource") "database") found)) nil))
+          (and (not (nil? database))
+            (> (count (get_assoc (show database "pj_peer_b" true) "triggers")) 0)))))
+  expect:
+    result: true
+- name: other-peer-deletes-members-after-cache-rebuild
+  cluster_node: 1
+  sql: DELETE FROM pj_peer_b WHERE id>=11
+  expect:
+    affected_rows: 12
+- name: shared-prejoin-removes-deleted-members-after-owner-change
+  sql: SELECT a.id,SUM(b.v) AS total,COUNT(*) AS n FROM pj_peer_a a JOIN pj_peer_b b ON b.aid=a.id GROUP BY a.id ORDER BY
+    total
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      total: 3
+      n: 1
+- name: other-peer-private-prejoin-rollback
+  cluster_node: 1
+  session_id: prejoin-other-peer-rollback
+  setup:
+  - sql: START ACID TRANSACTION
+  - sql: INSERT INTO pj_peer_b VALUES(23,1,99)
+  sql: SELECT a.id,SUM(b.v) AS total,COUNT(*) AS n FROM pj_peer_a a JOIN pj_peer_b b ON b.aid=a.id GROUP BY a.id ORDER BY
+    total
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      total: 102
+      n: 2
+- name: observer-excludes-other-peer-private-member-rollback
+  sql: SELECT a.id,SUM(b.v) AS total,COUNT(*) AS n FROM pj_peer_a a JOIN pj_peer_b b ON b.aid=a.id GROUP BY a.id ORDER BY
+    total
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      total: 3
+      n: 1
+- name: other-peer-decides-rollback
+  cluster_node: 1
+  session_id: prejoin-other-peer-rollback
+  sql: ROLLBACK
+- name: shared-prejoin-follows-other-peer-rollback
+  sql: SELECT a.id,SUM(b.v) AS total,COUNT(*) AS n FROM pj_peer_a a JOIN pj_peer_b b ON b.aid=a.id GROUP BY a.id ORDER BY
+    total
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      total: 3
+      n: 1
+- name: other-peer-private-prejoin-commit
+  cluster_node: 1
+  session_id: prejoin-other-peer-commit
+  setup:
+  - sql: START ACID TRANSACTION
+  - sql: INSERT INTO pj_peer_b VALUES(23,1,99)
+  sql: SELECT a.id,SUM(b.v) AS total,COUNT(*) AS n FROM pj_peer_a a JOIN pj_peer_b b ON b.aid=a.id GROUP BY a.id ORDER BY
+    total
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      total: 102
+      n: 2
+- name: observer-excludes-other-peer-private-member-commit
+  sql: SELECT a.id,SUM(b.v) AS total,COUNT(*) AS n FROM pj_peer_a a JOIN pj_peer_b b ON b.aid=a.id GROUP BY a.id ORDER BY
+    total
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      total: 3
+      n: 1
+- name: other-peer-decides-commit
+  cluster_node: 1
+  session_id: prejoin-other-peer-commit
+  sql: COMMIT
+- name: shared-prejoin-follows-other-peer-commit
+  sql: SELECT a.id,SUM(b.v) AS total,COUNT(*) AS n FROM pj_peer_a a JOIN pj_peer_b b ON b.aid=a.id GROUP BY a.id ORDER BY
+    total
+  expect:
+    rows: 1
+    data:
+    - id: 1
+      total: 102
+      n: 2
+  cleanup:
+  - sql: DROP TABLE pj_peer_b
+  - sql: DROP TABLE pj_peer_a

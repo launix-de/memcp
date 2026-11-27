@@ -401,8 +401,11 @@ func (capture *liveShardTransfer) write(writer io.Writer) error {
 		for _, column := range shard.t.columnDeclarations() {
 			if !isRuntimeComputedColumn(column) && column.OrcMapReduceFn.IsNil() {
 				header.Columns = append(header.Columns, column.Name)
-				if shard.t.PersistencyMode == Safe || shard.t.PersistencyMode == Logged {
-					reader := shard.t.schema.persistence.ReadColumn(shard.uuid.String(), column.Name)
+				// Catalog columns live on the system backend, which need not be
+				// shared by cluster peers. Their transfer must carry the bytes even
+				// when the source has a completed SAFE column file.
+				if shard.catalogOwner == "" && (shard.t.PersistencyMode == Safe || shard.t.PersistencyMode == Logged) {
+					reader := shard.home().persistence.ReadColumn(shard.uuid.String(), column.Name)
 					missing, known := reader.(interface{ Missing() bool })
 					header.ColumnReferences[column.Name] = !known || !missing.Missing()
 					reader.Close()
@@ -568,6 +571,9 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 		return fmt.Errorf("missing live shard database")
 	}
 	table := db.tables.Get(packet.Resource.Table)
+	if relation, catalog := catalogResourceRelation(packet.Resource); catalog {
+		table = systemSchemaTables[relation]
+	}
 	if table == nil {
 		return fmt.Errorf("missing live shard table")
 	}
@@ -610,6 +616,9 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 			return err
 		}
 		shard := &storageShard{t: table, uuid: id, main_count: header.Main, columns: make(map[string]ColumnStorage), deltaColumns: header.DeltaColumns}
+		if isCatalogResource(packet.Resource) {
+			shard.catalogOwner, shard.catalogHome = packet.Resource.Database, catalogBackendDatabase()
+		}
 		for _, name := range header.Columns {
 			if shard.schemaColumn(name) == nil {
 				return fmt.Errorf("unknown live shard column")
@@ -636,6 +645,21 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 				return fmt.Errorf("live column row count changed")
 			}
 			shard.columns[name] = shard.attachColumnRuntime(name, storage)
+			if isCatalogResource(packet.Resource) {
+				// The tenant backend is shared, while the system backend can be
+				// local to this node. A native catalog grant must remain loadable
+				// after its received main columns are evicted from RAM.
+				engine := shard.home().persistence
+				existing := engine.ReadColumn(header.ID, name)
+				missing, known := existing.(interface{ Missing() bool })
+				absent := known && missing.Missing()
+				existing.Close()
+				if absent {
+					writer := engine.WriteColumn(header.ID, name)
+					storage.Serialize(writer)
+					finishColumnWrite(writer, true)
+				}
+			}
 		}
 		rows := make([][]scm.Scmer, 0)
 		for range header.DeltaRows {
@@ -727,6 +751,11 @@ func (cluster *nodeCluster) installLiveShard(cell *replicaCell, packet mosiPacke
 	current := grains[packet.Content]
 	if current == nil {
 		return fmt.Errorf("live transfer omitted current generation")
+	}
+	if isCatalogResource(packet.Resource) {
+		// The receiver's system namespace is separate from the shared tenant
+		// anchor. Persist new main-file entries before granting native rights.
+		current.home().persistence.SyncNamespace()
 	}
 	for shard, next := range nextIDs {
 		if next != "" {

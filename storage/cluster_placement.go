@@ -17,6 +17,7 @@ import "runtime"
 import "hash/fnv"
 import "sync/atomic"
 import "github.com/google/uuid"
+import "github.com/launix-de/memcp/storage/mosi"
 
 type clusterCapacityRejection struct{}
 
@@ -58,6 +59,9 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 	if shard.state() != COLD || !clusterScanSupported(tx) {
 		return
 	}
+	if tx.hasSchemaWriter(shard.authorityDatabase()) {
+		return
+	}
 	// A job executes its subscans here while this node has room. Native GetRead
 	// acquires S/O as necessary; another owner is not a reason to ship the job.
 	tbl := shard.t
@@ -71,7 +75,7 @@ func (cluster *nodeCluster) prepareLocalScan(shard *storageShard, tx *TxContext,
 		origin = origins[0]
 	}
 	expected := remoteScanShard{Schema: shard.t.filterSchemaFingerprint(), Resource: mosiResource{Database: shard.t.schema.Name, Table: shard.t.Name, Shard: shard.uuid.String()}}
-	if GlobalCache.canLoadClusterShard(tbl) && (mutation || cluster.tryRead(scanQueryContext(tx, cluster.ctx), expected.Resource)) {
+	if GlobalCache.canLoadClusterShard(tbl) && (mutation || cluster.tryAcquire(scanQueryContext(tx, cluster.ctx), expected.Resource, mosi.S)) {
 		return
 	}
 	// Placement can delegate to an authorized owner without acquiring a local

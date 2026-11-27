@@ -1852,9 +1852,9 @@ caller's policy remains explicit through every nested view expansion. */
 		node)
 	(cons _head _tail) (begin (map node tsql_describe_sources) node)
 	_ node)))
-(define tsql_describe_query (lambda (query policy planning_session)
+(define tsql_describe_query (lambda (query policy planning_session tx)
 	(bind_query_names (tsql_describe_sources (tsql_bind_column_compilers
-		(sql_expand_views query policy) (tsql_column_compiler planning_session))) '())))
+		(sql_expand_views query policy tx) (tsql_column_compiler planning_session))) '())))
 /* Explicit wire descriptors come from the existing SQL expression metadata,
 never from the first row. Unknown expression types stay text in this first slice. */
 /* Width/scale originate in declaration syntax, never in the first output row.
@@ -3306,7 +3306,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(tsql_finalize_sources (nth captured 1) "query" '() '()) aliases))
 			(if (tsql_view_has_metadata_scalar? query)
 				(error "COL_LENGTH in stored views requires a consuming compile policy") true)
-			(bind_query_names (tsql_bind_column_compilers (sql_expand_views query policy)
+			(bind_query_names (tsql_bind_column_compilers (sql_expand_views query policy tx)
 				(tsql_column_compiler planning_session)) '())
 			(list (quote tsql_create_view_definition)
 				(list (quote session) "__memcp_tx")
@@ -3334,17 +3334,17 @@ that context explicitly; stored views refuse this scalar before publication. */
 		) (list op value)) empty true))
 	) (reduce terms tsql_fold_additive a)))
 	(define tsql_describe_dml (lambda (query) (begin
-		(define bound (tsql_describe_query query policy planning_session))
+		(define bound (tsql_describe_query query policy planning_session tx))
 		(define fields (tsql_result_columns bound parameters))
 		(if (list? fields) (list (quote quote) '()) (error "invalid prepared mutation contract")))))
 	(define tsql_build_select_plan (lambda (query) (begin
 		(define bound_query (tsql_finalize_sources query "query" '() '()))
-		(define expanded (tsql_bind_column_compilers (sql_expand_views bound_query policy) (tsql_column_compiler planning_session)))
+		(define expanded (tsql_bind_column_compilers (sql_expand_views bound_query policy tx) (tsql_column_compiler planning_session)))
 		/* Binding validates names and contracts but lowers conversion callbacks.
 		Describe the original declared expressions so NULL folding cannot erase
 		their explicit widths or temporal precision. Analysis still consumes the
 		bound tree; neither path constructs or executes a physical plan. */
-		(define checked (if describe (tsql_describe_query expanded policy planning_session) expanded))
+		(define checked (if describe (tsql_describe_query expanded policy planning_session tx) expanded))
 		(define descriptors (tsql_result_columns expanded parameters))
 		(if analyze_parameters (list (quote quote) checked)
 			describe (list (quote quote) descriptors) (list (quote !begin)
@@ -3356,7 +3356,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 	(define tsql_insert_select_plan (lambda (database tbl columns explicit_columns query) (begin
 		(define declarations (tsql_insert_declarations database tbl columns planning_session))
 		(define columns (map declarations (lambda (column) (column "Field"))))
-		(define expanded (tsql_bind_column_compilers (sql_expand_views query policy) (tsql_column_compiler planning_session)))
+		(define expanded (tsql_bind_column_compilers (sql_expand_views query policy tx) (tsql_column_compiler planning_session)))
 		(define identity (tsql_insert_identity database tbl planning_session))
 		(define insert_expr (tsql_native_insert_expr (quote __tsql_insert_target) identity columns
 			(cons list '((cons list (map (produceN (count columns))
@@ -3370,7 +3370,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 		(if (equal? (count (queryplan_result_titles expanded)) (count columns)) true
 			(error "INSERT column count does not match SELECT column count"))
 		(if describe (begin
-			(define checked (tsql_describe_query expanded policy planning_session))
+			(define checked (tsql_describe_query expanded policy planning_session tx))
 			/* Bind the source contract before accepting a pure prepared mutation. */
 			(define checked_fields (tsql_result_columns checked parameters))
 			(if (equal? (count checked_fields) (count declarations)) (list (quote quote) '())
@@ -3724,12 +3724,12 @@ that context explicitly; stored views refuse this scalar before publication. */
 	(define p (parser (or
 		tsql_cte_mutation
 		(parser (define query tsql_root_select) (lambda () (tsql_build_select_plan query)))
-		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query tsql_root_select)) (lambda () (explain_queryplan_ir (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy))))
-		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query tsql_root_select)) (lambda () (explain_queryplan_reorder (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy) planning_session)))
-		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query tsql_root_select)) (lambda () (explain_queryplan_compile (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy) parse_started_ns (strlen s) planning_session)))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query tsql_root_select)) (lambda () (explain_queryplan_physical (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy) planning_session)))
+		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query tsql_root_select)) (lambda () (explain_queryplan_ir (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy tx))))
+		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query tsql_root_select)) (lambda () (explain_queryplan_reorder (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy tx) planning_session)))
+		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query tsql_root_select)) (lambda () (explain_queryplan_compile (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy tx) parse_started_ns (strlen s) planning_session)))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query tsql_root_select)) (lambda () (explain_queryplan_physical (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy tx) planning_session)))
 		(parser '((atom "EXPLAIN" true) (define query tsql_root_select))
-			'(lambda () ('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy) planning_session tx)) (settings "ExplainWidth"))))))
+			'(lambda () ('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views (tsql_finalize_sources query "query" '() '()) policy tx) planning_session tx)) (settings "ExplainWidth"))))))
 		tsql_insert_into tsql_insert_default tsql_insert_select tsql_update tsql_delete tsql_truncate
 		tsql_create_view tsql_create_table tsql_alter_table tsql_create_index tsql_alter_index tsql_drop_index
 		(parser '((atom "CREATE" true) (atom "TYPE" true)
@@ -3764,7 +3764,7 @@ that context explicitly; stored views refuse this scalar before publication. */
 				(define database (tsql_qualifier_database schema2 schema frontend_options))
 				(define name (tsql_table_name database name planning_session))
 				(if policy (policy database name true) true)
-				(list (quote droptable) database name (if ifexists true false)))))
+				(list (quote droptable) database name (if ifexists true false) (quote tx)))))
 		(parser '((atom "DROP" true) (atom "VIEW" true)
 			(define ifexists (? (atom "IF" true) (atom "EXISTS" true)))
 			(? (define schema2 tsql_schema_identifier)) (define name tsql_identifier))

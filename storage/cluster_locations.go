@@ -297,6 +297,7 @@ func (cluster *nodeCluster) coordinate(ctx context.Context, source string, packe
 			return err
 		}
 	}
+	before := cluster.report(packet.Resource)
 	if err := cluster.manager.coordinate(ctx, source, packet); err != nil {
 		return err
 	}
@@ -304,6 +305,12 @@ func (cluster *nodeCluster) coordinate(ctx context.Context, source string, packe
 		cluster.manager.mu.Lock()
 		entry := cluster.manager.directory.Records[cluster.manager.resourceKey(packet.Resource)]
 		cluster.manager.mu.Unlock()
+		// A read grant changes native permissions, but keeps the same route.
+		// Its caller may be installing the schema which owns the location
+		// directory, so registering that unchanged route would wait on itself.
+		if before.Owner == entry.Owner && before.Resource == entry.Resource && (before.Content == entry.Content || before.Content == "" && entry.Content == entry.Resource.Shard) {
+			return nil
+		}
 		return cluster.registerLocations(ctx, cluster.locationUpdates(entry))
 	}
 	return nil

@@ -561,6 +561,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(list "d" "memcp-tests" "graph_d" false nil)))
 	(define test_physical_scan_signature (lambda (expr)
 		(match expr
+			((symbol scan) _tx ((symbol table) _schema _database_ignorecase relation _table_ignorecase _table_tx) _access_schema _access_values _filtercols _filterfn _mapcols mapreduce _init _combine outer)
+			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapreduce))
+			((symbol scan_order) _tx ((symbol table) _schema _database_ignorecase relation _table_ignorecase _table_tx) _access_schema _access_values _filtercols _filterfn _sortcols _sortdirs _brake _offset _limit _mapcols mapreduce _init outer)
+			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapreduce))
 			((symbol scan) _tx ((symbol table) _schema _database_ignorecase relation _table_ignorecase) _access_schema _access_values _filtercols _filterfn _mapcols mapreduce _init _combine outer)
 			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapreduce))
 			((symbol scan_order) _tx ((symbol table) _schema _database_ignorecase relation _table_ignorecase) _access_schema _access_values _filtercols _filterfn _sortcols _sortdirs _brake _offset _limit _mapcols mapreduce _init outer)

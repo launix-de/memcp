@@ -62,10 +62,10 @@ func newBatchAcceptBenchmarkFixture(b *testing.B) *batchAcceptBenchmarkFixture {
 	b.Cleanup(func() { databases.Remove(database) })
 	CreateDatabase(database, true)
 
-	documents, _ := CreateTable(database, "documents", Memory, true)
-	documents.CreateColumn("id", "INT", nil, nil)
-	documents.CreateColumn("bucket", "INT", nil, nil)
-	documents.CreateColumn("file_id", "INT", nil, nil)
+	documents, _ := CreateTable(nil, database, "documents", Memory, true)
+	documents.CreateColumn(nil, "id", "INT", nil, nil)
+	documents.CreateColumn(nil, "bucket", "INT", nil, nil)
+	documents.CreateColumn(nil, "file_id", "INT", nil, nil)
 	insertBatchAcceptBenchmarkRows(documents, []string{"id", "bucket", "file_id"}, batchAcceptBenchmarkRows, func(i int) []scm.Scmer {
 		return []scm.Scmer{
 			scm.NewInt(int64(i)),
@@ -75,9 +75,9 @@ func newBatchAcceptBenchmarkFixture(b *testing.B) *batchAcceptBenchmarkFixture {
 	})
 	RebuildTable(documents, true, false)
 
-	files, _ := CreateTable(database, "files", Memory, true)
-	files.CreateColumn("id", "INT", nil, nil)
-	files.CreateColumn("bucket", "INT", nil, nil)
+	files, _ := CreateTable(nil, database, "files", Memory, true)
+	files.CreateColumn(nil, "id", "INT", nil, nil)
+	files.CreateColumn(nil, "bucket", "INT", nil, nil)
 	insertBatchAcceptBenchmarkRows(files, []string{"id", "bucket"}, batchAcceptBenchmarkACLRows, func(i int) []scm.Scmer {
 		return []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i % 100))}
 	})

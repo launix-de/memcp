@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023, 2024, 2026  Carl-Philip Hänsch
+Copyright (C) 2023-2026, 2024, 2026  Carl-Philip Hänsch
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -408,7 +408,7 @@ frontend expression contracts before publishing executable assignment code. */
 						(list (symbol "lambda") (list (symbol "row"))
 							(list _psym "once" (list (symbol "nth") (symbol "row") 1) "scalar subselect returned more than one row")))
 					(list (symbol "set") (symbol "resultrow") _rrsym)
-					(build_queryplan_term (sql_expand_views transformed_subquery policy) planning_session tx)
+					(build_queryplan_term (sql_expand_views transformed_subquery policy tx) planning_session tx)
 					(list _psym "value")))
 				expr)
 			(if (or (equal?? head "inner_select_in") (equal?? head (quote inner_select_in))
@@ -436,6 +436,9 @@ frontend expression contracts before publishing executable assignment code. */
 	/* Output: (lambda (OLD NEW session tx) ...) that can be applied by ExecuteTriggers */
 	/* Uses set_assoc approach: (set changed_rows (set_assoc changed_rows key value)) */
 	(define compile_trigger_body (lambda (schema timing body) (begin
+		/* The callback outlives CREATE TRIGGER's cached plan. Its DML guards
+		belong inside the callback, rather than the creator's guard dispatcher. */
+		(define planning_session (newsession))
 		(define params (list (symbol "OLD") (symbol "NEW") (symbol "session") (symbol "tx")))
 		(define is_after (or (equal? timing "after_insert") (equal? timing "after_update") (equal? timing "after_delete")))
 		(define changed_rows_sym (symbol "changed_rows"))
@@ -538,7 +541,7 @@ frontend expression contracts before publishing executable assignment code. */
 										(list (symbol "list"))
 										(if ignore (list (symbol "lambda") '() 0) nil)
 										false nil (symbol "tx"))))
-							(build_queryplan_term (sql_expand_views inner_t policy) planning_session tx))))
+							(build_queryplan_term (sql_expand_views inner_t policy tx) planning_session tx))))
 
 					/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
 					'!update
@@ -1230,7 +1233,7 @@ frontend expression contracts before publishing executable assignment code. */
 				(list "found_rows" (list (quote aggregate) 1 (quote +) 0))
 				true nil nil nil nil nil '() '() '())))))
 	(define sql_build_select_plan (lambda (query) (begin
-		(define expanded_query (sql_expand_views query policy))
+		(define expanded_query (sql_expand_views query policy tx))
 		(define actual_plan (build_queryplan_term expanded_query planning_session tx))
 		(define execution_plan (if (and (sql_select_calc_found_rows? query)
 			(not (equal? (car actual_plan) (quote found_rows_result))))
@@ -1338,7 +1341,7 @@ frontend expression contracts before publishing executable assignment code. */
 				'((quote lambda) '() 0)
 				(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
 			nil '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))
-		(define plan (build_queryplan_term (sql_expand_views inner policy) planning_session tx))
+		(define plan (build_queryplan_term (sql_expand_views inner policy tx) planning_session tx))
 		(define ordered (or
 			(and (query_block? inner) (not (empty_list? (coalesceNil (qb_order inner) '()))))
 			(and (union_block? inner) (not (empty_list? (coalesceNil (union_order inner) '()))))))
@@ -1915,7 +1918,7 @@ frontend expression contracts before publishing executable assignment code. */
 					(parser empty '((quote list)))
 				))
 				(define typeparams sql_column_attributes)
-			) (lambda (id) '((quote sql_create_column) '((quote table) schema false id false) col type dimensions (cons 'list (sql_add_column_attributes typeparams)))))
+			) (lambda (id) '((quote sql_create_column) '((quote table) schema false id false) col type dimensions (cons 'list (sql_add_column_attributes typeparams)) 'tx)))
 			(parser '((atom "MODIFY" true) (?(atom "COLUMN" true))
 				(define col sql_identifier)
 				(define type sql_column_type)
@@ -1969,14 +1972,14 @@ frontend expression contracts before publishing executable assignment code. */
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
 		(parser (define query sql_select) (sql_build_select_plan query))
-		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir (sql_expand_views query policy)))
-		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder (sql_expand_views query policy) planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query sql_select)) (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s) planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "DISCOVER" true) (define query sql_select)) (explain_queryplan_physical_calibrate_discover (sql_expand_views query policy) planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "VARIANT" true) (define decision_id sql_string) (define variant sql_string) (define query sql_select)) (explain_queryplan_physical_calibrate_variant (sql_expand_views query policy) decision_id variant planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (define query sql_select)) (explain_queryplan_physical_calibrate (sql_expand_views query policy) planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query sql_select)) (explain_queryplan_physical (sql_expand_views query policy) planning_session))
-		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy) planning_session tx)) (settings "ExplainWidth")))))
+		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir (sql_expand_views query policy tx)))
+		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder (sql_expand_views query policy tx) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query sql_select)) (explain_queryplan_compile (sql_expand_views query policy tx) parse_started_ns (strlen s) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "DISCOVER" true) (define query sql_select)) (explain_queryplan_physical_calibrate_discover (sql_expand_views query policy tx) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "VARIANT" true) (define decision_id sql_string) (define variant sql_string) (define query sql_select)) (explain_queryplan_physical_calibrate_variant (sql_expand_views query policy tx) decision_id variant planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (define query sql_select)) (explain_queryplan_physical_calibrate (sql_expand_views query policy tx) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query sql_select)) (explain_queryplan_physical (sql_expand_views query policy tx) planning_session))
+		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy tx) planning_session tx)) (settings "ExplainWidth")))))
 		sql_insert_set
 		sql_insert_values_select
 		sql_insert_into
@@ -2247,8 +2250,8 @@ frontend expression contracts before publishing executable assignment code. */
 		(parser '((atom "DROP" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				(list (quote drop_sql_database) (list (quote session) "__memcp_tx") id (if if_exists true false))))
-		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema sql_identifier) (atom "." true) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
-		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
+		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema sql_identifier) (atom "." true) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false) (quote tx)))
+		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false) (quote tx)))
 		(parser '((atom "DROP" true) (atom "VIEW" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true)))
 			(define target (or
 				(parser '((define schema2 sql_identifier) "." (define id sql_identifier)) '(schema2 id))
@@ -2257,7 +2260,7 @@ frontend expression contracts before publishing executable assignment code. */
 				(define view_schema (coalesce schema2 schema))
 				(if policy (policy view_schema id true) true)
 				(list (quote drop_sql_view) (list (quote session) "__memcp_tx") view_schema id (if if_exists true false)))))
-		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier)) '((quote renametable) schema oldname newname))
+		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier)) '((quote renametable) schema oldname newname (quote tx)))
 		/* mysqldump --single-transaction establishes this before START TRANSACTION. */
 		(parser '((atom "SET" true) (atom "SESSION" true) (atom "TRANSACTION" true)
 			(atom "ISOLATION" true) (atom "LEVEL" true) (atom "REPEATABLE" true) (atom "READ" true)) (quote true))
@@ -2362,16 +2365,14 @@ frontend expression contracts before publishing executable assignment code. */
 		(parser '((atom "ANALYZE" true) (atom "TABLE" true) sql_identifier) "ignore")
 
 		/* transaction control */
-		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) (list (quote tx_begin_acid) (quote session) (quote tx)))
-		(parser '((atom "START" true) (atom "TRANSACTION" true)) (list (quote tx_begin) (quote session) (quote tx)))
-		(parser '((atom "BEGIN" true)) (list (quote tx_begin) (quote session) (quote tx)))
-		(parser '((atom "COMMIT" true)) (list (quote tx_commit) (quote session)))
-		/* mysqldump uses read-only savepoints around each table. MemCP keeps the
-		outer consistent transaction and accepts these markers as no-ops. */
-		(parser '((atom "SAVEPOINT" true) sql_identifier) (quote true))
-		(parser '((atom "ROLLBACK" true) (atom "TO" true) (? (atom "SAVEPOINT" true)) sql_identifier) (quote true))
-		(parser '((atom "RELEASE" true) (atom "SAVEPOINT" true) sql_identifier) (quote true))
-		(parser '((atom "ROLLBACK" true) (? (atom "WORK" true))) (list (quote tx_rollback) (quote session)))
+		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) (list (quote sql_transaction_begin) (quote session) (quote tx) true))
+		(parser '((atom "START" true) (atom "TRANSACTION" true)) (list (quote sql_transaction_begin) (quote session) (quote tx) false))
+		(parser '((atom "BEGIN" true)) (list (quote sql_transaction_begin) (quote session) (quote tx) false))
+		(parser '((atom "COMMIT" true)) (list (quote sql_transaction_end) (quote session) true))
+		(parser '((atom "SAVEPOINT" true) (define name sql_identifier)) (list (quote sql_savepoint) (quote session) (quote tx) (toLower name)))
+		(parser '((atom "ROLLBACK" true) (atom "TO" true) (? (atom "SAVEPOINT" true)) (define name sql_identifier)) (list (quote sql_rollback_to_savepoint) (quote session) (quote tx) (toLower name)))
+		(parser '((atom "RELEASE" true) (atom "SAVEPOINT" true) (define name sql_identifier)) (list (quote sql_release_savepoint) (quote session) (toLower name)))
+		(parser '((atom "ROLLBACK" true) (? (atom "WORK" true))) (list (quote sql_transaction_end) (quote session) false))
 		"" /* comment only command */
 	)))
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)

@@ -191,3 +191,48 @@ func TestMatchConcatWildcardIgnoresOuterBinding(t *testing.T) {
 		t.Fatal("concat wildcard resolved or rebound its outer namesake")
 	}
 }
+
+func TestMatchSubjectsRemainData(t *testing.T) {
+	for _, annotated := range []bool{false, true} {
+		t.Run(map[bool]string{false: "cons", true: "cons/source"}[annotated], func(t *testing.T) {
+			calls := 0
+			env := &Env{Vars: Vars{"subject_effect": NewFunc(func(...Scmer) Scmer {
+				calls++
+				return NewSlice([]Scmer{NewString("executed")})
+			})}, Outer: &Globalenv}
+			code := NewSlice([]Scmer{NewSymbol("eval"), NewSlice([]Scmer{NewSymbol("subject_effect")})})
+			subject := code
+			if annotated {
+				subject = NewSourceInfo(SourceInfo{source: "match subject", line: 1, col: 1, value: code})
+			}
+			if !match(subject, Read("subject pattern", "(cons head tail)", true), env, false) {
+				t.Fatal("cons rejected a list supplied as data")
+			}
+			if calls != 0 || !env.Vars["head"].SymbolEquals("eval") || !Equal(env.Vars["tail"], NewSlice(code.Slice()[1:])) {
+				t.Fatalf("cons executed or changed its subject: calls=%d head=%s", calls, String(env.Vars["head"]))
+			}
+		})
+	}
+	t.Run("regex", func(t *testing.T) {
+		calls := 0
+		env := &Env{Vars: Vars{"subject_effect": NewFunc(func(...Scmer) Scmer {
+			calls++
+			return NewString("executed")
+		})}, Outer: &Globalenv}
+		subject := NewSlice([]Scmer{NewSymbol("eval"), NewSlice([]Scmer{NewSymbol("subject_effect")})})
+		var failure any
+		func() {
+			defer func() { failure = recover() }()
+			match(subject, Read("subject pattern", `(regex "executed" _)`, true), env, false)
+		}()
+		if failure == nil || calls != 0 {
+			t.Fatalf("regex must reject a non-string subject without executing it: calls=%d panic=%v", calls, failure)
+		}
+	})
+	t.Run("explicit pattern evaluation", func(t *testing.T) {
+		env := &Env{Outer: &Globalenv}
+		if !match(NewInt(7), Read("evaluated pattern", "(eval (+ 3 4))", true), env, false) {
+			t.Fatal("explicit eval pattern lost its evaluation semantics")
+		}
+	})
+}

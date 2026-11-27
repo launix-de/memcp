@@ -78,7 +78,7 @@ func initMySQLImport(en scm.Env) {
 			defer db.Close()
 
 			// drop-semantics: reset trigger metadata for this import run
-			DropTable(mysqlImportMetaSchema, mysqlImportTriggersTable, true)
+			DropTable(nil, mysqlImportMetaSchema, mysqlImportTriggersTable, true)
 
 			srcDBs, err := mysqlListDatabases(ctx, db, sourceDB)
 			if err != nil {
@@ -236,9 +236,9 @@ func mysqlImportTable(ctx context.Context, db *sql.DB, srcDB, srcTable, dstDB, d
 	}
 
 	// drop-semantics: replace target table content+schema
-	DropTable(dstDB, dstTable, true)
+	DropTable(nil, dstDB, dstTable, true)
 
-	t, _ := CreateTable(dstDB, dstTable, Safe, true)
+	t, _ := CreateTable(nil, dstDB, dstTable, Safe, true)
 	if err := mysqlImportColumns(ctx, db, srcDB, srcTable, t); err != nil {
 		return err
 	}
@@ -312,7 +312,7 @@ ORDER BY ORDINAL_POSITION`, srcDB, srcTable)
 			opts = append(opts, scm.NewString("collate"), scm.NewString(collation.String))
 		}
 
-		if ok := t.CreateColumn(name.String, typ, dims, opts); !ok {
+		if ok := t.CreateColumn(nil, name.String, typ, dims, opts); !ok {
 			continue
 		}
 	}
@@ -406,7 +406,6 @@ ORDER BY tc.CONSTRAINT_NAME, kcu.ORDINAL_POSITION`, srcDB, srcTable)
 	}
 
 	t.schema.schemalock.Lock()
-	defer t.schema.schemalock.Unlock()
 
 existingLoop:
 	for k, cols := range keys {
@@ -422,7 +421,7 @@ existingLoop:
 		t.Unique = append(t.Unique, uniqueKey{Id: k.name, Cols: colNames})
 	}
 	t.publishShowColumnsSnapshot(true)
-	t.schema.save()
+	t.schema.saveLockedAndUnlock(nil, schemaSaveFsync, t)
 	return nil
 }
 
@@ -440,14 +439,14 @@ func sameStringSlice(a, b []string) bool {
 
 func mysqlEnsureTriggerTable() *table {
 	CreateDatabase(mysqlImportMetaSchema, true)
-	t, created := CreateTable(mysqlImportMetaSchema, mysqlImportTriggersTable, Safe, true)
+	t, created := CreateTable(nil, mysqlImportMetaSchema, mysqlImportTriggersTable, Safe, true)
 	if created {
-		_ = t.CreateColumn("schema", "varchar", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false)})
-		_ = t.CreateColumn("table", "varchar", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false)})
-		_ = t.CreateColumn("name", "varchar", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false)})
-		_ = t.CreateColumn("timing", "varchar", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false)})
-		_ = t.CreateColumn("event", "varchar", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false)})
-		_ = t.CreateColumn("statement", "text", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false)})
+		_ = t.CreateColumn(nil, "schema", "varchar", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false)})
+		_ = t.CreateColumn(nil, "table", "varchar", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false)})
+		_ = t.CreateColumn(nil, "name", "varchar", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false)})
+		_ = t.CreateColumn(nil, "timing", "varchar", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false)})
+		_ = t.CreateColumn(nil, "event", "varchar", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false)})
+		_ = t.CreateColumn(nil, "statement", "text", nil, []scm.Scmer{scm.NewString("null"), scm.NewBool(false)})
 	}
 	return t
 }

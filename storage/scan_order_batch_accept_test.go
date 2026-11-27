@@ -23,7 +23,7 @@ import "github.com/launix-de/memcp/scm"
 func setupBatchAcceptTable(t *testing.T, database string, rows int) *table {
 	t.Helper()
 	table := setupScanParallelTestTable(t, database)
-	table.CreateColumn("grp", "INT", nil, nil)
+	table.CreateColumn(nil, "grp", "INT", nil, nil)
 	values := make([][]scm.Scmer, rows)
 	for i := range values {
 		values[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i % 3))}
@@ -38,9 +38,9 @@ func TestJITScanOrderPreservesAdjacentMapColumnNames(t *testing.T) {
 	databases.Remove(database)
 	t.Cleanup(func() { databases.Remove(database) })
 	CreateDatabase(database, true)
-	table, _ := CreateTable(database, "posts", Memory, true)
+	table, _ := CreateTable(nil, database, "posts", Memory, true)
 	for _, column := range []string{"ID", "post_title", "post_status", "post_type"} {
-		table.CreateColumn(column, "TEXT", nil, nil)
+		table.CreateColumn(nil, column, "TEXT", nil, nil)
 	}
 	table.Insert([]string{"ID", "post_title", "post_status", "post_type"}, [][]scm.Scmer{{
 		scm.NewString("1"), scm.NewString("title"), scm.NewString("publish"), scm.NewString("post"),

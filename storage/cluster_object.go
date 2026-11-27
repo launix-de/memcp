@@ -703,7 +703,7 @@ func registeredClusterShards(name string) []*storageShard {
 	seen := make(map[*storageShard]bool)
 	var result []*storageShard
 	add := func(shard *storageShard) {
-		if shard != nil && shard.t != nil && shard.t.schema.Name == name && !seen[shard] {
+		if shard != nil && shard.t != nil && (shard.t.schema.Name == name || shard.home().Name == name || shard.catalogOwner == name) && !seen[shard] {
 			seen[shard] = true
 			result = append(result, shard)
 		}
@@ -727,7 +727,7 @@ func registeredClusterShards(name string) []*storageShard {
 	return result
 }
 func clusterRetainsShard(shard *storageShard) bool {
-	for _, registered := range registeredClusterShards(shard.t.schema.Name) {
+	for _, registered := range registeredClusterShards(shard.home().Name) {
 		if registered.uuid == shard.uuid {
 			return true
 		}

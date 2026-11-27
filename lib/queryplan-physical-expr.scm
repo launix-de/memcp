@@ -2773,7 +2773,7 @@ choices. */
 			(cons (quote list) (cons
 				(cons (quote list) (cons "unique" (cons "group" (list (cons (quote list) all_names)))))
 				(merge (list key_columns range_columns))))
-			(quoted_runtime_list '("engine" "cache"))
+			(quoted_runtime_list '("engine" "cache" "runtime_only" true))
 			true
 			(quote tx)))))
 
@@ -2848,7 +2848,7 @@ choices. */
 			(range_group_state_col_name stage ag)
 			"any"
 			(quoted_runtime_list '())
-			(quoted_runtime_list '("temp" true))
+			(quoted_runtime_list '("temp" true "runtime_only" true))
 			(cons (quote list) (merge (list key_names boundary_names)))
 			(list (quote lambda)
 				(merge (list (map key_names symbol) boundary_symbols))
@@ -6690,6 +6690,13 @@ large local recursive callback makes serial map setup walk its body per node. */
 		(define source_identity (lambda (src)
 			(list (source_schema src)
 				(rewrite (source_relation src))
+				/* A replacement logical table cannot reuse the predecessor's
+				cached aggregates. This catalog identity survives rename/rebuild;
+				physical helper generations remain identified by their recipes. */
+				(if (and (source_is_base_table? src) (not (strlike (source_relation src) ".%")))
+					(begin
+						(define relation (table (source_schema src) false (source_relation src) false))
+						(if relation (show relation "identity") nil)) nil)
 				(source_outer? src)
 				(rewrite (source_join_expr src)))))
 		(if (query_block? input)
@@ -6849,12 +6856,12 @@ initialization and eviction ownership. Dimensions describe keys, never owners. *
 		(group_cache_create (group_cache_schema cache) (group_cache_relation cache)
 			(cons (list "unique" "group" names)
 				(map names (lambda (name) (list "column" name "any" '() '("collate" "bin")))))
-			'("engine" "cache") true tx)
+			'("engine" "cache" "runtime_only" true) true tx)
 		/* A missing/invalid payload evaluates to nil. It is filled under source
 		read locks; native dependency triggers invalidate it on logical writes.
 		The callback is stateless and retains no request or normalized bindings. */
 		(createcolumn (table (group_cache_schema cache) false (group_cache_relation cache) false)
-			payload "any" '() (list "temp" true "dependencies" sources
+			payload "any" '() (list "temp" true "runtime_only" true "dependencies" sources
 				"filtercols" '() "filter" (lambda () false)) '() (lambda () nil) tx)
 		true)))
 
@@ -7427,7 +7434,7 @@ rename equivalent aggregate values in the two cache-source alternatives. */
 			(group_computed_order_col_name expr)
 			"any"
 			(quoted_runtime_list '())
-			(quoted_runtime_list '("temp" true))
+			(quoted_runtime_list '("temp" true "runtime_only" true))
 			(cons (quote list) cols)
 			(list (quote lambda)
 				(map cols (lambda (col) (symbol col)))
@@ -7481,9 +7488,9 @@ every group row and its canonical identity stays independent of bound values. */
 		(define filter_parts
 			(group_aggregate_probe_filter_parts stage src keys key_names))
 		(if (nil? filter_parts)
-			(list (quote list) "temp" true "collate" (physical_column_collation_expr src agg_expr))
+			(list (quote list) "temp" true "runtime_only" true "collate" (physical_column_collation_expr src agg_expr))
 			(list (quote list)
-				"temp" true "collate" (physical_column_collation_expr src agg_expr)
+				"temp" true "runtime_only" true "collate" (physical_column_collation_expr src agg_expr)
 				"filtercols" (quoted_runtime_list (car filter_parts))
 				"filter" (cadr filter_parts))))))
 
@@ -7545,7 +7552,7 @@ every group row and its canonical identity stays independent of bound values. */
 			agg_col
 			"any"
 			(quoted_runtime_list '())
-			(quoted_runtime_list '("temp" true))
+			(quoted_runtime_list '("temp" true "runtime_only" true))
 			(cons (quote list) key_names)
 			(list (quote lambda)
 				(map key_names (lambda (col) (symbol col)))
@@ -8575,7 +8582,7 @@ SUM/AVG empty and NULL semantics. */
 			(list (quote equal??) (nth remote_params i) (list (quote outer) 1 (nth params i))))) true))
 		(list (quote createcolumn) (source_table_expr (car spec))
 			(scalar_group_projection_name spec col) "any" (quoted_runtime_list '())
-			(quoted_runtime_list '("temp" true)) (quoted_runtime_list input_cols)
+			(quoted_runtime_list '("temp" true "runtime_only" true)) (quoted_runtime_list input_cols)
 			(list (quote lambda) params
 				(compile_scan_plan (quote scan) nil (source_table_expr (cadr spec))
 					(quoted_runtime_list lookup_cols) (list (quote lambda) remote_params condition)

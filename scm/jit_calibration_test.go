@@ -119,22 +119,48 @@ func TestJITCalibrationFilterBufferBestOf(t *testing.T) {
 		FilterBufferSavedNS:       5,
 		FilterBufferMaxUnits:      20,
 	}
-	if got := calibration.FilterBufferBreakEven(20, 3); got != 40 {
+	if got := calibration.FilterBufferBreakEven(20, 3, false); got != 40 {
 		t.Fatalf("filter buffer break-even rows = %d, want 40", got)
 	}
-	if got := calibration.FilterBufferBreakEven(30, 3); got != 56 {
+	if got := calibration.FilterBufferBreakEven(30, 3, false); got != 56 {
 		t.Fatalf("complex filter buffer break-even rows = %d, want 56", got)
 	}
-	if got := calibration.FilterBufferBreakEven(20, 0); got != math.MaxInt {
+	if got := calibration.FilterBufferBreakEven(20, 0, false); got != math.MaxInt {
 		t.Fatalf("zero-column filter break-even = %d, want MaxInt", got)
 	}
 	calibration.FilterBufferCompileUnitNS = 0
-	if got := calibration.FilterBufferBreakEven(100, 16); got != 40 {
+	if got := calibration.FilterBufferBreakEven(100, 16, false); got != 40 {
 		t.Fatalf("a measured flat compile slope disabled wide filters: %d", got)
 	}
 	calibration.FilterBufferCompileUnitNS = -1
-	if got := calibration.FilterBufferBreakEven(100, 16); got != math.MaxInt {
+	if got := calibration.FilterBufferBreakEven(100, 16, false); got != math.MaxInt {
 		t.Fatalf("an unavailable compile slope admitted wide filters: %d", got)
+	}
+}
+
+func TestJITCalibrationPricesTheActualFilterCallbackMode(t *testing.T) {
+	calibration := JITCostCalibration{
+		Enabled: true, FilterBufferCompileNS: 100, FilterBufferCompileUnitNS: 4,
+		FilterBufferMaxUnits: 20, FilterBufferSavedNS: 5,
+		FilterBufferInterpretedUnits: 40, FilterBufferInterpretedSavedNS: 40,
+	}
+	if got := calibration.FilterBufferBreakEven(40, 16, false); got != 72 {
+		t.Fatalf("compiled callback changed its existing admission: %d", got)
+	}
+	if got := calibration.FilterBufferBreakEven(40, 16, true); got != 9 {
+		t.Fatalf("interpreter work was priced as an already compiled callback: %d", got)
+	}
+	calibration.FilterBufferInterpretedSavedNS = 0
+	if got := calibration.FilterBufferBreakEven(40, 16, true); got != 72 {
+		t.Fatalf("unmeasured interpreter work bypassed the conservative estimate: %d", got)
+	}
+	calibration.FilterBufferSavedNS = 0
+	calibration.FilterBufferInterpretedSavedNS = 40
+	if got := calibration.FilterBufferBreakEven(40, 16, false); got != math.MaxInt {
+		t.Fatalf("an unprofitable compiled callback was admitted: %d", got)
+	}
+	if got := calibration.FilterBufferBreakEven(40, 16, true); got != 9 {
+		t.Fatalf("measured interpreter saving was hidden by the native-call estimate: %d", got)
 	}
 }
 

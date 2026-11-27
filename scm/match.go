@@ -284,7 +284,9 @@ func match(val Scmer, pattern Scmer, en *Env, mutable bool) bool {
 			}
 			return false
 		case "cons":
-			if list, ok := scmerAsSlice(valueFromPattern(val, en)); ok {
+			// The subject was evaluated by match's caller. Only explicit pattern
+			// operands may resolve names or eval code; subject lists remain data.
+			if list, ok := scmerAsSlice(val); ok {
 				if len(list) == 0 {
 					return false
 				}
@@ -295,7 +297,7 @@ func match(val Scmer, pattern Scmer, en *Env, mutable bool) bool {
 			// syntax: (match "v=5" (regex "^v=(.*)" _ v) (print "v is " v))
 			// for multiline parsing, use (?ms:<REGEXP>)
 			// for additional info, see https://github.com/google/re2/wiki/Syntax
-			if str, ok := scmerAsString(valueFromPattern(val, en)); ok {
+			if str, ok := scmerAsString(val); ok {
 				var re *regexp.Regexp
 				if p[1].IsRegex() {
 					re = p[1].Regex()

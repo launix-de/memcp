@@ -95,9 +95,10 @@ type mosiPeer struct {
 	outgoing        *mosiMailbox
 	writeDone       chan struct{}
 	mu              sync.Mutex
-	channels        *sync.Map                // channel name -> registered payload handler
-	packetOrder     map[string]chan struct{} // wire publication order per resource; payload and grant IDs may differ
-	packetBytes     atomic.Int64             // bounded queued packet bytes, never shard admission state
+	channels        *sync.Map                           // channel name -> registered payload handler
+	packetOrder     map[string]chan struct{}            // wire publication order per resource; payload and grant IDs may differ
+	catalogOrder    map[string]map[string]chan struct{} // pending native definitions by tenant and resource
+	packetBytes     atomic.Int64                        // bounded queued packet bytes, never shard admission state
 	next            atomic.Uint64
 	done            chan struct{}
 	once            sync.Once
@@ -450,7 +451,22 @@ func (p *mosiPeer) dispatchPacket(packet *mosiPacket, size int, readyAt time.Tim
 	}
 	previous := p.packetOrder[key]
 	var namespaceReady <-chan struct{}
-	if packet.Resource.Shard != "" {
+	var catalogReady []<-chan struct{}
+	if packet.Resource.Shard == "" && packet.Kind == "end" {
+		for _, pending := range p.catalogOrder[packet.Resource.Database] {
+			catalogReady = append(catalogReady, pending)
+		}
+	}
+	if isCatalogResource(packet.Resource) {
+		if p.catalogOrder == nil {
+			p.catalogOrder = make(map[string]map[string]chan struct{})
+		}
+		if p.catalogOrder[packet.Resource.Database] == nil {
+			p.catalogOrder[packet.Resource.Database] = make(map[string]chan struct{})
+		}
+		p.catalogOrder[packet.Resource.Database][key] = done
+	}
+	if packet.Resource.Shard != "" && !isCatalogResource(packet.Resource) {
 		namespaceReady = p.packetOrder[packet.Resource.Database]
 	}
 	p.packetOrder[key] = done
@@ -465,6 +481,12 @@ func (p *mosiPeer) dispatchPacket(packet *mosiPacket, size int, readyAt time.Tim
 			p.mu.Lock()
 			if p.packetOrder[key] == done {
 				delete(p.packetOrder, key)
+			}
+			if pending := p.catalogOrder[packet.Resource.Database]; pending[key] == done {
+				delete(pending, key)
+				if len(pending) == 0 {
+					delete(p.catalogOrder, packet.Resource.Database)
+				}
 			}
 			close(done)
 			p.mu.Unlock()
@@ -481,9 +503,21 @@ func (p *mosiPeer) dispatchPacket(packet *mosiPacket, size int, readyAt time.Tim
 		}
 		// A preceding schema publication introduces this data object's identity.
 		// Independent shard queues must not overtake that namespace barrier.
+		// Fixed catalog relations already exist and supply that publication's
+		// definitions; their own resource queue orders their generations.
 		if namespaceReady != nil {
 			select {
 			case <-namespaceReady:
+			case <-p.done:
+				return
+			}
+		}
+		// Native files precede their advertised root on the wire, but occupy
+		// independent resource queues. Join those completed publications only
+		// before decoding the root. Catalog imports never wait for the root.
+		for _, pending := range catalogReady {
+			select {
+			case <-pending:
 			case <-p.done:
 				return
 			}

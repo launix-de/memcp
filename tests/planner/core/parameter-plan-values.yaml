@@ -126,6 +126,29 @@ test_cases:
         (answer "rows")))))
   expect:
     result: [[[id, 0]], [[id, 1]], [], [[id, 0], [id, 0]], [[id, 1]], [[id, 2]], [[id, 0], [id, 1], [id, 2]]]
+- name: Shared scan recipes keep no outer request transaction and return complete rows
+  scm: |
+    (begin
+      (define source (list (quote table) "memcp-tests" false "parameter_values_base" false))
+      (define lowered (compile_scan_plan (quote scan) nil source
+        '() (list (quote lambda) '() true) (list (quote quote) (list "id" "value"))
+        (list (quote lambda) (list (quote acc) (quote id) (quote value))
+          (list (quote append) (quote acc) (list (quote list) (quote id) (quote value))))
+        (list (quote quote) '())
+        (list (quote lambda) (list (quote a) (quote b))
+          (list (quote merge) (list (quote list) (quote a) (quote b)))) false))
+      (define legacy (merge (list (slice lowered 0 2) (list source) (slice lowered 3 (count lowered)))))
+      (define make_recipe (lambda (program)
+        (sql_queryplan_compile_formula nil (list (quote lambda) '() program))))
+      (define control (close_procedure ((make_recipe legacy) (newsession) "request-marker" nil nil)))
+      (define recipe (close_procedure ((make_recipe lowered) (newsession) "request-marker" nil nil)))
+      (define control_json (json_encode control))
+      (define recipe_json (json_encode recipe))
+      (list (strlike control_json "%request-marker%")
+        (strlike recipe_json "%request-marker%")
+        (sort (recipe) (lambda (a b) (< (car a) (car b))))))
+  expect:
+    result: [true, false, [[0, 7], [1, 11], [2, null]]]
 - name: Computed source work remains opaque across row count publication
   scm: |
     (begin
@@ -161,6 +184,58 @@ test_cases:
       (list ((table_planner_statistics target) "has_read_program") (answer "row"))))
   expect:
     result: [true, [id, 7]]
+- name: Physical operator recognition uses syntax and callable identity
+  scm: |
+    (list
+      (physical_head_matches? true (quote scan))
+      (physical_head_matches? "scan" (quote scan))
+      (physical_head_matches? (list (quote lambda) (list (quote x)) (quote x)) (quote scan))
+      (physical_head_matches? (quote scan) (quote scan))
+      (physical_head_matches? scan (quote scan)))
+  expect:
+    result: [false, false, false, true, true]
+- name: Projected coordinates retain explicit scan transaction arguments
+  scm: |
+    (list
+      (projected_truth_recipe_fixed_coordinate? (list (quote table) "memcp-tests" false "parameter_values_base" false))
+      (projected_truth_recipe_fixed_coordinate? (list (quote table) "memcp-tests" false "parameter_values_base" false (physical_query_tx_symbol)))
+      (projected_truth_recipe_fixed_coordinate? (list (quote table) "memcp-tests" false "parameter_values_base" false nil))
+      (projected_truth_recipe_fixed_coordinate? (list (quote table) "memcp-tests" false "parameter_values_base" false (list (quote opaque_context)))))
+  expect:
+    result: [true, true, true, false]
+- name: Hoisted scan values recognize only symbolic operators
+  scm: |
+    (list
+      (scan_plan_hoist_safe (list true 1))
+      (scan_plan_hoist_safe (list "equal?" 1 1))
+      (scan_plan_hoist_safe (list (list (quote lambda) (list (quote x)) (quote x)) 1))
+      (scan_plan_hoist_safe (list (quote equal?) 1 1)))
+  expect:
+    result: [false, false, false, true]
+- name: Preparation calls require symbolic operators and an actual session source
+  scm: |
+    (list
+      (prepare_call_key (list true (list (physical_query_session_symbol) "stage") (list)))
+      (prepare_call_key (list "apply" (list (physical_query_session_symbol) "stage") (list)))
+      (prepare_call_key (list (quote apply) (list true "stage") (list)))
+      (prepare_call_key (list (quote apply) (list (list (quote context) true) "stage") (list)))
+      (prepare_call_key (list (quote apply) (list (physical_query_session_symbol) "stage") (list)))
+      (prepare_call_key (list (quote apply) (list (list (quote context) "session") "stage") (list))))
+  expect:
+    result: [null, null, null, null, stage, stage]
+- name: Session dependencies distinguish execution keys from truthy expressions
+  scm: |
+    (map (list
+      (query_session_read_expr (list true "visible"))
+      (query_session_read_expr (list equal? true))
+      (query_session_read_expr (list (quote session) "__memcp_tx"))
+      (query_session_read_expr (list (quote session) "visible"))
+      (query_session_read_expr (list (quote session) true))
+      (query_session_read_expr (list session_globalvar "visible"))
+      (query_session_read_expr (list session_globalvar true)))
+      (lambda (read) (if (nil? read) nil (list (string (car read)) (cadr read)))))
+  expect:
+    result: [null, null, null, [session, visible], [session, true], [session_globalvar, visible], [session_globalvar, true]]
 cleanup:
 - sql: DROP TABLE IF EXISTS parameter_values_initialized
 - sql: DROP TABLE IF EXISTS parameter_values_child

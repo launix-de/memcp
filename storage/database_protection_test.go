@@ -93,15 +93,15 @@ func TestDropRefusesInternalObjectsBeforeMutation(t *testing.T) {
 		}
 	})
 
-	requirePanic(t, func() { DropTable("system", "user", false) })
+	requirePanic(t, func() { DropTable(nil, "system", "user", false) })
 	if db.tables.Get("user") == nil {
 		t.Fatal("protected table was removed")
 	}
-	requirePanic(t, func() { RenameTable("system", "user", "renamed_user") })
+	requirePanic(t, func() { RenameTable(nil, "system", "user", "renamed_user") })
 	if db.tables.Get("user") == nil || db.tables.Get("renamed_user") != nil {
 		t.Fatal("protected table was renamed")
 	}
-	requirePanic(t, func() { db.tables.Get("user").DropColumn("admin") })
+	requirePanic(t, func() { db.tables.Get("user").DropColumn(nil, "admin") })
 
 	requirePanic(t, func() { DropDatabase("system", false) })
 	if databases.Get("system") != db {
@@ -113,7 +113,7 @@ func TestPublishedFoldedTableNames(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tfoldednames", 0)
 	db := tbl.schema
 	before := db.foldedTableNames.Load()
-	created, _ := CreateTable(db.Name, "MixedName", Safe, false)
+	created, _ := CreateTable(nil, db.Name, "MixedName", Safe, false)
 	if db.GetTable("mIXEDnAME", true) != created {
 		t.Fatal("shared table lookup did not resolve its folded spelling")
 	}
@@ -123,27 +123,27 @@ func TestPublishedFoldedTableNames(t *testing.T) {
 	if _, exists := (*before)["mixedname"]; exists {
 		t.Fatal("namespace publication mutated a retained snapshot")
 	}
-	RenameTable(db.Name, "MixedName", "Renamed")
+	RenameTable(nil, db.Name, "MixedName", "Renamed")
 	if db.GetTable("MIXEDNAME", true) != nil {
 		t.Fatal("rename retained an obsolete name")
 	}
 	if db.GetTable("renamed", true) != created || *created.publishedName.Load() != "Renamed" {
 		t.Fatal("rename did not publish its new spelling")
 	}
-	CreateTable(db.Name, "RENAMED", Safe, false)
+	CreateTable(nil, db.Name, "RENAMED", Safe, false)
 	requirePanic(t, func() { db.GetTable("Renamed", true) })
 	if db.GetTable("Renamed", false) != created {
 		t.Fatal("ambiguous folded names affected an exact-case caller")
 	}
-	DropTable(db.Name, "RENAMED", false)
+	DropTable(nil, db.Name, "RENAMED", false)
 	if db.GetTable("RENAMED", true) != created {
 		t.Fatal("DROP did not remove the folded-name ambiguity")
 	}
-	DropTable(db.Name, "Renamed", false)
+	DropTable(nil, db.Name, "Renamed", false)
 	if db.GetTable("renamed", true) != nil {
 		t.Fatal("DROP retained a removed table")
 	}
-	unicodeTable, _ := CreateTable(db.Name, "Key", Safe, false)
+	unicodeTable, _ := CreateTable(nil, db.Name, "Key", Safe, false)
 	if db.GetTable("KEY", true) != unicodeTable {
 		t.Fatal("folded namespace does not match the existing Unicode identifier policy")
 	}

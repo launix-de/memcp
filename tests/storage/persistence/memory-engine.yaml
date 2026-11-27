@@ -1,9 +1,13 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 metadata:
   version: "1.0"
   description: "ENGINE=MEMORY table and ALTER TABLE ENGINE= transitions"
   isolated: true
 
 setup:
+  - sql: DROP TABLE IF EXISTS engine_tx_original
+  - sql: DROP TABLE IF EXISTS engine_tx_promoted
   - sql: "DROP TABLE IF EXISTS mem_t"
   - sql: "DROP TABLE IF EXISTS alter_safe_to_mem"
   - sql: "DROP TABLE IF EXISTS alter_mem_to_safe"
@@ -167,7 +171,123 @@ test_cases:
     expect:
       error: true
 
+  - name: Create a persistent fixture for transactional engine changes
+    sql: CREATE TABLE engine_tx_original (id INT PRIMARY KEY, value INT)
+  - name: Populate the persistent engine fixture
+    sql: INSERT INTO engine_tx_original VALUES (1, 10)
+  - name: START ACID TRANSACTION rolls back engine declarations and earlier data together
+    steps:
+    - session_id: engine_tx_owner
+      sql: START ACID TRANSACTION
+    - session_id: engine_tx_owner
+      sql: UPDATE engine_tx_original SET value = 20 WHERE id = 1
+    - session_id: engine_tx_owner
+      sql: ALTER TABLE engine_tx_original ENGINE=MEMORY
+    - session_id: engine_tx_owner
+      sql: INSERT INTO engine_tx_original VALUES (2, 30)
+    - session_id: engine_tx_owner
+      sql: SELECT id, value FROM engine_tx_original ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 20
+        - id: 2
+          value: 30
+    - session_id: engine_tx_owner
+      sql: SELECT persistency_mode FROM system_schema.tables WHERE schema_name = 'memcp-tests' AND name = 'engine_tx_original'
+      expect:
+        rows: 1
+        data:
+        - persistency_mode: memory
+    - session_id: engine_tx_owner
+      sql: ROLLBACK
+  - name: START ACID TRANSACTION retains the original persistent rows after rollback
+    sql: SELECT id, value FROM engine_tx_original ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        value: 10
+  - name: BEGIN rolls back engine declarations and earlier data together
+    steps:
+    - session_id: engine_tx_owner
+      sql: BEGIN
+    - session_id: engine_tx_owner
+      sql: UPDATE engine_tx_original SET value = 20 WHERE id = 1
+    - session_id: engine_tx_owner
+      sql: ALTER TABLE engine_tx_original ENGINE=MEMORY
+    - session_id: engine_tx_owner
+      sql: INSERT INTO engine_tx_original VALUES (2, 30)
+    - session_id: engine_tx_owner
+      sql: SELECT id, value FROM engine_tx_original ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 20
+        - id: 2
+          value: 30
+    - session_id: engine_tx_owner
+      sql: SELECT persistency_mode FROM system_schema.tables WHERE schema_name = 'memcp-tests' AND name = 'engine_tx_original'
+      expect:
+        rows: 1
+        data:
+        - persistency_mode: memory
+    - session_id: engine_tx_owner
+      sql: ROLLBACK
+  - name: BEGIN retains the original persistent rows after rollback
+    sql: SELECT id, value FROM engine_tx_original ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        value: 10
+  - name: Restart after rolling back an engine downgrade
+    action: restart
+  - name: Rollback of the engine downgrade retains the original disk data
+    sql: SELECT id, value FROM engine_tx_original ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        value: 10
+  - name: Create a volatile fixture for transactional promotion
+    sql: CREATE TABLE engine_tx_promoted (id INT PRIMARY KEY, value INT) ENGINE=MEMORY
+  - name: Populate the volatile promotion fixture
+    sql: INSERT INTO engine_tx_promoted VALUES (1, 10)
+  - name: Commit earlier and later data with a persistent engine promotion
+    steps:
+    - session_id: engine_tx_owner
+      sql: START ACID TRANSACTION
+    - session_id: engine_tx_owner
+      sql: UPDATE engine_tx_promoted SET value = 11 WHERE id = 1
+    - session_id: engine_tx_owner
+      sql: ALTER TABLE engine_tx_promoted ENGINE=SAFE
+    - session_id: engine_tx_owner
+      sql: INSERT INTO engine_tx_promoted VALUES (2, 22)
+    - session_id: engine_tx_owner
+      sql: COMMIT
+  - name: Restart after accepting the engine promotion
+    action: restart
+  - name: The accepted engine promotion recovers every original transaction row
+    sql: SELECT id, value FROM engine_tx_promoted ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: 11
+      - id: 2
+        value: 22
+  - name: The accepted engine promotion recovers its matching declaration
+    sql: SELECT persistency_mode FROM system_schema.tables WHERE schema_name = 'memcp-tests' AND name = 'engine_tx_promoted'
+    expect:
+      rows: 1
+      data:
+      - persistency_mode: safe
 cleanup:
+  - sql: DROP TABLE IF EXISTS engine_tx_original
+  - sql: DROP TABLE IF EXISTS engine_tx_promoted
   - sql: "DROP TABLE IF EXISTS mem_t"
   - sql: "DROP TABLE IF EXISTS alter_safe_to_mem"
   - sql: "DROP TABLE IF EXISTS alter_mem_to_safe"

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -30,11 +31,17 @@ class ReliabilityDrillTests(unittest.TestCase):
 	def test_replication_cleanup_dumps_only_the_failed_owned_process(self):
 		node = object.__new__(replication.Node)
 		node.name = "owned-node"
+		node.generation = 3
+		directory = tempfile.TemporaryDirectory()
+		self.addCleanup(directory.cleanup)
+		node.artifact_dir = Path(directory.name)
+		node.snapshot = mock.Mock(return_value={"records": []})
 		node.process = mock.Mock()
 		node.process.poll.return_value = None
 		with mock.patch.object(replication.OwnedServer, "cleanup") as cleanup:
 			replication.Node.cleanup(node)
 			node.process.send_signal.assert_not_called()
+			node.snapshot.assert_not_called()
 			try:
 				raise RuntimeError("scenario failed")
 			except RuntimeError:
@@ -42,6 +49,14 @@ class ReliabilityDrillTests(unittest.TestCase):
 			node.process.send_signal.assert_called_once_with(replication.signal.SIGABRT)
 			node.process.wait.assert_called_once_with(timeout=2)
 			self.assertEqual(cleanup.call_count, 2)
+			node.snapshot.assert_called_once_with(timeout=2)
+			self.assertEqual(json.loads((node.artifact_dir / "authority-generation-3.json").read_text()), {"records": []})
+
+	def test_partial_sql_stream_preserves_the_server_error(self) -> None:
+		client = drill.HttpClient(4321, 20)
+		with mock.patch.object(client, "request", return_value=' {"id": 1}\nSQL Error: Cluster network error\n'):
+			with self.assertRaisesRegex(drill.DrillFailure, "SELECT id.*\\nSQL Error: Cluster network error"):
+				client.sql("SELECT id FROM items")
 
 	def test_ports_remain_distinct_before_nodes_start_listening(self) -> None:
 		with mock.patch.object(drill, "_allocated_ports", set()), mock.patch.object(drill.socket, "socket") as factory:
@@ -320,6 +335,32 @@ class ClusterSuiteTests(unittest.TestCase):
 	def snapshot(self, index, received=0, delegated=0, ram=100):
 		return {"state": {"self": {"id": f"node-{index}"}, "received": received,
 			"delegated": delegated}, "budget": {"MemoryBudget": ram}}
+
+	def test_execution_counters_follow_the_selected_ingress(self):
+		before = [self.snapshot(i) for i in range(3)]
+		after = [self.snapshot(0, received=4), self.snapshot(1, delegated=4), self.snapshot(2)]
+		proof = replication.cluster_evidence(before, after, 1000, ingress_index=1)
+		self.assertEqual(proof["remote_shards"], 4)
+		self.assertEqual(proof["remote_node_ids"], ["node-0"])
+		replication.assert_cluster_evidence({"min_remote_shards": 4, "min_remote_nodes": 1}, proof)
+		with self.assertRaises(replication.DrillFailure):
+			replication.cluster_evidence(before, after, 1000, ingress_index=3)
+
+	def test_case_ingress_is_local_to_the_case_and_not_the_runner(self):
+		from types import SimpleNamespace
+		nodes = [SimpleNamespace(port=4100+i,password="admin",database="memcp-tests") for i in range(2)]
+		seen = []
+		def execute(runner,case,database):
+			seen.append(runner.base_url)
+			return True
+		with tempfile.TemporaryDirectory() as temp:
+			runner = replication.ClusterSQLTestRunner(nodes[0],nodes,Path(temp),[],Path(temp)/"report.json",lambda _:None)
+			with mock.patch.object(replication.SQLTestRunner,"run_test_case",new=execute), mock.patch("builtins.print"):
+				self.assertTrue(runner.run_test_case({"name":"peer input","cluster_node":1},"memcp-tests"))
+				self.assertTrue(runner.run_test_case({"name":"normal input"},"memcp-tests"))
+				self.assertFalse(runner.run_test_case({"name":"invalid input","cluster_node":2},"memcp-tests"))
+			self.assertEqual(seen,["http://127.0.0.1:4101","http://127.0.0.1:4100"])
+			self.assertEqual(runner.base_url,"http://127.0.0.1:4100")
 
 	def test_membership_and_correct_rows_are_not_execution_proof(self):
 		snapshots = [self.snapshot(i) for i in range(4)]

@@ -711,3 +711,267 @@ func TestCachePublishesBudgetWithoutAdmissionTransition(t *testing.T) {
 		t.Fatalf("cold placement did not observe the changed budget: before=%+v after=%+v", before, after)
 	}
 }
+
+func TestCanonicalPrejoinConcurrentInitializer(t *testing.T) {
+	source, _ := createDurabilityTestTable(t, "prejoin_init_owner", 0)
+	cache, _ := CreateTable(nil, source.schema.Name, ".prejoin:concurrent", Cache, false)
+	var builds atomic.Int32
+	started, release := make(chan struct{}), make(chan struct{})
+	results := make(chan bool, 12)
+	build := func(*scm.SessionState) {
+		builds.Add(1)
+		close(started)
+		<-release
+	}
+	for range 12 {
+		go func() { results <- cache.initializeCache(nil, build) }()
+	}
+	<-started
+	close(release)
+	owners := 0
+	for range 12 {
+		if <-results {
+			owners++
+		}
+	}
+	if owners != 1 || builds.Load() != 1 {
+		t.Fatalf("canonical initializer ran %d times with %d creators", builds.Load(), owners)
+	}
+	if cache.initializeCache(nil, func(*scm.SessionState) { t.Fatal("warm cache rebuilt") }) {
+		t.Fatal("warm guard reported a new build")
+	}
+}
+
+func TestCanonicalPrejoinDependencySurvivesRollbackAndEviction(t *testing.T) {
+	source, _ := createDurabilityTestTable(t, "prejoin_dependency_owner", 0)
+	db := source.schema
+	cache, _ := CreateTable(nil, db.Name, ".prejoin:lifetime", Cache, false)
+	cache.RuntimeOnly = true
+	owner, observer := NewTxContext(TxACID), NewTxContext(TxACID)
+	defer owner.Rollback()
+	defer observer.Rollback()
+	owner.readSchema(db)
+	observer.readSchema(db)
+	calls := 0
+	register := func() {
+		scm.Apply(scm.Globalenv.Vars[scm.Symbol("createtrigger")],
+			NewTableScmer(source), scm.NewString(".prejoin:lifetime|items|after_insert"), scm.NewString("after_insert"),
+			scm.NewString(""), scm.NewString(""), scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+				calls++
+				return scm.NewBool(true)
+			}), scm.NewBool(false), scm.NewAny(owner), NewTableScmer(cache))
+	}
+	cache.initializeCache(nil, func(*scm.SessionState) { register() })
+	if owner.hasSchemaWriter(db) {
+		t.Fatal("runtime cache dependency became user declaration DDL")
+	}
+	owner.Rollback()
+	if db.GetTable(cache.Name) != cache || !cache.cacheInitialized {
+		t.Fatal("using transaction rollback discarded the canonical cache")
+	}
+	source.ExecuteTriggers(AfterInsert, nil, dataset{scm.NewInt(1), scm.NewString("committed")}, nil)
+	if calls != 1 || cache.cacheTriggerSources.Load() == nil {
+		t.Fatal("rollback removed maintenance or its reverse dependency")
+	}
+	GlobalCache.Stop()
+	defer resumeOwnershipTestCache()
+	if !keytableCleanup(cache, nil) || len(source.GetTriggers(AfterInsert)) != 0 {
+		t.Fatal("eviction left stale maintenance dependencies")
+	}
+	if cache.acquireCacheUse() {
+		t.Fatal("evicted cache remained available")
+	}
+}
+
+func TestCanonicalPrejoinPrivateMaterialization(t *testing.T) {
+	source, _ := createDurabilityTestTable(t, "prejoin_private_owner", 0)
+	columns := []scm.Scmer{scm.NewSlice([]scm.Scmer{scm.NewString("value"), scm.NewString("int"), scm.NewString("bin")})}
+	producer := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		var workers sync.WaitGroup
+		for i := range 64 {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				scm.Apply(args[0], scm.NewSlice([]scm.Scmer{scm.NewInt(int64(i))}))
+			}()
+		}
+		workers.Wait()
+		return scm.NewBool(true)
+	})
+	var private *table
+	result := materializeQueryTable(nil, source.schema, columns, producer, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		private = TableFromScmer(args[0])
+		if source.schema.GetTable(private.Name) != nil {
+			t.Fatal("private values entered the shared namespace")
+		}
+		seen, sum := make(map[int64]bool), int64(0)
+		for _, shard := range private.ActiveShards() {
+			reader := shard.ColumnReaderTx(nil, "value", false, ReadCompressed)
+			for row := uint32(0); row < shard.main_count+uint32(len(shard.deltaRows())); row++ {
+				value := reader.GetValue(row).Int()
+				if seen[value] || value < 0 || value >= 64 {
+					t.Fatalf("materialized row is duplicated or invalid: %d", value)
+				}
+				seen[value], sum = true, sum+value
+			}
+			ReleaseColumnReader(reader)
+		}
+		if len(seen) != 64 {
+			t.Fatalf("materialized %d distinct values, want 64", len(seen))
+		}
+		return scm.NewInt(sum)
+	}))
+	if result.Int() != 2016 || atomic.LoadInt64(&private.cacheUsers) != 0 {
+		t.Fatalf("private materialization returned %s or retained its producer pin", scm.String(result))
+	}
+	GlobalCache.Stop()
+	defer resumeOwnershipTestCache()
+	if !keytableCleanup(private, nil) {
+		t.Fatal("private table cannot be reclaimed with its index/column children")
+	}
+}
+
+func TestCanonicalPrejoinDefersUnfinishedSourceDecision(t *testing.T) {
+	source, _ := createDurabilityTestTable(t, "prejoin_pending_owner", 1)
+	cache, _ := CreateTable(nil, source.schema.Name, ".prejoin:pending", Cache, false)
+	cache.RuntimeOnly = true
+	owner := NewTxContext(TxACID)
+	defer owner.Rollback()
+	owner.AddToDeleteMask(source.ActiveShards()[0], 0)
+	builder := NewTxContext(TxCursorStability)
+	builder.autoCommit = true
+	defer builder.Rollback()
+	fills := 0
+	initializer := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		return scm.Apply(scm.Globalenv.Vars[scm.Symbol("initialize_cache_table")], args[0], NewTableScmer(cache),
+			scm.NewSlice([]scm.Scmer{NewTableScmer(source)}),
+			scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
+			scm.NewFunc(func(...scm.Scmer) scm.Scmer { fills++; return scm.NewBool(true) }),
+			scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }), scm.NewBool(true))
+	})
+	cache.OnInit.Store(&initializer)
+	prepare := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		cache.awaitCreationInitialization(scm.NewAny(builder))
+		return scm.NewBool(true)
+	})
+	if trySharedCachePreparation(builder, prepare) || fills != 0 || cache.creationPanic != nil || cache.onInitComplete.Load() {
+		t.Fatal("unfinished source decision published or permanently poisoned the cache")
+	}
+	owner.Rollback()
+	if !trySharedCachePreparation(builder, prepare) || fills != 1 || !cache.cacheInitialized {
+		t.Fatal("cache did not retry after the source decision completed")
+	}
+	later := NewTxContext(TxACID)
+	defer later.Rollback()
+	later.AddToDeleteMask(source.ActiveShards()[0], 0)
+	if !trySharedCachePreparation(builder, prepare) || fills != 1 {
+		t.Fatal("a later source writer slowed or rebuilt a complete warm cache")
+	}
+}
+
+func TestCanonicalPrejoinPendingMutationIncludesRetainedTopology(t *testing.T) {
+	source, _ := createDurabilityTestTable(t, "prejoin_retained_owner", 0)
+	old := source.ActiveShards()[0]
+	old.beginTransactionUse()
+	defer old.endTransactionUse()
+	replacement := NewShard(source)
+	source.mu.Lock()
+	source.Shards = []*storageShard{replacement}
+	source.publishTopologyLocked()
+	source.mu.Unlock()
+	if source.ActiveShards()[0].activeTransactions.Load() != 0 || source.pendingCacheMutations.Load() != 1 {
+		t.Fatal("current-only shard accounting lost a retained generation's pending decision")
+	}
+}
+
+func TestCanonicalPrejoinRetiresAfterUntrackedOwnershipChange(t *testing.T) {
+	source, _ := createDurabilityTestTable(t, "prejoin_remote_retirement", 0)
+	makeCache := func(name string) *table {
+		scm.Apply(scm.Globalenv.Vars[scm.Symbol("createtable")], scm.NewString(source.schema.Name), scm.NewString(name),
+			scm.NewSlice(nil), scm.NewSlice([]scm.Scmer{scm.NewString("engine"), scm.NewString("cache"), scm.NewString("runtime_only"), scm.NewBool(true)}), scm.NewBool(false), scm.NewNil())
+		return source.schema.GetTable(name)
+	}
+	root := makeCache(".prejoin:retirement")
+	root.cacheTracksSourceRows.Store(true)
+	child := makeCache(".grp:retirement")
+	link := func(parent, target *table, name string) {
+		parent.AddTrigger(TriggerDescription{Name: name, Timing: AfterInsert, Hidden: true,
+			cacheTarget: target, Acquire: target.acquireCacheUseForTrigger, Release: target.releaseCacheUse})
+	}
+	source.AddTrigger(TriggerDescription{Name: "user_trigger", Timing: AfterInsert})
+	link(source, root, ".prejoin:retirement")
+	link(root, child, ".cache:retirement")
+	if !root.acquireCacheUse() {
+		t.Fatal("cannot pin original reader")
+	}
+	defer func() {
+		if atomic.LoadInt64(&root.cacheUsers) > 0 {
+			root.releaseCacheUse()
+		}
+	}()
+	invalidateDependentCaches(source, false)
+	if root.cacheRowsInvalidated.Load() {
+		t.Fatal("ordinary committed maintenance retired shared membership")
+	}
+	invalidateDependentCaches(source, true)
+	GlobalCache.Stat()
+	if !root.cacheRowsInvalidated.Load() || source.schema.tables.Get(root.Name) != root {
+		t.Fatal("invalid membership was reusable or its active reader was removed")
+	}
+	if source.schema.tables.Get(child.Name) != nil {
+		t.Fatal("native owner did not retire dependent cache first")
+	}
+	if trySharedCachePreparation(nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		root.awaitCreationInitialization(scm.NewNil())
+		return scm.NewBool(true)
+	})) {
+		t.Fatal("invalidated membership was admitted for another query")
+	}
+	late := makeCache(".grp:retirement-late")
+	link(root, late, ".cache:late-consumer")
+	GlobalCache.Stat()
+	if source.schema.tables.Get(late.Name) != nil {
+		t.Fatal("late registration escaped native retirement")
+	}
+	root.releaseCacheUse()
+	GlobalCache.Stat()
+	if source.schema.tables.Get(root.Name) != nil {
+		t.Fatal("native owner retained an unpinned invalid cache")
+	}
+	remaining := source.GetTriggers(AfterInsert)
+	if len(remaining) != 1 || remaining[0].Name != "user_trigger" {
+		t.Fatal("retirement removed a user trigger or retained a cache edge")
+	}
+	fresh := makeCache(root.Name)
+	if fresh == root || fresh.cacheRowsInvalidated.Load() {
+		t.Fatal("canonical name retained its retired lifetime")
+	}
+	builds := 0
+	for i := 0; i < 2; i++ {
+		fresh.initializeCache(nil, func(*scm.SessionState) { builds++ })
+	}
+	if builds != 1 {
+		t.Fatal("recreated cache was not reusable across invocations")
+	}
+}
+
+func TestCanonicalPrejoinRejectsSourceChangeDuringColdFill(t *testing.T) {
+	source, _ := createDurabilityTestTable(t, "prejoin_fill_revalidation", 0)
+	cache, _ := CreateTable(nil, source.schema.Name, ".prejoin:fill-revalidation", Cache, false)
+	cache.RuntimeOnly = true
+	prepare := scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		return scm.Apply(scm.Globalenv.Vars[scm.Symbol("initialize_cache_table")], scm.NewNil(), NewTableScmer(cache),
+			scm.NewSlice([]scm.Scmer{NewTableScmer(source)}),
+			scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
+			scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+				source.beginContributionMutation()
+				source.endContributionMutation()
+				return scm.NewBool(true)
+			}),
+			scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }), scm.NewBool(true))
+	})
+	if trySharedCachePreparation(nil, prepare) || !cache.cacheRowsInvalidated.Load() || cache.cacheInitialized {
+		t.Fatal("source changes during fill certified a reusable shared membership")
+	}
+	GlobalCache.Stat()
+}

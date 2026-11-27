@@ -204,19 +204,26 @@ func (cm *cacheMap) getOrCompute(key string, queryState scm.Scmer, producer scm.
 		return entry.value
 	}
 	flight := cm.flights[key]
+	var produceContext context.Context
 	if flight == nil {
 		compileCtx, cancel := context.WithCancel(context.Background())
+		produceContext = compileCtx
 		flight = &cacheMapFlight{
 			done:    make(chan struct{}),
 			cancel:  cancel,
 			waiters: 1,
 		}
 		cm.flights[key] = flight
-		go cm.runProducer(compileCtx, key, producer, flight)
 	} else {
 		flight.waiters++
 	}
 	cm.mu.Unlock()
+	// A factory may read the caller's transaction and declaration scope. Its
+	// owner must join that work before cancellation can release or reuse them.
+	// Other callers still share the flight and may cancel their own wait.
+	if produceContext != nil {
+		cm.runProducer(produceContext, key, producer, flight)
+	}
 
 	ctx := cacheMapContext(queryState)
 	select {

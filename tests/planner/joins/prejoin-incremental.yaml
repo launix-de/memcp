@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 metadata:
   version: "1.0"
   description: "Prejoin incremental maintenance: INSERT/UPDATE/DELETE on both source tables propagate to the prejoin"
@@ -6,14 +9,20 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS prejoin_orders"
   - sql: "DROP TABLE IF EXISTS prejoin_customers"
-  - sql: "CREATE TABLE prejoin_customers (id INT, name TEXT)"
-  - sql: "CREATE TABLE prejoin_orders (id INT, customer_id INT, amount INT)"
+  - sql: "CREATE TABLE prejoin_customers (id INT PRIMARY KEY, name TEXT)"
+  - sql: "CREATE TABLE prejoin_orders (id INT PRIMARY KEY, customer_id INT, amount INT)"
   - sql: "INSERT INTO prejoin_customers VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol')"
   - sql: "INSERT INTO prejoin_orders VALUES (10, 1, 100), (20, 1, 200), (30, 2, 50)"
 
 test_cases:
 
   # --- Initial materialization ---
+
+  - name: "First filtered consumer does not narrow the shared prejoin"
+    sql: "SELECT prejoin_customers.name, SUM(prejoin_orders.amount) AS total FROM prejoin_orders JOIN prejoin_customers ON prejoin_orders.customer_id = prejoin_customers.id WHERE prejoin_customers.name='Alice' GROUP BY prejoin_customers.name ORDER BY prejoin_customers.name"
+    expect:
+      rows: 1
+      data: [{name: "Alice", total: 300}]
 
   - name: "Initial GROUP BY across tables materializes prejoin"
     sql: "SELECT prejoin_customers.name, SUM(prejoin_orders.amount) AS total FROM prejoin_orders JOIN prejoin_customers ON prejoin_orders.customer_id = prejoin_customers.id GROUP BY prejoin_customers.name ORDER BY prejoin_customers.name"

@@ -228,9 +228,9 @@ func TestNativeACIDUpdatesSurviveRestart(t *testing.T) {
 			first, engine := createDurabilityTestTable(t, "tnative_update_commit", 1)
 			tables := []*table{first}
 			if count == 2 {
-				second, _ := CreateTable(first.schema.Name, "second", Safe, false)
-				second.CreateColumn("id", "INT", nil, nil)
-				second.CreateColumn("payload", "TEXT", nil, nil)
+				second, _ := CreateTable(nil, first.schema.Name, "second", Safe, false)
+				second.CreateColumn(nil, "id", "INT", nil, nil)
+				second.CreateColumn(nil, "payload", "TEXT", nil, nil)
 				second.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("old")}}, nil, scm.NewNil(), false, nil)
 				tables = append(tables, second)
 			}

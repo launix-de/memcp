@@ -23,9 +23,9 @@ import "github.com/launix-de/memcp/scm"
 
 func setupScanJoinOrderTable(t testing.TB, database string, name string, columns []string, rows [][]scm.Scmer) *table {
 	t.Helper()
-	table, _ := CreateTable(database, name, Memory, true)
+	table, _ := CreateTable(nil, database, name, Memory, true)
 	for _, column := range columns {
-		table.CreateColumn(column, "INT", nil, nil)
+		table.CreateColumn(nil, column, "INT", nil, nil)
 	}
 	table.Insert(columns, rows, nil, scm.NewNil(), false, nil)
 	return table

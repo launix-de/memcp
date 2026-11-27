@@ -1218,7 +1218,7 @@ test_cases:
           _ (error "unexpected failure" cause))))))
       (run "INSERT identity_mode_a(value) VALUES(4)")
       (run "CREATE VIEW identity_mode_view AS SELECT id,value FROM identity_mode_a")
-      (define ir (nth (sql_find_view "memcp-tests" "identity_mode_view") 2))
+      (define ir (nth (sql_find_view nil "memcp-tests" "identity_mode_view") 2))
       (define out (newsession))
       (with_autocommit s nil nil "ordinary view consumer" (lambda (tx)
         (sql_execute_formula s tx (sql_queryplan_compile_formula tx

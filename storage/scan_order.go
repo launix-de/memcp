@@ -1768,7 +1768,7 @@ func (t *table) scanOrderSingle(currentTx *TxContext, spec scanOrderTableSpec, s
 	}
 	stats[0].access = bounds
 	stats[0].analyzeNs = time.Since(analyzeStart).Nanoseconds()
-	topology, shard, single := t.pinSingleShardForScan(bounds)
+	topology, shard, single := t.pinSingleShardForScan(currentTx, bounds)
 	if !single {
 		return scm.NewNil(), false
 	}

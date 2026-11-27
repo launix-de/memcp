@@ -18,7 +18,10 @@ package storage
 
 import (
 	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"reflect"
 	"strings"
@@ -894,6 +897,41 @@ func TestConstishZerosAndNulls(t *testing.T) {
 	verifyStorage(t, col2, n, gen)
 }
 
+func TestStorageSCMERBufferedSerializationKeepsExactFraming(t *testing.T) {
+	text := strings.Repeat("<catalog>&\"\nGröße", 1000)
+	storage := &StorageSCMER{values: []scm.Scmer{scm.NewString(text), scm.NewInt(42), scm.NewNil()}}
+	var serialized bytes.Buffer
+	storage.Serialize(&serialized)
+	// Current magic/version, little-endian count and exact value lengths. Include
+	// a value larger than the buffer to cover both streamed and final writes.
+	want := []byte{3, 3, 1, 3, 0, 0, 0, 0, 0, 0, 0}
+	encoded, err := json.Marshal(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range [][]byte{encoded, []byte("42"), []byte("null")} {
+		want = binary.LittleEndian.AppendUint64(want, uint64(len(value)))
+		want = append(want, value...)
+	}
+	if !bytes.Equal(serialized.Bytes(), want) {
+		t.Fatal("buffering changed exact SCMER framing or JSON escaping")
+	}
+}
+
+type scmerFailedWriter struct{}
+
+func (scmerFailedWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestStorageSCMERBufferedSerializationPropagatesWriteFailure(t *testing.T) {
+	defer func() {
+		if failure := recover(); failure != io.ErrClosedPipe {
+			t.Fatalf("serialization failure = %v, want closed pipe", failure)
+		}
+	}()
+	storage := &StorageSCMER{values: []scm.Scmer{scm.NewString("buffered tail")}}
+	storage.Serialize(scmerFailedWriter{})
+}
+
 func TestStorageSCMERPreservesBSONTag(t *testing.T) {
 	value, err := scm.NewBSONFromJSON(`{"name":"Ada","values":[1,true,null]}`)
 	if err != nil {
@@ -902,11 +940,11 @@ func TestStorageSCMERPreservesBSONTag(t *testing.T) {
 	storage := &StorageSCMER{values: []scm.Scmer{value, scm.NewNil()}}
 	var serialized bytes.Buffer
 	storage.Serialize(&serialized)
-	if magic, err := serialized.ReadByte(); err != nil || magic != 1 {
-		t.Fatalf("magic = %d, err=%v; want 1", magic, err)
+	if magic, err := serialized.ReadByte(); err != nil || magic != 3 {
+		t.Fatalf("magic = %d, err=%v; want 3", magic, err)
 	}
 
-	var decoded StorageSCMER
+	var decoded storageSCMERExact
 	if count := decoded.Deserialize(&serialized); count != 2 {
 		t.Fatalf("decoded count = %d, want 2", count)
 	}

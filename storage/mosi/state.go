@@ -90,10 +90,71 @@ type Publication struct {
 	backend    Phase // immutable RAM permission proving an IS generation is current
 	flight     *Flight
 	installing bool
-	writer     *Writer   // the single active local writer; independent of read permission
-	writeDepth uint32    // nested scopes belonging to that same writer/transaction
-	handover   *Handover // closes new writer admission; existing transactions may finish
-	sealed     bool      // the existing transaction/generation drain has completed
+	writer     *Writer    // the single active local writer; independent of read permission
+	writeDepth uint32     // nested scopes belonging to that same writer/transaction
+	handover   *Handover  // closes new writer admission; existing transactions may finish
+	sealed     bool       // the existing transaction/generation drain has completed
+	readers    *readGroup // optional coarse definition lifetime; ordinary reads remain unregistered
+	readCount  uint32
+}
+
+type readGroup struct{ done chan struct{} }
+
+// ReadLease retains a complete declaration scope across statements. It is
+// acquired once at the schema boundary, never by shard scans or item loops.
+type ReadLease struct {
+	state    *State
+	group    *readGroup
+	released atomic.Bool
+}
+
+func (state *State) TryRetainRead() (*ReadLease, <-chan struct{}) {
+	for {
+		current := state.Snapshot()
+		if current.handover != nil {
+			return nil, current.handover.done
+		}
+		if current.installing {
+			return nil, current.flight.done
+		}
+		if !current.phase.Readable() {
+			return nil, nil
+		}
+		next := *current
+		if next.readers == nil {
+			next.readers = &readGroup{done: make(chan struct{})}
+		}
+		next.readCount++
+		if state.value.CompareAndSwap(current, &next) {
+			return &ReadLease{state: state, group: next.readers}, nil
+		}
+	}
+}
+
+func (lease *ReadLease) Release() {
+	if lease == nil {
+		return
+	}
+	if lease.released.Swap(true) {
+		panic("MOSI declaration read released twice")
+	}
+	for {
+		current := lease.state.Snapshot()
+		if current.readers != lease.group || current.readCount == 0 {
+			panic("MOSI declaration read lost its native lifetime")
+		}
+		next := *current
+		next.readCount--
+		if next.readCount == 0 {
+			next.readers = nil
+		}
+		if lease.state.value.CompareAndSwap(current, &next) {
+			if next.readCount == 0 {
+				close(lease.group.done)
+			}
+			return
+		}
+	}
 }
 
 var stable = [...]Publication{{phase: IO}, {phase: M}, {phase: O}, {phase: S}, {phase: IS}}
@@ -224,7 +285,7 @@ func (state *State) BackendOnly() {
 		if !current.phase.Readable() || current.writer != nil || current.handover != nil && !current.sealed {
 			return
 		}
-		next := &Publication{phase: IS, backend: current.phase, handover: current.handover, sealed: current.sealed}
+		next := &Publication{phase: IS, backend: current.phase, handover: current.handover, sealed: current.sealed, readers: current.readers, readCount: current.readCount}
 		if state.value.CompareAndSwap(current, next) {
 			return
 		}
@@ -264,7 +325,7 @@ func (state *State) Request(wanted Phase) (*Publication, Action) {
 		}
 		if current.phase.Requested() {
 			if wanted == M && current.phase != MR && !current.installing {
-				next := &Publication{phase: MR, flight: current.flight, prior: current.prior, handover: current.handover, sealed: current.sealed}
+				next := &Publication{phase: MR, flight: current.flight, prior: current.prior, handover: current.handover, sealed: current.sealed, readers: current.readers, readCount: current.readCount}
 				if !state.value.CompareAndSwap(old, next) {
 					continue
 				}
@@ -278,7 +339,7 @@ func (state *State) Request(wanted Phase) (*Publication, Action) {
 		} else if wanted == O {
 			phase = OR
 		}
-		next := &Publication{phase: phase, prior: current.phase, handover: current.handover, sealed: current.sealed, flight: &Flight{id: uuid.NewString(), done: make(chan struct{})}}
+		next := &Publication{phase: phase, prior: current.phase, handover: current.handover, sealed: current.sealed, readers: current.readers, readCount: current.readCount, flight: &Flight{id: uuid.NewString(), done: make(chan struct{})}}
 		if state.value.CompareAndSwap(old, next) {
 			return next, Send
 		}
@@ -301,7 +362,7 @@ func (state *State) Grant(id string, phase Phase, install func() error) (bool, e
 		if current.phase == MR && phase != M {
 			return false, nil
 		}
-		claimed := &Publication{phase: current.phase, flight: current.flight, installing: true, handover: current.handover, sealed: current.sealed}
+		claimed := &Publication{phase: current.phase, flight: current.flight, installing: true, handover: current.handover, sealed: current.sealed, readers: current.readers, readCount: current.readCount}
 		if !state.value.CompareAndSwap(current, claimed) {
 			continue
 		}
@@ -371,7 +432,7 @@ func (state *State) Publish(phase Phase) {
 			if prior == current.prior {
 				return
 			}
-			next := &Publication{phase: current.phase, flight: current.flight, prior: prior, handover: current.handover, sealed: current.sealed}
+			next := &Publication{phase: current.phase, flight: current.flight, prior: prior, handover: current.handover, sealed: current.sealed, readers: current.readers, readCount: current.readCount}
 			if !state.value.CompareAndSwap(current, next) {
 				continue
 			}
@@ -426,10 +487,10 @@ func (flight *Flight) SetSequence(sequence uint64) { flight.serial.Store(sequenc
 // permissionPublication retains local admission ownership across a wire-right
 // transition. Local active M is never serialized as another network permission.
 func permissionPublication(phase Phase, previous *Publication) *Publication {
-	if previous == nil || previous.handover == nil {
+	if previous == nil || previous.handover == nil && previous.readCount == 0 {
 		return &stable[phase]
 	}
-	return &Publication{phase: phase, handover: previous.handover, sealed: previous.sealed}
+	return &Publication{phase: phase, handover: previous.handover, sealed: previous.sealed, readers: previous.readers, readCount: previous.readCount}
 }
 
 // Writer is the one local M writer. Nested scopes may borrow the same explicit
@@ -448,7 +509,7 @@ type Writer struct {
 // A nil completion means M must first be acquired through the ordinary protocol.
 // continuation is proof from the existing native transaction directory; only
 // that transaction may continue while an unsealed handover drains its writes.
-func (state *State) TryWrite(owner any, continuation bool) (*Writer, <-chan struct{}) {
+func (state *State) TryWrite(owner any, continuation bool, readProof *ReadLease) (*Writer, <-chan struct{}) {
 	for {
 		current := state.value.Load()
 		if current == nil || current.phase != M {
@@ -463,6 +524,16 @@ func (state *State) TryWrite(owner any, continuation bool) (*Writer, <-chan stru
 			}
 		} else if current.handover != nil && (current.sealed || !continuation) {
 			return nil, current.handover.done
+		}
+		// A declaration upgrade must retain its exact sole read proof. Ordinary
+		// resource batches may publish compatible physical topology while local
+		// readers retain unchanged definitions; logical DDL separately owns the
+		// database's exclusive definition admission.
+		if readProof != nil && (readProof.released.Load() || readProof.state != state || readProof.group != current.readers || current.readCount != 1) {
+			if current.readers != nil {
+				return nil, current.readers.done
+			}
+			return nil, nil
 		}
 		next := *current
 		if next.writer == nil {
@@ -495,10 +566,9 @@ func (writer *Writer) Release() {
 	}
 }
 
-// Handover owns admission closure only. It never excludes readers. A sealed
-// handover may prepare/install a generation; it must be released before network
-// streaming. Native transaction counters supply the drain, never new reader or
-// transaction registration in MOSI.
+// Handover closes admission and drains optional declaration lifetimes and native
+// writers. Ordinary shard readers remain unregistered and keep their generation.
+// A sealed handover is released before network streaming.
 type Handover struct {
 	state *State
 	done  chan struct{}
@@ -507,9 +577,9 @@ type Handover struct {
 func (state *State) ClosingWrites() bool { return state.Snapshot().handover != nil }
 func (state *State) Writing() bool       { return state.Snapshot().writer != nil }
 
-func (state *State) TryHandover(drained func() bool) *Handover {
+func (state *State) TryHandover(drained func() bool, declarations bool) *Handover {
 	current := state.value.Load()
-	if current != nil && (current.writer != nil || current.handover != nil || current.installing) {
+	if current != nil && (current.writer != nil || current.handover != nil || current.installing || declarations && current.readCount != 0) {
 		return nil
 	}
 	if !drained() {
@@ -524,7 +594,7 @@ func (state *State) TryHandover(drained func() bool) *Handover {
 	return next.handover
 }
 
-func (state *State) BeginHandover(ctx context.Context, drain func(context.Context) error) (*Handover, error) {
+func (state *State) BeginHandover(ctx context.Context, drain func(context.Context) error, declarations bool) (*Handover, error) {
 	var handover *Handover
 	for handover == nil {
 		current := state.value.Load()
@@ -564,6 +634,14 @@ func (state *State) BeginHandover(ctx context.Context, drain func(context.Contex
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-current.writer.done:
+			}
+			continue
+		}
+		if declarations && current.readCount != 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-current.readers.done:
 			}
 			continue
 		}

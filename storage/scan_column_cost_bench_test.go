@@ -34,11 +34,11 @@ func scanColumnCostTable(b testing.TB, name string, rows int) (*table, []string)
 	databases.Remove(dbName)
 	b.Cleanup(func() { databases.Remove(dbName) })
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
 	cols := make([]string, 16)
 	for i := range cols {
 		cols[i] = fmt.Sprintf("c%d", i)
-		tbl.CreateColumn(cols[i], "INT", nil, nil)
+		tbl.CreateColumn(nil, cols[i], "INT", nil, nil)
 	}
 	if rows == 0 {
 		return tbl, cols
@@ -105,8 +105,8 @@ func TestScanSelectivityEstimateScalesIndexCandidatesByShardPopulation(t *testin
 	databases.Remove(dbName)
 	t.Cleanup(func() { databases.Remove(dbName) })
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
-	tbl.CreateColumn("tenant", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
+	tbl.CreateColumn(nil, "tenant", "INT", nil, nil)
 
 	values := make([][]scm.Scmer, 1000)
 	for row := range values {
@@ -290,11 +290,11 @@ func scanTypedColumnCostTable(b *testing.B, name string, typ string, rows int, v
 	databases.Remove(dbName)
 	b.Cleanup(func() { databases.Remove(dbName) })
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
 	cols := make([]string, 8)
 	for i := range cols {
 		cols[i] = fmt.Sprintf("c%d", i)
-		tbl.CreateColumn(cols[i], typ, nil, nil)
+		tbl.CreateColumn(nil, cols[i], typ, nil, nil)
 	}
 	values := make([][]scm.Scmer, rows)
 	for row := range values {

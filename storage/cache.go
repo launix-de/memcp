@@ -263,9 +263,86 @@ type CacheManager struct {
 	expH    expiryHeap // min-heap for maxIdleTime expiry; lazy-deletion (stale entries discarded on pop)
 	itemMap map[any]*softItem
 
-	opChan  chan cacheOp
-	runDone chan struct{}
-	stopped atomic.Bool
+	retirementHead atomic.Pointer[cacheTableRetirement]
+	retirementWake chan struct{}
+	retiredTables  map[*table]struct{} // actor-owned; retries after existing users drain
+	opChan         chan cacheOp
+	runDone        chan struct{}
+	stopped        atomic.Bool
+}
+
+type cacheTableRetirement struct {
+	table *table
+	next  *cacheTableRetirement
+}
+
+// retireTable never waits for the cache actor or a query. MOSI receivers must
+// acknowledge revocation even when that query is waiting for network work.
+func (cm *CacheManager) retireTable(t *table) {
+	if t == nil || !t.RuntimeOnly || !t.isEphemeralQueryTable() {
+		return
+	}
+	if t.cacheTracksSourceRows.Load() {
+		t.cacheRowsInvalidated.Store(true)
+	}
+	if !t.cacheRetirementPending.CompareAndSwap(false, true) || cm.opChan == nil || cm.stopped.Load() {
+		return
+	}
+	entry := &cacheTableRetirement{table: t}
+	for {
+		entry.next = cm.retirementHead.Load()
+		if cm.retirementHead.CompareAndSwap(entry.next, entry) {
+			break
+		}
+	}
+	select {
+	case cm.retirementWake <- struct{}{}:
+	default:
+	}
+}
+
+// Native lifecycle cleanup removes consumers before their source. Busy old
+// readers retain their objects; new consumers of an invalid row cache execute
+// privately until this owner has retired the old dependency graph.
+func (cm *CacheManager) reclaimRetiredTables() {
+	if cm.retiredTables == nil {
+		cm.retiredTables = make(map[*table]struct{})
+	}
+	for entry := cm.retirementHead.Swap(nil); entry != nil; entry = entry.next {
+		cm.retiredTables[entry.table] = struct{}{}
+	}
+	var freed [numEvictableTypes]int64
+	for {
+		progress := false
+		for t := range cm.retiredTables {
+			if !t.mu.TryLock() {
+				continue
+			}
+			for _, tr := range t.Triggers {
+				child := tr.cacheTarget
+				if child == nil || child == t || !child.RuntimeOnly || !child.isEphemeralQueryTable() || atomic.LoadInt64(&child.cacheUsers) < 0 {
+					continue
+				}
+				if child.cacheTracksSourceRows.Load() {
+					child.cacheRowsInvalidated.Store(true)
+				}
+				child.cacheRetirementPending.Store(true)
+				if _, known := cm.retiredTables[child]; !known {
+					cm.retiredTables[child] = struct{}{}
+					progress = true
+				}
+			}
+			t.mu.Unlock()
+			if atomic.LoadInt64(&t.cacheUsers) < 0 || keytableCleanup(t, &freed) {
+				cm.removeInternal(t, &freed)
+				delete(cm.retiredTables, t)
+				progress = true
+			}
+		}
+		if !progress {
+			break
+		}
+	}
 }
 
 type cacheOp struct {
@@ -311,6 +388,7 @@ func (cm *CacheManager) Init(memoryBudget, persistedBudget, minimumMemory int64)
 	cm.persistedBudget = persistedBudget
 	cm.itemMap = make(map[any]*softItem)
 	cm.opChan = make(chan cacheOp, 1024)
+	cm.retirementWake = make(chan struct{}, 1)
 	cm.runDone = make(chan struct{})
 	cm.publishShardRAM()
 	heap.Init(&cm.h)
@@ -606,6 +684,7 @@ batch:
 			break batch
 		}
 	}
+	cm.reclaimRetiredTables()
 	if budgetChanged {
 		for table, used := range cm.tableShardMemory {
 			cm.publishTableShardRAM(table, used)
@@ -641,7 +720,11 @@ func (cm *CacheManager) run() {
 			if !ok || cm.applyBatch(op) {
 				return
 			}
+		case <-cm.retirementWake:
+			cm.reclaimRetiredTables()
+			cm.publishShardRAM()
 		case <-expireTicker.C:
+			cm.reclaimRetiredTables()
 			cm.evictExpired()
 			cm.publishShardRAM()
 		}

@@ -12,6 +12,7 @@ warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
 package storage
 
 import "fmt"
+import "maps"
 import "sort"
 import "sync"
 import "weak"
@@ -114,7 +115,13 @@ func (c *replicaCell) forwardingDone() <-chan struct{} {
 	return c.forwardDone
 }
 
-func (table *table) schemaWrite() (*table, WriteAccess) {
+func (table *table) schemaWrite(tx *TxContext) (*table, WriteAccess) {
+	if table.retired.Load() {
+		panic("table handle belongs to a rolled-back or dropped definition")
+	}
+	if nativeCatalogRelation(table) {
+		panic("schema catalog declarations are read-only; use native DDL")
+	}
 	if table.isEphemeralQueryTable() {
 		return table, WriteAccess{}
 	}
@@ -126,11 +133,11 @@ func (table *table) schemaWrite() (*table, WriteAccess) {
 			// waits for a source which itself waits for our schema writer.
 			for _, shard := range table.ActiveShards() {
 				if shard != nil {
-					r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", nil)
+					r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", tx)
 				}
 			}
 		}
-		access := table.schema.GetWrite(nil)
+		access := table.schema.GetWrite(tx)
 		complete, retry := false, false
 		func() {
 			defer func() {
@@ -157,7 +164,7 @@ func (table *table) schemaWrite() (*table, WriteAccess) {
 							return
 						}
 					} else {
-						r.obtain(*cell.resource.Load(), mosi.M, "", nil)
+						r.obtain(*cell.resource.Load(), mosi.M, "", tx)
 					}
 				}
 			}
@@ -224,6 +231,18 @@ func (r *replicationManager) obtain(resource mosiResource, wanted mosi.Phase, us
 		return c
 	}
 	if r.config != nil && ((!r.master && !r.ready.Load()) || !r.resourceKnown(resource)) {
+		r.mu.Lock()
+		key := r.resourceKey(resource)
+		record, confirmed := r.directory.Records[key], r.confirmed[key]
+		schema := r.confirmed[mosiResource{Database: resource.Database}.key()]
+		reports := maps.Clone(r.recoveryReports[key])
+		r.mu.Unlock()
+		proofs := make(map[string]string, len(reports))
+		for peer, report := range reports {
+			proofs[peer] = fmt.Sprintf("%s owner=%s epoch=%d", report.State, report.Owner, report.Epoch)
+		}
+		fmt.Println("replication admission unavailable:", resource, "master", r.master, "ready", r.ready.Load(), "known", r.resourceKnown(resource),
+			"owner", record.Owner, "epoch", record.Epoch, "confirmed", confirmed, "schema", schema, "reports", proofs)
 		panic(mosi.NetworkError)
 	}
 	// A master owns previously undelegated local resources. Declare that fact
@@ -354,22 +373,15 @@ func (r *replicationManager) firstDatabase(name string, session scm.Scmer) {
 	if db == nil {
 		panic("missing initial schema")
 	}
+	db.prepareReplicaCatalog()
 	resources := make([]mosiResource, 0)
-	for _, table := range db.tables.GetAll() {
-		if table.isEphemeralQueryTable() {
-			continue
-		}
-		for _, shard := range table.ActiveShards() {
-			if shard == nil {
-				continue
-			}
-			item := mosiResource{Database: name, Table: table.Name, Shard: shard.uuid.String()}
-			r.mu.Lock()
-			claimed := r.directory.Records[r.resourceKey(item)].InitialClaimed
-			r.mu.Unlock()
-			if !claimed {
-				resources = append(resources, item)
-			}
+	for _, shard := range db.replicationShards() {
+		item := shard.replicationResource()
+		r.mu.Lock()
+		claimed := r.directory.Records[r.resourceKey(item)].InitialClaimed
+		r.mu.Unlock()
+		if !claimed {
+			resources = append(resources, item)
 		}
 	}
 	c.bootstrapStarted = true
@@ -495,7 +507,9 @@ func (c *replicaCell) transactionContinues(tx *TxContext) bool {
 // acquire a lease and network streaming never retains an active writer.
 func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext, blocking bool) (*replicaCell, func(), bool) {
 	c := r.resourceCell(resource)
-	if resource.Shard != "" && tx != nil {
+	// Fixed catalog declarations precede the database schema and are also
+	// edited while preparing its handover. Their own shard M admits writes.
+	if resource.Shard != "" && tx != nil && !isCatalogResource(resource) {
 		schema := mosiResource{Database: resource.Database}
 		// A foreign DDL owner may already hold schema M while waiting for our
 		// native data transaction. Its continuation retains its old declarations
@@ -508,24 +522,40 @@ func (r *replicationManager) writeResource(resource mosiResource, tx *TxContext,
 		}
 	}
 	var owner any
+	var readProof *mosi.ReadLease
 	if tx != nil {
 		owner = tx.transactionState
+		if resource.Shard == "" {
+			if lease := tx.schemaLease(databases.Get(resource.Database)); lease != nil && lease.write {
+				readProof = lease.reader.Load()
+			}
+		}
 	}
 	for {
 		c = c.resolved()
 		resource = *c.resource.Load()
 		if blocking {
-			c = r.obtain(resource, mosi.M, replicationUser(tx), tx)
+			if readProof != nil && r.cluster != nil {
+				if !r.cluster.tryAcquire(scanQueryContext(tx, r.cluster.ctx), resource, mosi.M) {
+					panic("schema upgrade conflicts with another transaction; retry transaction")
+				}
+				c = c.resolved()
+			} else {
+				c = r.obtain(resource, mosi.M, replicationUser(tx), tx)
+			}
 		}
-		writer, wait := c.ownstate.TryWrite(owner, false)
+		writer, wait := c.ownstate.TryWrite(owner, false, readProof)
 		if writer == nil && c.ownstate.ClosingWrites() && c.transactionContinues(tx) {
 			// Handover may begin between a preflight check and TryWrite. Prove
 			// continuation after admission refuses us, before waiting on the
 			// handover which itself waits for this transaction to finish.
-			writer, wait = c.ownstate.TryWrite(owner, true)
+			writer, wait = c.ownstate.TryWrite(owner, true, readProof)
 		}
 		if writer != nil {
 			return c, writer.Release, true
+		}
+		if readProof != nil {
+			panic("schema upgrade cannot wait while retaining an earlier definition; retry transaction")
 		}
 		if !blocking {
 			return c, nil, false
@@ -559,8 +589,28 @@ func (r *replicationManager) backupDatabase(name, user string) {
 	if err != nil {
 		return
 	}
-	// A schema checkpoint must not introduce partitions whose live creator
-	// authority the receiver has never acknowledged.
+	prepareSchema := func() bool {
+		if guard.ownstate.Phase() != mosi.M {
+			return true
+		}
+		// Freeze the native roots before enumerating their resources. Catalog
+		// files must reach the backup before its schema can decode those roots;
+		// backup admission must not acquire S and remove our offline M rights.
+		handover := guard.ownstate.TryHandover(guard.writesDrained, false)
+		if handover == nil {
+			return false
+		}
+		_, err := r.prepareResource(mosiResource{Database: name})
+		handover.Release()
+		if err != nil {
+			scm.PrintError(err)
+			return false
+		}
+		return true
+	}
+	if !prepareSchema() {
+		return
+	}
 	if err := r.announceCreatedResources(peer, name, user, auth); err != nil {
 		scm.PrintError(err)
 		return
@@ -573,20 +623,46 @@ func (r *replicationManager) backupDatabase(name, user string) {
 		}
 	}
 	r.mu.Unlock()
-	sort.Slice(resources, func(i, j int) bool { return resources[i].key() < resources[j].key() })
+	sort.Slice(resources, func(i, j int) bool {
+		if isCatalogResource(resources[i]) != isCatalogResource(resources[j]) {
+			return isCatalogResource(resources[i])
+		}
+		return resources[i].key() < resources[j].key()
+	})
 	if guard.ownstate.Phase() == mosi.M {
 		// Recovery may restore live schema rights before its RAM directory
 		// record. Always introduce new tables before sending their data.
 		schema := mosiResource{Database: name}
-		resources = append([]mosiResource{schema}, resources...)
+		catalogEnd := 0
+		for catalogEnd < len(resources) && isCatalogResource(resources[catalogEnd]) {
+			catalogEnd++
+		}
+		resources = append(resources[:catalogEnd], append([]mosiResource{schema}, resources[catalogEnd:]...)...)
 		resources = append(resources, schema)
 	}
-	for index, resource := range resources {
-		if resource.Shard == "" {
+	finalCatalogsPrepared := false
+	for index := 0; index < len(resources); index++ {
+		resource := resources[index]
+		if index == len(resources)-1 && resource.Shard == "" && !finalCatalogsPrepared {
+			// Data preparation may have rebuilt a generation. Freeze the final
+			// topology and send its catalog files before its final root as well.
+			if !prepareSchema() {
+				return
+			}
 			if err := r.announceCreatedResources(peer, name, user, auth); err != nil {
 				scm.PrintError(err)
 				return
 			}
+			var catalogs []mosiResource
+			for _, shard := range databases.Get(name).replicationShards() {
+				if shard.catalogOwner != "" {
+					catalogs = append(catalogs, shard.replicationResource())
+				}
+			}
+			resources = append(resources[:index], append(catalogs, resource)...)
+			finalCatalogsPrepared = true
+			index--
+			continue
 		}
 		cell := r.resourceCell(resource)
 		resource = *cell.resource.Load() // schema publication may have renamed its table
@@ -602,7 +678,7 @@ func (r *replicationManager) backupDatabase(name, user string) {
 				return false
 			}
 			defer releasePersistence()
-			handover := cell.ownstate.TryHandover(cell.writesDrained)
+			handover := cell.ownstate.TryHandover(cell.writesDrained, false)
 			if handover == nil {
 				return false
 			}
@@ -618,7 +694,14 @@ func (r *replicationManager) backupDatabase(name, user string) {
 			if cell.ownstate.Phase() != mosi.M {
 				return false
 			}
-			content, err := r.prepareResource(resource)
+			var content string
+			if resource.Shard == "" {
+				// prepareSchema already froze these roots before their native
+				// files were sent. Rebuilding here would advertise unsent UUIDs.
+				content, err = r.schemaDigest(databases.Get(name).persistence.ReadSchema())
+			} else {
+				content, err = r.prepareResource(resource)
+			}
 			if err != nil {
 				scm.PrintError(err)
 				return false
@@ -641,7 +724,7 @@ func (r *replicationManager) backupDatabase(name, user string) {
 			}
 			return true
 		}()
-		if index == 0 && resource.Shard == "" && !sent {
+		if resource.Shard == "" && !sent {
 			return
 		}
 	}

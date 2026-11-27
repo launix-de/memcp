@@ -1268,7 +1268,7 @@ cache scan for every output row. */
 									(range_cache_state_init_expr stage ag)
 									(list (quote createcolumn) (source_table_expr target)
 										column_name "any" (quoted_runtime_list '())
-										(quoted_runtime_list '("temp" true))
+										(quoted_runtime_list '("temp" true "runtime_only" true))
 										(cons (quote list) input_cols)
 										(list (quote lambda)
 											(map input_cols (lambda (col)
@@ -1977,7 +1977,8 @@ outer joins. */
 				(merge (list ensure_agg_columns agg_plans computed_order_plans))))
 			(define base_group_fill (symbol "__group_base_fill"))
 			(define base_group_fill_call (list base_group_fill (physical_query_tx_symbol)))
-			(define finalize_group_fill (list (quote rebuild) (list (quote table) schema false grouptbl false) true false))
+			(define finalize_group_fill (list (quote rebuild)
+				(list (quote table) schema false grouptbl false (symbol "__group_finalize_tx")) true false))
 			(define partition_plan (group_cache_partition_plan schema tbl alias src grouptbl keys key_names))
 			(define initial_fill_expr (if (nil? base_group_into_plan)
 				nil
@@ -1990,9 +1991,9 @@ outer joins. */
 					base_group_fill
 					(list (quote lambda) (list (symbol "__group_finalize_tx")) finalize_group_fill))))
 			(define create_options (if (nil? initial_fill_expr)
-				(quoted_runtime_list '("engine" "cache"))
+				(quoted_runtime_list '("engine" "cache" "runtime_only" true))
 				(list (quote list)
-					"engine" "cache"
+					"engine" "cache" "runtime_only" true
 					"oninit" (list (quote lambda) (list (quote tx)) initial_fill_expr))))
 			/* Every use must seed its own session-domain keys, even when another
 			stage owns creation of the shared physical carrier. */
@@ -2095,7 +2096,7 @@ outer joins. */
 			"any"
 			(quoted_runtime_list '())
 			(list (quote list)
-				"temp" true
+				"temp" true "runtime_only" true
 				"sortcols" (quoted_runtime_list (os_sortcols stage))
 				"sortdirs" (cons (quote list) (os_sortdirs stage))
 				"partitioncount" (os_partitioncount stage)
@@ -2123,7 +2124,7 @@ outer joins. */
 				"any"
 				(quoted_runtime_list '())
 				(list (quote list)
-					"temp" true
+					"temp" true "runtime_only" true
 					"sortcols" (quoted_runtime_list sortcols)
 					"sortdirs" (cons (quote list) sortdirs)
 					"partitioncount" partitioncount
@@ -3387,7 +3388,7 @@ cached plan is recompiled when data growth crosses the carrier boundary. */
 												(source_table_expr target)
 												column_name "any"
 												(quoted_runtime_list '())
-												(quoted_runtime_list '("temp" true))
+												(quoted_runtime_list '("temp" true "runtime_only" true))
 												(cons (quote list) input_cols)
 												(list (quote lambda) params lookup_expr)
 												(physical_query_tx_symbol)))
@@ -10688,9 +10689,9 @@ only. Its predicates and aliases cannot prove a prefilter of preserved rows. */
 		order_items offset_value limit_value allow_membership_carrier column_recipe stages
 		(list (quote reduce) reduce_expr neutral_expr shard_reduce_expr) probe_work_rows scalar_plan facts)))
 
-(define build_join_scan_sink (lambda (schema sources default_alias needed_exprs final_condition sink_expr stages)
+(define build_join_scan_sink (lambda (schema sources plan default_alias needed_exprs final_condition sink_expr stages)
 	(build_join_scan_pipeline_using_recipe
-		schema sources sources default_alias needed_exprs final_condition sink_expr
+		schema sources plan default_alias needed_exprs final_condition sink_expr
 		'() 0 -1 false nil nil stages nil '())))
 
 /* ------------------------------------------------------------------------- */
@@ -10832,13 +10833,13 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(not (prejoin_where_join_term? block term))))
 		true)))
 
-/* Version 3 prevents reuse of helper columns created without source collation. */
+/* Version 4 isolates source-coherent runtime ownership from legacy helpers. */
 (define prejoin_table_name (lambda (block default_alias)
 	(begin
 		(define sources (qb_sources block))
 		(define canonical_alias "__prejoin")
 		(define signature (list
-			"physical-prejoin-v3"
+			"physical-prejoin-v4"
 			(map sources prejoin_source_table_key)
 			(prejoin_rewrite_expr sources default_alias canonical_alias (prejoin_join_condition block))))
 		(concat ".prejoin:" (stable_structural_hash signature true)))))
@@ -10884,14 +10885,20 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define condition (prejoin_join_condition block))
 		(define values (map key_exprs (lambda (expr)
 			(lower_column_expr_for_join sources default_alias expr))))
-		(build_join_scan_sink
-			(qb_schema block)
-			(prejoin_sources_without_join_conditions sources)
-			default_alias
-			(merge (list key_exprs (list condition)))
-			condition
-			(prejoin_insert_expr (qb_schema block) table_name (prejoin_primary_key_names sources) values)
-			'()))))
+		(list (quote populate_cache_table) (physical_query_tx_symbol)
+			(list (quote table) (qb_schema block) false table_name false)
+			(quoted_runtime_list (prejoin_primary_key_names sources))
+			(list (quote lambda) (list (quote __prejoin_emit))
+				(build_join_scan_sink
+					(qb_schema block)
+					(prejoin_sources_without_join_conditions sources)
+					(join_optimizer_tree_project_predicates (query_block_join_plan block sources)
+						(split_and_terms condition))
+					default_alias
+					(merge (list key_exprs (list condition)))
+					condition
+					(list (quote __prejoin_emit) (cons (quote list) values))
+					'()))))))
 
 (define prejoin_replace_trigger_expr (lambda (sources default_alias trigger_alias dict_symbol expr)
 	(match expr
@@ -10929,6 +10936,9 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(build_join_scan_sink
 			(qb_schema block)
 			remaining
+			(join_optimizer_tree_project_predicates
+				(join_optimizer_tree_without_aliases (query_block_join_plan block sources) (list trigger_alias))
+				(split_and_terms condition))
 			remaining_default
 			(merge (list key_exprs (list condition)))
 			condition
@@ -10962,26 +10972,29 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 				(list (quote OLD) (quote NEW) (quote session) (physical_query_tx_symbol))
 				body)))))
 
-(define prejoin_create_trigger_plan (lambda (src name timing body)
+(define prejoin_create_trigger_plan (lambda (src name timing body target)
 	(list (quote createtrigger)
 		(list (quote table) (source_schema src) false (source_relation src) false)
-		name timing "" "" (prejoin_deferred_trigger body) false)))
+		name timing "" "" (prejoin_deferred_trigger body) false
+		(physical_query_tx_symbol)
+		target)))
 
 (define prejoin_trigger_registration_plans (lambda (block table_name)
 	(merge (map (qb_sources block) (lambda (src)
 		(begin
 			(define prefix (concat ".prejoin:" table_name "|" (source_relation src) "|"))
+			(define target (list (quote table) (qb_schema block) false table_name false))
 			(define delete_body (prejoin_trigger_delete_plan block table_name src (quote OLD)))
 			(define insert_body (prejoin_trigger_insert_plan block table_name src (quote NEW)))
 			(list
-				(prejoin_create_trigger_plan src (concat prefix "after_delete") "after_delete" delete_body)
-				(prejoin_create_trigger_plan src (concat prefix "after_insert") "after_insert" insert_body)
+				(prejoin_create_trigger_plan src (concat prefix "after_delete") "after_delete" delete_body target)
+				(prejoin_create_trigger_plan src (concat prefix "after_insert") "after_insert" insert_body target)
 				(prejoin_create_trigger_plan src (concat prefix "after_update") "after_update"
-					(list (quote !begin) delete_body insert_body))
+					(list (quote !begin) delete_body insert_body) target)
 				(prejoin_create_trigger_plan src (concat prefix "after_drop_table") "after_drop_table"
-					(list (quote droptable) (qb_schema block) table_name true))
+					(list (quote droptable) (qb_schema block) table_name true (physical_query_tx_symbol)) target)
 				(prejoin_create_trigger_plan src (concat prefix "after_drop_column") "after_drop_column"
-					(list (quote droptable) (qb_schema block) table_name true)))))))))
+					(list (quote droptable) (qb_schema block) table_name true (physical_query_tx_symbol)) target))))))))
 
 (define prejoin_lookup_computed_column_plan (lambda (block table_name sources src col)
 	(begin
@@ -11009,7 +11022,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(prejoin_column_name sources alias col)
 			"any"
 			(quoted_runtime_list '())
-			(quoted_runtime_list (list "temp" true "collate" (source_column_order_collation src col)))
+			(quoted_runtime_list (list "temp" true "runtime_only" true "collate" (source_column_order_collation src col)))
 			(cons (quote list) input_cols)
 			computor))))
 
@@ -11060,22 +11073,90 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			table_expr
 			(cons (quote list) (map sources source_table_expr))
 			(list (quote lambda) (list (physical_query_tx_symbol)) (cons (quote !begin) (prejoin_trigger_registration_plans block table_name)))
-			(list (quote lambda) (list (physical_query_tx_symbol)) (prejoin_initial_fill_plan block table_name))))
+			(list (quote lambda) (list (physical_query_tx_symbol)) (prejoin_initial_fill_plan block table_name))
+			(list (quote lambda) (list (physical_query_tx_symbol)) true) true))
 		(define prepare_plan (list (quote !begin)
 			(list (quote group_cache_create) (qb_schema block) table_name
 				(prejoin_create_columns sources)
-				(list (quote list) "engine" "cache" "oninit"
+				(list (quote list) "engine" "cache" "runtime_only" true "oninit"
 					(list (quote lambda) (list (physical_query_tx_symbol)) initialize))
 				true (physical_query_tx_symbol))
 			(cons (quote !begin) (prejoin_computed_column_plans block fields table_name))))
 		(list prepare_plan (prejoin_rewritten_block block fields table_name)))))
 
-(define lower_query_block_through_prejoin (lambda (block)
+/* Private snapshots execute the same joined relation without reading or
+publishing shared cache values. Native table storage owns the final ordering. */
+(define prejoin_group_dependency_block (lambda (block)
 	(begin
+		(define sources (qb_sources block))
+		(define fields (expand_query_block_fields sources (qb_fields block)))
+		(define referenced (prejoin_columns_by_alias block fields))
+		/* Primary-key dependents are constant within each existing group. Carry
+		the requested values directly while retaining the same group cardinality. */
+		(define dependencies (merge (map sources (lambda (src)
+			(if (source_primary_key_grouped? block src)
+				(map (qassoc_get referenced (source_alias src) '()) (lambda (col)
+					(list (quote get_column) (source_alias src) false col false)))
+				'())))))
+		(if (empty_list? dependencies) block
+			(make_query_block (qb_schema block) sources fields (qb_where block)
+				(merge_unique (list (qb_group block) dependencies))
+				(qb_having block) (qb_order block) (qb_limit block) (qb_offset block)
+				(qb_hidden block) (qb_stages block) (qb_facts block))))))
+
+(define prejoin_private_plan (lambda (block)
+	(begin
+		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
+		(define grouped (or (not (empty_list? (qb_group block)))
+			(or (not (nil? (qb_having block))) (query_block_has_aggregates? block))))
+		(define stage (if grouped (make_group_stage_for_query_block block) nil))
+		(define order_items (coalesceNil (if grouped (gs_order stage) (qb_order block)) '()))
+		(define projection (materialized_order_projection fields order_items 0 '()))
+		(define materialized_fields (car projection))
+		(define titles (extract_assoc materialized_fields (lambda (title _expr) title)))
+		(define names (mapIndex titles (lambda (i _title) (concat "v" i))))
+		(define params (map names symbol))
+		(define columns (mapIndex (extract_assoc materialized_fields (lambda (_title expr) expr))
+			(lambda (i expr) (list (quote list) (nth names i) "any" (physical_expr_collation block expr)))))
+		(define unordered (if grouped
+			(lower_direct_query_group_stage stage
+				materialized_fields '() 0 -1)
+			(build_join_scan_rows (qb_schema block) (qb_sources block)
+				(query_block_join_plan block (qb_sources block))
+				(qassoc_get (qb_facts block) (quote default_alias) (source_alias (car (qb_sources block))))
+				(extract_assoc materialized_fields (lambda (_title expr) expr))
+				(coalesceNil (qb_where block) true) materialized_fields '() 0 -1 false
+				(query_block_stage_catalog block) (qb_facts block))))
+		(define producer (list
+			(list (quote lambda) (list (quote resultrow)) unordered)
+			(list (quote lambda) (list (quote __prejoin_row))
+				(list (quote __prejoin_emit) (cons (quote list) (map titles (lambda (title)
+					(list (quote get_assoc) (quote __prejoin_row) title))))))))
+		(list (quote with_materialized_table) (physical_query_tx_symbol) (qb_schema block)
+			(cons (quote list) columns)
+			(list (quote lambda) (list (quote __prejoin_emit)) producer)
+			(list (quote lambda) (list (quote __prejoin_private_table))
+				(compile_scan_plan (quote scan_order) (physical_query_tx_symbol) (quote __prejoin_private_table)
+					(quoted_runtime_list '()) (list (quote lambda) '() true)
+					(quoted_runtime_list (map (cadr projection) (lambda (i) (nth names i))))
+					(quoted_runtime_list (order_relations_default order_items))
+					0 (coalesceNil (qb_offset block) 0) (coalesceNil (qb_limit block) -1)
+					(quoted_runtime_list (slice names 0 (/ (count fields) 2)))
+					(list (quote lambda) (cons (quote __scan_acc) (slice params 0 (/ (count fields) 2)))
+						(list (quote resultrow) (cons (quote list)
+							(merge (mapIndex (extract_assoc fields (lambda (title _expr) title))
+								(lambda (i title) (list title (nth params i))))))))
+					nil false))))))
+
+(define lower_query_block_through_prejoin (lambda (input_block)
+	(begin
+		(define block (prejoin_group_dependency_block input_block))
 		(define prejoin (physical_prejoin_plan block))
-		(list (quote !begin)
-			(nth prejoin 0)
-			(lower_single_source_query_block (nth prejoin 1))))))
+		(list (quote if)
+			(list (quote prepare_shared_cache) (physical_query_tx_symbol)
+				(list (quote lambda) '() (nth prejoin 0)))
+			(lower_single_source_query_block (nth prejoin 1))
+			(prejoin_private_plan block)))))
 
 (define direct_join_group_supported? (lambda (stage)
 	(begin
@@ -12218,10 +12299,10 @@ stars through the same catalog-aware path used by physical lowering. */
 		(queryplan_result_titles (normalize_query_ast query))
 		((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
 		(projection_titles (expand_query_block_fields sources fields))
-		((symbol union-block) _mode branches _order _limit _offset _facts)
-		(match branches
+		((symbol union-block) _mode branches _order _limit _offset facts)
+		(qassoc_get facts (quote result_titles) (match branches
 			(cons first_branch _rest) (queryplan_result_titles first_branch)
-			_ '())
+			_ '()))
 		_ '())))
 
 (define projection_exprs (lambda (fields)
@@ -12597,7 +12678,9 @@ once rather than walking position/relation lists on every comparison. */
 
 (define lower_union_all_ordered_materialized (lambda (block titles width order_positions)
 	(begin
-		(define id (concat "__union_materialized_" (fnv_hash (serialize block))))
+		/* These bindings belong to the generated lexical scope. Planning facts
+		may contain invocation-owned transactions and must not be serialized. */
+		(define id "__union_materialized")
 		(define rows (symbol (concat id "_rows")))
 		(define emit (symbol (concat id "_emit")))
 		(define collect_lock (symbol (concat id "_collect_lock")))
@@ -12730,7 +12813,8 @@ while result-only callbacks may return nil instead of an affected-row count. */
 (define lower_union_all_successive (lambda (block) (begin
 	(define branches (union_branches block))
 	(if (empty_list? branches) nil (begin
-		(define titles (queryplan_result_titles block))
+		(define titles (if (nil? (qassoc_get (union_facts block) (quote result_titles) nil))
+			(queryplan_result_titles block) (projection_titles (union_canonical_fields block))))
 		(define width (* 2 (count titles)))
 		(if (or (not (empty_list? (union_order block)))
 			(not (nil? (union_limit block))) (not (nil? (union_offset block))))
@@ -12762,7 +12846,17 @@ while result-only callbacks may return nil instead of an affected-row count. */
 					(list (quote if) (list seen key) nil
 						(list (quote begin) (list seen key true) (list emit row))))))))))
 
-(define lower_union_block (lambda (block)
+(define lower_union_block (lambda (block) (begin
+	(define plan (lower_union_block_core block))
+	(define visible (qassoc_get (union_facts block) (quote result_titles) nil))
+	(if (nil? visible) plan
+		(list (list (quote lambda) (list (quote resultrow)) plan)
+			(list (quote lambda) (list (quote __union_visible_row))
+				(list (quote resultrow) (cons (quote list)
+					(merge (map visible (lambda (title)
+						(list title (list (quote get_assoc) (quote __union_visible_row) title)))))))))))))
+
+(define lower_union_block_core (lambda (block)
 	(if (equal? (union_mode block) (quote all))
 		(lower_union_all_successive block)
 		(if (or (equal? (union_mode block) (quote distinct)) (equal? (union_mode block) (quote union_distinct)))
@@ -12874,20 +12968,18 @@ build_queryplan contract. */
 			(define head (nth expr 0))
 			(define target (nth expr 1))
 			(if (and
-				(or (equal? head (quote apply)) (equal? head (symbol "apply")))
+				(expression_equal? head (quote apply))
 				(list? target)
 				(equal? (count target) 2))
 				(begin
 					(define session_call (nth target 0))
 					(if (or
-						(equal? session_call (physical_query_session_symbol))
+						(expression_equal? session_call (physical_query_session_symbol))
 						(and
 							(list? session_call)
 							(equal? (count session_call) 2)
-							(or
-								(equal? (nth session_call 0) (quote context))
-								(equal? (nth session_call 0) (symbol "context")))
-							(equal? (nth session_call 1) "session")))
+							(expression_equal? (nth session_call 0) (quote context))
+							(expression_equal? (nth session_call 1) "session")))
 						(nth target 1)
 						nil))
 				nil))
@@ -13119,7 +13211,10 @@ preparation prefix into that producer cannot hide a local binding. */
 	(match expr
 		'(quote _value) true
 		'(table schema _database_ignorecase tbl _table_ignorecase) (and (string? schema) (string? tbl))
-		(cons head tail) (and (equal? head 'list) (reduce tail (lambda (ok item) (and ok (string? item))) true))
+		'(table schema _database_ignorecase tbl _table_ignorecase lookup_tx)
+		(and (string? schema) (string? tbl)
+			(or (nil? lookup_tx) (expression_equal? lookup_tx (physical_query_tx_symbol))))
+		(cons head tail) (and (expression_equal? head 'list) (reduce tail (lambda (ok item) (and ok (string? item))) true))
 		_ (string? expr))))
 
 (define projected_truth_recipe_carrier (lambda (body)
@@ -13130,7 +13225,7 @@ preparation prefix into that producer cannot hide a local binding. */
 				(and (projected_truth_recipe_fixed_coordinate? target)
 					(projected_truth_recipe_fixed_coordinate? target_keys))))
 			(list carrier (list source_keys target target_keys)) nil)
-		(cons head tail) (if (and (or (equal? head 'begin) (equal? head '!begin))
+		(cons head tail) (if (and (or (expression_equal? head 'begin) (expression_equal? head '!begin))
 			(not (empty_list? tail)))
 			(begin
 				(define parts (projected_truth_recipe_carrier (nth tail (- (count tail) 1))))
@@ -13295,7 +13390,7 @@ prepare bindings; no key enumeration or storage artifact enters logical IR. */
 					nil)
 				_ nil)
 			nil)
-		(cons head tail) (if (or (equal? head (quote begin)) (equal? head (quote !begin)))
+		(cons head tail) (if (or (expression_equal? head (quote begin)) (expression_equal? head (quote !begin)))
 			(begin
 				(define replacement (ordered_keyset_scan_source (nth tail (- (count tail) 1))))
 				(if (nil? replacement) nil
@@ -13304,10 +13399,10 @@ prepare bindings; no key enumeration or storage artifact enters logical IR. */
 
 (define lower_ordered_keyset_scans (lambda (expr)
 	(match expr
-		(cons head tail) (if (equal? head (quote quote)) expr
+		(cons head tail) (if (expression_equal? head (quote quote)) expr
 			(begin
 				(define children (map tail lower_ordered_keyset_scans))
-				(define source (if (and (equal? head (quote scan_order)) (>= (count children) 12))
+				(define source (if (and (expression_equal? head (quote scan_order)) (>= (count children) 12))
 					(ordered_keyset_scan_source (nth children 1)) nil))
 				(if (nil? source) (cons head children)
 					(cons (quote scan_order_keys)
@@ -13741,9 +13836,9 @@ compilation break-even estimate smaller and hide a later specialization. */
 		_ '())))
 
 (define physical_head_matches? (lambda (head target)
-	(or (equal? head target)
+	(or (expression_equal? head target)
 		(try
-			(lambda () (equal? head (eval target)))
+			(lambda () (identical? head (eval target)))
 			(lambda (_e) false)))))
 
 (define physical_expr_has_head? (lambda (expr target)
@@ -14529,7 +14624,7 @@ existing scan and expression primitives. No predicate is discarded. */
 		(define body (unqualify qualified_body))
 		(define name (concat ".predicate:" (stable_structural_hash (list (source_schema driver) (source_relation driver) (source_schema lookup) (source_relation lookup) columns body) true)))
 		(list name
-			(list (quote createcolumn) (source_table_expr driver) name "any" (quoted_runtime_list '()) (quoted_runtime_list '("temp" true))
+			(list (quote createcolumn) (source_table_expr driver) name "any" (quoted_runtime_list '()) (quoted_runtime_list '("temp" true "runtime_only" true))
 				(quoted_runtime_list columns)
 				(list (quote lambda) (map columns symbol) body))
 			(compile_scan_plan (quote scan) (physical_query_tx_symbol) (source_table_expr driver)
