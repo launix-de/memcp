@@ -40,6 +40,20 @@ test_cases:
         (expression_equal? (nth (nth bound 1) 1) (physical_table_binding_name source)))
         "ok" (error "native source was not bound")))
   expect: {data: [ok]}
+- name: independent outer source keeps its single scan-owned resolution
+  scm: |
+    (begin
+      (define outer_source (list table "memcp-tests" false "handle_left" false (symbol "tx")))
+      (define inner_source (list table "memcp-tests" false "handle_right" false (symbol "tx")))
+      (define inner (list scan (symbol "tx") inner_source nil nil))
+      (define input (list scan (symbol "tx") outer_source nil nil
+        (list (symbol "lambda") '() inner)))
+      (define bound (bind_physical_table_handles input))
+      (if (and (equal? (count bound) 3)
+        (expression_equal? (nth (nth bound 1) 2) inner_source)
+        (expression_equal? (nth (nth bound 2) 2) outer_source))
+        "ok" (error "single-use outer source received an unnecessary binding")))
+  expect: {data: [ok]}
 - name: source lists and RecMap targets retain their scan argument positions
   scm: |
     (begin
