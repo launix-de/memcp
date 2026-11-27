@@ -80,8 +80,8 @@ func (s *StorageSCMER) String() string {
 //	byte in v0.1.0. Historically StorageSCMER was not a final storage type;
 //	BSON values intentionally remain in it. Format changes still require a NEW
 //	magic byte in storages[] (storage.go); keep magic 1 as a legacy reader
-//	forever. Native dates select the versioned magic-3 private
-//	frame, preserving their identity, zone and fractional seconds.
+//	forever. Current writers use the versioned magic-3 private frame,
+//	preserving native values, including date zones and fractional seconds.
 //	BSON values use a reserved JSON object envelope inside their existing JSONL
 //	line. This adds a representation for the new Scmer tag without changing the
 //	legacy framing or the decoding of any previously supported Scmer value.
@@ -465,7 +465,8 @@ func (s *StorageSCMER) DistinctCount() uint { return uint(len(s.values)) }
 const storageExactScalarVersion = 3
 
 // storageSCMERExact preserves historical native scalar values. Magic 1 keeps
-// its independent reader/writer and never interprets the private envelopes.
+// its independent permanent reader and never interprets private envelopes;
+// rebuilds and new scalar values use the current magic-3 writer.
 // Version 1 is the historical length-framed private JSON payload. Version 2
 // adds an encoding byte: 1 retains that JSON payload, 2 stores native dates
 // as three bit-packed integer columns. Version 3 adds encoding 3: upper-zone

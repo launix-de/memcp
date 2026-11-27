@@ -904,7 +904,7 @@ func TestStorageSCMERBufferedSerializationKeepsExactFraming(t *testing.T) {
 	storage.Serialize(&serialized)
 	// Current magic/version, little-endian count and exact value lengths. Include
 	// a value larger than the buffer to cover both streamed and final writes.
-	want := []byte{3, 1, 3, 0, 0, 0, 0, 0, 0, 0}
+	want := []byte{3, 3, 1, 3, 0, 0, 0, 0, 0, 0, 0}
 	encoded, err := json.Marshal(text)
 	if err != nil {
 		t.Fatal(err)
@@ -944,7 +944,7 @@ func TestStorageSCMERPreservesBSONTag(t *testing.T) {
 		t.Fatalf("magic = %d, err=%v; want 3", magic, err)
 	}
 
-	var decoded StorageSCMER
+	var decoded storageSCMERExact
 	if count := decoded.Deserialize(&serialized); count != 2 {
 		t.Fatalf("decoded count = %d, want 2", count)
 	}
