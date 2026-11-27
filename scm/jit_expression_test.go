@@ -280,13 +280,30 @@ func TestJITEscapingProducerPreservesNestedOuterCaptures(t *testing.T) {
 func TestJITCloseProcedureMaterializesInlineCaptures(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (captured)
 		(lambda () (lambda () captured)))`)
-	closed := CloseProcedure(Apply(compiled, NewString("persisted capture")))
-	if closed.Proc().JITCode != 0 || closed.Proc().Compiled != nil {
-		t.Fatal("closed capturing procedure retained process-local JIT state")
-	}
-	inner := Apply(closed)
-	if got := Apply(inner); !Equal(got, NewString("persisted capture")) {
-		t.Fatalf("closed nested capture returned %s", SerializeToString(got, &Globalenv))
+	payload := NewString(strings.Repeat("persisted capture", 256))
+	original := Apply(compiled, payload)
+	ComputeSize(original)
+	closer := compileJITExpressionTestProc(t, `(lambda (callback) (close_procedure callback))`)
+	for name, closeFn := range map[string]func(Scmer) Scmer{
+		"Go":  CloseProcedure,
+		"JIT": func(value Scmer) Scmer { return Apply(closer, value) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			closed := closeFn(original)
+			if original.Proc().OptimizerMeta != nil && closed.Proc().OptimizerMeta == original.Proc().OptimizerMeta {
+				t.Fatal("closing inline captures reused the original source identity")
+			}
+			if size := ComputeSize(closed); size < uint(len(payload.String())) {
+				t.Fatal("closed source sizing lost its materialized capture", size)
+			}
+			if closed.Proc().JITCode != 0 || closed.Proc().Compiled != nil {
+				t.Fatal("closed capturing procedure retained process-local JIT state")
+			}
+			inner := Apply(closed)
+			if got := Apply(inner); !Equal(got, payload) {
+				t.Fatalf("closed nested capture returned %s", SerializeToString(got, &Globalenv))
+			}
+		})
 	}
 }
 

@@ -38,8 +38,8 @@ import (
 func benchScanTable(b *testing.B, name string) *table {
 	b.Helper()
 	CreateDatabase("bench_scan_fc_"+name, true)
-	tbl, _ := CreateTable("bench_scan_fc_"+name, "empty", Memory, true)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "bench_scan_fc_"+name, "empty", Memory, true)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 	return tbl
 }
 
@@ -139,9 +139,9 @@ func benchmarkUniquePointScan(b *testing.B, name string, currentTx *TxContext) {
 	dbName := "bench_scan_point_" + name
 	databases.Remove(dbName)
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("label", "VARCHAR", nil, nil)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "label", "VARCHAR", nil, nil)
 	rows := make([][]scm.Scmer, 1024)
 	for i := range rows {
 		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString("value")}
@@ -178,9 +178,9 @@ func BenchmarkScanUniquePointCompiledAccessWithTx(b *testing.B) {
 	dbName := "bench_scan_point_compiled"
 	databases.Remove(dbName)
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("label", "VARCHAR", nil, nil)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "label", "VARCHAR", nil, nil)
 	rows := make([][]scm.Scmer, 1024)
 	for i := range rows {
 		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString("value")}
@@ -215,9 +215,9 @@ func BenchmarkScanUniquePointCoveredCompiledAccessWithTx(b *testing.B) {
 	databases.Remove(dbName)
 	b.Cleanup(func() { databases.Remove(dbName) })
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("label", "VARCHAR", nil, nil)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "label", "VARCHAR", nil, nil)
 	rows := make([][]scm.Scmer, 1024)
 	for i := range rows {
 		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString("value")}
@@ -249,9 +249,9 @@ func benchmarkUniqueMainPointScan(b *testing.B, name string, currentTx *TxContex
 	dbName := "bench_scan_main_point_" + name
 	databases.Remove(dbName)
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("label", "VARCHAR", nil, nil)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "label", "VARCHAR", nil, nil)
 	rows := make([][]scm.Scmer, 1024)
 	for i := range rows {
 		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString("value")}
@@ -295,9 +295,9 @@ func benchmarkGetRecordIDForUnique(b *testing.B, value int64) {
 	databases.Remove(dbName)
 	b.Cleanup(func() { databases.Remove(dbName) })
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "value", "INT", nil, nil)
 	rows := make([][]scm.Scmer, 1024)
 	for i := range rows {
 		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i * 2))}
@@ -340,8 +340,8 @@ func TestOpenMapReducerAllocatesMutationMetadataLazily(t *testing.T) {
 	databases.Remove(dbName)
 	t.Cleanup(func() { databases.Remove(dbName) })
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 	shard := tbl.Shards[0]
 	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })
 
@@ -363,11 +363,11 @@ func TestReadMapReducerWorkspaceMainDeltaAndWideProjection(t *testing.T) {
 	databases.Remove(dbName)
 	t.Cleanup(func() { databases.Remove(dbName) })
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
 	columns := make([]string, inlineMapReducerColumns+1)
 	for i := range columns {
 		columns[i] = "c" + strconv.Itoa(i)
-		tbl.CreateColumn(columns[i], "INT", nil, nil)
+		tbl.CreateColumn(nil, columns[i], "INT", nil, nil)
 	}
 	mainRows := make([][]scm.Scmer, 2)
 	for rowIndex := range mainRows {
@@ -447,12 +447,12 @@ func BenchmarkNewExecutionContext(b *testing.B) {
 //	go test ./storage/ -bench BenchmarkScanUpdate -benchtime=5s -count=3 -benchmem
 func BenchmarkScanUpdate(b *testing.B) {
 	CreateDatabase("bench_scan_update", true)
-	tbl, _ := CreateTable("bench_scan_update", "su", Memory, true)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("val", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "bench_scan_update", "su", Memory, true)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "val", "INT", nil, nil)
 	// Create computed column schema first, then populate with ComputeColumn
 	computor := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[0] })
-	tbl.CreateColumn("cached_val", "INT", nil, nil)
+	tbl.CreateColumn(nil, "cached_val", "INT", nil, nil)
 
 	// Insert 10k rows
 	const N = 10_000
@@ -489,9 +489,9 @@ func TestScanOrderFirstReusesReadBuffers(t *testing.T) {
 	databases.Remove(dbName)
 	t.Cleanup(func() { databases.Remove(dbName) })
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("label", "VARCHAR", nil, nil)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "label", "VARCHAR", nil, nil)
 	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString("other")},
 		{scm.NewInt(42), scm.NewString("selected")},

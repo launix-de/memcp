@@ -181,9 +181,9 @@ func TestAlterDatabaseStorageMovesDataAndPublishesDescriptor(t *testing.T) {
 	})
 
 	CreateDatabase(databaseName, false)
-	table, _ := CreateTable(databaseName, "items", Safe, false)
-	table.CreateColumn("id", "INT", nil, nil)
-	table.CreateColumn("value", "TEXT", nil, nil)
+	table, _ := CreateTable(nil, databaseName, "items", Safe, false)
+	table.CreateColumn(nil, "id", "INT", nil, nil)
+	table.CreateColumn(nil, "value", "TEXT", nil, nil)
 	largeValue := strings.Repeat("blob-value-", maxInlineBlobBytes)
 	table.Insert([]string{"id", "value"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString("preserved")},
@@ -263,9 +263,9 @@ func TestAlterDatabaseStorageFailureKeepsSourceActive(t *testing.T) {
 	})
 
 	CreateDatabase(databaseName, false)
-	table, _ := CreateTable(databaseName, "items", Safe, false)
-	table.CreateColumn("id", "INT", nil, nil)
-	table.CreateColumn("value", "TEXT", nil, nil)
+	table, _ := CreateTable(nil, databaseName, "items", Safe, false)
+	table.CreateColumn(nil, "id", "INT", nil, nil)
+	table.CreateColumn(nil, "value", "TEXT", nil, nil)
 	table.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("source")}}, nil, scm.NewNil(), false, nil)
 	sourceIdentity := table.schema.persistence.StorageIdentity()
 	tx := NewTxContext(TxCursorStability)
@@ -328,9 +328,9 @@ func TestAlterDatabaseStorageKeepsReadersOnPublishedGeneration(t *testing.T) {
 	})
 
 	CreateDatabase(databaseName, false)
-	table, _ := CreateTable(databaseName, "items", Safe, false)
-	table.CreateColumn("id", "INT", nil, nil)
-	table.CreateColumn("value", "TEXT", nil, nil)
+	table, _ := CreateTable(nil, databaseName, "items", Safe, false)
+	table.CreateColumn(nil, "id", "INT", nil, nil)
+	table.CreateColumn(nil, "value", "TEXT", nil, nil)
 	table.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("old-generation")}}, nil, scm.NewNil(), false, nil)
 	oldTopology := table.activeTopology()
 	tx := NewTxContext(TxCursorStability)
@@ -351,7 +351,9 @@ func TestAlterDatabaseStorageKeepsReadersOnPublishedGeneration(t *testing.T) {
 	}
 	readDone := make(chan scm.Scmer, 1)
 	go func() {
-		readDone <- table.scanLookup(NewTxContext(TxCursorStability), testLookupAccess([]string{"id"}, []scm.Scmer{scm.NewInt(1)}), "value", true)
+		reader := NewTxContext(TxCursorStability)
+		defer reader.Rollback()
+		readDone <- table.scanLookup(reader, testLookupAccess([]string{"id"}, []scm.Scmer{scm.NewInt(1)}), "value", true)
 	}()
 	select {
 	case got := <-readDone:
@@ -371,7 +373,7 @@ func TestAlterDatabaseStorageKeepsReadersOnPublishedGeneration(t *testing.T) {
 	}
 	ddlDone := make(chan struct{})
 	go func() {
-		CreateTable(databaseName, "created_after_move", Memory, false)
+		CreateTable(nil, databaseName, "created_after_move", Memory, false)
 		close(ddlDone)
 	}()
 	select {

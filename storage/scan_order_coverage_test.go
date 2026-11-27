@@ -288,8 +288,8 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 	const rows = 4096
 	const limit = 20
 	tbl := setupScanParallelTestTable(t, "tcoveredorderedlimit")
-	tbl.CreateColumn("bucket", "VARCHAR(16)", nil, nil)
-	tbl.CreateColumn("rank", "INT", nil, nil)
+	tbl.CreateColumn(nil, "bucket", "VARCHAR(16)", nil, nil)
+	tbl.CreateColumn(nil, "rank", "INT", nil, nil)
 	values := make([][]scm.Scmer, rows)
 	for i := range values {
 		values[i] = []scm.Scmer{
@@ -391,7 +391,7 @@ func TestCoveredOrderedLimitBrakesInsideIndexBatch(t *testing.T) {
 
 func TestOrderedComparisonReaderLifetime(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "torderedreaderownership")
-	tbl.CreateColumn("label", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "label", "TEXT", nil, nil)
 	inputs := []string{"report zebra", "report alpha", "report middle"}
 	values := make([][]scm.Scmer, len(inputs))
 	for i, value := range inputs {

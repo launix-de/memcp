@@ -990,7 +990,7 @@ func TestRemoteAdmissionWhileLoadingColdExtent(t *testing.T) {
 
 func TestRemoteUniqueChannelRetainsGuardThroughUpdateAndFinish(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_remote_unique_channel", 4)
-	tbl.CreateColumn("label", "VARCHAR", []int{40}, []scm.Scmer{scm.NewString("collate"), scm.NewString("utf8mb4_general_ci")})
+	tbl.CreateColumn(nil, "label", "VARCHAR", []int{40}, []scm.Scmer{scm.NewString("collate"), scm.NewString("utf8mb4_general_ci")})
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "label", Cols: []string{"label"}}}
 	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{{scm.NewInt(5), scm.NewString("ſail")}}, nil, scm.NewNil(), false, nil)
 	var triggerCalls atomic.Int32

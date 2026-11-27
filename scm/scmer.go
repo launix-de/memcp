@@ -122,6 +122,15 @@ type CustomJSONCodec struct {
 
 var CustomJSONCodecs [256]CustomJSONCodec
 
+// Stable semantic kinds within the existing JSON runtime-value envelope. These
+// wire identities are independent of Scmer's in-memory iota tags. Version 1
+// distinguishes quoted callable values from inert lambda source arrays.
+const (
+	jsonRuntimeNativeKind    = 8
+	jsonRuntimeProcedureKind = 10
+	jsonRuntimeValueVersion  = 1
+)
+
 // NewCString creates a lazy compressed-string Scmer.
 // ptr points into the StorageString dictionary (must stay alive as long as the Scmer).
 // format: storage.StringFormat value (5 bits); nibbleOff: 0 or 1; charLen: original char count.
@@ -1215,21 +1224,35 @@ func ToFloat(v Scmer) float64 { return v.Float() }
 // MarshalJSON encodes a Scmer into JSON by converting it to native Go
 // types first (nil, bool, float64/int64, string, []any, map-like assoc
 // list), ensuring stable and portable JSON output for persistence and APIs.
-func (s Scmer) MarshalJSON() ([]byte, error) { return s.marshalJSON(false) }
+func (s Scmer) MarshalJSON() ([]byte, error) {
+	return s.marshalJSON(false)
+}
 
-// MarshalPersistentJSON preserves historical native-value envelopes when a
-// version-3 storage frame is rewritten. Public JSON retains its existing form.
+// MarshalPersistentJSON preserves native calendar identity in storage codecs.
+// Public JSON keeps its existing date-text representation.
 func MarshalPersistentJSON(s Scmer) ([]byte, error) { return s.marshalJSON(true) }
 
 func (s Scmer) marshalJSON(persistent bool) ([]byte, error) {
-	if s.IsBSON() && !persistent {
+	if s.IsBSON() {
+		if persistent {
+			return json.Marshal(persistentBSONValue(s))
+		}
 		return appendBSONText(nil, s, false, "")
 	}
 	// Custom, stable encoding for persistence of SCM values.
+	// Reuse the existing JSON walk for procedure syntax as well as data.
+	// Only an actual procedure body introduces executable code; ordinary lists
+	// and quoted values must never be interpreted as optimized calls.
+	type codeContext struct {
+		bound   map[Symbol]struct{}
+		origin  *Env
+		pattern bool
+		literal bool // quoted data; actual callable values retain their identity
+	}
 	var encodeErr error
-	var toJSONable func(Scmer) any
+	var toJSONable func(Scmer, *codeContext) any
 	// helper: find name of native func in Globalenv
-	toJSONable = func(v Scmer) any {
+	toJSONable = func(v Scmer, code *codeContext) any {
 		switch v.GetTag() {
 		case tagNil:
 			return nil
@@ -1255,8 +1278,103 @@ func (s Scmer) marshalJSON(persistent bool) ([]byte, error) {
 		case tagSlice:
 			list := lambdaSyntaxOperands(v.Slice())
 			out := make([]any, len(list))
+			if code != nil && !code.literal && len(list) > 0 {
+				callee := v.Slice()[0].WithoutSourceInfo()
+				portableCall := !callee.IsSymbol()
+				if callee.IsSymbol() && !code.pattern {
+					if _, local := code.bound[callee.Symbol()]; !local && code.origin != nil {
+						if binding := code.origin.FindRead(callee.Symbol()); binding != nil {
+							symbol := callee.Symbol()
+							callee = binding.Vars[symbol]
+							// Only the declared global identity is stable source.
+							// An arbitrary lexical alias remains invocation-owned.
+							if declaration := DeclarationForValue(callee); binding == &Globalenv && declaration != nil {
+								portableCall = declaration.Name == string(symbol)
+							}
+						}
+					}
+				}
+				head := ""
+				if code.pattern {
+					head, _ = symbolName(list[0])
+				} else if callee.GetTag() == tagSpecialForm {
+					head = callee.SpecialFormName()
+				}
+				if head == "quote" {
+					for i, item := range list {
+						var child *codeContext
+						if i > 0 {
+							child = &codeContext{literal: true}
+						}
+						out[i] = toJSONable(item, child)
+					}
+					return out
+				}
+				if code.pattern {
+					for i, item := range list {
+						// Like the ordinary procedure printer, the pattern owns
+						// its compiled regex slot and restores the source string.
+						if head == "regex" && i == 1 && item.WithoutSourceInfo().IsRegex() {
+							item = NewString(item.WithoutSourceInfo().Regex().String())
+						}
+						child := code
+						if i == 0 || head == "regex" && i == 1 {
+							child = nil
+						}
+						if head == "eval" && i == 1 {
+							child = &codeContext{bound: code.bound, origin: code.origin}
+						}
+						out[i] = toJSONable(item, child)
+					}
+					return out
+				}
+				if head == "lambda" && (len(list) == 3 || len(list) == 4) {
+					for i, item := range list {
+						var child *codeContext
+						if i == 2 {
+							child = &codeContext{bound: procedureWireBindings(list[1], item, code.bound), origin: code.origin}
+						}
+						out[i] = toJSONable(item, child)
+					}
+					return out
+				}
+				if (head == "match" || head == "match_mut") && len(list) >= 2 {
+					out[0], out[1] = toJSONable(list[0], nil), toJSONable(list[1], code)
+					i := 2
+					for ; i+1 < len(list); i += 2 {
+						out[i] = toJSONable(list[i], &codeContext{bound: code.bound, origin: code.origin, pattern: true})
+						// The enclosing body scan already owns declarations
+						// outside nested lambdas. Clone it; do not rescan each arm.
+						bound := procedureWireBindings(NewSlice(nil), NewNil(), code.bound)
+						procedurePatternBindings(list[i], bound)
+						out[i+1] = toJSONable(list[i+1], &codeContext{bound: bound, origin: code.origin})
+					}
+					if i < len(list) {
+						out[i] = toJSONable(list[i], code)
+					}
+					return out
+				}
+				if portableCall && callee.IsNativeFunc() {
+					if declaration := DeclarationForValue(callee); declaration != nil && declaration.SerializeCall != nil {
+						source, err := declaration.SerializeCall(list[1:])
+						if err != nil {
+							encodeErr = err
+							return nil
+						}
+						// The declaration's portable source must not resolve to a
+						// different callable through the receiving local frame.
+						if items, ok := scmerAsSlice(source); ok && len(items) > 0 && items[0].IsSymbol() {
+							if _, local := code.bound[items[0].Symbol()]; local {
+								encodeErr = fmt.Errorf("optimized call source is shadowed by local %s", items[0].Symbol())
+								return nil
+							}
+						}
+						return toJSONable(source, code)
+					}
+				}
+			}
 			for i, it := range list {
-				out[i] = toJSONable(it)
+				out[i] = toJSONable(it, code)
 			}
 			return out
 		case tagFastDict:
@@ -1267,7 +1385,11 @@ func (s Scmer) marshalJSON(persistent bool) ([]byte, error) {
 			pairs := fd.ToList()
 			out := make([]any, len(pairs))
 			for i, it := range pairs {
-				out[i] = toJSONable(it)
+				var child *codeContext
+				if code != nil && code.literal {
+					child = code
+				}
+				out[i] = toJSONable(it, child)
 			}
 			return out
 		case tagParser:
@@ -1275,11 +1397,27 @@ func (s Scmer) marshalJSON(persistent bool) ([]byte, error) {
 		case tagVector:
 			return v.Vector()
 		case tagFunc:
-			// Try to encode as the symbolic name if known; otherwise as "?"
+			if code != nil && code.literal {
+				if proc := JITProcForFunction(v.Func()); proc != nil {
+					closed := CloseProcedure(Scmer{(*byte)(unsafe.Pointer(proc)), makeAux(tagProc, 0)})
+					return toJSONable(closed, code)
+				}
+			}
+			// Unknown native functions retain their historical symbolic fallback.
 			decl := DeclarationForValue(v)
 			if decl != nil {
+				if code != nil && code.literal {
+					canonical, exists := Globalenv.Vars[Symbol(decl.Name)]
+					if declarations[decl.Name] != decl || decl.Fn == nil || !exists || !canonical.IsNativeFunc() ||
+						FunctionIdentity(canonical.Func()) != FunctionIdentity(v.Func()) {
+						encodeErr = fmt.Errorf("quoted native callable %q has no canonical global declaration", decl.Name)
+						return nil
+					}
+					return map[string]any{"scmer_custom": jsonRuntimeNativeKind,
+						"value": []any{jsonRuntimeValueVersion, decl.Name}}
+				}
 				if persistent {
-					return map[string]any{"scmer_custom": jsonRuntimeNativeKind, "value": []any{1, decl.Name}}
+					return map[string]any{"scmer_custom": jsonRuntimeNativeKind, "value": []any{jsonRuntimeValueVersion, decl.Name}}
 				}
 				return map[string]any{"symbol": decl.Name}
 			}
@@ -1297,33 +1435,47 @@ func (s Scmer) marshalJSON(persistent bool) ([]byte, error) {
 		case tagNthLocalVar:
 			return map[string]any{"var": int(v.NthLocalVar())}
 		case tagProc:
+			if code != nil && code.literal {
+				v = CloseProcedure(v)
+			}
 			p := v.Proc()
+			var bodyContext *codeContext
+			if persistent {
+				bodyContext = &codeContext{bound: procedureWireBindings(p.Params, p.Body, nil), origin: p.En}
+			}
 			arr := make([]any, 0, 4)
 			arr = append(arr, map[string]any{"symbol": "lambda"})
-			arr = append(arr, toJSONable(p.Params))
-			arr = append(arr, toJSONable(p.Body))
+			arr = append(arr, toJSONable(p.Params, nil))
+			arr = append(arr, toJSONable(p.Body, bodyContext))
 			if p.NumVars > 0 {
 				arr = append(arr, p.NumVars)
 			}
 			if persistent {
-				return map[string]any{"scmer_custom": jsonRuntimeProcedureKind, "value": []any{1, arr}}
+				return map[string]any{"scmer_custom": jsonRuntimeProcedureKind,
+					"value": []any{jsonRuntimeValueVersion, arr}}
 			}
 			return arr
 		case tagSourceInfo:
-			return toJSONable(v.SourceInfo().value)
+			return toJSONable(v.SourceInfo().value, code)
 		case tagBSON:
 			if persistent {
-				kind, raw := v.BSONRaw()
-				return map[string]any{"scmer_bson_v1": []any{kind, base64.StdEncoding.EncodeToString(raw)}}
+				return persistentBSONValue(v)
 			}
 			return json.RawMessage(bsonText(v))
 		case tagJIT:
 			jep := v.JIT()
 			p := jep.Proc
+			if code != nil && code.literal {
+				return toJSONable(NewProcStruct(p), code)
+			}
+			var bodyContext *codeContext
+			if persistent {
+				bodyContext = &codeContext{bound: procedureWireBindings(p.Params, p.Body, nil), origin: p.En}
+			}
 			arr := make([]any, 0, 4)
 			arr = append(arr, map[string]any{"symbol": "lambda"})
-			arr = append(arr, toJSONable(p.Params))
-			arr = append(arr, toJSONable(p.Body))
+			arr = append(arr, toJSONable(p.Params, nil))
+			arr = append(arr, toJSONable(p.Body, bodyContext))
 			if p.NumVars > 0 {
 				arr = append(arr, p.NumVars)
 			}
@@ -1333,6 +1485,19 @@ func (s Scmer) marshalJSON(persistent bool) ([]byte, error) {
 			return arr
 		default:
 			tag := v.GetTag()
+			if tag == tagAny {
+				// Opaque embedding values can reject serialization through Go's
+				// existing JSON contract instead of losing their runtime identity
+				// in the diagnostic string fallback below.
+				if marshaler, ok := v.Any().(json.Marshaler); ok {
+					encoded, err := json.Marshal(marshaler)
+					if err != nil {
+						encodeErr = err
+						return nil
+					}
+					return json.RawMessage(encoded)
+				}
+			}
 			if codec := CustomJSONCodecs[tag]; codec.Encode != nil {
 				return map[string]any{"scmer_custom": int(tag), "value": codec.Encode(unsafe.Pointer(v.ptr))}
 			}
@@ -1340,11 +1505,11 @@ func (s Scmer) marshalJSON(persistent bool) ([]byte, error) {
 			return v.String()
 		}
 	}
-	value := toJSONable(s)
+	encoded := toJSONable(s, nil)
 	if encodeErr != nil {
 		return nil, encodeErr
 	}
-	return json.Marshal(value)
+	return json.Marshal(encoded)
 }
 
 func (s *Scmer) Write(w io.Writer) {
@@ -1424,17 +1589,16 @@ func (s *Scmer) Write(w io.Writer) {
 
 // UnmarshalJSON decodes JSON into a Scmer by first decoding into
 // interface{} and then transforming to Scmer using TransformFromJSON.
-// Historical private runtime-value identities are independent of Scmer tags.
-const (
-	jsonRuntimeNativeKind    = 8
-	jsonRuntimeProcedureKind = 10
-)
-
 func (s *Scmer) UnmarshalJSON(data []byte) error { return s.unmarshalJSON(data, false) }
 
 // UnmarshalPersistentJSON is selected by a versioned storage frame. Public and
 // historical JSON never interpret these native scalar envelopes.
 func UnmarshalPersistentJSON(data []byte, s *Scmer) error { return s.unmarshalJSON(data, true) }
+
+func persistentBSONValue(value Scmer) any {
+	kind, payload := value.BSONRaw()
+	return map[string]any{"scmer_bson_v1": []any{kind, base64.StdEncoding.EncodeToString(payload)}}
+}
 
 func (s *Scmer) unmarshalJSON(data []byte, persistent bool) error {
 	// Use decoder with UseNumber to preserve ints

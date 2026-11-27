@@ -1,0 +1,671 @@
+# Copyright (C) 2026 Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Declarations live in the relational system_schema catalog. They must be
+# queryable like tables, follow DDL immediately and survive restarts with
+# unchanged behaviour (keys, foreign keys, triggers, defaults, engines).
+metadata:
+  version: '1.0'
+  isolated: true
+  description: Schema declarations persist through the relational system_schema catalog
+setup:
+  - sql: DROP TABLE IF EXISTS cat_physical_checkpoint
+  - sql: DROP VIEW IF EXISTS cat_tx_view
+  - sql: DROP TABLE IF EXISTS cat_aggregate_owner
+  - sql: DROP TABLE IF EXISTS sc_log
+  - sql: DROP TABLE IF EXISTS sc_child
+  - sql: DROP TABLE IF EXISTS sc_parent
+  - sql: DROP TABLE IF EXISTS sc_memory
+  - sql: DROP TABLE IF EXISTS sc_gone
+  - sql: DROP TABLE IF EXISTS sc_rename_old
+  - sql: DROP TABLE IF EXISTS sc_rename_new
+  - sql: DROP TABLE IF EXISTS cat_tx_renamed
+  - sql: DROP TABLE IF EXISTS cat_tx_created
+  - sql: DROP TABLE IF EXISTS cat_tx_progress
+  - sql: CREATE TABLE cat_tx_progress (id INT PRIMARY KEY, value INT)
+  - sql: INSERT INTO cat_tx_progress VALUES (1, 10)
+test_cases:
+  - name: Create a relation for rename publication
+    sql: CREATE TABLE sc_rename_old (id INT PRIMARY KEY, label TEXT DEFAULT 'kept')
+  - name: Populate the relation before rename
+    sql: INSERT INTO sc_rename_old (id) VALUES (7)
+  - name: Rename publishes the complete new declaration
+    sql: RENAME TABLE sc_rename_old TO sc_rename_new
+  - name: Catalog joins see the renamed table with all its columns
+    sql: >-
+      SELECT t.name AS table_name, c.ordinal, c.name AS column_name
+      FROM system_schema.tables t JOIN system_schema.columns c
+      ON c.schema_name = t.schema_name AND c.table_name = t.name
+      WHERE t.schema_name = 'memcp-tests' AND t.name IN ('sc_rename_old', 'sc_rename_new')
+      ORDER BY c.ordinal
+    expect:
+      rows: 2
+      data:
+        - {table_name: sc_rename_new, ordinal: 0, column_name: id}
+        - {table_name: sc_rename_new, ordinal: 1, column_name: label}
+  - name: The old name no longer resolves
+    sql: SELECT * FROM sc_rename_old
+    expect: {error: true}
+  - name: A failed rename preserves the accepted declaration
+    sql: RENAME TABLE sc_rename_new TO sc_rename_new
+    expect: {error: true}
+  - name: Create a parent with named keys, defaults and comments
+    sql: >-
+      CREATE TABLE sc_parent (id INT PRIMARY KEY AUTO_INCREMENT, code VARCHAR(12) NOT NULL COMMENT 'business code',
+      kind ENUM('a','b','c') DEFAULT 'b', amount DECIMAL(10,2) DEFAULT 1.50, UNIQUE KEY sc_code_unique (code))
+      COMMENT='parent rows'
+  - name: Create a child with a cascading foreign key
+    sql: >-
+      CREATE TABLE sc_child (id INT PRIMARY KEY, parent_id INT, label TEXT,
+      FOREIGN KEY (parent_id) REFERENCES sc_parent(id) ON DELETE CASCADE)
+  - name: Create an audit table and a trigger
+    sql: CREATE TABLE sc_log (parent_code VARCHAR(12))
+  - name: Install the trigger
+    sql: CREATE TRIGGER sc_parent_audit AFTER INSERT ON sc_parent FOR EACH ROW INSERT INTO sc_log (parent_code) VALUES (NEW.code)
+  - name: Create a memory engine table
+    sql: CREATE TABLE sc_memory (id INT) ENGINE=MEMORY
+  - name: Create and drop a table
+    sql: CREATE TABLE sc_gone (id INT)
+  - name: Drop it again
+    sql: DROP TABLE sc_gone
+  - name: Insert parents through the trigger
+    sql: INSERT INTO sc_parent (code) VALUES ('p1'), ('p2')
+  - name: Insert children
+    sql: INSERT INTO sc_child VALUES (1, 1, 'one'), (2, 2, 'two')
+
+  - name: The catalog lists the tables of this database
+    sql: >-
+      SELECT name, persistency_mode, comment FROM system_schema.tables
+      WHERE schema_name = 'memcp-tests' AND name IN ('sc_parent', 'sc_child', 'sc_log', 'sc_memory', 'sc_gone') ORDER BY name
+    expect:
+      rows: 4
+      data:
+        - {name: sc_child, persistency_mode: safe, comment: ''}
+        - {name: sc_log, persistency_mode: safe, comment: ''}
+        - {name: sc_memory, persistency_mode: memory, comment: ''}
+        - {name: sc_parent, persistency_mode: safe, comment: parent rows}
+  - name: Columns keep their ordinals, declared types and comments
+    sql: >-
+      SELECT ordinal, name, LOWER(typ) AS typ, comment FROM system_schema.columns
+      WHERE schema_name = 'memcp-tests' AND table_name = 'sc_parent' ORDER BY ordinal
+    expect:
+      rows: 4
+      data:
+        - {ordinal: 0, name: id, typ: int, comment: ''}
+        - {ordinal: 1, name: code, typ: varchar, comment: business code}
+        - {ordinal: 2, name: kind, typ: enum, comment: ''}
+        - {ordinal: 3, name: amount, typ: decimal, comment: ''}
+  - name: SQL cannot delete authoritative column declarations
+    sql: DELETE FROM system_schema.columns WHERE schema_name = 'memcp-tests' AND table_name = 'sc_parent'
+    expect: {error: true}
+  - name: SQL cannot update authoritative table declarations
+    sql: UPDATE system_schema.tables SET comment = 'forged' WHERE schema_name = 'memcp-tests' AND name = 'sc_parent'
+    expect: {error: true}
+  - name: SQL cannot insert authoritative table declarations
+    sql: INSERT INTO system_schema.tables (schema_name, name) VALUES ('memcp-tests', 'forged')
+    expect: {error: true}
+  - name: Native catalog declarations cannot be altered through SQL
+    sql: ALTER TABLE system_schema.columns ADD COLUMN forged INT
+    expect: {error: true}
+  - name: Rejected writes leave the admitted definition intact
+    sql: SELECT comment FROM system_schema.tables WHERE schema_name = 'memcp-tests' AND name = 'sc_parent'
+    expect:
+      rows: 1
+      data: [{comment: parent rows}]
+  - name: Key columns join their keys
+    sql: >-
+      SELECT k.id, kc.column_name FROM system_schema.`keys` k
+      JOIN system_schema.key_columns kc ON kc.schema_name = k.schema_name AND kc.table_name = k.table_name AND kc.key_ordinal = k.ordinal
+      WHERE k.schema_name = 'memcp-tests' AND k.table_name = 'sc_parent' ORDER BY k.ordinal, kc.ordinal
+    expect:
+      rows: 2
+      data:
+        - {id: PRIMARY, column_name: id}
+        - {id: sc_code_unique, column_name: code}
+  - name: The foreign key is recorded on both tables
+    sql: >-
+      SELECT f.table_name, f.tbl1, f.tbl2, f.deletemode, fc.column1, fc.column2 FROM system_schema.foreign_keys f
+      JOIN system_schema.foreign_key_columns fc ON fc.schema_name = f.schema_name AND fc.table_name = f.table_name AND fc.foreign_key_ordinal = f.ordinal
+      WHERE f.schema_name = 'memcp-tests' AND f.tbl1 = 'sc_child' ORDER BY f.table_name
+    expect:
+      rows: 2
+      data:
+        - {table_name: sc_child, tbl1: sc_child, tbl2: sc_parent, deletemode: 1, column1: parent_id, column2: id}
+        - {table_name: sc_parent, tbl1: sc_child, tbl2: sc_parent, deletemode: 1, column1: parent_id, column2: id}
+  - name: The trigger keeps its SQL source
+    sql: >-
+      SELECT name, table_name, timing, language FROM system_schema.triggers
+      WHERE schema_name = 'memcp-tests' AND name = 'sc_parent_audit'
+    expect:
+      rows: 1
+      data:
+        - {name: sc_parent_audit, table_name: sc_parent, timing: after_insert, language: sql}
+  - name: Schema changes are visible immediately
+    sql: ALTER TABLE sc_child ADD COLUMN note TEXT DEFAULT 'none'
+  - name: The added column appears in the catalog
+    sql: >-
+      SELECT ordinal, name FROM system_schema.columns
+      WHERE schema_name = 'memcp-tests' AND table_name = 'sc_child' ORDER BY ordinal
+    expect:
+      rows: 4
+      data:
+        - {ordinal: 0, name: id}
+        - {ordinal: 1, name: parent_id}
+        - {ordinal: 2, name: label}
+        - {ordinal: 3, name: note}
+
+  - name: Restart loads the declarations from the catalog
+    action: restart
+  - name: Defaults survive the restart
+    sql: INSERT INTO sc_parent (code) VALUES ('p3')
+  - name: Renamed data and defaults survive restart
+    sql: SELECT id, label FROM sc_rename_new ORDER BY id
+    expect:
+      rows: 1
+      data:
+        - {id: 7, label: kept}
+  - name: Renamed declarations survive restart without the old owner
+    sql: >-
+      SELECT table_name, ordinal, name FROM system_schema.columns
+      WHERE schema_name = 'memcp-tests' AND table_name IN ('sc_rename_old', 'sc_rename_new')
+      ORDER BY ordinal
+    expect:
+      rows: 2
+      data:
+        - {table_name: sc_rename_new, ordinal: 0, name: id}
+        - {table_name: sc_rename_new, ordinal: 1, name: label}
+  - name: Recovered defaults and AUTO_INCREMENT continue
+    sql: SELECT id, kind, amount FROM sc_parent WHERE code = 'p3'
+    expect:
+      rows: 1
+      data:
+        - {id: 3, kind: b, amount: 1.5}
+  - name: The recovered trigger still fires
+    sql: SELECT parent_code FROM sc_log ORDER BY parent_code
+    expect:
+      rows: 3
+      data:
+        - {parent_code: p1}
+        - {parent_code: p2}
+        - {parent_code: p3}
+  - name: The recovered named key still rejects duplicates
+    sql: INSERT INTO sc_parent (code) VALUES ('p1')
+    expect:
+      error: true
+  - name: The recovered foreign key still cascades
+    sql: DELETE FROM sc_parent WHERE code = 'p1'
+  - name: Cascaded children are gone
+    sql: SELECT id FROM sc_child ORDER BY id
+    expect:
+      rows: 1
+      data:
+        - {id: 2}
+  - name: The recovered column default applies
+    sql: INSERT INTO sc_child (id, parent_id) VALUES (3, 2)
+  - name: The added column keeps its default
+    sql: SELECT note FROM sc_child WHERE id = 3
+    expect:
+      rows: 1
+      data:
+        - {note: none}
+  - name: The catalog is queryable after restart
+    sql: >-
+      SELECT COUNT(*) AS n FROM system_schema.columns
+      WHERE schema_name = 'memcp-tests' AND table_name IN ('sc_parent', 'sc_child')
+    expect:
+      rows: 1
+      data:
+        - {n: 8}
+  - name: A second restart reads the catalog written by this binary
+    action: restart
+  - name: Declarations remain complete after the second restart
+    sql: SELECT COUNT(*) AS n FROM sc_parent WHERE kind = 'b'
+    expect:
+      rows: 1
+      data:
+        - {n: 2}
+  - name: The memory engine table keeps its engine
+    sql: >-
+      SELECT persistency_mode FROM system_schema.tables WHERE schema_name = 'memcp-tests' AND name = 'sc_memory'
+    expect:
+      rows: 1
+      data:
+        - {persistency_mode: memory}
+
+  - name: Dropped tables leave the catalog
+    sql: DROP TABLE sc_memory
+  - name: The dropped table has no catalog rows
+    sql: >-
+      SELECT COUNT(*) AS n FROM system_schema.columns WHERE schema_name = 'memcp-tests' AND table_name = 'sc_memory'
+    expect:
+      rows: 1
+      data:
+        - {n: 0}
+  - name: An error aborts an update script after prior DML and schema edits
+    steps:
+      - session_id: cat_tx_owner
+        sql: START ACID TRANSACTION
+      - session_id: cat_tx_owner
+        sql: UPDATE cat_tx_progress SET value = 20 WHERE id = 1
+      - session_id: cat_tx_owner
+        sql: CREATE TABLE cat_tx_created (id INT PRIMARY KEY, value INT DEFAULT 7)
+      - session_id: cat_tx_owner
+        sql: INSERT INTO cat_tx_created (id) VALUES (2)
+      - session_id: cat_tx_owner
+        sql: ALTER TABLE cat_tx_progress ADD COLUMN note TEXT DEFAULT 'added'
+      - session_id: cat_tx_owner
+        sql: SELECT missing FROM cat_tx_progress
+        expect: {error: true}
+      - session_id: cat_tx_owner
+        sql: ROLLBACK
+  - name: Prior data changes roll back
+    sql: SELECT id, value FROM cat_tx_progress ORDER BY id
+    expect:
+      rows: 1
+      data: [{id: 1, value: 10}]
+  - name: Created declarations roll back with the same owner
+    sql: SELECT name FROM system_schema.tables WHERE schema_name = 'memcp-tests' AND name IN ('cat_tx_created', 'cat_tx_progress') ORDER BY name
+    expect:
+      rows: 1
+      data: [{name: cat_tx_progress}]
+  - name: Added definitions roll back with the same owner
+    sql: SELECT ordinal, name FROM system_schema.columns WHERE schema_name = 'memcp-tests' AND table_name = 'cat_tx_progress' ORDER BY ordinal
+    expect:
+      rows: 2
+      data: [{ordinal: 0, name: id}, {ordinal: 1, name: value}]
+  - name: Restart after rejected update script
+    action: restart
+  - name: Original data survives restart
+    sql: SELECT id, value FROM cat_tx_progress ORDER BY id
+    expect:
+      rows: 1
+      data: [{id: 1, value: 10}]
+  - name: Rejected declarations stay absent after restart
+    sql: SELECT name FROM system_schema.tables WHERE schema_name = 'memcp-tests' AND name IN ('cat_tx_created', 'cat_tx_progress') ORDER BY name
+    expect:
+      rows: 1
+      data: [{name: cat_tx_progress}]
+  - name: Rejected columns stay absent after restart
+    sql: SELECT ordinal, name FROM system_schema.columns WHERE schema_name = 'memcp-tests' AND table_name = 'cat_tx_progress' ORDER BY ordinal
+    expect:
+      rows: 2
+      data: [{ordinal: 0, name: id}, {ordinal: 1, name: value}]
+  - name: Rename and drop share the original data transaction and savepoint
+    steps:
+    - session_id: cat_namespace_owner
+      sql: START ACID TRANSACTION
+    - session_id: cat_namespace_owner
+      sql: UPDATE cat_tx_progress SET value = 11 WHERE id = 1
+    - session_id: cat_namespace_owner
+      sql: SAVEPOINT declarations
+    - session_id: cat_namespace_owner
+      sql: RENAME TABLE cat_tx_progress TO cat_tx_renamed
+    - session_id: cat_namespace_owner
+      sql: SELECT id, value FROM cat_tx_renamed ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - session_id: cat_namespace_owner
+      sql: ROLLBACK TO SAVEPOINT declarations
+    - session_id: cat_namespace_owner
+      sql: SELECT id, value FROM cat_tx_progress ORDER BY id
+      expect:
+        rows: 1
+        data:
+        - id: 1
+          value: 11
+    - session_id: cat_namespace_owner
+      sql: DROP TABLE cat_tx_progress
+    - session_id: cat_namespace_owner
+      sql: ROLLBACK
+  - name: Rollback preserves both original rows and original table name
+    sql: SELECT id, value FROM cat_tx_progress ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        value: 10
+  - name: Commit a rename together with prior and following data changes
+    steps:
+    - session_id: cat_namespace_owner
+      sql: BEGIN
+    - session_id: cat_namespace_owner
+      sql: UPDATE cat_tx_progress SET value = 12 WHERE id = 1
+    - session_id: cat_namespace_owner
+      sql: RENAME TABLE cat_tx_progress TO cat_tx_renamed
+    - session_id: cat_namespace_owner
+      sql: INSERT INTO cat_tx_renamed VALUES (2, 22)
+    - session_id: cat_namespace_owner
+      sql: COMMIT
+  - name: Restart after the accepted namespace and data decision
+    action: restart
+  - name: Restart recovers the accepted name and every committed row
+    sql: SELECT id, value FROM cat_tx_renamed ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: 12
+      - id: 2
+        value: 22
+  - name: Restart does not resurrect the previous table name
+    sql: SELECT * FROM cat_tx_progress
+    expect:
+      error: true
+  - name: Restore the fixture name
+    sql: RENAME TABLE cat_tx_renamed TO cat_tx_progress
+  - name: Column and key definitions roll back after prior DML
+    steps:
+    - session_id: cat_namespace_owner
+      sql: START ACID TRANSACTION
+    - session_id: cat_namespace_owner
+      sql: UPDATE cat_tx_progress SET value = 13 WHERE id = 1
+    - session_id: cat_namespace_owner
+      sql: SAVEPOINT declarations
+    - session_id: cat_namespace_owner
+      sql: CREATE UNIQUE INDEX cat_tx_value_key ON cat_tx_progress (value)
+    - session_id: cat_namespace_owner
+      sql: ALTER TABLE cat_tx_progress ALTER COLUMN value SET DEFAULT 9
+    - session_id: cat_namespace_owner
+      sql: ALTER TABLE cat_tx_progress DROP COLUMN value
+    - session_id: cat_namespace_owner
+      sql: ROLLBACK TO SAVEPOINT declarations
+    - session_id: cat_namespace_owner
+      sql: SELECT id, value FROM cat_tx_progress ORDER BY id
+      expect:
+        rows: 2
+        data:
+        - id: 1
+          value: 13
+        - id: 2
+          value: 22
+    - session_id: cat_namespace_owner
+      sql: ROLLBACK
+  - name: Undone keys leave complete original key definitions
+    sql: SELECT id FROM system_schema.`keys` WHERE schema_name = 'memcp-tests' AND table_name = 'cat_tx_progress'
+      ORDER BY id
+    expect:
+      rows: 1
+      data:
+      - id: PRIMARY
+  - name: Restart after undoing column key and data changes
+    action: restart
+  - name: Undo of column key and data changes survives restart
+    sql: SELECT id, value FROM cat_tx_progress ORDER BY id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        value: 12
+      - id: 2
+        value: 22
+  - name: Create a view and preceding data changes in one transaction
+    steps:
+    - session_id: cat_view_owner
+      sql: START ACID TRANSACTION
+    - session_id: cat_view_owner
+      sql: UPDATE cat_tx_progress SET value = 31 WHERE id = 1
+    - session_id: cat_view_owner
+      sql: CREATE VIEW cat_tx_view AS SELECT id, value FROM cat_tx_progress WHERE id = 1
+    - session_id: cat_view_owner
+      sql: SELECT name FROM system.views WHERE database = 'memcp-tests' AND name = 'cat_tx_view'
+      expect: {rows: 1, data: [{name: cat_tx_view}]}
+    - session_id: cat_view_owner
+      sql: SELECT id, value FROM cat_tx_view ORDER BY id
+      expect: {rows: 1, data: [{id: 1, value: 31}]}
+    - session_id: cat_view_owner
+      sql: ROLLBACK
+  - name: Aborted view creation leaves no definition
+    sql: SELECT id, value FROM cat_tx_view ORDER BY id
+    expect: {error: true}
+  - name: Aborted view creation also rolls back preceding data
+    sql: SELECT id, value FROM cat_tx_progress ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: 12}, {id: 2, value: 22}]}
+  - name: Commit a view together with preceding data
+    steps:
+    - session_id: cat_view_owner
+      sql: START ACID TRANSACTION
+    - session_id: cat_view_owner
+      sql: UPDATE cat_tx_progress SET value = 32 WHERE id = 1
+    - session_id: cat_view_owner
+      sql: CREATE VIEW cat_tx_view AS SELECT id, value FROM cat_tx_progress WHERE id = 1
+    - session_id: cat_view_owner
+      sql: COMMIT
+  - name: Accepted view resolves with its accepted data
+    sql: SELECT id, value FROM cat_tx_view ORDER BY id
+    expect: {rows: 1, data: [{id: 1, value: 32}]}
+  - name: View replacement and drop follow the original savepoint
+    steps:
+    - session_id: cat_view_owner
+      sql: BEGIN
+    - session_id: cat_view_owner
+      sql: UPDATE cat_tx_progress SET value = 33 WHERE id = 1
+    - session_id: cat_view_owner
+      sql: SAVEPOINT declarations
+    - session_id: cat_view_owner
+      sql: CREATE OR REPLACE VIEW cat_tx_view AS SELECT id, value FROM cat_tx_progress WHERE id = 2
+    - session_id: cat_view_owner
+      sql: SELECT id, value FROM cat_tx_view ORDER BY id
+      expect: {rows: 1, data: [{id: 2, value: 22}]}
+    - session_id: cat_view_owner
+      sql: ROLLBACK TO SAVEPOINT declarations
+    - session_id: cat_view_owner
+      sql: SELECT id, value FROM cat_tx_view ORDER BY id
+      expect: {rows: 1, data: [{id: 1, value: 33}]}
+    - session_id: cat_view_owner
+      sql: DROP VIEW cat_tx_view
+    - session_id: cat_view_owner
+      sql: ROLLBACK
+  - name: Cached view query resolves the restored definition and data
+    sql: SELECT id, value FROM cat_tx_view ORDER BY id
+    expect: {rows: 1, data: [{id: 1, value: 32}]}
+  - name: Restart after accepting and rejecting view definitions
+    action: restart
+  - name: Restart retains only the accepted view definition and data
+    sql: SELECT id, value FROM cat_tx_view ORDER BY id
+    expect: {rows: 1, data: [{id: 1, value: 32}]}
+  - name: Fresh view creation waits for an existing reader
+    session_id: cat_view_wait_reader
+    setup:
+    - sql: DROP VIEW IF EXISTS cat_waiting_view
+    steps:
+    - session_id: cat_view_wait_reader
+      sql: START ACID TRANSACTION
+    - session_id: cat_view_wait_reader
+      sql: SELECT id, value FROM cat_tx_progress WHERE id = 1
+      expect: {rows: 1}
+    - session_id: cat_view_wait_writer
+      sql: CREATE VIEW cat_waiting_view AS SELECT id, value FROM cat_tx_progress WHERE id = 1
+      background: true
+      expect: {rows: 1}
+    - scm: (begin (sleep 0.05) true)
+      expect: {rows: 1}
+    - session_id: cat_view_wait_reader
+      sql: SELECT name FROM system.views WHERE database = 'memcp-tests' AND name = 'cat_waiting_view'
+      expect: {rows: 0}
+    - session_id: cat_view_wait_reader
+      sql: COMMIT
+    - wait_for_background: true
+    cleanup:
+    - sql: ROLLBACK
+  - name: Waiting view creation publishes its complete result
+    sql: SELECT id, value FROM cat_waiting_view
+    expect: {rows: 1, data: [{id: 1, value: 32}]}
+  - name: Fresh view removal waits for an existing reader
+    session_id: cat_view_wait_reader
+    steps:
+    - session_id: cat_view_wait_reader
+      sql: START ACID TRANSACTION
+    - session_id: cat_view_wait_reader
+      sql: SELECT id, value FROM cat_waiting_view
+      expect: {rows: 1}
+    - session_id: cat_view_wait_writer
+      sql: DROP VIEW cat_waiting_view
+      background: true
+      expect: {rows: 1}
+    - scm: (begin (sleep 0.05) true)
+      expect: {rows: 1}
+    - session_id: cat_view_wait_reader
+      sql: SELECT name FROM system.views WHERE database = 'memcp-tests' AND name = 'cat_waiting_view'
+      expect: {rows: 1}
+    - session_id: cat_view_wait_reader
+      sql: COMMIT
+    - wait_for_background: true
+    cleanup:
+    - sql: ROLLBACK
+    - sql: DROP VIEW IF EXISTS cat_waiting_view
+  - name: Waiting view removal leaves no readable definition
+    sql: SELECT id, value FROM cat_waiting_view
+    expect: {error: true}
+  - name: T-SQL data and relational catalog joins use the same pending definition
+    syntax: tsql
+    sql: |
+      BEGIN TRANSACTION;
+      UPDATE dbo.cat_tx_progress SET value = 45 WHERE id = 1;
+      ALTER TABLE dbo.cat_tx_progress ADD note INT DEFAULT 7;
+      SELECT id, value, note FROM dbo.cat_tx_progress ORDER BY id;
+      SELECT t.name AS table_name, c.ordinal, c.name AS column_name
+      FROM system_schema.tables t JOIN system_schema.[columns] c
+        ON c.schema_name = t.schema_name AND c.table_name = t.name
+      WHERE t.schema_name = 'memcp-tests' AND t.name = 'cat_tx_progress'
+      ORDER BY c.ordinal;
+      ROLLBACK TRANSACTION;
+    expect:
+      rows: 5
+      data:
+      - {id: 1, value: 45, note: 7}
+      - {id: 2, value: 22, note: 7}
+      - {table_name: cat_tx_progress, ordinal: 0, column_name: id}
+      - {table_name: cat_tx_progress, ordinal: 1, column_name: value}
+      - {table_name: cat_tx_progress, ordinal: 2, column_name: note}
+  - name: T-SQL rollback restores data seen by the other SQL frontend
+    sql: SELECT id, value FROM cat_tx_progress ORDER BY id
+    expect: {rows: 2, data: [{id: 1, value: 32}, {id: 2, value: 22}]}
+  - name: T-SQL rollback restores the authoritative column definitions
+    sql: SELECT ordinal, name FROM system_schema.columns WHERE schema_name = 'memcp-tests' AND table_name = 'cat_tx_progress' ORDER BY ordinal
+    expect: {rows: 2, data: [{ordinal: 0, name: id}, {ordinal: 1, name: value}]}
+  - name: Create an aggregate source incarnation
+    sql: CREATE TABLE cat_aggregate_owner (id INT PRIMARY KEY, value INT)
+  - name: Populate the original aggregate source
+    sql: INSERT INTO cat_aggregate_owner VALUES (1, 4)
+  - name: Warm a reusable aggregate on the original source
+    sql: SELECT SUM(value) AS total FROM cat_aggregate_owner
+    expect: {rows: 1, data: [{total: 4}]}
+  - name: Drop the aggregate source
+    sql: DROP TABLE cat_aggregate_owner
+  - name: Recreate the same schema under the same name
+    sql: CREATE TABLE cat_aggregate_owner (id INT PRIMARY KEY, value INT)
+  - name: Populate the replacement incarnation
+    sql: INSERT INTO cat_aggregate_owner VALUES (2, 9)
+  - name: Reused SQL never reads the predecessor aggregate
+    sql: SELECT SUM(value) AS total FROM cat_aggregate_owner
+    expect: {rows: 1, data: [{total: 9}]}
+  - name: The replacement has exactly its own rows
+    sql: SELECT id, value FROM cat_aggregate_owner ORDER BY id
+    expect: {rows: 1, data: [{id: 2, value: 9}]}
+  - name: Restart after replacing an aggregate source
+    action: restart
+  - name: Restart cannot resurrect the predecessor aggregate
+    sql: SELECT SUM(value) AS total FROM cat_aggregate_owner
+    expect: {rows: 1, data: [{total: 9}]}
+  - name: Warm a joined aggregate before transactional lifecycle cleanup
+    sql: >-
+      SELECT p.id, p.value, SUM(a.value) AS total
+      FROM cat_tx_progress p LEFT JOIN cat_aggregate_owner a ON a.id = p.id
+      GROUP BY p.id, p.value ORDER BY p.id
+    expect: {rows: 2, data: [{id: 1, value: 32, total: null}, {id: 2, value: 22, total: 9}]}
+  - name: Begin a data and cascading cache declaration rollback
+    session_id: cat_lifecycle_owner
+    sql: START TRANSACTION
+  - name: Update the joined source in the original transaction
+    session_id: cat_lifecycle_owner
+    sql: UPDATE cat_aggregate_owner SET value = 55 WHERE id = 2
+    expect: {affected_rows: 1}
+  - name: The joined aggregate sees its original pending row update
+    session_id: cat_lifecycle_owner
+    sql: >-
+      SELECT p.id, p.value, SUM(a.value) AS total
+      FROM cat_tx_progress p LEFT JOIN cat_aggregate_owner a ON a.id = p.id
+      GROUP BY p.id, p.value ORDER BY p.id
+    expect: {rows: 2, data: [{id: 1, value: 32, total: null}, {id: 2, value: 22, total: 55}]}
+  - name: Drop the joined source and its derived caches in the same transaction
+    session_id: cat_lifecycle_owner
+    sql: DROP TABLE cat_aggregate_owner
+  - name: The pending catalog contains no dropped joined source
+    session_id: cat_lifecycle_owner
+    sql: SELECT name FROM system_schema.tables WHERE schema_name = 'memcp-tests' AND name = 'cat_aggregate_owner'
+    expect: {rows: 0, data: []}
+  - name: Roll back the row update and cascading declaration cleanup
+    session_id: cat_lifecycle_owner
+    sql: ROLLBACK
+  - name: Rollback restores the complete joined aggregate result
+    sql: >-
+      SELECT p.id, p.value, SUM(a.value) AS total
+      FROM cat_tx_progress p LEFT JOIN cat_aggregate_owner a ON a.id = p.id
+      GROUP BY p.id, p.value ORDER BY p.id
+    expect: {rows: 2, data: [{id: 1, value: 32, total: null}, {id: 2, value: 22, total: 9}]}
+  - name: An update script error rolls back joined data and cascading cleanup together
+    sql: |
+      UPDATE cat_aggregate_owner SET value = 88 WHERE id = 2;
+      DROP TABLE cat_aggregate_owner;
+      SELECT missing_native_catalog_column FROM cat_tx_progress;
+    expect: {error: true}
+  - name: The failed script restores the complete joined aggregate result
+    sql: >-
+      SELECT p.id, p.value, SUM(a.value) AS total
+      FROM cat_tx_progress p LEFT JOIN cat_aggregate_owner a ON a.id = p.id
+      GROUP BY p.id, p.value ORDER BY p.id
+    expect: {rows: 2, data: [{id: 1, value: 32, total: null}, {id: 2, value: 22, total: 9}]}
+  - name: Restart after rejecting explicit and failed cascading declaration cleanup
+    action: restart
+  - name: Restart preserves the restored joined source and rows
+    sql: >-
+      SELECT p.id, p.value, SUM(a.value) AS total
+      FROM cat_tx_progress p LEFT JOIN cat_aggregate_owner a ON a.id = p.id
+      GROUP BY p.id, p.value ORDER BY p.id
+    expect: {rows: 2, data: [{id: 1, value: 32, total: null}, {id: 2, value: 22, total: 9}]}
+  - name: Restart restores every column of the rolled-back joined source
+    sql: SELECT ordinal, name FROM system_schema.columns WHERE schema_name = 'memcp-tests' AND table_name = 'cat_aggregate_owner' ORDER BY ordinal
+    expect: {rows: 2, data: [{ordinal: 0, name: id}, {ordinal: 1, name: value}]}
+  - name: Scoped partition checkpoint publishes its physical layout
+    setup:
+      - scm: '(settings "PartitionMaxDimensions" 1)'
+      - sql: DROP TABLE IF EXISTS cat_physical_checkpoint
+      - sql: CREATE TABLE cat_physical_checkpoint (id INT PRIMARY KEY, value TEXT) ENGINE=SAFE
+      - sql: INSERT INTO cat_physical_checkpoint VALUES (1, 'first'), (20, 'middle'), (40, 'last')
+    scm: |
+      (begin
+        (define relation (table "memcp-tests" false "cat_physical_checkpoint" false))
+        (rebuild relation true false)
+        (and (partitiontable relation (list "id" (list 15 30)))
+          (equal? (table_shard_count relation) 3)))
+    timeout: 5
+    expect: {data: [true]}
+    cleanup:
+      - scm: '(settings "PartitionMaxDimensions" 10)'
+  - name: Scoped checkpoint preserves every accepted row
+    sql: SELECT id, value FROM cat_physical_checkpoint ORDER BY id
+    expect: {rows: 3, data: [{id: 1, value: first}, {id: 20, value: middle}, {id: 40, value: last}]}
+  - name: Restart after a scoped physical catalog checkpoint
+    action: restart
+  - name: Scoped checkpoint restores the partition layout
+    scm: '(table_shard_count (table "memcp-tests" false "cat_physical_checkpoint" false))'
+    expect: {data: [3]}
+  - name: Scoped checkpoint restores every accepted row
+    sql: SELECT id, value FROM cat_physical_checkpoint ORDER BY id
+    expect: {rows: 3, data: [{id: 1, value: first}, {id: 20, value: middle}, {id: 40, value: last}]}
+cleanup:
+  - sql: DROP TABLE IF EXISTS cat_physical_checkpoint
+  - sql: DROP VIEW IF EXISTS cat_tx_view
+  - sql: DROP TABLE IF EXISTS cat_aggregate_owner
+  - sql: DROP TABLE IF EXISTS cat_tx_renamed
+  - sql: DROP TABLE IF EXISTS cat_tx_created
+  - sql: DROP TABLE IF EXISTS cat_tx_progress
+  - sql: DROP TABLE IF EXISTS sc_rename_old
+  - sql: DROP TABLE IF EXISTS sc_rename_new
+  - sql: DROP TABLE IF EXISTS sc_log
+  - sql: DROP TABLE IF EXISTS sc_child
+  - sql: DROP TABLE IF EXISTS sc_parent
+  - sql: DROP TABLE IF EXISTS sc_memory
+  - sql: DROP TABLE IF EXISTS sc_gone

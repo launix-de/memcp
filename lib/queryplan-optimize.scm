@@ -2220,6 +2220,33 @@ running DP over a wide projection-only graph. */
 			(make_join_optimizer_node kind left right predicates))
 		_ (neumann_fail "join_reorder" "malformed logical join plan"))))
 
+/* A relation extracted from a selected join keeps that tree's shape and
+predicate placement, but only the predicates which define the extracted relation.
+In particular, query-local filters cannot narrow a reusable intermediate. */
+(define join_optimizer_tree_project_predicates (lambda (tree expressions)
+	(begin
+		(define retained (lambda (predicates)
+			(filter predicates (lambda (predicate)
+				(contains? expressions (join_order_pred_expr predicate))))))
+		(match tree
+			((symbol join-leaf) alias) tree
+			((quote join-leaf) alias) tree
+			((symbol join-leaf) alias predicates)
+			(list (quote join-leaf) alias (retained predicates))
+			((quote join-leaf) alias predicates)
+			(list (quote join-leaf) alias (retained predicates))
+			((symbol join-node) kind left right predicates)
+			(make_join_optimizer_node kind
+				(join_optimizer_tree_project_predicates left expressions)
+				(join_optimizer_tree_project_predicates right expressions)
+				(retained predicates))
+			((quote join-node) kind left right predicates)
+			(make_join_optimizer_node kind
+				(join_optimizer_tree_project_predicates left expressions)
+				(join_optimizer_tree_project_predicates right expressions)
+				(retained predicates))
+			_ (neumann_fail "build_queryplan" "malformed logical join plan while projecting predicates")))))
+
 (define join_optimizer_leaf_predicates (lambda (leaf)
 	(match leaf
 		((symbol join-leaf) _alias) '()

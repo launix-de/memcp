@@ -23,6 +23,44 @@ metadata:
     storage_bandwidth_mbps: 1000
     storage_latency_ms: 5
 test_cases:
+- name: canonical-ordered-prejoin-builds-from-delegated-sources
+  sql: >-
+    SELECT k.id,SUM(b.id) AS total FROM big_items b JOIN operator_keys k ON b.id=k.id
+    GROUP BY k.id ORDER BY total DESC
+  expect:
+    rows: 4
+    data: [{id: 245000, total: 245000}, {id: 175000, total: 175000},
+      {id: 90000, total: 90000}, {id: 42000, total: 42000}]
+    cluster: {min_remote_shards: 1, plan_contains: [initialize_cache_table]}
+- name: private-ordered-prejoin-materializes-on-the-coordinator
+  session_id: cluster-private-prejoin
+  setup:
+  - sql: START ACID TRANSACTION
+  - sql: UPDATE operator_keys SET id=42001 WHERE id=42000
+  sql: >-
+    SELECT k.id,SUM(b.id) AS total FROM big_items b JOIN operator_keys k ON b.id=k.id
+    GROUP BY k.id ORDER BY total DESC
+  expect:
+    rows: 4
+    data: [{id: 245000, total: 245000}, {id: 175000, total: 175000},
+      {id: 90000, total: 90000}, {id: 42001, total: 42001}]
+    cluster: {min_remote_shards: 1, plan_contains: [with_materialized_table]}
+  cleanup:
+  - sql: ROLLBACK
+- name: private-prejoin-rollback-retains-the-complete-public-source
+  sql: SELECT id FROM operator_keys ORDER BY id
+  expect:
+    rows: 4
+    data: [{id: 42000}, {id: 90000}, {id: 175000}, {id: 245000}]
+- name: shared-prejoin-retains-complete-values-after-private-rollback
+  sql: >-
+    SELECT k.id,SUM(b.id) AS total FROM big_items b JOIN operator_keys k ON b.id=k.id
+    GROUP BY k.id ORDER BY total DESC
+  expect:
+    rows: 4
+    data: [{id: 245000, total: 245000}, {id: 175000, total: 175000},
+      {id: 90000, total: 90000}, {id: 42000, total: 42000}]
+    cluster: {plan_contains: [initialize_cache_table]}
 - name: concat-string-comparison-survives-delegation-mysql
   syntax: mysql
   sql: SELECT a.id FROM big_items a JOIN big_items b

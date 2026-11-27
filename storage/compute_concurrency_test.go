@@ -85,9 +85,9 @@ func TestComputeColumnRejectsRequestContextBeforePublishing(t *testing.T) {
 	defer cleanup()
 
 	CreateDatabase("compconc", false)
-	tbl, _ := CreateTable("compconc", "stateless", Memory, false)
-	tbl.CreateColumn("base", "INT", nil, nil)
-	tbl.CreateColumn("derived", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "compconc", "stateless", Memory, false)
+	tbl.CreateColumn(nil, "base", "INT", nil, nil)
+	tbl.CreateColumn(nil, "derived", "INT", nil, nil)
 	computor := scm.NewProcStruct(scm.Proc{
 		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("base")}),
 		Body: scm.NewSlice([]scm.Scmer{
@@ -122,9 +122,9 @@ func BenchmarkComputedColumnRepair(b *testing.B) {
 	defer databases.Remove("bench_stateless_compute")
 
 	CreateDatabase("bench_stateless_compute", false)
-	tbl, _ := CreateTable("bench_stateless_compute", "items", Memory, false)
-	tbl.CreateColumn("base", "INT", nil, nil)
-	tbl.CreateColumn("derived", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "bench_stateless_compute", "items", Memory, false)
+	tbl.CreateColumn(nil, "base", "INT", nil, nil)
+	tbl.CreateColumn(nil, "derived", "INT", nil, nil)
 	tbl.Insert([]string{"base"}, [][]scm.Scmer{{scm.NewInt(41)}}, nil, scm.NewNil(), false, nil)
 	if result := GetDatabase("bench_stateless_compute").rebuild(true, false, true); len(result.errors) > 0 {
 		b.Fatalf("rebuild errors: %v", result.errors)
@@ -206,16 +206,16 @@ func TestGlobalAggregateComputeAndInsertDoNotDeadlock(t *testing.T) {
 	defer setupComputeConcurrencyTest(t)()
 
 	CreateDatabase("compconc", false)
-	src, _ := CreateTable("compconc", "feature", Memory, false)
-	src.CreateColumn("uid", "INT", nil, nil)
-	src.CreateColumn("form", "TEXT", nil, nil)
-	src.CreateColumn("subid", "TEXT", nil, nil)
-	src.CreateColumn("k", "TEXT", nil, nil)
-	src.CreateColumn("value", "TEXT", nil, nil)
+	src, _ := CreateTable(nil, "compconc", "feature", Memory, false)
+	src.CreateColumn(nil, "uid", "INT", nil, nil)
+	src.CreateColumn(nil, "form", "TEXT", nil, nil)
+	src.CreateColumn(nil, "subid", "TEXT", nil, nil)
+	src.CreateColumn(nil, "k", "TEXT", nil, nil)
+	src.CreateColumn(nil, "value", "TEXT", nil, nil)
 
-	keytable, _ := CreateTable("compconc", ".feature:(1)", Memory, true)
-	keytable.CreateColumn("1", "ANY", nil, nil)
-	keytable.CreateColumn("counted", "ANY", nil, nil)
+	keytable, _ := CreateTable(nil, "compconc", ".feature:(1)", Memory, true)
+	keytable.CreateColumn(nil, "1", "ANY", nil, nil)
+	keytable.CreateColumn(nil, "counted", "ANY", nil, nil)
 	keytable.Insert([]string{"1"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 
 	computor := countCollapsedComputor()
@@ -300,8 +300,8 @@ func TestInsertSanitizationDoesNotMutateCallerRows(t *testing.T) {
 	defer setupComputeConcurrencyTest(t)()
 
 	CreateDatabase("compconc", false)
-	tbl, _ := CreateTable("compconc", "caller_rows", Memory, false)
-	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "compconc", "caller_rows", Memory, false)
+	tbl.CreateColumn(nil, "value", "INT", nil, nil)
 	row := []scm.Scmer{scm.NewString("7")}
 	values := [][]scm.Scmer{row}
 
@@ -392,7 +392,7 @@ func TestComputeColumnRetainsPayloadThroughCallbackAndPanic(t *testing.T) {
 
 func TestComputeColumnCancellationKeepsSharedAcquisition(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tcomputecancel", 1)
-	tbl.CreateColumn("cached", "INT", nil, nil)
+	tbl.CreateColumn(nil, "cached", "INT", nil, nil)
 	cluster := &nodeCluster{self: clusterMember{ID: "memcp://" + uuid.NewString()}, ctx: context.Background()}
 	cluster.initializeManager()
 	owner := "memcp://" + uuid.NewString()
@@ -445,7 +445,7 @@ func TestComputeColumnCancellationKeepsSharedAcquisition(t *testing.T) {
 
 func TestComputeColumnWaitsForStartedShardsAfterFailure(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tcomputedrain", 4)
-	tbl.CreateColumn("cached", "INT", nil, nil)
+	tbl.CreateColumn(nil, "cached", "INT", nil, nil)
 	RebuildTable(tbl, true, false)
 	if !tbl.beginManualRepartition() {
 		t.Fatal("manual repartition was not claimed")
@@ -507,10 +507,10 @@ func TestFilteredComputeColumnReusesValidValuesAcrossFilters(t *testing.T) {
 	defer setupComputeConcurrencyTest(t)()
 
 	CreateDatabase("compconc", false)
-	tbl, _ := CreateTable("compconc", "filtered", Memory, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("val", "INT", nil, nil)
-	tbl.CreateColumn("cached", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "compconc", "filtered", Memory, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "val", "INT", nil, nil)
+	tbl.CreateColumn(nil, "cached", "INT", nil, nil)
 	tbl.Insert([]string{"id", "val"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewInt(1)},
 		{scm.NewInt(2), scm.NewInt(2)},
@@ -590,10 +590,10 @@ func TestUnfilteredComputeColumnReusesCompletePreparationUntilMutation(t *testin
 	defer setupComputeConcurrencyTest(t)()
 
 	CreateDatabase("compconc", false)
-	tbl, _ := CreateTable("compconc", "unfiltered", Memory, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("val", "INT", nil, nil)
-	tbl.CreateColumn("cached", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "compconc", "unfiltered", Memory, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "val", "INT", nil, nil)
+	tbl.CreateColumn(nil, "cached", "INT", nil, nil)
 	tbl.Insert([]string{"id", "val"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewInt(10)},
 		{scm.NewInt(2), scm.NewInt(20)},
@@ -648,10 +648,10 @@ func TestOrderedComputeInvalidationReadsDeltaUnderShardLock(t *testing.T) {
 	defer setupComputeConcurrencyTest(t)()
 
 	CreateDatabase("compconc", false)
-	tbl, _ := CreateTable("compconc", "orcrace", Memory, false)
-	tbl.CreateColumn("grp", "INT", nil, nil)
-	tbl.CreateColumn("amount", "INT", nil, nil)
-	tbl.CreateColumn("running", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "compconc", "orcrace", Memory, false)
+	tbl.CreateColumn(nil, "grp", "INT", nil, nil)
+	tbl.CreateColumn(nil, "amount", "INT", nil, nil)
+	tbl.CreateColumn(nil, "running", "INT", nil, nil)
 	tbl.Insert([]string{"grp", "amount"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewInt(10)},
 	}, nil, scm.NewNil(), false, nil)
@@ -800,9 +800,9 @@ func TestComputeSetDoesNotUpgradeShardReadOwnership(t *testing.T) {
 func TestFilteredPreparationPreservesMainDeltaAndNullValues(t *testing.T) {
 	defer setupComputeConcurrencyTest(t)()
 	CreateDatabase("compconc", false)
-	tbl, _ := CreateTable("compconc", "filtered_main", Memory, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("val", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "compconc", "filtered_main", Memory, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "val", "INT", nil, nil)
 	tbl.Insert([]string{"id", "val"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewInt(10)}, {scm.NewInt(2), scm.NewInt(20)},
 		{scm.NewInt(3), scm.NewNil()}, {scm.NewInt(4), scm.NewInt(40)},
@@ -813,7 +813,7 @@ func TestFilteredPreparationPreservesMainDeltaAndNullValues(t *testing.T) {
 	tbl.Insert([]string{"id", "val"}, [][]scm.Scmer{
 		{scm.NewInt(5), scm.NewNil()},
 	}, nil, scm.NewNil(), false, nil)
-	tbl.CreateColumn("cached", "INT", nil, nil)
+	tbl.CreateColumn(nil, "cached", "INT", nil, nil)
 	var calls atomic.Int64
 	computor := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		calls.Add(1)
@@ -855,11 +855,11 @@ func TestComputeColumnWaitsForRequestedPublication(t *testing.T) {
 		t.Run(fmt.Sprintf("filtered=%v", filtered), func(t *testing.T) {
 			defer setupComputeConcurrencyTest(t)()
 			CreateDatabase("compconc", false)
-			tbl, _ := CreateTable("compconc", "preparation_completion", Memory, false)
-			tbl.CreateColumn("id", "INT", nil, nil)
+			tbl, _ := CreateTable(nil, "compconc", "preparation_completion", Memory, false)
+			tbl.CreateColumn(nil, "id", "INT", nil, nil)
 			tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 			RebuildTable(tbl, true, false)
-			tbl.CreateColumn("cached", "INT", nil, nil)
+			tbl.CreateColumn(nil, "cached", "INT", nil, nil)
 			var source, calls atomic.Int64
 			source.Store(1)
 			first, retry := make(chan struct{}), make(chan struct{})
@@ -944,13 +944,13 @@ func TestComputeColumnWaitsForRequestedPublication(t *testing.T) {
 func TestFilteredPreparationRejectsInvalidatedPublication(t *testing.T) {
 	defer setupComputeConcurrencyTest(t)()
 	CreateDatabase("compconc", false)
-	tbl, _ := CreateTable("compconc", "filtered_publication", Memory, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "compconc", "filtered_publication", Memory, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 	if result := GetDatabase("compconc").rebuild(true, false, true); len(result.errors) > 0 {
 		t.Fatalf("rebuild: %v", result.errors)
 	}
-	tbl.CreateColumn("cached", "INT", nil, nil)
+	tbl.CreateColumn(nil, "cached", "INT", nil, nil)
 	var source, calls atomic.Int64
 	source.Store(1)
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -1002,9 +1002,9 @@ func TestFilteredPreparationRejectsInvalidatedPublication(t *testing.T) {
 func TestFilteredPreparationPanicLeavesValuesLazy(t *testing.T) {
 	defer setupComputeConcurrencyTest(t)()
 	CreateDatabase("compconc", false)
-	tbl, _ := CreateTable("compconc", "filtered_panic", Memory, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("cached", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "compconc", "filtered_panic", Memory, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "cached", "INT", nil, nil)
 	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 	var fail atomic.Bool
 	fail.Store(true)

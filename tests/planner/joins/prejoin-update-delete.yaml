@@ -24,6 +24,10 @@ setup: []
 
 # These fixtures are verified by subsequent cases in this suite.
 cleanup:
+  - sql: DROP TABLE IF EXISTS pj_pending_b
+  - sql: DROP TABLE IF EXISTS pj_pending_a
+  - sql: "DROP TABLE IF EXISTS pj_lifecycle_b"
+  - sql: "DROP TABLE IF EXISTS pj_lifecycle_a"
   - sql: "DROP TABLE IF EXISTS ux_invoice"
   - sql: "DROP TABLE IF EXISTS ux_order"
   - sql: "DROP TABLE IF EXISTS ux_purchase"
@@ -168,3 +172,377 @@ test_cases:
       data:
         - ID: 2
           typ: 20
+
+  # Canonical cache lifetime is separate from a using transaction.
+  - name: Prejoin lifecycle fixture has keys and an ordered grouped join
+    sql: EXPLAIN SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY
+      a.id ORDER BY total,a.id
+    setup:
+    - sql: DROP TABLE IF EXISTS pj_lifecycle_b
+    - sql: DROP TABLE IF EXISTS pj_lifecycle_a
+    - sql: CREATE TABLE pj_lifecycle_a(id INT PRIMARY KEY,v INT)
+    - sql: CREATE TABLE pj_lifecycle_b(id INT PRIMARY KEY,aid INT,v INT)
+    - sql: INSERT INTO pj_lifecycle_a VALUES(1,10),(2,20)
+    - sql: INSERT INTO pj_lifecycle_b VALUES(1,1,3),(2,1,4),(3,2,5)
+    expect:
+      contains:
+      - initialize_cache_table
+      - with_materialized_table
+  - name: Begin cold prejoin snapshot
+    sql: START ACID TRANSACTION
+    session_id: pj_owner
+  - name: Cold private prejoin returns complete values
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    session_id: pj_owner
+    expect:
+      rows: 2
+      data:
+      - id: 2
+        total: 5
+      - id: 1
+        total: 7
+  - name: Roll back cold prejoin reader
+    sql: ROLLBACK
+    session_id: pj_owner
+  - name: Concurrent canonical prejoin initialization 1
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    parallel: prejoin_lifecycle_cold
+    expect:
+      rows: 2
+      data:
+      - id: 2
+        total: 5
+      - id: 1
+        total: 7
+  - name: Concurrent canonical prejoin initialization 2
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    parallel: prejoin_lifecycle_cold
+    expect:
+      rows: 2
+      data:
+      - id: 2
+        total: 5
+      - id: 1
+        total: 7
+  - name: Concurrent canonical prejoin initialization 3
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    parallel: prejoin_lifecycle_cold
+    expect:
+      rows: 2
+      data:
+      - id: 2
+        total: 5
+      - id: 1
+        total: 7
+  - name: Concurrent canonical prejoin initialization 4
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    parallel: prejoin_lifecycle_cold
+    expect:
+      rows: 2
+      data:
+      - id: 2
+        total: 5
+      - id: 1
+        total: 7
+  - name: Concurrent canonical prejoin initialization 5
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    parallel: prejoin_lifecycle_cold
+    expect:
+      rows: 2
+      data:
+      - id: 2
+        total: 5
+      - id: 1
+        total: 7
+  - name: Concurrent canonical prejoin initialization 6
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    parallel: prejoin_lifecycle_cold
+    expect:
+      rows: 2
+      data:
+      - id: 2
+        total: 5
+      - id: 1
+        total: 7
+  - name: Canonical prejoin publishes every source maintenance trigger
+    scm: |-
+      (begin
+        (define maintenance (lambda (source)
+          (filter (get_assoc (show "memcp-tests" source true) "triggers")
+            (lambda (trigger) (equal? (substr (get_assoc trigger "name") 0 9) ".prejoin:")))))
+        (define left (maintenance "pj_lifecycle_a"))
+        (define right (maintenance "pj_lifecycle_b"))
+        (if (and (equal? (count left) 5) (equal? (count right) 5)) true
+          (error (concat "incomplete prejoin triggers: " (serialize (list left right))))))
+    expect:
+      result: true
+  - name: Begin warm private prejoin snapshot
+    sql: START ACID TRANSACTION
+    session_id: pj_owner
+  - name: Private payload update follows original transaction
+    sql: UPDATE pj_lifecycle_b SET v=30 WHERE id=1
+    session_id: pj_owner
+  - name: Warm private prejoin sees its own payload
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    session_id: pj_owner
+    expect:
+      rows: 2
+      data:
+      - id: 2
+        total: 5
+      - id: 1
+        total: 34
+  - name: Private ordered join materializes complete expressions before OFFSET and LIMIT
+    session_id: pj_owner
+    sql: SELECT a.id,b.id AS bid,b.v FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id ORDER BY (a.v+b.v)
+      DESC LIMIT 2 OFFSET 1
+    expect:
+      rows: 2
+      data:
+      - id: 2
+        bid: 3
+        v: 5
+      - id: 1
+        bid: 2
+        v: 4
+  - name: Private grouped join retains an unselected ordering aggregate
+    session_id: pj_owner
+    sql: SELECT a.id FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER BY SUM(b.v) DESC
+    expect:
+      rows: 2
+      data:
+      - id: 1
+      - id: 2
+  - name: Private range predicate filters the original transaction values
+    session_id: pj_owner
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id WHERE b.v>=5 GROUP
+      BY a.id ORDER BY total
+    expect:
+      rows: 2
+      data:
+      - id: 2
+        total: 5
+      - id: 1
+        total: 30
+  - name: Private grouped projection retains primary-key-dependent values
+    session_id: pj_owner
+    sql: SELECT a.id,a.v AS label,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP
+      BY a.id ORDER BY total,a.v
+    expect:
+      rows: 2
+      data:
+      - id: 2
+        label: 20
+        total: 5
+      - id: 1
+        label: 10
+        total: 34
+  - name: Observer retains complete committed join values
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    expect:
+      rows: 2
+      data:
+      - id: 2
+        total: 5
+      - id: 1
+        total: 7
+  - name: Private insertion extends join membership
+    sql: INSERT INTO pj_lifecycle_b VALUES(4,2,20)
+    session_id: pj_owner
+  - name: Private deletion removes join membership
+    sql: DELETE FROM pj_lifecycle_b WHERE id=2
+    session_id: pj_owner
+  - name: Private join combines update insert and delete
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    session_id: pj_owner
+    expect:
+      rows: 2
+      data:
+      - id: 2
+        total: 25
+      - id: 1
+        total: 30
+  - name: Roll back warm prejoin user
+    sql: ROLLBACK
+    session_id: pj_owner
+  - name: Shared prejoin survives user rollback with original values
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    expect:
+      rows: 2
+      data:
+      - id: 2
+        total: 5
+      - id: 1
+        total: 7
+  - name: Committed insertion after rollback still fires maintenance
+    sql: INSERT INTO pj_lifecycle_b VALUES(4,2,20)
+  - name: Maintenance remains complete after rollback
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        total: 7
+      - id: 2
+        total: 25
+  - name: Begin prejoin savepoint transaction
+    sql: START ACID TRANSACTION
+    session_id: pj_owner
+  - name: Save prejoin transaction boundary
+    sql: SAVEPOINT pj_before
+    session_id: pj_owner
+  - name: Private update changes join partner
+    sql: UPDATE pj_lifecycle_b SET aid=2,v=8 WHERE id=1
+    session_id: pj_owner
+  - name: Private reordered join sees changed partner
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    session_id: pj_owner
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        total: 4
+      - id: 2
+        total: 33
+  - name: Rewind private prejoin values
+    sql: ROLLBACK TO SAVEPOINT pj_before
+    session_id: pj_owner
+  - name: Rewound private join sees complete predecessor
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    session_id: pj_owner
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        total: 7
+      - id: 2
+        total: 25
+  - name: Update prejoin source before commit
+    sql: UPDATE pj_lifecycle_b SET v=8 WHERE id=1
+    session_id: pj_owner
+  - name: Commit original source transaction
+    sql: COMMIT
+    session_id: pj_owner
+  - name: Shared prejoin observes accepted source values
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        total: 12
+      - id: 2
+        total: 25
+  - name: Eviction retires complete prejoin dependency sets
+    scm: |-
+      (begin
+        (sleep 1.1)
+        (settings "MaxRamBytes" 1)
+        (settings "MaxRamBytes" 0)
+        (and (equal? (count (get_assoc (show "memcp-tests" "pj_lifecycle_a" true) "triggers")) 0)
+          (equal? (count (get_assoc (show "memcp-tests" "pj_lifecycle_b" true) "triggers")) 0)))
+    expect:
+      result: true
+  - name: Source mutation after eviction has no stale cache target
+    sql: INSERT INTO pj_lifecycle_b VALUES(5,1,9)
+  - name: Evicted prejoin rebuilds complete current values
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        total: 21
+      - id: 2
+        total: 25
+  - name: Restart reconstructs caches from committed source values
+    action: restart
+  - name: Restart retains accepted data without private cache values
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_lifecycle_a a JOIN pj_lifecycle_b b ON b.aid=a.id GROUP BY a.id ORDER
+      BY total,a.id
+    expect:
+      rows: 2
+      data:
+      - id: 1
+        total: 21
+      - id: 2
+        total: 25
+  # Cold publication must also respect decisions staged before registration.
+  - name: begin insertion before cache exists
+    session_id: pending_owner
+    sql: START ACID TRANSACTION
+    setup: &id001
+    - sql: DROP TABLE IF EXISTS pj_pending_b
+    - sql: DROP TABLE IF EXISTS pj_pending_a
+    - sql: CREATE TABLE pj_pending_a(id INT PRIMARY KEY)
+    - sql: CREATE TABLE pj_pending_b(id INT PRIMARY KEY,aid INT,v INT)
+    - sql: INSERT INTO pj_pending_a VALUES(1)
+    - sql: INSERT INTO pj_pending_b VALUES(1,1,3)
+  - name: stage insertion before maintenance exists
+    session_id: pending_owner
+    sql: INSERT INTO pj_pending_b VALUES(2,1,7)
+  - name: Observer reads the committed predecessor while cold admission is deferred
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_pending_a a JOIN pj_pending_b b ON b.aid=a.id GROUP BY a.id ORDER BY
+      total
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        total: 3
+  - name: No partial maintenance is published before earlier source decisions
+    scm: (equal? (count (get_assoc (show "memcp-tests" "pj_pending_b" true) "triggers")) 0)
+    expect:
+      result: true
+  - name: accept insertion after cache initialization
+    session_id: pending_owner
+    sql: COMMIT
+  - name: cache includes the accepted insertion
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_pending_a a JOIN pj_pending_b b ON b.aid=a.id GROUP BY a.id ORDER BY
+      total
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        total: 10
+  - name: Shared initialization resumes after the earlier source decision
+    scm: (> (count (get_assoc (show "memcp-tests" "pj_pending_b" true) "triggers")) 0)
+    expect:
+      result: true
+  - name: Failed first consumer rolls back its own transaction
+    setup: *id001
+    scm: |-
+      (begin
+        (define s (newsession))
+        (define sql "SELECT a.id,SUM(b.v) AS total FROM pj_pending_a a JOIN pj_pending_b b ON b.aid=a.id GROUP BY a.id ORDER BY total")
+        (try (lambda () (begin
+          (with_autocommit s nil nil sql (lambda (tx)
+            (sql_execute_formula s tx (sql_queryplan_compile_formula tx
+              (parse_sql "memcp-tests" sql nil s tx))
+              (lambda (row) (error "expected client failure after canonical initialization"))
+              (lambda (fields) true))))
+          false)) (lambda (failure)
+            (strlike (concat failure) "%expected client failure after canonical initialization%"))))
+    expect:
+      result: true
+  - name: Canonical rows outlive a failed first consumer
+    sql: SELECT a.id,SUM(b.v) AS total FROM pj_pending_a a JOIN pj_pending_b b ON b.aid=a.id GROUP BY a.id ORDER BY
+      total
+    expect:
+      rows: 1
+      data:
+      - id: 1
+        total: 3

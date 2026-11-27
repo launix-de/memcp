@@ -875,3 +875,64 @@ func TestCountProcedureCallUsesResultLength(t *testing.T) {
 		}
 	}
 }
+
+type procSizeMutablePayload struct{ bytes uint }
+
+func (p *procSizeMutablePayload) ComputeSize() uint { return p.bytes }
+
+func TestProcComputeSizeRetainsDynamicPayloadAccounting(t *testing.T) {
+	payload := &procSizeMutablePayload{bytes: 1024}
+	value := NewProcStruct(Proc{Params: NewSlice(nil), Body: NewSlice([]Scmer{
+		NewSymbol("quote"), NewAny(payload),
+	}), OptimizerMeta: &ProcOptimizerMeta{}})
+	before := ComputeSize(value)
+	payload.bytes += 8192
+	if got := ComputeSize(value); got != before+8192 {
+		t.Fatalf("retained source sizing hid mutable payload growth: before=%d after=%d", before, got)
+	}
+}
+
+func TestProcComputeSizeRetainsNestedSpecializationAccounting(t *testing.T) {
+	child := NewProcStruct(Proc{Params: NewSlice([]Scmer{NewSymbol("x")}), Body: NewSymbol("x"),
+		NumVars: 1, OptimizerMeta: &ProcOptimizerMeta{}})
+	parent := NewProcStruct(Proc{Params: NewSlice(nil), Body: NewSlice([]Scmer{
+		NewSymbol("quote"), child,
+	}), OptimizerMeta: &ProcOptimizerMeta{}})
+	before := ComputeSize(parent)
+	variant := NewProcStruct(Proc{Params: NewSlice([]Scmer{NewSymbol("x")}),
+		Body: NewString(strings.Repeat("x", 16384)), NumVars: 1})
+	child.Proc().OptimizerMeta.specializations.Store(&procSpecializationSnapshot{
+		variants: map[procSpecializationKey]Scmer{{paramMask: 1}: variant},
+	})
+	if got := ComputeSize(parent); got < before+16384 {
+		t.Fatalf("retained source sizing hid nested specialization growth: before=%d after=%d", before, got)
+	}
+}
+
+func TestProcComputeSizeConcurrentSourcePublication(t *testing.T) {
+	body := make([]Scmer, 512)
+	for i := range body {
+		body[i] = NewSlice([]Scmer{NewSymbol("list"), NewString("retained immutable source"), NewInt(int64(i))})
+	}
+	value := NewProcStruct(Proc{Params: NewSlice(nil), Body: NewSlice(body), OptimizerMeta: &ProcOptimizerMeta{}})
+	start := make(chan struct{})
+	sizes := make(chan uint, 32)
+	var group sync.WaitGroup
+	for range 32 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			sizes <- ComputeSize(value)
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(sizes)
+	want := ComputeSize(value)
+	for got := range sizes {
+		if got != want {
+			t.Fatalf("concurrent source sizing changed the retained footprint: %d != %d", got, want)
+		}
+	}
+}

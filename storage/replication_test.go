@@ -40,9 +40,9 @@ func TestReplicationUniqueAcquisitionAllowsCollidingConfigWrite(t *testing.T) {
 	source.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	CreateDatabase("system_unique_acquisition", false)
 	t.Cleanup(func() { databases.Remove("system_unique_acquisition") })
-	config, _ := CreateTable("system_unique_acquisition", "config", Memory, false)
+	config, _ := CreateTable(nil, "system_unique_acquisition", "config", Memory, false)
 	for _, name := range []string{"node", "key", "value"} {
-		config.CreateColumn(name, "TEXT", nil, nil)
+		config.CreateColumn(nil, name, "TEXT", nil, nil)
 	}
 	config.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"node", "key"}}}
 	r := &replicationManager{id: "replica-test", master: true, config: config, cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
@@ -242,7 +242,7 @@ func TestReplicationOrderedMutationDrainsNativeTransactionBeforeHandover(t *test
 			tbl.scan_order(tx, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil, nil, trueCondition(),
 				[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{order}, 0, 0, 1,
 				[]string{"$update"}, scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-					if handover := cell.ownstate.TryHandover(cell.writesDrained); handover != nil {
+					if handover := cell.ownstate.TryHandover(cell.writesDrained, false); handover != nil {
 						handover.Release()
 						t.Error("ownership handover was admitted during the mutation callback")
 					}
@@ -252,7 +252,7 @@ func TestReplicationOrderedMutationDrainsNativeTransactionBeforeHandover(t *test
 			if tx.IsVisible(shard, 0) {
 				t.Fatal("transaction did not delete the first row")
 			}
-			if handover := cell.ownstate.TryHandover(cell.writesDrained); handover != nil {
+			if handover := cell.ownstate.TryHandover(cell.writesDrained, false); handover != nil {
 				handover.Release()
 				t.Fatal("native transaction did not defer ownership handover")
 			}
@@ -261,7 +261,7 @@ func TestReplicationOrderedMutationDrainsNativeTransactionBeforeHandover(t *test
 			if shard.deletions.Count() != 0 {
 				t.Fatal("rollback did not restore the ordered deletion")
 			}
-			handover := cell.ownstate.TryHandover(cell.writesDrained)
+			handover := cell.ownstate.TryHandover(cell.writesDrained, false)
 			if handover == nil {
 				t.Fatal("completed transaction retained write admission")
 			}
@@ -318,7 +318,7 @@ func TestReplicationOrderedRecSetKeepsHistoricalGeneration(t *testing.T) {
 	if called || !strings.Contains(fmt.Sprint(failure), "generation changed; retry statement") {
 		t.Fatalf("historical mutation called = %v, failure = %v", called, failure)
 	}
-	handover := cell.ownstate.TryHandover(cell.writesDrained)
+	handover := cell.ownstate.TryHandover(cell.writesDrained, false)
 	if handover == nil {
 		t.Fatal("content mismatch leaked its write capability")
 	}
@@ -487,12 +487,15 @@ func TestReplicationWebSocketRejectsUnsupportedProtocol(t *testing.T) {
 
 func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {
 	table, _ := createDurabilityTestTable(t, "treplicareclaim", 3)
-	empty, _ := CreateTable(table.schema.Name, "empty", Safe, false)
-	empty.CreateColumn("id", "INT", nil, nil)
+	empty, _ := CreateTable(nil, table.schema.Name, "empty", Safe, false)
+	empty.CreateColumn(nil, "id", "INT", nil, nil)
 	r := &replicationManager{id: "slave", cells: make(map[string]*replicaCell), directory: replicaDirectory{Records: make(map[string]replicaRecord)}}
 	schema := mosiResource{Database: table.schema.Name}
 	r.resourceCell(schema).ownstate.Initialize(mosi.M)
 	r.schemaShards(table.schema, r.id, true)
+	for _, shard := range table.schema.catalog.live {
+		r.shardCell(shard).ownstate.RestoreBackend(mosi.M)
+	}
 	for _, item := range table.schema.tables.GetAll() {
 		for _, shard := range item.ActiveShards() {
 			r.shardCell(shard).ownstate.RestoreBackend(mosi.M)
@@ -500,6 +503,11 @@ func TestReplicationReclaimIncludesEmptyAndColdShards(t *testing.T) {
 	}
 	if !r.reclaimDatabase(table.schema.Name) {
 		t.Fatal("current backend-only exclusive generations were not reclaimed")
+	}
+	for _, shard := range table.schema.catalog.live {
+		if r.shardCell(shard).ownstate.Phase() != mosi.M {
+			t.Fatalf("catalog %s: native partition was not acquired", shard.t.Name)
+		}
 	}
 	for _, item := range table.schema.tables.GetAll() {
 		for _, shard := range item.ActiveShards() {
@@ -633,7 +641,7 @@ func TestReplicationParallelReadsIgnoreControlLocks(t *testing.T) {
 		// Hold every control-plane lock, including closed writer admission.
 		// Already-authorized reads must still complete on their own snapshots.
 		r.mu.Lock()
-		handover := c.ownstate.TryHandover(c.writesDrained)
+		handover := c.ownstate.TryHandover(c.writesDrained, true)
 		if handover == nil {
 			t.Fatal("unexpected active write")
 		}
@@ -871,6 +879,7 @@ func TestReplicationSnapshotKeepsGenerationAndFiles(t *testing.T) {
 	}
 	cell := r.resourceCell(resource)
 	original := cell.current.Load()
+	r.schemaShards(table.schema, r.id, true)
 	cell.ownstate.Initialize(mosi.S)
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
@@ -1132,6 +1141,26 @@ func TestReplicationImportDefersCleanup(t *testing.T) {
 	if err := transfer.packet(packet); err != nil {
 		t.Fatal(err)
 	}
+	// A completed column is visible before its enclosing shard transfer ends.
+	// The receiver keeps its GC lease until the whole transfer is admitted or
+	// aborted; an opened, still-private writer is not a published column.
+	var incoming, packed bytes.Buffer
+	(&StorageSCMER{values: []scm.Scmer{scm.NewString("incoming")}}).Serialize(&incoming)
+	writer := gzip.NewWriter(&packed)
+	if _, err := writer.Write(incoming.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	packet.Kind, packet.Payload = "chunk", packed.Bytes()
+	if err := transfer.packet(packet); err != nil {
+		t.Fatal(err)
+	}
+	packet.Kind, packet.Payload = "object_end", nil
+	if err := transfer.packet(packet); err != nil {
+		t.Fatal(err)
+	}
 	if blobs, shards, complete := CleanDatabase(table.schema); blobs != 0 || shards != 0 || complete {
 		t.Fatalf("cleanup ran through a private transfer: %d blobs, %d shards, complete=%v", blobs, shards, complete)
 	}
@@ -1139,6 +1168,9 @@ func TestReplicationImportDefersCleanup(t *testing.T) {
 	if missing, ok := reader.(interface{ Missing() bool }); ok && missing.Missing() {
 		reader.Close()
 		t.Fatal("cleanup deleted the incoming content")
+	}
+	if got, err := io.ReadAll(reader); err != nil || !bytes.Equal(got, incoming.Bytes()) {
+		t.Fatal("cleanup changed the completed incoming column", err)
 	}
 	reader.Close()
 	transfer.abort()
@@ -1177,7 +1209,7 @@ func TestReplicationBackupBackpressureDoesNotHoldActiveWriter(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("backup did not reach the transport")
 	}
-	writer, wait := cell.ownstate.TryWrite(nil, false)
+	writer, wait := cell.ownstate.TryWrite(nil, false, nil)
 	if writer == nil || wait != nil {
 		t.Fatal("network backpressure retained local writer admission")
 	}
@@ -1472,7 +1504,7 @@ func TestReplicationCheckpointRoutesBeforeActivePublication(t *testing.T) {
 	tbl.Shards = []*storageShard{successor}
 	tbl.publishSchemaTopology(ShardModeFree, tbl.Shards, tbl.PDimensions)
 	tbl.mu.Unlock()
-	tbl.schema.save()
+	tbl.schema.save(nil, nil)
 	// Schema publication itself must establish the route, before capture can
 	// advertise it or another peer can declare an independent successor cell.
 	if r.lookupCell(r.shardResource(successor)) != cell || r.resourceKey(resource) != r.shardResource(successor).key() {
@@ -1525,12 +1557,89 @@ func TestReplicationRequestLearnsOnlyOwnerForwarding(t *testing.T) {
 	}
 }
 
+func TestReplicationDeclaredSuccessorRetainsExistingReaderAuthority(t *testing.T) {
+	r := replicaRecoveryFixture()
+	from := mosiResource{Database: "tenant", Table: "items", Shard: uuid.NewString()}
+	to := from
+	to.Shard = uuid.NewString()
+	cell := r.resourceCell(from)
+	cell.ownstate.Initialize(mosi.S)
+	r.updateRecord(from, func(record *replicaRecord) bool {
+		record.Owner, record.State, record.Epoch = "client", "S", 9
+		record.Readers = map[string]bool{r.id: true}
+		return true
+	})
+	// A catalog declaration can introduce the successor's UUID before its
+	// first write request. It must still share its predecessor's revocation
+	// directory, including readers which already hold the predecessor payload.
+	r.declareShardResource(to, "client", false)
+	if err := r.acceptRequestRoutes("client", mosiPacket{Kind: "write", Resource: to, Forwards: []shardForward{{from, to}}}); err != nil {
+		t.Fatal(err)
+	}
+	if r.resourceCell(from) != r.resourceCell(to) || r.canonicalResource(from) != to {
+		t.Fatal("declared successor split the existing native authority")
+	}
+	record := r.directory.Records[to.key()]
+	if record.Epoch != 9 || !record.Readers[r.id] || cell.resolved().ownstate.Phase() != mosi.S {
+		t.Fatal("successor publication lost existing reader revocation rights or changed permission")
+	}
+}
+
+func TestReplicationRevokesReadsBeforeInvalidatingDependentCaches(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "replica-revocation-cache-order", 0)
+	r := replicaRecoveryFixture()
+	resource := tbl.ActiveShards()[0].replicationResource()
+	cell := r.declareShard(tbl.ActiveShards()[0], r.id, true)
+	cell.ownstate.Initialize(mosi.S)
+	generation := tbl.cacheGeneration.Load()
+	// Hold dependency traversal after its generation publication, allowing a
+	// reader to inspect the exact cache-invalidation/permission boundary.
+	tbl.mu.Lock()
+	done := make(chan struct{})
+	go func() { defer close(done); r.publishLocal(resource, mosi.IO) }()
+	defer func() { tbl.mu.Unlock(); <-done }()
+	deadline := time.Now().Add(time.Second)
+	for tbl.cacheGeneration.Load() == generation {
+		if time.Now().After(deadline) {
+			t.Fatal("cache invalidation did not reach its dependency traversal")
+		}
+		runtime.Gosched()
+	}
+	if cell.ownstate.Phase() != mosi.IO {
+		t.Fatal("cache invalidation still allowed reinitialization from revoked local payload")
+	}
+}
+
+func TestReplicationRequestResolvesRetainedCheckpointWithoutReversingCurrent(t *testing.T) {
+	r := replicaRecoveryFixture()
+	old := mosiResource{Database: "example", Table: "items", Shard: uuid.NewString()}
+	current, checkpoint := old, old
+	current.Shard, checkpoint.Shard = uuid.NewString(), uuid.NewString()
+	cell := r.resourceCell(old)
+	cell.ownstate.Initialize(mosi.M)
+	r.updateRecord(old, func(record *replicaRecord) bool {
+		record.Owner, record.State, record.Epoch = r.id, "M", 9
+		return true
+	})
+	r.forwardResource(old, current)
+	if err := r.acceptRequestRoutes("former-owner", mosiPacket{Resource: checkpoint, Forwards: []shardForward{{old, checkpoint}}}); err != nil {
+		t.Fatal(err)
+	}
+	if r.canonicalResource(old) != current || r.canonicalResource(checkpoint) != current || r.lookupCell(checkpoint) != cell {
+		t.Fatal("a retained checkpoint reversed the current UUID authority")
+	}
+	if record := r.directory.Records[current.key()]; record.Owner != r.id || record.Epoch != 9 || cell.ownstate.Phase() != mosi.M {
+		t.Fatal("resolving a retained checkpoint changed ownership or permissions")
+	}
+}
+
 func TestReplicationSharedSchemaKeepsNewerShard(t *testing.T) {
 	tbl, engine := createDurabilityTestTable(t, "replica_shared_schema_successor", 3)
 	RebuildTable(tbl, true, false)
 	older := append([]byte(nil), engine.ReadSchema()...)
 	r := replicaRecoveryFixture()
 	r.cluster = &nodeCluster{manager: r, self: clusterMember{ID: r.id}}
+	r.schemaShards(tbl.schema, r.id, true)
 	previous := replication.Swap(r)
 	defer replication.Store(previous)
 	source := tbl.ActiveShards()[0]
@@ -1542,7 +1651,7 @@ func TestReplicationSharedSchemaKeepsNewerShard(t *testing.T) {
 	}
 	cell.current.Store(successor)
 	cell.ownstate.Publish(mosi.O)
-	if err := r.installSchema("peer", tbl.schema.Name, engine, older); err != nil {
+	if err := r.installSchema("peer", tbl.schema.Name, engine, older, false); err != nil {
 		t.Fatal(err)
 	}
 	if current := tbl.schema.tables.Get(tbl.Name).ActiveShards()[0]; current != successor || cell.current.Load() != successor {
@@ -1699,7 +1808,7 @@ func TestReplicationRejectsSlaveSchemaCode(t *testing.T) {
 		t.Fatal("slave-supplied trigger executed")
 	}
 	// The same native codec remains available to local/trusted code authorities.
-	if err := r.installSchema(r.id, resource.Database, tbl.schema.persistence, data); err != nil {
+	if err := r.installSchema(r.id, resource.Database, tbl.schema.persistence, data, false); err != nil {
 		t.Fatal(err)
 	}
 	trusted := GetDatabase("memcp-tests").GetTable("items")
@@ -1875,7 +1984,7 @@ func TestReplicationColumnTransferRejectsComputeStorage(t *testing.T) {
 
 	// An ordinary locally created schema must not make the manifest exemption
 	// usable as a computed-column upload, either.
-	table.CreateColumn(blobManifestColumn, "INT", nil, nil)
+	table.CreateColumn(nil, blobManifestColumn, "INT", nil, nil)
 	header.Kind, header.Payload, header.Object = "object", nil, blobManifestColumn
 	other := &replicaImport{header: header, engine: engine, untrusted: true}
 	defer other.abort()
@@ -1945,7 +2054,7 @@ func TestReplicationCommitRacesHandoverAdmission(t *testing.T) {
 		committed := make(chan error, 1)
 		go func() {
 			<-start
-			h, err := cell.ownstate.BeginHandover(ctx, cell.drainWrites)
+			h, err := cell.ownstate.BeginHandover(ctx, cell.drainWrites, true)
 			if err == nil {
 				h.Release()
 			}
@@ -2102,7 +2211,7 @@ func TestMosiDeclarationOwnsItsBytesBeforeTask(t *testing.T) {
 
 func TestReplicationDeclarationIgnoresMaterializedColumnAddExtents(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_replica_add_extent_identity", 3)
-	tbl.CreateColumn("counter", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(0)})
+	tbl.CreateColumn(nil, "counter", "INT", nil, []scm.Scmer{scm.NewString("default"), scm.NewInt(0)})
 	encoded, err := json.Marshal(tbl)
 	if err != nil {
 		t.Fatal(err)

@@ -423,7 +423,7 @@ func TestConcurrentFirstDatabaseReadersShareOneSchemaLoad(t *testing.T) {
 		release:           make(chan struct{}),
 	}
 	db := newDatabase()
-	db.Name = "tconcurrentload"
+	db.Name = "tconcurrentloadsource"
 	db.persistence = blocking
 	db.srState = COLD
 
@@ -482,9 +482,9 @@ func createDurabilityTestTable(t *testing.T, databaseName string, rows int) (*ta
 	Init(scm.Globalenv)
 	LoadDatabases()
 	CreateDatabase(databaseName, false)
-	tbl, _ := CreateTable(databaseName, "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("payload", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, databaseName, "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "payload", "TEXT", nil, nil)
 	values := make([][]scm.Scmer, rows)
 	for i := range values {
 		values[i] = []scm.Scmer{scm.NewInt(int64(i + 1)), scm.NewString(fmt.Sprintf("row-%08d", i+1))}
@@ -552,6 +552,11 @@ func TestForcedDatabaseRebuildCompactsTransactionLog(t *testing.T) {
 	tbl, engine := createDurabilityTestTable(t, "ttxlogrebuild", 4)
 	db := tbl.schema
 	db.commitTransaction("completed-before-rebuild/1", true)
+	// Physical catalog checkpoints have native decisions of their own. Give
+	// compaction a real history to remove while retaining any later decisions.
+	for i := 2; i <= 20; i++ {
+		db.commitTransaction(fmt.Sprintf("completed-before-rebuild/%d", i), true)
+	}
 	logPath := engine.(*FileStorage).path + transactionLogName + ".log"
 	before, err := os.Stat(logPath)
 	if err != nil {
@@ -570,6 +575,11 @@ func TestForcedDatabaseRebuildCompactsTransactionLog(t *testing.T) {
 	t.Logf("transaction log size: before=%d bytes after=%d bytes", before.Size(), after.Size())
 	if db.transactionCommitted("completed-before-rebuild/1") {
 		t.Fatal("rebuilt transaction remains in the commit authority")
+	}
+	for i := 2; i <= 20; i++ {
+		if db.transactionCommitted(fmt.Sprintf("completed-before-rebuild/%d", i)) {
+			t.Fatalf("rebuilt transaction %d remains in the commit authority", i)
+		}
 	}
 	db.closeTransactionLog()
 }
@@ -906,9 +916,9 @@ func TestShardRebuildForwardsConcurrentInsertsViaNext(t *testing.T) {
 	defer databases.Remove("trebuildnext")
 
 	CreateDatabase("trebuildnext", false)
-	tbl, _ := CreateTable("trebuildnext", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("payload", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "trebuildnext", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "payload", "TEXT", nil, nil)
 
 	initialRows := make([][]scm.Scmer, 0, 20000)
 	for i := 0; i < 20000; i++ {
@@ -990,9 +1000,9 @@ func TestShardRebuildDeletePropagationUsesStableTranslation(t *testing.T) {
 	defer databases.Remove("trebuilddelete")
 
 	CreateDatabase("trebuilddelete", false)
-	tbl, _ := CreateTable("trebuilddelete", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("payload", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "trebuilddelete", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "payload", "TEXT", nil, nil)
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString("one")},
 		{scm.NewInt(2), scm.NewString("two")},
@@ -1031,9 +1041,9 @@ func TestShardRebuildUpdatePropagationUsesStableTranslation(t *testing.T) {
 	defer databases.Remove("trebuildupdate")
 
 	CreateDatabase("trebuildupdate", false)
-	tbl, _ := CreateTable("trebuildupdate", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("payload", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "trebuildupdate", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "payload", "TEXT", nil, nil)
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString("one")},
 		{scm.NewInt(2), scm.NewString("two")},
@@ -1074,9 +1084,9 @@ func TestManualRepartitionForwardsConcurrentInserts(t *testing.T) {
 	defer databases.Remove("tmanualrepartition")
 
 	CreateDatabase("tmanualrepartition", false)
-	tbl, _ := CreateTable("tmanualrepartition", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("payload", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "tmanualrepartition", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "payload", "TEXT", nil, nil)
 
 	initialRows := make([][]scm.Scmer, 0, 20000)
 	for i := 0; i < 20000; i++ {
@@ -1146,9 +1156,9 @@ func TestManualRepartitionInsertDeleteUsesTranslationMap(t *testing.T) {
 	defer databases.Remove("tmanualrepartitiondelete")
 
 	CreateDatabase("tmanualrepartitiondelete", false)
-	tbl, _ := CreateTable("tmanualrepartitiondelete", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("payload", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "tmanualrepartitiondelete", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "payload", "TEXT", nil, nil)
 
 	initialRows := make([][]scm.Scmer, 0, 20000)
 	for i := 0; i < 20000; i++ {
@@ -1219,9 +1229,9 @@ func TestDatabaseRebuildDoesNotForceFreeTableIntoSingleShardPartition(t *testing
 		t.Fatal("database not found")
 	}
 
-	tbl, _ := CreateTable("trebuildfree", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("grp", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "trebuildfree", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "grp", "INT", nil, nil)
 	tbl.Insert([]string{"id", "grp"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewInt(1)},
 		{scm.NewInt(2), scm.NewInt(2)},
@@ -1246,6 +1256,37 @@ func TestDatabaseRebuildDoesNotForceFreeTableIntoSingleShardPartition(t *testing
 	}
 }
 
+func TestRepartitionExistingLayoutReleasesMaintenance(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "trepartitionagain", 128)
+	if !tbl.beginManualRepartition() {
+		t.Fatal("initial free topology did not accept repartition")
+	}
+	tbl.repartition([]shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(64)}}})
+	tbl.maintenanceMu.Lock()
+	// This is the legitimate rebuild-to-repartition handoff: PShards is the
+	// current layout, rather than evidence of a concurrent repartition.
+	tbl.mu.Lock()
+	tbl.maintenanceKind = 2
+	tbl.mu.Unlock()
+	tbl.repartition([]shardDimension{{Column: "id", NumPartitions: 3, Pivots: []scm.Scmer{scm.NewInt(43), scm.NewInt(86)}}})
+	if got := len(tbl.activeTopology().shards); got != 3 {
+		// The broken early-return path transferred maintenance to nobody.
+		tbl.mu.Lock()
+		tbl.maintenanceKind = 0
+		tbl.mu.Unlock()
+		tbl.maintenanceMu.Unlock()
+		t.Fatalf("second repartition retained %d shards, want 3", got)
+	}
+	tbl.maintenanceMu.Lock()
+	tbl.maintenanceMu.Unlock()
+	if got := tbl.Count(); got != 128 {
+		t.Fatalf("second repartition row count = %d, want 128", got)
+	}
+	ddl := NewTxContext(TxACID)
+	defer ddl.Rollback()
+	ddl.recordSchema(tbl, false)
+}
+
 func TestPartitionTableEmptySpecKeepsFreeShardMode(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-empty-partition-*")
 	if err != nil {
@@ -1261,8 +1302,8 @@ func TestPartitionTableEmptySpecKeepsFreeShardMode(t *testing.T) {
 	defer databases.Remove("temptypartition")
 
 	CreateDatabase("temptypartition", false)
-	tbl, _ := CreateTable("temptypartition", "items", Sloppy, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "temptypartition", "items", Sloppy, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}, {scm.NewInt(2)}}, nil, scm.NewNil(), false, nil)
 	origUUID := tbl.Shards[0].uuid
 
@@ -1305,8 +1346,8 @@ func TestPartitionTableNestedAssocAppliesRealPartitioning(t *testing.T) {
 	defer databases.Remove("tnestedpartition")
 
 	CreateDatabase("tnestedpartition", false)
-	tbl, _ := CreateTable("tnestedpartition", "items", Sloppy, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "tnestedpartition", "items", Sloppy, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 	tbl.Insert([]string{"id"}, [][]scm.Scmer{
 		{scm.NewInt(1)},
 		{scm.NewInt(2)},
@@ -1359,8 +1400,8 @@ func TestPartitionTableSinglePartitionSpecIsNoop(t *testing.T) {
 	defer databases.Remove("tsinglepartition")
 
 	CreateDatabase("tsinglepartition", false)
-	tbl, _ := CreateTable("tsinglepartition", "items", Sloppy, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "tsinglepartition", "items", Sloppy, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}, {scm.NewInt(2)}}, nil, scm.NewNil(), false, nil)
 	origUUID := tbl.Shards[0].uuid
 
@@ -1407,8 +1448,8 @@ func TestDatabaseRebuildWaitsForTableDDL(t *testing.T) {
 		t.Fatal("database not found")
 	}
 
-	tbl, _ := CreateTable("trebuildddl", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "trebuildddl", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 
 	tbl.ddlMu.Lock()
@@ -1445,13 +1486,13 @@ func TestCreateColumnWaitsForTableRebuildLock(t *testing.T) {
 	defer databases.Remove("tcreatecolumnddl")
 
 	CreateDatabase("tcreatecolumnddl", false)
-	tbl, _ := CreateTable("tcreatecolumnddl", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "tcreatecolumnddl", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 
 	tbl.ddlMu.RLock()
 	done := make(chan bool, 1)
 	go func() {
-		done <- tbl.CreateColumn("payload", "TEXT", nil, nil)
+		done <- tbl.CreateColumn(nil, "payload", "TEXT", nil, nil)
 	}()
 
 	select {
@@ -1481,9 +1522,9 @@ func TestShardRebuildPreservesComputeProxyColumns(t *testing.T) {
 	defer databases.Remove("trebuildproxy")
 
 	CreateDatabase("trebuildproxy", false)
-	tbl, _ := CreateTable("trebuildproxy", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("running", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "trebuildproxy", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "running", "INT", nil, nil)
 	tbl.Insert([]string{"id"}, [][]scm.Scmer{
 		{scm.NewInt(1)},
 		{scm.NewInt(2)},
@@ -1544,9 +1585,9 @@ func TestEnsureColumnLoadedRestoresComputeProxyRuntimeBindings(t *testing.T) {
 	defer databases.Remove("tloadproxy")
 
 	CreateDatabase("tloadproxy", false)
-	tbl, _ := CreateTable("tloadproxy", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("running", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "tloadproxy", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "running", "INT", nil, nil)
 	tbl.Insert([]string{"id"}, [][]scm.Scmer{
 		{scm.NewInt(1)},
 		{scm.NewInt(2)},
@@ -1608,10 +1649,10 @@ func TestEnsureColumnLoadedRehydratesOrderedProxyFromSchemaPlaceholder(t *testin
 	defer databases.Remove("tloadorcplaceholder")
 
 	CreateDatabase("tloadorcplaceholder", false)
-	tbl, _ := CreateTable("tloadorcplaceholder", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("day", "INT", nil, nil)
-	tbl.CreateColumn("running", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "tloadorcplaceholder", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "day", "INT", nil, nil)
+	tbl.CreateColumn(nil, "running", "INT", nil, nil)
 	tbl.Insert([]string{"id", "day"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewInt(10)},
 		{scm.NewInt(2), scm.NewInt(20)},
@@ -1678,9 +1719,9 @@ func TestEphemeralQueryShardLoadIgnoresPersistedHelperContents(t *testing.T) {
 	defer databases.Remove("tephemeralhelper")
 
 	CreateDatabase("tephemeralhelper", false)
-	tbl, _ := CreateTable("tephemeralhelper", ".helper", Cache, false)
-	tbl.CreateColumn("grp", "TEXT", nil, nil)
-	tbl.CreateColumn("sumv", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "tephemeralhelper", ".helper", Cache, false)
+	tbl.CreateColumn(nil, "grp", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "sumv", "INT", nil, nil)
 
 	orig := tbl.Shards[0]
 	grp := &StorageSCMER{values: []scm.Scmer{scm.NewString("A"), scm.NewString("B")}}
@@ -1742,8 +1783,8 @@ func TestEmptyWALReplayKeepsPersistedColumnsLazy(t *testing.T) {
 	defer databases.Remove("temptywallazy")
 
 	CreateDatabase("temptywallazy", false)
-	tbl, _ := CreateTable("temptywallazy", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "temptywallazy", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 
 	orig := tbl.Shards[0]
 	column := &StorageConst{count: 2, value: scm.NewInt(1)}
@@ -1786,11 +1827,11 @@ func TestCreateColumnBuiltinUpgradesExistingColumnToORC(t *testing.T) {
 	defer databases.Remove("tcreatecolumnorc")
 
 	CreateDatabase("tcreatecolumnorc", false)
-	tbl, _ := CreateTable("tcreatecolumnorc", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("day", "INT", nil, nil)
-	tbl.CreateColumn("amount", "INT", nil, nil)
-	tbl.CreateColumn("running", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "tcreatecolumnorc", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "day", "INT", nil, nil)
+	tbl.CreateColumn(nil, "amount", "INT", nil, nil)
+	tbl.CreateColumn(nil, "running", "INT", nil, nil)
 	tbl.Insert([]string{"id", "day", "amount"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewInt(10), scm.NewInt(100)},
 		{scm.NewInt(2), scm.NewInt(20), scm.NewInt(200)},
@@ -1858,10 +1899,10 @@ func TestMutationScanRepairsInvalidOrderedComputeColumnBeforeTakingShardLock(t *
 	defer databases.Remove("tscanorcrepair")
 
 	CreateDatabase("tscanorcrepair", false)
-	tbl, _ := CreateTable("tscanorcrepair", "items", Memory, false)
-	tbl.CreateColumn("day", "INT", nil, nil)
-	tbl.CreateColumn("amount", "INT", nil, nil)
-	tbl.CreateColumn("running", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "tscanorcrepair", "items", Memory, false)
+	tbl.CreateColumn(nil, "day", "INT", nil, nil)
+	tbl.CreateColumn(nil, "amount", "INT", nil, nil)
+	tbl.CreateColumn(nil, "running", "INT", nil, nil)
 	tbl.Insert([]string{"day", "amount"}, [][]scm.Scmer{
 		{scm.NewInt(10), scm.NewInt(100)},
 		{scm.NewInt(20), scm.NewInt(200)},
@@ -1942,9 +1983,9 @@ func TestShardRebuildWaitsForOrderedProxySnapshot(t *testing.T) {
 	defer databases.Remove("trebuildorc")
 
 	CreateDatabase("trebuildorc", false)
-	tbl, _ := CreateTable("trebuildorc", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("running", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "trebuildorc", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "running", "INT", nil, nil)
 	tbl.Insert([]string{"id"}, [][]scm.Scmer{
 		{scm.NewInt(1)},
 		{scm.NewInt(2)},
@@ -2060,10 +2101,10 @@ func TestInvalidateORCHitsShadowRebuildShards(t *testing.T) {
 	defer databases.Remove("torcshadow")
 
 	CreateDatabase("torcshadow", false)
-	tbl, _ := CreateTable("torcshadow", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("day", "INT", nil, nil)
-	tbl.CreateColumn("running", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, "torcshadow", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "day", "INT", nil, nil)
+	tbl.CreateColumn(nil, "running", "INT", nil, nil)
 	tbl.Insert([]string{"id", "day"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewInt(10)},
 		{scm.NewInt(2), scm.NewInt(20)},
@@ -2604,6 +2645,59 @@ func TestRepartitionPostFlipUpdateDoesNotDuplicateRow(t *testing.T) {
 	}
 }
 
+func TestExplicitRebuildWaitsForExistingMaintenance(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "texplicitrebuildwait", 1)
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("pending")}}, nil, scm.NewNil(), false, nil)
+	tbl.maintenanceMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			tbl.maintenanceMu.Unlock()
+		}
+	}()
+	done := make(chan string, 1)
+	go func() { done <- RebuildTable(tbl, true, false) }()
+	select {
+	case result := <-done:
+		t.Fatalf("explicit rebuild skipped existing maintenance: %s", result)
+	case <-time.After(20 * time.Millisecond):
+	}
+	// A maintenance owner can still finish its DDL publication while the
+	// explicit rebuild waits; retaining ddlMu.RLock here would deadlock it.
+	published := make(chan struct{})
+	go func() {
+		tbl.ddlMu.Lock()
+		tbl.ddlMu.Unlock()
+		close(published)
+	}()
+	select {
+	case <-published:
+	case <-time.After(3 * time.Second):
+		t.Fatal("explicit rebuild blocked the existing maintenance publication")
+	}
+	tbl.maintenanceMu.Unlock()
+	locked = false
+	select {
+	case result := <-done:
+		if strings.Contains(result, "errors:") {
+			t.Fatal(result)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("explicit rebuild did not finish after existing maintenance")
+	}
+	for _, shard := range tbl.activeTopology().shards {
+		shard.mu.RLock()
+		pending := len(shard.deltaRows())
+		shard.mu.RUnlock()
+		if pending != 0 {
+			t.Fatalf("explicit rebuild left %d pending rows", pending)
+		}
+	}
+	if got := tbl.Count(); got != 2 {
+		t.Fatalf("rebuild count = %d, want 2", got)
+	}
+}
+
 func TestFailedRebuildSchemaPublicationKeepsLaterWritesRecoverable(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "trebuildsavefailure", 1)
 	tbl.schema.ensureBlobTable()
@@ -2697,7 +2791,7 @@ func TestEphemeralCacheColumnDDLBuffersSchemaPublicationUntilRebuild(t *testing.
 	LoadDatabases()
 	CreateDatabase("tcachecolumnbatch", false)
 	db := GetDatabase("tcachecolumnbatch")
-	tbl, created := CreateTable("tcachecolumnbatch", ".grp:query:test", Cache, false)
+	tbl, created := CreateTable(nil, "tcachecolumnbatch", ".grp:query:test", Cache, false)
 	if !created {
 		t.Fatal("ephemeral cache table was not created")
 	}
@@ -2706,7 +2800,7 @@ func TestEphemeralCacheColumnDDLBuffersSchemaPublicationUntilRebuild(t *testing.
 	db.persistence = counting
 
 	for i := 0; i < 32; i++ {
-		if !tbl.CreateColumn(fmt.Sprintf("agg_%d", i), "int", nil, nil) {
+		if !tbl.CreateColumn(nil, fmt.Sprintf("agg_%d", i), "int", nil, nil) {
 			t.Fatalf("cache column %d was not created", i)
 		}
 	}
@@ -2880,9 +2974,9 @@ func TestShardReadRetainsPreparedColumnsUntilLastRelease(t *testing.T) {
 			tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
 			cleanup := shardCleanup
 			if engine == Cache {
-				tbl, _ = CreateTable("memcp-tests", "cache_items", Cache, false)
-				tbl.CreateColumn("id", "INT", nil, nil)
-				tbl.CreateColumn("payload", "TEXT", nil, nil)
+				tbl, _ = CreateTable(nil, "memcp-tests", "cache_items", Cache, false)
+				tbl.CreateColumn(nil, "id", "INT", nil, nil)
+				tbl.CreateColumn(nil, "payload", "TEXT", nil, nil)
 				tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 					{scm.NewInt(1), scm.NewString("row-00000001")},
 				}, nil, scm.NewNil(), false, nil)
@@ -3102,7 +3196,7 @@ func TestPartitionUniqueKeepsUnrelatedShardsCold(t *testing.T) {
 	tbl.PShards = []*storageShard{NewShard(tbl), NewShard(tbl)}
 	tbl.publishTopologyLocked()
 	tbl.mu.Unlock()
-	tbl.schema.save()
+	tbl.schema.save(nil, nil)
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString("low")}, {scm.NewInt(11), scm.NewString("high")},
 	}, nil, scm.NewNil(), false, nil)
@@ -3346,7 +3440,7 @@ func TestColdIndexSuffixReloadsForPrefixRead(t *testing.T) {
 
 func TestORCInvalidationReadsReloadedSortColumn(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "memcp-tests", 2)
-	tbl.CreateColumn("running", "INT", nil, nil)
+	tbl.CreateColumn(nil, "running", "INT", nil, nil)
 	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
 		t.Fatal(result)
 	}

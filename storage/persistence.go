@@ -49,6 +49,11 @@ type PersistenceEngine interface {
 	// with *PersistenceFailure; absence is represented explicitly by a reader
 	// whose Missing method returns true.
 	WriteSchema(schema []byte)
+	// SyncNamespace makes completed object creations durable before an anchor
+	// in another backend may name them. Column contents must already have been
+	// synced through their writers. Object stores acknowledge creation at Close;
+	// filesystems additionally need the containing directory's durability barrier.
+	SyncNamespace()
 	ReadColumn(shard string, column string) io.ReadCloser
 	// WriteColumn returns a generation-private writer. Close must either publish
 	// the complete column object or report an error; partial objects must never

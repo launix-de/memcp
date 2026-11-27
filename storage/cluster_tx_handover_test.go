@@ -4,16 +4,17 @@ SPDX-License-Identifier: GPL-3.0-or-later
 */
 package storage
 
+import "io"
 import "fmt"
-import "bytes"
-import "bufio"
-import "time"
-import "context"
 import "sync"
+import "time"
+import "bufio"
+import "bytes"
+import "context"
 import "testing"
-import "github.com/launix-de/memcp/storage/mosi"
-import "github.com/launix-de/memcp/scm"
 import "github.com/google/uuid"
+import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage/mosi"
 
 func TestClusterSavepointFollowsPhysicalShardAcrossHandover(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "t_handover_savepoint", 3)
@@ -136,8 +137,8 @@ func TestClusterFailedLiveCaptureReleasesMaintenanceAndTransactionAdmission(t *t
 
 func TestClusterCaptureRetainsOverlayWhenHelperBecomesPersistent(t *testing.T) {
 	fixture, _ := createDurabilityTestTable(t, "t_handover_helper_engine", 1)
-	tbl, _ := CreateTable(fixture.schema.Name, ".helper", Cache, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, fixture.schema.Name, ".helper", Cache, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 	shard := tbl.ActiveShards()[0]
 	tx := NewTxContext(TxACID)
@@ -320,8 +321,8 @@ func TestClusterCursorDecisionDoesNotPinWritersAcrossParticipants(t *testing.T) 
 
 func TestClusterOppositeCursorDecisionsFinishWithoutWriterCycle(t *testing.T) {
 	first, _ := createDurabilityTestTable(t, "t_cursor_opposite_first", 4)
-	second, _ := CreateTable(first.schema.Name, "opposite_second", Safe, false)
-	second.CreateColumn("id", "INT", nil, nil)
+	second, _ := CreateTable(nil, first.schema.Name, "opposite_second", Safe, false)
+	second.CreateColumn(nil, "id", "INT", nil, nil)
 	second.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}, {scm.NewInt(2)}}, nil, scm.NewNil(), false, nil)
 	shards := []*storageShard{first.ActiveShards()[0], second.ActiveShards()[0]}
 	roots := []*TxContext{NewTxContext(TxCursorStability), NewTxContext(TxCursorStability)}
@@ -387,7 +388,7 @@ func TestClusterOppositeCursorDecisionsFinishWithoutWriterCycle(t *testing.T) {
 
 func TestClusterLiveTransferCarriesExistingDecisionCapability(t *testing.T) {
 	fixture, _ := createDurabilityTestTable(t, "t_transfer_capability", 1)
-	tbl, _ := CreateTable(fixture.schema.Name, "empty_overlay", Memory, false)
+	tbl, _ := CreateTable(nil, fixture.schema.Name, "empty_overlay", Memory, false)
 	shard := NewShard(tbl)
 	tx := NewTxContext(TxCursorStability)
 	defer tx.Rollback()
@@ -428,5 +429,44 @@ func TestClusterLiveTransferCarriesExistingDecisionCapability(t *testing.T) {
 	}
 	if overlay.DecisionToken != st.decisionToken {
 		t.Fatal("live handover discarded the capability retained by existing endpoints")
+	}
+}
+
+func TestClusterLiveCatalogTransferCarriesSystemBackendColumns(t *testing.T) {
+	fixture, _ := createDurabilityTestTable(t, "t_catalog_transfer_columns", 1)
+	rows := catalogRowsFromTable(fixture)
+	shard := buildDiskShard(fixture.schema, catalogTables, rows[catalogTables], true)
+	if shard.t.PersistencyMode != Safe {
+		t.Fatal("catalog transfer fixture must use the durable catalog engine")
+	}
+	var output bytes.Buffer
+	if err := (&liveShardTransfer{shards: []*storageShard{shard}}).write(&output); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(&output)
+	var stream struct{ Version, Generations int }
+	var grain liveGrainHeader
+	if err := readLiveRecord(reader, &stream); err != nil {
+		t.Fatal(err)
+	}
+	if err := readLiveRecord(reader, &grain); err != nil {
+		t.Fatal(err)
+	}
+	if stream.Generations != 1 || grain.Main != 1 || len(grain.Columns) != len(catalogRelationColumns(catalogTables)) {
+		t.Fatal("catalog transfer lost rows or columns")
+	}
+	for _, name := range grain.Columns {
+		if grain.ColumnReferences[name] {
+			t.Fatalf("catalog column %s references the sender's local system backend", name)
+		}
+		actual, err := io.ReadAll(&columnFrameReader{reader: reader})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var expected bytes.Buffer
+		shard.columns[name].Serialize(&expected)
+		if !bytes.Equal(actual, expected.Bytes()) {
+			t.Fatalf("catalog column %s payload differs from its source", name)
+		}
 	}
 }

@@ -131,10 +131,10 @@ func BenchmarkBudgetedTableRebuild(b *testing.B) {
 	dbName := fmt.Sprintf("maintenance-budget-bench-%d", time.Now().UnixNano())
 	CreateDatabase(dbName, false)
 	b.Cleanup(func() { databases.Remove(dbName) })
-	tbl, _ := CreateTable(dbName, "items", Memory, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("tenant_id", "INT", nil, nil)
-	tbl.CreateColumn("payload", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "tenant_id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "payload", "TEXT", nil, nil)
 	rows := make([][]scm.Scmer, 10_000)
 	for i := range rows {
 		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i % 128)), scm.NewString(fmt.Sprintf("payload-%d", i))}

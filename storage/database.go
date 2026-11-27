@@ -27,18 +27,22 @@ import "strings"
 import "reflect"
 import "sync/atomic"
 import "encoding/json"
+import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/NonLockingReadMap"
 import "github.com/launix-de/memcp/storage/mosi"
 
 type database struct {
-	Name        string                                     `json:"name"`
+	Name string `json:"name"`
+	// Retained predecessor identity, authoritative in the database catalog row.
+	Incarnation string                                     `json:"incarnation,omitempty"`
 	persistence PersistenceEngine                          `json:"-"`
 	tables      *NonLockingReadMap.ReadMap[string, *table] `json:"-"`
 	// Name-only metadata, rebuilt under schemalock at namespace publication.
 	// Readers never retain tables or traverse the catalog. An empty spelling
 	// records an ambiguous folded name; exact-case frontends are unaffected.
 	foldedTableNames atomic.Pointer[map[string]string] `json:"-"`
+	tableIdentities  atomic.Pointer[map[string]*table] `json:"-"`
 	// Immutable source definitions use the same lock-free catalog as tables.
 	// DDL publishes under schemalock; compiled code is transient per definition.
 	procedures *NonLockingReadMap.ReadMap[string, *ProcedureDescription] `json:"-"`
@@ -49,7 +53,13 @@ type database struct {
 	// schemalock protects only database-local schema membership and schema.json
 	// snapshots. It must never cover long rebuild/repartition/blob work. The
 	// lock order continues with table.ddlMu -> table.mu -> shard.mu.
-	schemalock sync.RWMutex `json:"-"`
+	schemalock          sync.RWMutex    `json:"-"`
+	definitionMu        definitionMutex `json:"-"`
+	definitionAdmission sync.Mutex      `json:"-"`
+	// Failed publication retains every old root. An uncertain native decision
+	// requires recovery before a later checkpoint may export RAM definitions.
+	schemaExportPending    atomic.Bool `json:"-"`
+	schemaRecoveryRequired atomic.Bool `json:"-"`
 	// saveMu/ saveCond serialize schema.json commits per database.
 	// Software contract:
 	//   - every caller still waits until its schema mutation is persisted
@@ -76,14 +86,22 @@ type database struct {
 	// transactionLog is the database-wide commit authority for transactional
 	// shard WAL entries. Shard logs may contain prepared records after a crash;
 	// recovery exposes them only when this log contains their durable commit.
-	transactionOnce sync.Once          `json:"-"`
-	transactionMu   sync.RWMutex       `json:"-"`
-	transactionLog  PersistenceLogfile `json:"-"`
-	committedTx     map[string]uint64  `json:"-"`
-	transactionGen  uint64             `json:"-"`
+	transactionOnce           sync.Once          `json:"-"`
+	transactionMu             sync.RWMutex       `json:"-"`
+	transactionLog            PersistenceLogfile `json:"-"`
+	committedTx               map[string]uint64  `json:"-"`
+	transactionGen            uint64             `json:"-"`
+	transactionNamespaceReady bool               `json:"-"`
 
 	// lazy-loading/shared-resource state (not serialized)
 	srState SharedState `json:"-"`
+
+	// catalog is this database's system_schema partition. catalogMu orders
+	// catalog generations; it is taken after schemalock. Catalog rows are the
+	// definition authority; runtime metadata is never refreshed into them.
+	catalogBootstrap sync.Once       `json:"-"`
+	catalogMu        sync.Mutex      `json:"-"`
+	catalog          databaseCatalog `json:"-"`
 }
 
 // blobRefLock occupies one cache line so unrelated hash stripes do not
@@ -171,7 +189,7 @@ func (db *database) transactionCommitted(txID string) bool {
 	_, committed := db.committedTx[txID]
 	db.transactionMu.RUnlock()
 	if !committed {
-		if engine := sharedCommitBackend(); engine != nil {
+		if engine := nativeCommitDecisionBackend(); engine != nil {
 			return readDistributedDecision(engine, txID)
 		}
 	}
@@ -187,6 +205,12 @@ func (db *database) commitTransaction(txID string, durable bool) error {
 	defer db.transactionMu.Unlock()
 	if _, exists := db.committedTx[txID]; exists {
 		return nil
+	}
+	if durable && !db.transactionNamespaceReady {
+		if err := persistenceCall(db.persistence.SyncNamespace); err != nil {
+			return err
+		}
+		db.transactionNamespaceReady = true
 	}
 	if err := persistenceCall(func() { db.transactionLog.Write(LogEntryCommit{txID: txID}) }); err != nil {
 		return err
@@ -341,9 +365,10 @@ func normalizeTempLookupName(dbName string, name string) string {
 // Custom JSON to persist private tables field
 func (d *database) MarshalJSON() ([]byte, error) {
 	type persist struct {
-		Name       string                                     `json:"name"`
-		Tables     *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
-		Procedures []*ProcedureDescription                    `json:"procedures,omitempty"`
+		Name        string                                     `json:"name"`
+		Incarnation string                                     `json:"incarnation,omitempty"`
+		Tables      *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
+		Procedures  []*ProcedureDescription                    `json:"procedures,omitempty"`
 	}
 	definitions := make([]*ProcedureDescription, 0)
 	if d.procedures != nil {
@@ -361,7 +386,7 @@ func (d *database) MarshalJSON() ([]byte, error) {
 			}
 		}
 	}
-	return json.Marshal(persist{Name: d.Name, Tables: tables, Procedures: definitions})
+	return json.Marshal(persist{Name: d.Name, Incarnation: d.Incarnation, Tables: tables, Procedures: definitions})
 }
 
 // marshalSchemaSnapshot retains the readable schema encoding without passing
@@ -381,15 +406,22 @@ func (d *database) marshalSchemaSnapshot() ([]byte, error) {
 
 func (d *database) UnmarshalJSON(data []byte) error {
 	type persist struct {
-		Name       string                                     `json:"name"`
-		Tables     *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
-		Procedures []*ProcedureDescription                    `json:"procedures,omitempty"`
+		Name        string                                     `json:"name"`
+		Incarnation string                                     `json:"incarnation,omitempty"`
+		Tables      *NonLockingReadMap.ReadMap[string, *table] `json:"tables"`
+		Procedures  []*ProcedureDescription                    `json:"procedures,omitempty"`
 	}
 	var p persist
 	if err := json.Unmarshal(data, &p); err != nil {
 		return err
 	}
 	d.Name = p.Name
+	if p.Incarnation != "" {
+		if id, err := uuid.Parse(p.Incarnation); err != nil || id == uuid.Nil {
+			return fmt.Errorf("invalid persisted database incarnation")
+		}
+	}
+	d.Incarnation = p.Incarnation
 	d.tables = p.Tables
 	d.procedures = NonLockingReadMap.NewReadMap[string, *ProcedureDescription]()
 	for _, definition := range p.Procedures {
@@ -478,24 +510,34 @@ func RebuildTable(tbl *table, all bool, repartition bool) string {
 		panic("cannot rebuild a stale table handle")
 	}
 
+	if tbl.schema == systemSchemaDB {
+		// system_schema partitions are memory shards owned by their databases'
+		// catalogs, which compact them after each change; there is no storage
+		// generation, blob store or schema.json to rebuild here.
+		return fmt.Sprint(time.Since(start))
+	}
+	if !tbl.isEphemeralQueryTable() {
+		tbl.schema.definitionMu.RLock()
+		defer tbl.schema.definitionMu.RUnlock()
+	}
 	tbl.schema.persistenceLifecycle.RLock()
 	defer tbl.schema.persistenceLifecycle.RUnlock()
 	result := tbl.schema.rebuildWithLifecycle(all, repartition, true, tbl)
-	if r := replication.Load(); r != nil && !r.master && validReplicaDatabase(tbl.schema.Name) {
+	if r := replication.Load(); !tbl.RuntimeOnly && r != nil && !r.master && validReplicaDatabase(tbl.schema.Name) {
 		defer func() { go replicationCheckpoint(tbl.schema.Name, "") }()
 	}
 	errs := append([]string(nil), result.errors...)
-	if len(errs) == 0 {
+	if len(errs) == 0 && !tbl.RuntimeOnly {
 		if err := func() (err error) {
 			defer func() { err = recoverAsError("save failed for database " + tbl.schema.Name) }()
-			tbl.schema.save()
+			tbl.schema.save(nil, nil, tbl)
 			return nil
 		}(); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}
 	if len(errs) == 0 {
-		// tbl.schema.save() committed all replacement UUIDs. Only this success
+		// tbl.schema.save(nil, nil) committed all replacement UUIDs. Only this success
 		// path may remove files belonging to the previous generation.
 		errs = append(errs, cleanupReplacedShardGenerations(result.replaced, "table "+tbl.schema.Name+"."+tbl.Name)...)
 	}
@@ -525,6 +567,8 @@ func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string 
 // complete distinguishes a full checkpoint from successful best-effort
 // maintenance which skipped a busy or cold table. Replication needs the former.
 func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, includeEphemeral bool) ([]string, bool) {
+	db.definitionMu.RLock()
+	defer db.definitionMu.RUnlock()
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	if replication.Load() != nil && GetDatabase(db.Name) != db {
@@ -548,12 +592,12 @@ func rebuildDatabaseAndCompact(db *database, all bool, repartition bool, include
 	}
 	if err := func() (err error) {
 		defer func() { err = recoverAsError("save failed for database " + db.Name) }()
-		db.save()
+		db.save(nil, nil)
 		return nil
 	}(); err != nil {
 		return []string{err.Error()}, false
 	}
-	// db.save() committed all replacement UUIDs. A save failure returns above
+	// db.save(nil, nil) committed all replacement UUIDs. A save failure returns above
 	// and deliberately retains every old generation.
 	errs := cleanupReplacedShardGenerations(result.replaced, "database "+db.Name)
 	if len(errs) != 0 || !result.complete || !hasTransactions {
@@ -652,6 +696,12 @@ func LoadDatabases() {
 		}
 	}
 
+	// Register database keys only. The first selected catalog scan opens
+	// that database's anchor; unrelated tenant schemas remain untouched.
+	for _, db := range databases.GetAll() {
+		publishCatalogDatabaseName(db.Name)
+	}
+
 	// Ensure system_statistic.scans exists for scan logging
 	ensureSystemStatistic()
 }
@@ -733,10 +783,33 @@ func (db *database) commitSchemaSnapshot(jsonbytes []byte, durable bool, release
 	}
 }
 
-func (db *database) save(counterOwner ...*replicaCell) {
-	if len(counterOwner) > 1 {
-		panic("invalid counter checkpoint ownership")
+func (db *database) save(tx *TxContext, counterOwner *replicaCell, tables ...*table) {
+	if db == systemSchemaDB {
+		return // fixed, never persisted
 	}
+	if len(tables) != 0 {
+		persistent := false
+		for _, table := range tables {
+			persistent = persistent || (table != nil && table.schema == db && !table.RuntimeOnly)
+		}
+		if !persistent {
+			// Local cache topology has no catalog declaration to checkpoint.
+			// It must not export or migrate unrelated accepted definitions.
+			return
+		}
+	}
+	if tx.hasSchemaWriter(db) {
+		// Physical growth inside a pending DDL operation belongs to the same
+		// decision. Do not recursively acquire its definition lock or export
+		// the caller's unaccepted definitions through an autonomous checkpoint.
+		db.schemalock.Lock()
+		defer db.schemalock.Unlock()
+		db.checkpointCatalogLocked(tx, tables...)
+		tx.markSchemaDirty(db)
+		return
+	}
+	db.definitionMu.RLock()
+	defer db.definitionMu.RUnlock()
 	if sharedClusterDatabase(db.Name) {
 		cluster := activeNodeCluster()
 		if cluster == nil {
@@ -744,7 +817,7 @@ func (db *database) save(counterOwner ...*replicaCell) {
 		}
 		cell := cluster.manager.resourceCell(mosiResource{Database: db.Name})
 		phase := cell.ownstate.Phase()
-		if len(counterOwner) != 0 {
+		if counterOwner != nil {
 			// The allocator holds this existing directory mutex through the
 			// checkpoint. O owns the unchanged declarations and may persist its
 			// runtime counter without recalling every S reader. A local M
@@ -755,7 +828,7 @@ func (db *database) save(counterOwner ...*replicaCell) {
 			cluster.manager.mu.Lock()
 			owner := cluster.manager.directory.Records[cluster.manager.resourceKey(mosiResource{Database: db.Name})].Owner
 			cluster.manager.mu.Unlock()
-			if counterOwner[0] != cell || owner != cluster.self.ID {
+			if counterOwner != cell || owner != cluster.self.ID {
 				panic("counter checkpoint lost its owner")
 			}
 		} else if phase != mosi.M {
@@ -766,138 +839,210 @@ func (db *database) save(counterOwner ...*replicaCell) {
 		// Do not serialize a cold database; keep existing schema.json intact
 		return
 	}
-	db.schemalock.RLock()
-	jsonbytes, _ := db.marshalSchemaSnapshot()
-	// Buffered mutations after this snapshot must leave the catalog dirty.
-	// They need the exclusive schema lock and therefore cannot race this store.
-	db.schemaDirty.Store(false)
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				db.schemaDirty.Store(true)
-				panic(r)
-			}
-		}()
-		db.commitSchemaSnapshot(jsonbytes, true, db.schemalock.RUnlock)
+	db.schemalock.Lock()
+	owned := true
+	defer func() {
+		if owned {
+			db.schemalock.Unlock()
+		}
 	}()
+	db.checkpointCatalogLocked(nil, tables...)
+	owned = false
+	db.commitSchemaLocked(nil, true, len(tables) == 0, db.schemalock.Unlock)
 	// shards are written while rebuild
 }
 
 // saveLockedAndUnlock publishes according to mode and always releases
 // schemalock. Buffered temp metadata is immediately visible in memory; a later
 // synchronous schema save or rebuild includes it in its complete snapshot.
-func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
+func (db *database) saveLockedAndUnlock(tx *TxContext, mode schemaSaveMode, proposals ...*table) {
+	owned := true
+	defer func() {
+		if owned {
+			db.schemalock.Unlock()
+		}
+	}()
+	if db == systemSchemaDB {
+		owned = false
+		db.schemalock.Unlock()
+		return // fixed, never persisted; its cache triggers are runtime state
+	}
 	if sharedClusterDatabase(db.Name) {
 		cluster := activeNodeCluster()
 		if cluster == nil || cluster.manager.resourceCell(mosiResource{Database: db.Name}).ownstate.Phase() != mosi.M {
+			owned = false
 			db.schemalock.Unlock()
 			return
 		}
 	}
 	if db.srState == COLD {
+		owned = false
+		db.schemalock.Unlock()
+		return
+	}
+	db.proposeCatalogTablesLocked(tx, proposals...)
+	if tx != nil {
+		tx.markSchemaDirty(db)
+		owned = false
 		db.schemalock.Unlock()
 		return
 	}
 	if mode == schemaSaveBuffered {
 		db.schemaDirty.Store(true)
+		owned = false
 		db.schemalock.Unlock()
 		return
 	}
-	jsonbytes, _ := db.marshalSchemaSnapshot()
-	// Clear while the snapshot is protected. A later buffered mutation takes
-	// schemalock exclusively and sets dirty again after this generation.
-	db.schemaDirty.Store(false)
-	defer func() {
-		if r := recover(); r != nil {
-			db.schemaDirty.Store(true)
-			panic(r)
-		}
-	}()
-	db.commitSchemaSnapshot(jsonbytes, mode == schemaSaveFsync, db.schemalock.Unlock)
+	db.checkpointCatalogLocked(nil)
+	owned = false
+	db.commitSchemaLocked(nil, mode == schemaSaveFsync, true, db.schemalock.Unlock)
 }
 
 // ensureLoaded loads schema.json into the database struct exactly once.
 func (db *database) ensureLoaded() {
-	db.loadOnce.Do(func() {
-		defer db.publishTableNamesLocked()
-		db.initializeTransactionLog()
-		if db.srState != COLD {
-			return
-		}
-		jsonbytes := db.persistence.ReadSchema()
-		if len(jsonbytes) == 0 {
-			// fresh/empty database
-			db.tables = NonLockingReadMap.NewReadMap[string, *table]()
-			db.srState = SHARED
-			return
-		}
-		tmp := new(database)
-		if err := json.Unmarshal(jsonbytes, tmp); err != nil {
-			panic(err)
-		}
-		db.tables = tmp.tables
-		db.procedures = tmp.procedures
-		// restore back-references; do not touch on-disk columns yet
-		for _, t := range db.tables.GetAll() {
-			t.schema = db
-			invalidatePersistedPlannerCodeAfterLoad(t)
-			if t.Name == ".blobs" {
-				db.blobRefState().table.Store(t)
-			}
-			for _, col := range t.Columns {
-				col.UpdateSanitizer()
-			}
-			// attach table pointer to existing shard stubs without loading them
-			if t.Shards != nil {
-				for _, s := range t.Shards {
-					if s != nil {
-						s.t = t
-					}
-				}
-			}
-			if t.PShards != nil {
-				for _, s := range t.PShards {
-					if s != nil {
-						s.t = t
-					}
-				}
-			}
-			// Derive ShardMode from shard presence for backward compatibility
-			// with schemas that don't yet have ShardMode persisted.
-			if t.PShards != nil && t.Shards == nil {
-				t.ShardMode = ShardModePartition
-			} else {
-				t.ShardMode = ShardModeFree
-			}
-			t.publishTopologyLocked()
-			t.initializeLegacyPlannerRowEstimate()
-			t.publishShowColumnsSnapshot(true)
-			t.restoreKeyFrequencies()
-			t.restoreFilterFeedback()
-		}
-		// FK declarations are authoritative, while their system triggers are
-		// generated code. Rebuild that code at the persistence boundary so schema
-		// files written by older binaries cannot retain an obsolete builtin ABI.
-		rebuildFKTriggersAfterLoad(db)
-		rebuildORCSelfTriggersAfterLoad(db)
+	db.loadOnce.Do(func() { db.initializeSchemaSnapshot(nil, false) })
+}
+
+// initializeSchemaSnapshot owns the unpublished database behind loadOnce.
+// A non-nil document is an accepted peer handover; nil opens the local anchor.
+func (db *database) initializeSchemaSnapshot(document []byte, catalogSnapshot bool) []byte {
+	defer db.publishTableNamesLocked()
+	db.initializeTransactionLog()
+	if db.srState != COLD {
+		return nil
+	}
+	jsonbytes := document
+	if jsonbytes == nil {
+		jsonbytes = db.persistence.ReadSchema()
+	}
+	if len(jsonbytes) == 0 {
+		// fresh/empty database
+		db.tables = NonLockingReadMap.NewReadMap[string, *table]()
 		db.srState = SHARED
-		// Dot-prefixed cache tables are planner-owned and persisted only so a
-		// warm query cache can survive restart. Re-register their table-level
-		// owner after loading; durable internal tables such as .blobs remain
-		// ordinary shard-owned storage.
-		for _, table := range db.tables.GetAll() {
-			if table.isEphemeralQueryTable() {
-				registerCreatedTable(table)
+		return nil
+	}
+	if document != nil && readCatalogRoot(document) == nil {
+		// A cold cluster receiver initializes from the owner's accepted schema
+		// handover, rather than opening a foreign node's anchor/root first.
+		// This is an explicit protocol publication, never a JSON fallback for
+		// an unreadable locally authoritative root.
+		db.catalogBootstrap.Do(func() {})
+		systemSchema()
+		rows := catalogRowsFromDocument(jsonbytes)
+		var live [catalogRelationCount]*storageShard
+		var fingerprints [catalogRelationCount][32]byte
+		for i := range catalogRelations {
+			live[i] = newCatalogShard(db, catalogRelationID(i), rows[i])
+			fingerprints[i] = catalogFingerprint(catalogRelationID(i), rows[i])
+		}
+		db.catalogMu.Lock()
+		db.catalog.live, db.catalog.liveFP = live, fingerprints
+		db.catalog.liveVersion.Add(1)
+		publishCatalogShards(db.Name, &live)
+		db.catalogMu.Unlock()
+		jsonbytes = catalogDocumentFromRows(db.Name, &rows)
+	} else {
+		if catalogSnapshot {
+			db.catalogBootstrap.Do(func() {})
+		} else {
+			db.bootstrapCatalog(jsonbytes)
+		}
+		// The system_schema catalog takes precedence over the legacy document
+		// stored next to its root. A recognized root must be readable.
+		if root := readCatalogRoot(jsonbytes); root != nil {
+			if document, err := db.loadCatalogDocument(root, catalogSnapshot); err == nil {
+				jsonbytes = document
+			} else {
+				panic(fmt.Errorf("authoritative catalog of database %s is unreadable: %w", db.Name, err))
 			}
 		}
-	})
+		// Legacy import occurs once, before runtime definitions are materialized.
+		if db.catalog.live[0] == nil {
+			rows := catalogRowsFromDocument(jsonbytes)
+			db.editCatalogLocked(nil, &rows, catalogAllRelations, nil)
+		}
+	}
+
+	tmp := new(database)
+	if err := json.Unmarshal(jsonbytes, tmp); err != nil {
+		panic(err)
+	}
+	db.tables = tmp.tables
+	db.Incarnation = tmp.Incarnation
+	db.procedures = tmp.procedures
+	// restore back-references; do not touch on-disk columns yet
+	for _, t := range db.tables.GetAll() {
+		db.initializeTableAfterLoad(t)
+		if t.Name == ".blobs" {
+			db.blobRefState().table.Store(t)
+		}
+	}
+	// FK declarations are authoritative, while their system triggers are
+	// generated code. Rebuild that code at the persistence boundary so schema
+	// files written by older binaries cannot retain an obsolete builtin ABI.
+	rebuildFKTriggersAfterLoad(db)
+	rebuildORCSelfTriggersAfterLoad(db)
+	db.srState = SHARED
+	// Dot-prefixed cache tables are planner-owned and persisted only so a
+	// warm query cache can survive restart. Re-register their table-level
+	// owner after loading; durable internal tables such as .blobs remain
+	// ordinary shard-owned storage.
+	for _, table := range db.tables.GetAll() {
+		if table.isEphemeralQueryTable() {
+			registerCreatedTable(table)
+		}
+	}
+	return jsonbytes
+}
+
+// initializeTableAfterLoad prepares one unpublished runtime descriptor from its
+// admitted declaration. Both whole-database startup and lazy catalog loading
+// use this path; neither needs to load the table's data columns.
+func (db *database) initializeTableAfterLoad(t *table) {
+	if t.RuntimeIdentity != "" {
+		if _, err := uuid.Parse(t.RuntimeIdentity); err != nil {
+			panic(fmt.Errorf("invalid native relation identity: %w", err))
+		}
+	}
+	t.schema = db
+	invalidatePersistedPlannerCodeAfterLoad(t)
+	for _, col := range t.Columns {
+		col.UpdateSanitizer()
+	}
+	attach := func(shards []*storageShard) {
+		for _, shard := range shards {
+			if shard != nil {
+				shard.t = t
+			}
+		}
+	}
+	attach(t.Shards)
+	attach(t.PShards)
+	// Older declarations do not persist ShardMode.
+	if t.PShards != nil && t.Shards == nil {
+		t.ShardMode = ShardModePartition
+	} else {
+		t.ShardMode = ShardModeFree
+	}
+	t.publishTopologyLocked()
+	t.initializeLegacyPlannerRowEstimate()
+	t.publishShowColumnsSnapshot(true)
+	t.restoreKeyFrequencies()
+	t.restoreFilterFeedback()
 }
 
 // publishTableNamesLocked owns schema membership (or an unpublished database).
 // Names are immutable scalar copies, not pointers to mutable table descriptors.
 func (db *database) publishTableNamesLocked() {
 	names := make(map[string]string)
+	identities := make(map[string]*table)
 	for _, t := range db.tables.GetAll() {
+		if t.RuntimeIdentity != "" {
+			if _, exists := identities[t.RuntimeIdentity]; exists {
+				panic("duplicate native table generation")
+			}
+			identities[t.RuntimeIdentity] = t
+		}
 		if t.isHiddenFromShowTables() {
 			continue
 		}
@@ -909,6 +1054,7 @@ func (db *database) publishTableNamesLocked() {
 		}
 	}
 	db.foldedTableNames.Store(&names)
+	db.tableIdentities.Store(&identities)
 }
 
 // invalidatePersistedPlannerCodeAfterLoad drops executable code derived from a
@@ -1139,6 +1285,63 @@ func upgradePersistedTableCalls(value scm.Scmer) scm.Scmer {
 	return restored
 }
 
+// Stored generated cleanup procedures already had a four-slot trigger frame,
+// but older native DROP calls omitted its transaction. Only adapt this known
+// generated grammar; user procedures and quoted data remain unchanged.
+func restorePlannerLifecycleTransaction(trigger *TriggerDescription) {
+	if !(trigger.Hidden || trigger.IsSystem) ||
+		(trigger.Timing != AfterDropTable && trigger.Timing != AfterDropColumn) || !trigger.Func.IsProc() {
+		return
+	}
+	known := false
+	for _, prefix := range []string{".prejoin:", ".cache:", ".kt_cleanup:", ".self_cleanup:", ".orcdep_cleanup:"} {
+		known = known || strings.HasPrefix(trigger.Name, prefix)
+	}
+	if !known {
+		return
+	}
+	proc := trigger.Func.Proc()
+	params := proc.Params.WithoutSourceInfo()
+	if !params.IsSlice() || len(params.Slice()) != 4 || !params.Slice()[3].IsSymbol() {
+		return
+	}
+	argument := params.Slice()[3]
+	if proc.NumberedOnly {
+		argument = scm.NewNthLocalVar(3)
+	}
+	var bind func(scm.Scmer) scm.Scmer
+	bind = func(value scm.Scmer) scm.Scmer {
+		body := value.WithoutSourceInfo()
+		if !body.IsSlice() || len(body.Slice()) == 0 {
+			return value
+		}
+		parts := body.Slice()
+		if len(parts) == 4 && (callHeadIs(parts[0], "droptable") || callHeadIs(parts[0], "droptrigger")) {
+			return scm.NewSlice(append(append([]scm.Scmer(nil), parts...), argument))
+		}
+		if !callHeadIs(parts[0], "begin") && !callHeadIs(parts[0], "!begin") && !callHeadIs(parts[0], "begin_mut") {
+			return value
+		}
+		var changed []scm.Scmer
+		for i := 1; i < len(parts); i++ {
+			if next := bind(parts[i]); next != parts[i] {
+				if changed == nil {
+					changed = append([]scm.Scmer(nil), parts...)
+				}
+				changed[i] = next
+			}
+		}
+		if changed == nil {
+			return value
+		}
+		return scm.NewSlice(changed)
+	}
+	if body := bind(proc.Body); body != proc.Body {
+		trigger.Func = scm.NewProcStruct(scm.Proc{Params: proc.Params, Body: body, En: proc.En,
+			NumVars: proc.NumVars, NumberedOnly: proc.NumberedOnly})
+	}
+}
+
 // ORC self invalidation is generated from column declarations. Restore it while
 // the database is unpublished; do not reinterpret obsolete native addresses.
 func rebuildORCSelfTriggersAfterLoad(db *database) {
@@ -1171,6 +1374,7 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 	for i := range t.Triggers {
 		trigger := &t.Triggers[i]
 		trigger.Func = upgradePersistedTableCalls(trigger.Func)
+		restorePlannerLifecycleTransaction(trigger)
 		if trigger.Language == "scheme" && trigger.Source != "" {
 			definition := scm.Read("stored trigger", trigger.Source, true)
 			if restored := upgradePersistedTableCalls(definition); restored != definition {
@@ -1185,7 +1389,16 @@ func invalidatePersistedPlannerCodeAfterLoad(t *table) {
 
 // SharedResource impl for database
 func (db *database) GetState() SharedState { return db.srState }
-func (db *database) GetRead(tx *TxContext) ReadAccess {
+
+// Schema authority is independent of its Go projection. Catalog-only readers
+// retain compatible definitions without materializing every runtime table.
+func (db *database) readAuthority(tx *TxContext) {
+	if db == systemSchemaDB {
+		return
+	}
+	if lease := tx.schemaLease(db); lease != nil && (lease.write || lease.reader.Load() != nil) {
+		return
+	}
 	if r := activeReplication(db); r != nil && validReplicaDatabase(db.Name) {
 		resource := mosiResource{Database: db.Name}
 		// An authorized schema read only samples its local permission. User
@@ -1194,6 +1407,13 @@ func (db *database) GetRead(tx *TxContext) ReadAccess {
 		if !r.resourceCell(resource).ownstate.Phase().Readable() {
 			r.obtain(resource, mosi.S, replicationUser(tx), tx)
 		}
+	}
+}
+
+func (db *database) GetRead(tx *TxContext) ReadAccess {
+	db.readAuthority(tx)
+	if db == systemSchemaDB {
+		return ReadAccess{}
 	}
 	db.ensureLoaded()
 	return ReadAccess{}
@@ -1268,6 +1488,10 @@ func (db *database) ShowTables() scm.Scmer {
 }
 
 func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, only ...*table) rebuildDatabaseResult {
+	if len(only) != 1 || !only[0].isEphemeralQueryTable() {
+		db.definitionMu.RLock()
+		defer db.definitionMu.RUnlock()
+	}
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	return db.rebuildWithLifecycle(all, repartition, includeEphemeral, only...)
@@ -1293,7 +1517,11 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 	}
 	// Blob-producing table rebuilds run in parallel. Publish their shared
 	// refcount table before workers start so no worker mutates the catalog.
-	db.ensureBlobTable()
+	// Memory/cache compaction never writes external blob payloads. A focused
+	// rebuild of such a table needs no durable blob catalog as a side effect.
+	if len(only) == 0 || only[0].PersistencyMode != Memory && only[0].PersistencyMode != Cache {
+		db.ensureBlobTable()
+	}
 	var done sync.WaitGroup
 	// Collect pre-rebuild shards that were superseded. Their cleanup
 	// (RemoveFromDisk → ReleaseBlobs → DecrBlobRefcount) must run after
@@ -1394,9 +1622,18 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 					}
 				}
 			}
-			if !t.maintenanceMu.TryLock() {
-				incomplete.Store(true)
-				return // another rebuild/repartition is in progress
+			for !t.maintenanceMu.TryLock() {
+				if len(only) == 0 {
+					incomplete.Store(true)
+					return // background maintenance may skip a busy table
+				}
+				// An explicit table rebuild must finish its requested work even
+				// when overflow already started a partial rebuild. Do not retain
+				// ddlMu while waiting: repartition may need its write side.
+				t.ddlMu.RUnlock()
+				t.maintenanceMu.Lock()
+				t.maintenanceMu.Unlock()
+				t.ddlMu.RLock()
 			}
 			t.mu.Lock() // table lock
 			tableLocked = true
@@ -1447,7 +1684,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 					if s != nil {
 						if r := activeReplication(db); r != nil && validReplicaDatabase(db.Name) && !t.isEphemeralQueryTable() {
 							cell := r.shardCell(s)
-							handover := cell.ownstate.TryHandover(cell.writesDrained)
+							handover := cell.ownstate.TryHandover(cell.writesDrained, false)
 							if handover == nil {
 								newShardList[i] = s
 								incomplete.Store(true)
@@ -1549,7 +1786,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 			if durablePublication {
 				func() {
 					defer func() { publicationPanic = recover() }()
-					db.save()
+					db.save(nil, nil, t)
 				}()
 			}
 			if publicationPanic != nil {
@@ -1704,7 +1941,7 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 	done.Wait()
 
 	// Return replaced shards to the caller (Rebuild) so it can delete their
-	// on-disk files AFTER db.save() has written the new schema.json.
+	// on-disk files AFTER db.save(nil, nil) has written the new schema.json.
 	// Deleting old column files before saving the schema creates a window
 	// where a crash/kill leaves schema.json pointing at already-deleted UUIDs.
 	// Failed schema publication intentionally retains the old generation: it is
@@ -1717,6 +1954,9 @@ func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphe
 }
 
 func GetDatabase(schema string, ignoreCase ...bool) *database {
+	if isSystemSchemaName(schema, len(ignoreCase) != 0 && ignoreCase[0]) {
+		return systemSchema()
+	}
 	if len(ignoreCase) != 0 && ignoreCase[0] {
 		names := databases.folded.Load()
 		if names == nil {
@@ -1735,6 +1975,9 @@ func GetDatabase(schema string, ignoreCase ...bool) *database {
 }
 
 func CreateDatabase(schema string, ignoreexists bool /*, persistence PersistenceFactory*/) bool {
+	if isSystemSchemaName(schema, true) {
+		panic("Database " + schema + " is reserved for the system catalog")
+	}
 	db := databases.Get(schema)
 	if db != nil {
 		if ignoreexists {
@@ -1758,7 +2001,8 @@ func CreateDatabase(schema string, ignoreexists bool /*, persistence Persistence
 		panic("Database " + schema + " already exists")
 	}
 
-	db.save()
+	db.initializeEmptyCatalog()
+	db.save(nil, nil)
 	return true
 }
 
@@ -1812,7 +2056,8 @@ func CreateDatabaseWithBackend(schema string, ignoreexists bool, options map[str
 		panic("Database " + schema + " already exists")
 	}
 
-	db.save()
+	db.initializeEmptyCatalog()
+	db.save(nil, nil)
 	return true
 }
 
@@ -1946,7 +2191,8 @@ func CreateDatabaseFrom(schema string, ignoreexists bool, sourceDB string) bool 
 		panic("Database " + schema + " already exists")
 	}
 
-	db.save()
+	db.initializeEmptyCatalog()
+	db.save(nil, nil)
 	return true
 }
 
@@ -2178,6 +2424,10 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 	// update it, and no table may appear while the destination generation is
 	// being prepared.
 	db.ensureBlobTable()
+	// Keep declarations stable through the backend switch and its physical
+	// catalog checkpoint. Ordinary row readers/writers retain the old generation.
+	db.definitionMu.RLock()
+	defer db.definitionMu.RUnlock()
 	defer db.GetWrite(nil).Release()
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
@@ -2256,6 +2506,11 @@ func AlterDatabaseStorage(schema string, targetConfig json.RawMessage, currentTx
 		publishStorageMoveGenerations(db, dst, generations, targetConfig)
 	}()
 	published = true
+	// Catalog payloads remain on the system backend. Publish the successor
+	// user shard IDs there and export both formats to the destination before
+	// retiring source storage; the already-written legacy snapshot is recoverable
+	// if this physical checkpoint fails.
+	db.save(nil, nil)
 	retireSourceStorage(src, generations, oldTransactionLog)
 	return true
 }
@@ -2285,6 +2540,7 @@ func DropDatabase(schema string, ifexists bool) bool {
 		panic("database has active replication transfers; retry DROP DATABASE")
 	}
 	requireDatabaseMaintenance(schema, maintenanceDrop)
+	db.ensureLoaded()
 	db = databases.Remove(schema)
 	if db == nil {
 		if ifexists {
@@ -2292,6 +2548,7 @@ func DropDatabase(schema string, ifexists bool) bool {
 		}
 		panic("Database " + schema + " does not exist")
 	}
+	db.detachCatalog()
 
 	// clean up shards/indexes/temp columns from GlobalCache
 	db.ensureLoaded()
@@ -2320,10 +2577,20 @@ func DropDatabase(schema string, ifexists bool) bool {
 	return true
 }
 
-func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*table, bool) {
+func CreateTable(tx *TxContext, schema, name string, pm PersistencyMode, ifnotexists bool) (*table, bool) {
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("Database " + schema + " does not exist")
+	}
+	physical := pm == Cache && strings.HasPrefix(name, ".")
+	if tx == nil && !physical {
+		var relation *table
+		var created bool
+		schemaAutocommit(func(current *TxContext) { relation, created = CreateTable(current, schema, name, pm, ifnotexists) })
+		return relation, created
+	}
+	if !physical {
+		tx.readSchema(db)
 	}
 	if ifnotexists {
 		if existing := db.tables.Get(name); existing != nil {
@@ -2331,8 +2598,9 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 			return existing, false
 		}
 	}
-	if !(pm == Cache && strings.HasPrefix(name, ".")) {
-		defer db.GetWrite(nil).Release()
+	if !physical {
+		tx.writeSchema(db)
+		defer db.GetWrite(tx).Release()
 	}
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
@@ -2343,11 +2611,14 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 		db.schemalock.Unlock()
 		return t, false
 	}
+	if !physical {
+		tx.recordSchema(t, true)
+	}
 	mode := t.schemaSaveMode()
 	if t.isEphemeralQueryTable() {
 		mode = schemaSaveBuffered
 	}
-	db.saveLockedAndUnlock(mode)
+	db.saveLockedAndUnlock(tx, mode, t)
 	registerCreatedTable(t)
 	return t, true
 }
@@ -2376,7 +2647,11 @@ func (db *database) createTableLocked(name string, pm PersistencyMode, ifnotexis
 // newTable builds a complete table object without publishing it in db.tables.
 // Callers may add internal columns before publication while holding schemalock.
 func (db *database) newTable(name string, pm PersistencyMode) *table {
+	if db == systemSchemaDB && !(pm == Cache && strings.HasPrefix(name, ".")) {
+		panic("schema catalog namespace is read-only")
+	}
 	t := new(table)
+	t.RuntimeIdentity = uuid.NewString()
 	t.DroppedColumns = make(map[string]bool)
 	t.schema = db
 	t.Name = name
@@ -2408,12 +2683,30 @@ func registerCreatedTable(t *table) {
 	}
 }
 
-func DropTable(schema, name string, ifexists bool) {
+func DropTable(tx *TxContext, schema, name string, ifexists bool) {
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
-	schemaAccess := db.GetWrite(nil)
+	target := db.GetTable(name)
+	physical := target != nil && target.RuntimeOnly
+	if tx == nil && !physical {
+		schemaAutocommit(func(current *TxContext) { DropTable(current, schema, name, ifexists) })
+		return
+	}
+	projection := -1
+	var related []*table
+	if tx != nil && !physical {
+		tx.writeSchema(db)
+		if target = db.GetTable(name); target != nil {
+			projection = tx.recordSchema(target, false)
+			related = db.relatedSchemaTables(name)
+			for _, candidate := range related {
+				tx.recordSchema(candidate, false)
+			}
+		}
+	}
+	schemaAccess := db.GetWrite(tx)
 	defer func() { schemaAccess.Release() }()
 	db.persistenceLifecycle.RLock()
 	persistenceLifecycleLocked := true
@@ -2436,6 +2729,22 @@ func DropTable(schema, name string, ifexists bool) {
 		db.schemalock.Unlock()
 		requireTableMaintenance(schema, name, maintenanceDrop)
 	}
+	if !t.RuntimeOnly {
+		db.dropCatalogTableLocked(tx, name)
+		for _, fk := range t.Foreign {
+			removeFKTriggers(db.tables.Get(fk.Tbl1), db.tables.Get(fk.Tbl2), fk)
+		}
+		for _, candidate := range related {
+			kept := make([]foreignKey, 0, len(candidate.Foreign))
+			for _, fk := range candidate.Foreign {
+				if fk.Tbl1 != name && fk.Tbl2 != name {
+					kept = append(kept, fk)
+				}
+			}
+			candidate.Foreign = kept
+			candidate.publishShowColumnsSnapshot(true)
+		}
+	}
 	db.tables.Remove(name)
 	if !t.isHiddenFromShowTables() {
 		db.publishTableNamesLocked()
@@ -2443,8 +2752,32 @@ func DropTable(schema, name string, ifexists bool) {
 	if name == ".blobs" {
 		db.blobRefState().table.Store(nil)
 	}
-	db.saveLockedAndUnlock(t.schemaSaveMode())
+	if t.RuntimeOnly {
+		db.schemalock.Unlock()
+	} else {
+		db.saveLockedAndUnlock(tx, t.schemaSaveMode(), related...)
+	}
 
+	if tx != nil && !t.RuntimeOnly {
+		tx.recordDrop(projection)
+	} else {
+		finishDroppedTable(t)
+	}
+	db.persistenceLifecycle.RUnlock()
+	persistenceLifecycleLocked = false
+	// Fire AfterDropTable triggers after releasing catalog and persistence
+	// lifecycle locks. Cascading drops may perform DDL in this database again.
+	schemaAccess.Release()
+	schemaAccess = WriteAccess{}
+	t.ExecuteTableLifecycleTriggers(AfterDropTable, tx)
+}
+
+// finishDroppedTable runs only after the original transaction and catalog
+// export accepted DROP. It never participates in rollback or eviction.
+func finishDroppedTable(t *table) {
+	if !t.RuntimeOnly {
+		t.retired.Store(true)
+	}
 	// deregister temp keytable from CacheManager (no-op if not registered or already evicted)
 	// Must be AFTER schemalock.Unlock to avoid deadlock: Remove → run() → evict → keytableCleanup → TryLock
 	GlobalCache.Remove(t)
@@ -2465,21 +2798,26 @@ func DropTable(schema, name string, ifexists bool) {
 			s.RemoveFromDisk()
 		}
 	}
-	db.persistenceLifecycle.RUnlock()
-	persistenceLifecycleLocked = false
-	// Fire AfterDropTable triggers after releasing catalog and persistence
-	// lifecycle locks. Cascading drops may perform DDL in this database again.
-	schemaAccess.Release()
-	schemaAccess = WriteAccess{}
-	t.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 }
 
-func RenameTable(schema, oldname, newname string) {
+func RenameTable(tx *TxContext, schema, oldname, newname string) {
 	db := GetDatabase(schema)
 	if db == nil {
 		panic("Database " + schema + " does not exist")
 	}
-	defer db.GetWrite(nil).Release()
+	if tx == nil {
+		schemaAutocommit(func(current *TxContext) { RenameTable(current, schema, oldname, newname) })
+		return
+	}
+	tx.writeSchema(db)
+	if target := db.GetTable(oldname); target != nil {
+		tx.recordSchema(target, false)
+	}
+	related := db.relatedSchemaTables(oldname)
+	for _, candidate := range related {
+		tx.recordSchema(candidate, false)
+	}
+	defer db.GetWrite(tx).Release()
 	db.persistenceLifecycle.RLock()
 	defer db.persistenceLifecycle.RUnlock()
 	db.ensureLoaded()
@@ -2487,7 +2825,7 @@ func RenameTable(schema, oldname, newname string) {
 		if target := db.tables.Get(oldname); target != nil {
 			for _, shard := range target.ActiveShards() {
 				if shard != nil {
-					r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", nil)
+					r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", tx)
 				}
 			}
 		}
@@ -2510,12 +2848,54 @@ func RenameTable(schema, oldname, newname string) {
 		db.schemalock.Unlock()
 		panic("Table " + schema + "." + newname + " already exists")
 	}
+	// Keep the RAM directory intact if native admission fails. Removing the
+	// old catalog name and adding the new one must share one transaction.
+	func() {
+		defer func() {
+			if failure := recover(); failure != nil {
+				db.schemalock.Unlock()
+				panic(failure)
+			}
+		}()
+		db.renameCatalogTableLocked(tx, oldname, newname)
+	}()
 	db.tables.Remove(oldname)
 	t.Name = newname
 	t.publishedName.Store(&newname)
 	db.tables.Set(newname, t)
 	db.publishTableNamesLocked()
-	db.saveLockedAndUnlock(t.schemaSaveMode())
+	var proposals []*table
+	for _, candidate := range append(related, t) {
+		changed := false
+		foreign := append([]foreignKey(nil), candidate.Foreign...)
+		for i := range foreign {
+			if foreign[i].Tbl1 == oldname {
+				foreign[i].Tbl1 = newname
+				changed = true
+			}
+			if foreign[i].Tbl2 == oldname {
+				foreign[i].Tbl2 = newname
+				changed = true
+			}
+		}
+		if changed {
+			candidate.Foreign = foreign
+			candidate.publishShowColumnsSnapshot(true)
+			proposals = append(proposals, candidate)
+		}
+	}
+	for _, child := range proposals {
+		for _, fk := range child.Foreign {
+			if fk.Tbl1 != child.Name || (fk.Tbl1 != newname && fk.Tbl2 != newname) {
+				continue
+			}
+			if parent := db.tables.Get(fk.Tbl2); parent != nil {
+				removeFKTriggers(child, parent, fk)
+				installFKTriggers(db, child, parent, fk)
+			}
+		}
+	}
+	db.saveLockedAndUnlock(tx, t.schemaSaveMode(), proposals...)
 }
 
 // keytableCleanup retires a planner-owned in-memory cache on the manager

@@ -19,7 +19,106 @@ package storage
 import "time"
 import "strings"
 import "context"
+import "github.com/google/uuid"
 import "github.com/launix-de/memcp/scm"
+import "github.com/launix-de/memcp/storage/mosi"
+
+type cachePreparationDeferred struct{}
+
+func (cachePreparationDeferred) Error() string { return "cache sources have pending mutations" }
+
+func deferredCachePreparation(value any) bool {
+	_, deferred := value.(cachePreparationDeferred)
+	return deferred
+}
+
+// A deferred cold build is not a query failure or a permanently broken recipe.
+// Existing complete caches keep their warm path, including during later writes.
+func trySharedCachePreparation(tx *TxContext, prepare scm.Scmer) (ready bool) {
+	if txRequiresQueryLocalCache(tx) {
+		return false
+	}
+	if tx != nil {
+		if leases := tx.schemas.leases.Load(); leases != nil {
+			for _, lease := range *leases {
+				if lease.write {
+					return false
+				}
+			}
+		}
+	}
+	defer func() {
+		if failure := recover(); failure != nil {
+			if !deferredCachePreparation(failure) {
+				panic(failure)
+			}
+			ready = false
+		}
+	}()
+	scm.Apply(prepare)
+	return true
+}
+
+// materializeQueryTable keeps private relational values in an ordinary native
+// table, never in a shared cache or a Scheme list. Only the emitter crosses to
+// source workers; it routes bounded output back to this invocation's owner.
+func materializeQueryTable(tx *TxContext, db *database, columns []scm.Scmer, producer, consumer scm.Scmer) scm.Scmer {
+	t := db.newTable(".query:"+uuid.NewString(), Cache)
+	t.RuntimeOnly = true
+	names := make([]string, len(columns))
+	for i, definition := range columns {
+		fields := mustScmerSlice(definition, "materialized column")
+		if len(fields) != 3 {
+			panic("materialized columns require name, type and collation")
+		}
+		names[i] = scm.String(fields[0])
+		if _, created := t.createColumnLocked(names[i], scm.String(fields[1]), nil,
+			[]scm.Scmer{scm.NewString("collate"), fields[2]}, false, nil); !created {
+			panic("duplicate materialized column")
+		}
+	}
+	t.publishShowColumnsSnapshot(true)
+	t.acquireCacheUse()
+	defer t.releaseCacheUse()
+	// The native cache owner reclaims the entire object and its index/column
+	// descendants once invocation readers have drained. It is never published
+	// in the database namespace or reused by another transaction.
+	GlobalCache.AddItemEx(t, int64(t.exclusiveSize()), TypeTempKeytable, nil,
+		keytableLastUsed, nil, 0, time.Minute)
+	populateCacheTable(tx, t, names, producer)
+	return scm.Apply(consumer, NewTableScmer(t))
+}
+
+// A source worker emits bounded tuples to the cache owner. Its local catalog
+// need not contain the owner's runtime-only table. These reconstructible rows
+// belong to cache construction, not the using transaction's undo journal.
+func populateCacheTable(tx *TxContext, t *table, names []string, producer scm.Scmer) {
+	if !t.RuntimeOnly || !t.isEphemeralQueryTable() {
+		panic("cache population requires an internal runtime-only table")
+	}
+	if !t.acquireCacheUse() {
+		panic("cache population target was evicted")
+	}
+	defer t.releaseCacheUse()
+	ctx, cancel := context.WithCancel(scanQueryContext(tx, context.Background()))
+	defer cancel()
+	accepted := scm.NewBool(true)
+	ignoreCollision := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return accepted })
+	emit := scm.NewClusterCallback(ctx, func(values ...scm.Scmer) scm.Scmer {
+		if len(values) != 1 {
+			panic("materialized emitter expects one complete row")
+		}
+		row := mustScmerSlice(values[0], "materialized row")
+		if len(row) != len(names) {
+			panic("materialized row has incorrect width")
+		}
+		// Reconstructible rows have no independent transaction decision. The
+		// producer retains source visibility; initialization gates publication.
+		t.Insert(names, [][]scm.Scmer{row}, nil, ignoreCollision, true, nil, nil)
+		return accepted
+	}, &accepted)
+	scm.Apply(producer, emit)
+}
 
 // Shared cache admission owns its source coherence proof. Delegating a producer
 // grants no local shard rights, and therefore cannot alone certify later hits.
@@ -39,7 +138,7 @@ func (t *table) acquireCacheSourceRights(tx *TxContext) bool {
 	done := runFanoutTasks(tx, len(shards), func(i int, _ bool) {
 		defer func() { failures[i] = recover() }()
 		shard := shards[i]
-		granted[i] = shard == nil || cluster.tryRead(ctx, *cluster.manager.shardCell(shard).resource.Load())
+		granted[i] = shard == nil || cluster.tryAcquire(ctx, *cluster.manager.shardCell(shard).resource.Load(), mosi.S)
 	})
 	if done != nil {
 		<-done
@@ -72,6 +171,10 @@ func (t *table) initializeCache(ss *scm.SessionState, initialize func(*scm.Sessi
 	if !strings.HasPrefix(t.Name, ".") {
 		panic("cache initialization requires a dot-prefixed cache table")
 	}
+	if !t.acquireCacheUse() {
+		panic(cachePreparationDeferred{})
+	}
+	defer t.releaseCacheUse()
 
 	t.cacheInitMu.Lock()
 	if t.cacheInitialized {
@@ -301,7 +404,9 @@ func (t *table) discardCacheValue(currentTx *TxContext, keys []string, values []
 // Mark runtime dependency targets without acquiring their shard/proxy locks or
 // executing SQL triggers. A cache query can itself be waiting for network data;
 // the reader must acknowledge revocation without waiting for that query.
-func invalidateDependentCaches(source *table) {
+// Untracked ownership changes also retire native row-cache membership. Normal
+// accepted DML keeps its trigger-maintained membership and invalidates payloads.
+func invalidateDependentCaches(source *table, rowsUntracked bool) {
 	queue := []*table{source}
 	seen := make(map[*table]bool)
 	for len(queue) > 0 {
@@ -311,6 +416,9 @@ func invalidateDependentCaches(source *table) {
 			continue
 		}
 		seen[target] = true
+		if rowsUntracked && target.cacheTracksSourceRows.Load() {
+			GlobalCache.retireTable(target)
+		}
 		target.visibilityCacheEpoch.Add(1)
 		target.cacheGeneration.Add(1)
 		target.beginContributionMutation()

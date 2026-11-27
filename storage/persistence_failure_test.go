@@ -28,6 +28,77 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
+func TestFileColumnWritesPublishOnlyCompleteSnapshots(t *testing.T) {
+	for _, old := range []string{"", "old-complete"} {
+		t.Run(old, func(t *testing.T) {
+			store := &FileStorage{path: t.TempDir() + "/"}
+			if old != "" {
+				writer := store.WriteColumn("generation", "value")
+				io.WriteString(writer, old)
+				finishColumnWrite(writer, true)
+			}
+			writer := store.WriteColumn("generation", "value")
+			if _, err := io.WriteString(writer, "new-prefix"); err != nil {
+				t.Fatal(err)
+			}
+			reader := store.ReadColumn("generation", "value")
+			if missing, ok := reader.(interface{ Missing() bool }); ok && missing.Missing() {
+				reader.Close()
+				if old != "" {
+					t.Fatal("private replacement hid the published column")
+				}
+			} else {
+				got, err := io.ReadAll(reader)
+				reader.Close()
+				if err != nil || string(got) != old {
+					t.Fatal("reader observed an incomplete column", string(got), err)
+				}
+			}
+			pinned := store.ReadColumn("generation", "value")
+			defer pinned.Close()
+			if _, err := io.WriteString(writer, "-suffix"); err != nil {
+				t.Fatal(err)
+			}
+			finishColumnWrite(writer, true)
+			if old != "" {
+				got, err := io.ReadAll(pinned)
+				if err != nil || string(got) != old {
+					t.Fatal("replacement changed an already opened snapshot", string(got), err)
+				}
+			}
+			reader = store.ReadColumn("generation", "value")
+			got, err := io.ReadAll(reader)
+			reader.Close()
+			if err != nil || string(got) != "new-prefix-suffix" {
+				t.Fatal("complete column was not published", string(got), err)
+			}
+		})
+	}
+}
+
+func TestFileColumnAbortPreservesConcurrentCompletedCopy(t *testing.T) {
+	store := &FileStorage{path: t.TempDir() + "/"}
+	completed := store.WriteColumn("generation", "value")
+	interrupted := store.WriteColumn("generation", "value")
+	io.WriteString(completed, "completed")
+	io.WriteString(interrupted, "partial")
+	finishColumnWrite(completed, true)
+	for range 2 {
+		if err := interrupted.(interface{ Abort() error }).Abort(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reader := store.ReadColumn("generation", "value")
+	got, err := io.ReadAll(reader)
+	reader.Close()
+	if err != nil || string(got) != "completed" {
+		t.Fatal("aborted duplicate damaged completed column", string(got), err)
+	}
+	if files, err := filepath.Glob(store.path + "*.writing-*"); err != nil || len(files) != 0 {
+		t.Fatal("column publication or abort retained private files", files, err)
+	}
+}
+
 type failingPersistenceReader struct {
 	readErr  error
 	closeErr error

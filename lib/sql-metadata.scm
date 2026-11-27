@@ -34,10 +34,10 @@ ordering. The inherited value is stored, so ADD COLUMN and restart agree. */
 					(sql_column_collation_defaults typ attributes (get_assoc options "collation")))
 				_ definition))) options ifnotexists tx)))
 
-(define sql_create_column (lambda (relation name typ dimensions attributes)
+(define sql_create_column (lambda (relation name typ dimensions attributes tx)
 	(createcolumn relation name typ dimensions
 		(sql_column_collation_defaults typ attributes
-			(get_assoc (show relation true) "Collation")))))
+			(get_assoc (show relation true) "Collation")) nil nil tx)))
 
 /* ADD freezes one value for historical rows. Keep the existing evaluation
 path for literal arithmetic and casts; reject volatile or relational defaults
@@ -569,3 +569,183 @@ relations are deliberately resolved by the single public get_schema dispatcher. 
 		(define tbl_arg (if (string? tbl_resolved) (list 'table schema false tbl_resolved false) tbl_resolved))
 		(merge (list scanfn '(session "__memcp_tx") tbl_arg) rest))
 ))))
+
+
+/* Native catalog relations are exposed as ordinary logical views. Their
+filters and join keys survive untangle_query and use the engine's autoindexes.
+Only bounded scalar formatting remains in frontend helpers. */
+(define sql_catalog_column_type (lambda (typ dimensions labels)
+	(concat typ
+		(if (and (equal?? typ "enum") (not (nil? labels)))
+			(concat "(" (reduce (map labels quote_mysql_string) (lambda (a b) (concat a "," b))) ")")
+			(if (or (nil? dimensions) (empty_list? dimensions)) ""
+				(concat "(" (reduce (map dimensions string) (lambda (a b) (concat a "," b))) ")"))))))
+
+(define sql_catalog_default (lambda (value expression nullable)
+	(info_schema_column_default (list "Default" (if (nil? value) nil (json_decode_scmer value))
+		"DefaultExpression" (coalesceNil expression "") "Null" nullable))))
+
+(define sql_catalog_visible_table (lambda (name)
+	(not (equal? (substr name 0 1) "."))))
+
+(define sql_catalog_column_key (lambda (rank)
+	(if (nil? rank) "" (equal? rank 1) "PRI" "UNI")))
+
+(define sql_catalog_view (lambda (schema relation) (if (equal?? schema "information_schema") (begin
+	(define catalog_col (lambda (alias name) (list (quote get_column) alias false name false)))
+	(define catalog_source (lambda (alias name) (list alias "system_schema" name false nil)))
+	(define catalog_equal_col (lambda (a b name) (list (quote equal?) (catalog_col a name) (catalog_col b name))))
+	(define catalog_visible_expr (lambda (alias) (begin
+		(define user_expr (list (quote coalesce) (list (quote session) "username") "root"))
+		(list (quote or)
+			(list (quote inner_select_exists) (make_query_block "system"
+				(list (list "catalog_user" "system" "user" false nil)) (list "present" 1)
+				(list (quote and) (list (quote equal?) (catalog_col "catalog_user" "username") user_expr)
+					(catalog_col "catalog_user" "admin")) nil nil nil nil nil '() '() '()))
+			(list (quote inner_select_exists) (make_query_block "system"
+				(list (list "catalog_access" "system" "access" false nil)) (list "present" 1)
+				(list (quote and) (list (quote equal?) (catalog_col "catalog_access" "username") user_expr)
+					(list (quote equal?) (catalog_col "catalog_access" "database") (catalog_col alias "schema_name")))
+				nil nil nil nil nil '() '() '()))))))
+	(define catalog_view_query (lambda (sources fields where)
+		(make_query_block "system_schema" sources fields where nil nil nil nil nil '() '() '())))
+	(match (toLower relation)
+		"schemata" (catalog_view_query (list (catalog_source "d" "databases"))
+			(list "catalog_name" "def" "schema_name" (catalog_col "d" "schema_name")
+				"default_character_set_name" "utf8mb4" "default_collation_name" "utf8mb3_general_ci"
+				"sql_path" nil "schema_comment" "") (catalog_visible_expr "d"))
+		"tables" (catalog_view_query (list (catalog_source "t" "tables"))
+			(list "table_catalog" "def" "table_schema" (catalog_col "t" "schema_name")
+				"table_name" (catalog_col "t" "name") "table_type" "BASE TABLE"
+				"engine" (catalog_col "t" "persistency_mode")
+				"table_rows" (list (quote sql_catalog_table_rows) (catalog_col "t" "schema_name") (catalog_col "t" "name"))
+				"data_length" (list (quote sql_catalog_table_size) (catalog_col "t" "schema_name") (catalog_col "t" "name"))
+				"table_collation" (catalog_col "t" "collation") "table_comment" (catalog_col "t" "comment"))
+			(list (quote and) (catalog_visible_expr "t") (list (quote sql_catalog_visible_table) (catalog_col "t" "name"))))
+		"columns" (begin
+			(define key_rank (list (quote inner_select)
+				(catalog_view_query (list (catalog_source "k" "keys") (catalog_source "kc" "key_columns"))
+					(list "rank" (list (quote aggregate)
+						(list (quote if) (list (quote equal?) (catalog_col "k" "id") "PRIMARY") 1 2) (quote min) nil))
+					(list (quote and) (catalog_equal_col "k" "kc" "schema_name") (catalog_equal_col "k" "kc" "table_name")
+						(list (quote equal?) (catalog_col "k" "ordinal") (catalog_col "kc" "key_ordinal"))
+						(catalog_equal_col "c" "kc" "schema_name") (catalog_equal_col "c" "kc" "table_name")
+						(list (quote equal?) (catalog_col "c" "name") (catalog_col "kc" "column_name"))))))
+			(catalog_view_query (list (catalog_source "c" "columns"))
+				(list "table_catalog" "def" "table_schema" (catalog_col "c" "schema_name")
+					"table_name" (catalog_col "c" "table_name") "column_name" (catalog_col "c" "name")
+					"ordinal_position" (list (quote +) (catalog_col "c" "ordinal") 1)
+					"column_default" (list (quote sql_catalog_default) (catalog_col "c" "default") (catalog_col "c" "default_expression") (catalog_col "c" "allow_null"))
+					"is_nullable" (list (quote if) (catalog_col "c" "allow_null") "YES" "NO")
+					"data_type" (catalog_col "c" "typ")
+					"column_type" (list (quote sql_catalog_column_type) (catalog_col "c" "typ") (catalog_col "c" "typdimensions") (catalog_col "c" "enum_values"))
+					"column_key" (list (quote sql_catalog_column_key) key_rank)
+					"extra" (list (quote if) (catalog_col "c" "auto_increment") "auto_increment" "")
+					"privileges" "select,insert,update,references" "column_comment" (catalog_col "c" "comment")
+					"is_generated" "NEVER" "generation_expression" "")
+				(list (quote and) (catalog_visible_expr "c")
+					(list (quote sql_catalog_visible_table) (catalog_col "c" "table_name"))
+					(list (quote not) (catalog_col "c" "is_temp")))))
+
+		"statistics" (catalog_view_query (list (catalog_source "k" "keys") (catalog_source "kc" "key_columns"))
+			(list "table_catalog" "def" "table_schema" (catalog_col "k" "schema_name")
+				"table_name" (catalog_col "k" "table_name") "non_unique" 0
+				"index_schema" (catalog_col "k" "schema_name") "index_name" (catalog_col "k" "id")
+				"seq_in_index" (list (quote +) (catalog_col "kc" "ordinal") 1)
+				"column_name" (catalog_col "kc" "column_name") "collation" "A"
+				"cardinality" nil "sub_part" nil "packed" nil "nullable" "" "index_type" "BTREE" "comment" "" "index_comment" "")
+			(list (quote and) (catalog_visible_expr "k")
+				(list (quote sql_catalog_visible_table) (catalog_col "k" "table_name"))
+				(catalog_equal_col "k" "kc" "schema_name") (catalog_equal_col "k" "kc" "table_name")
+				(list (quote equal?) (catalog_col "k" "ordinal") (catalog_col "kc" "key_ordinal"))))
+		"key_column_usage" (make_union_block (quote all) (list
+			(catalog_view_query (list (catalog_source "k" "keys") (catalog_source "kc" "key_columns"))
+				(list "constraint_catalog" "def" "constraint_schema" (catalog_col "k" "schema_name")
+					"constraint_name" (list (quote sql_catalog_constraint_name) (catalog_col "k" "constraint_name") (catalog_col "k" "id"))
+					"table_catalog" "def" "table_schema" (catalog_col "k" "schema_name") "table_name" (catalog_col "k" "table_name")
+					"column_name" (catalog_col "kc" "column_name") "ordinal_position" (list (quote +) (catalog_col "kc" "ordinal") 1)
+					"position_in_unique_constraint" nil "referenced_table_schema" nil "referenced_table_name" nil "referenced_column_name" nil)
+				(list (quote and) (catalog_visible_expr "k")
+					(list (quote sql_catalog_visible_table) (catalog_col "k" "table_name"))
+					(catalog_equal_col "k" "kc" "schema_name") (catalog_equal_col "k" "kc" "table_name")
+					(list (quote equal?) (catalog_col "k" "ordinal") (catalog_col "kc" "key_ordinal"))))
+			(catalog_view_query (list (catalog_source "f" "foreign_keys") (catalog_source "fc" "foreign_key_columns"))
+				(list "constraint_catalog" "def" "constraint_schema" (catalog_col "f" "schema_name")
+					"constraint_name" (catalog_col "f" "id") "table_catalog" "def"
+					"table_schema" (catalog_col "f" "schema_name") "table_name" (catalog_col "f" "tbl1")
+					"column_name" (catalog_col "fc" "column1") "ordinal_position" (list (quote +) (catalog_col "fc" "ordinal") 1)
+					"position_in_unique_constraint" (list (quote +) (catalog_col "fc" "ordinal") 1)
+					"referenced_table_schema" (catalog_col "f" "schema_name") "referenced_table_name" (catalog_col "f" "tbl2")
+					"referenced_column_name" (catalog_col "fc" "column2"))
+				(list (quote and) (catalog_visible_expr "f")
+					(list (quote sql_catalog_visible_table) (catalog_col "f" "tbl1"))
+					(list (quote equal?) (catalog_col "f" "table_name") (catalog_col "f" "tbl1"))
+					(catalog_equal_col "f" "fc" "schema_name") (catalog_equal_col "f" "fc" "table_name")
+					(list (quote equal?) (catalog_col "f" "ordinal") (catalog_col "fc" "foreign_key_ordinal")))))
+			nil nil nil '())
+		"referential_constraints" (begin
+			(define referenced_columns (list (quote inner_select)
+				(catalog_view_query (list (catalog_source "fc" "foreign_key_columns"))
+					(list "signature" (sql_group_concat_ordered_expr (list (quote sql_catalog_key_part) (catalog_col "fc" "column2"))
+						(list (list (catalog_col "fc" "ordinal") <)) "" false))
+					(list (quote and) (catalog_equal_col "f" "fc" "schema_name") (catalog_equal_col "f" "fc" "table_name")
+						(list (quote equal?) (catalog_col "f" "ordinal") (catalog_col "fc" "foreign_key_ordinal"))))))
+			(define key_columns (list (quote inner_select)
+				(catalog_view_query (list (catalog_source "kc" "key_columns"))
+					(list "signature" (sql_group_concat_ordered_expr (list (quote sql_catalog_key_part) (catalog_col "kc" "column_name"))
+						(list (list (catalog_col "kc" "ordinal") <)) "" false))
+					(list (quote and) (catalog_equal_col "k" "kc" "schema_name") (catalog_equal_col "k" "kc" "table_name")
+						(list (quote equal?) (catalog_col "k" "ordinal") (catalog_col "kc" "key_ordinal"))))))
+			(define matching_key (list (quote inner_select)
+				(make_query_block "system_schema" (list (catalog_source "k" "keys"))
+					(list "constraint_name" (list (quote sql_catalog_constraint_name) (catalog_col "k" "constraint_name") (catalog_col "k" "id")))
+					(list (quote and) (catalog_equal_col "f" "k" "schema_name")
+						(list (quote equal?) (catalog_col "f" "tbl2") (catalog_col "k" "table_name"))
+						(list (quote equal?) key_columns referenced_columns))
+					nil nil (list (list (catalog_col "k" "ordinal") <)) 1 nil '() '() '())))
+			(catalog_view_query (list (catalog_source "f" "foreign_keys"))
+				(list "constraint_catalog" "def" "constraint_schema" (catalog_col "f" "schema_name")
+					"constraint_name" (catalog_col "f" "id") "unique_constraint_catalog" "def"
+					"unique_constraint_schema" (catalog_col "f" "schema_name") "unique_constraint_name" matching_key
+					"match_option" "NONE" "update_rule" (list (quote sql_catalog_fk_action) (catalog_col "f" "updatemode"))
+					"delete_rule" (list (quote sql_catalog_fk_action) (catalog_col "f" "deletemode"))
+					"table_name" (catalog_col "f" "tbl1") "referenced_table_name" (catalog_col "f" "tbl2"))
+				(list (quote and) (catalog_visible_expr "f")
+					(list (quote sql_catalog_visible_table) (catalog_col "f" "tbl1"))
+					(list (quote equal?) (catalog_col "f" "table_name") (catalog_col "f" "tbl1")))))
+		"triggers" (catalog_view_query (list (catalog_source "tr" "triggers"))
+			(list "trigger_catalog" "def" "trigger_schema" (catalog_col "tr" "schema_name") "trigger_name" (catalog_col "tr" "name")
+				"event_manipulation" (list (quote sql_catalog_trigger_part) (catalog_col "tr" "timing") 1)
+				"event_object_catalog" "def" "event_object_schema" (catalog_col "tr" "schema_name") "event_object_table" (catalog_col "tr" "table_name")
+				"action_order" 1 "action_condition" nil "action_statement" (catalog_col "tr" "source") "action_orientation" "ROW"
+				"action_timing" (list (quote sql_catalog_trigger_part) (catalog_col "tr" "timing") 0)
+				"created" nil "sql_mode" "" "definer" "root@localhost" "character_set_client" "utf8mb4"
+				"collation_connection" "utf8mb4_general_ci" "database_collation" "utf8mb4_general_ci")
+			(list (quote and) (catalog_visible_expr "tr")
+				(list (quote sql_catalog_visible_table) (catalog_col "tr" "table_name"))
+				(list (quote not) (catalog_col "tr" "hidden")) (list (quote not) (catalog_col "tr" "is_system"))))
+		_ nil)) nil)))
+
+(define sql_catalog_query? (lambda (node)
+	(match node
+		((symbol query-block) _schema sources _fields _where _group _having _order _limit _offset _hidden _stages _facts)
+		(or (reduce sources (lambda (found source)
+			(or found (and (equal?? (cadr source) "information_schema") (string? (nth source 2))))) false)
+			(reduce (cdr node) (lambda (found child) (or found (sql_catalog_query? child))) false))
+		(cons head tail) (or (sql_catalog_query? head)
+			(reduce tail (lambda (found child) (or found (sql_catalog_query? child))) false))
+		_ false)))
+
+
+(define sql_catalog_constraint_name (lambda (name id)
+	(if (or (nil? name) (equal? name "")) id name)))
+(define sql_catalog_fk_action (lambda (mode)
+	(if (equal? mode 1) "CASCADE" (equal? mode 2) "SET NULL" "RESTRICT")))
+(define sql_catalog_trigger_part (lambda (timing part)
+	(toUpper (nth (split timing "_") part))))
+(define sql_catalog_table_rows (lambda (schema name)
+	(get_assoc (table_planner_statistics (table schema false name false)) "row_count")))
+(define sql_catalog_table_size (lambda (schema name)
+	(table_size_estimate (table schema false name false))))
+
+(define sql_catalog_key_part (lambda (name) (concat (strlen name) ":" name)))

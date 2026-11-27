@@ -130,7 +130,16 @@ func (r *replicationManager) invalidateResource(ctx context.Context, source stri
 		if packet.Epoch < epoch {
 			return nil
 		}
-		handover, err := c.ownstate.BeginHandover(ctx, c.drainWrites)
+		var handover *mosi.Handover
+		var err error
+		if packet.TryRead {
+			handover = c.ownstate.TryHandover(c.writesDrained, true)
+			if handover == nil {
+				return errClusterReadBusy
+			}
+		} else {
+			handover, err = c.ownstate.BeginHandover(ctx, c.drainWrites, true)
+		}
 		if err != nil {
 			return err
 		}
@@ -181,7 +190,15 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 			c.acquire.Unlock()
 		}
 	}()
-	handover, err := c.ownstate.BeginHandover(ctx, c.drainWrites)
+	var handover *mosi.Handover
+	if packet.TryRead {
+		handover = c.ownstate.TryHandover(c.writesDrained, packet.State == "IO")
+		if handover == nil {
+			return errClusterReadBusy
+		}
+	} else {
+		handover, err = c.ownstate.BeginHandover(ctx, c.drainWrites, packet.State == "IO")
+	}
 	if err != nil {
 		return err
 	}
@@ -254,6 +271,29 @@ func (r *replicationManager) offerResource(ctx context.Context, source string, p
 }
 
 func (r *replicationManager) coordinate(ctx context.Context, requester string, packet mosiPacket) error {
+	for {
+		err := r.coordinateAttempt(ctx, requester, packet)
+		pending, ok := err.(*replicaRecoveryPending)
+		if !ok {
+			return err
+		}
+		if packet.TryRead {
+			return errClusterReadBusy
+		}
+		// A connected replacement must finish recovery before this flight
+		// captures its authority epoch. The attempt released coordination;
+		// hello can now use that same boundary to install the recovered state.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-pending.peer.done:
+			return fmt.Errorf("%s: connection closed during participant recovery", mosi.NetworkError)
+		case <-pending.peer.recoveryDone:
+		}
+	}
+}
+
+func (r *replicationManager) coordinateAttempt(ctx context.Context, requester string, packet mosiPacket) error {
 	if r.cluster == nil && sharedClusterDatabase(packet.Resource.Database) {
 		return fmt.Errorf("replication of a cluster-owned database requires an enclosing domain handover")
 	}
@@ -301,6 +341,9 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 		// Let native recovery finish before capturing a recall's authority epoch.
 		// Recovery owns this same directory, so release it while waiting.
 		coordination.Release()
+		if packet.TryRead {
+			return errClusterReadBusy
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -419,7 +462,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			defer releasePersistence()
 			var handover *mosi.Handover
 			if packet.TryRead {
-				handover = c.ownstate.TryHandover(c.writesDrained)
+				handover = c.ownstate.TryHandover(c.writesDrained, write)
 				if handover == nil {
 					return errClusterReadBusy
 				}
@@ -432,7 +475,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 					return errClusterReadBusy
 				}
 			} else {
-				handover, err = c.ownstate.BeginHandover(ctx, c.drainWrites)
+				handover, err = c.ownstate.BeginHandover(ctx, c.drainWrites, write)
 			}
 			if err != nil {
 				return err
@@ -480,7 +523,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 			if !write {
 				knownReaders[requester] = true
 			}
-			if err := r.step(ctx, record.Owner, mosiPacket{Kind: "recall", ID: uuid.NewString(), Resource: packet.Resource, Epoch: record.Epoch, State: oldState, Readers: knownReaders, Owner: requester}); err != nil {
+			if err := r.step(ctx, record.Owner, mosiPacket{Kind: "recall", ID: uuid.NewString(), Resource: packet.Resource, Epoch: record.Epoch, State: oldState, Readers: knownReaders, Owner: requester, TryRead: packet.TryRead}); err != nil {
 				return err
 			}
 			r.mu.Lock()
@@ -494,7 +537,16 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				continue
 			}
 			if reader == r.id {
-				handover, err := c.ownstate.BeginHandover(ctx, c.drainWrites)
+				var handover *mosi.Handover
+				var err error
+				if packet.TryRead {
+					handover = c.ownstate.TryHandover(c.writesDrained, true)
+					if handover == nil {
+						return errClusterReadBusy
+					}
+				} else {
+					handover, err = c.ownstate.BeginHandover(ctx, c.drainWrites, true)
+				}
 				if err != nil {
 					return err
 				}
@@ -505,7 +557,7 @@ func (r *replicationManager) coordinate(ctx context.Context, requester string, p
 				if packet.Resource.Shard != "" {
 					routes = r.shardRoutes(packet.Resource)
 				}
-				if err := r.step(ctx, reader, mosiPacket{Kind: "invalidate", ID: uuid.NewString(), Resource: r.canonicalResource(packet.Resource), Epoch: record.Epoch, Forwards: routes}); err != nil {
+				if err := r.step(ctx, reader, mosiPacket{Kind: "invalidate", ID: uuid.NewString(), Resource: r.canonicalResource(packet.Resource), Epoch: record.Epoch, Forwards: routes, TryRead: packet.TryRead}); err != nil {
 					return err
 				}
 			}
@@ -627,26 +679,50 @@ func (r *replicationManager) acceptRequestRoutes(source string, packet mosiPacke
 	}
 	r.mu.Lock()
 	target := r.canonicalResource(packet.Resource)
-	known := r.directory.Records[target.key()].Owner != ""
+	targetRecord := r.directory.Records[target.key()]
+	known := targetRecord.Owner != ""
+	targetCell := r.lookupCell(target)
 	var authority *replicaCell
-	if !known {
+	var retained *replicaCell
+	if !known || targetRecord.Owner == source {
 		for _, route := range packet.Forwards {
 			from := r.canonicalResource(route.From)
-			if record := r.directory.Records[from.key()]; record.Owner == source {
+			record := r.directory.Records[from.key()]
+			if from != route.From && record.Owner == r.id {
+				if candidate := r.lookupCell(from); retained != nil && retained != candidate {
+					r.mu.Unlock()
+					return fmt.Errorf("request forwarding crosses retained shard authorities")
+				} else {
+					retained = candidate
+				}
+			}
+			if record.Owner == source {
 				authority = r.lookupCell(from)
 				break
 			}
 		}
 	}
 	r.mu.Unlock()
-	if known {
+	if known && authority == nil {
 		return nil // an old request cannot reverse an already learned successor
 	}
 	if authority == nil {
-		return fmt.Errorf("request forwarding from non-owner")
+		if retained != nil {
+			// A former owner can request a private checkpoint UUID after its
+			// predecessor has already advanced here. Its known historical edge
+			// identifies our current authority; the request cannot reverse it.
+			for _, route := range packet.Forwards {
+				if cell := r.lookupCell(route.From); cell != nil && cell != retained {
+					return fmt.Errorf("request forwarding crosses shard authorities")
+				}
+			}
+			r.forwardResource(packet.Resource, *retained.resource.Load())
+			return nil
+		}
+		return fmt.Errorf("request forwarding from non-owner: %s table %s, routes %v, canonical %v", packet.Resource.key(), packet.Resource.Table, packet.Forwards, target)
 	}
 	for _, route := range packet.Forwards {
-		if cell := r.lookupCell(route.From); cell != nil && cell != authority {
+		if cell := r.lookupCell(route.From); cell != nil && cell != authority && cell != targetCell {
 			return fmt.Errorf("request forwarding crosses shard authorities")
 		}
 	}

@@ -28,9 +28,9 @@ import (
 
 func recMapTestTable(tb testing.TB, database, name string, columns []string, rows [][]scm.Scmer) *table {
 	tb.Helper()
-	tbl, _ := CreateTable(database, name, Memory, true)
+	tbl, _ := CreateTable(nil, database, name, Memory, true)
 	for _, column := range columns {
-		tbl.CreateColumn(column, "INT", nil, nil)
+		tbl.CreateColumn(nil, column, "INT", nil, nil)
 	}
 	tbl.Insert(columns, rows, nil, scm.NewNil(), false, nil)
 	return tbl
@@ -554,8 +554,8 @@ func TestScanRecMapShardParallelMapping(t *testing.T) {
 	databases.Remove(database)
 	t.Cleanup(func() { databases.Remove(database) })
 	CreateDatabase(database, true)
-	source, _ := CreateTable(database, "source", Memory, true)
-	source.CreateColumn("id", "INT", nil, nil)
+	source, _ := CreateTable(nil, database, "source", Memory, true)
+	source.CreateColumn(nil, "id", "INT", nil, nil)
 	source.ShardMode = ShardModePartition
 	source.PDimensions = []shardDimension{{Column: "id", NumPartitions: 2, Pivots: []scm.Scmer{scm.NewInt(10)}}}
 	source.PShards = []*storageShard{NewShard(source), NewShard(source)}
@@ -752,10 +752,10 @@ func TestRecMapRangeFirstMapperCombinesShardImages(t *testing.T) {
 	databases.Remove(database)
 	t.Cleanup(func() { databases.Remove(database) })
 	CreateDatabase(database, true)
-	target, _ := CreateTable(database, "target", Memory, true)
+	target, _ := CreateTable(nil, database, "target", Memory, true)
 	columns := []string{"parent", "at", "value"}
 	for _, column := range columns {
-		target.CreateColumn(column, "INT", nil, nil)
+		target.CreateColumn(nil, column, "INT", nil, nil)
 	}
 	target.ShardMode = ShardModePartition
 	target.PDimensions = []shardDimension{{Column: "parent", NumPartitions: 4,

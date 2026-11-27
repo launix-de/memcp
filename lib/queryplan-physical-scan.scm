@@ -75,7 +75,7 @@ callbacks. Local operator optimizer hooks may subsequently transform the plan. *
 (define scan_plan_hoist_safe (lambda (expr)
 	(match expr
 		((quote quote) _) true
-		(cons head args) (and (has? (list (quote session) (quote equal?) (quote equal??) (quote nil?)
+		(cons head args) (and (symbol? head) (has? (list (quote session) (quote equal?) (quote equal??) (quote nil?)
 			(quote not) (quote sql_not) (quote and) (quote or) (quote coalesceNil) (quote bool?)
 			(quote int?) (quote float?) (quote string?) (quote <) (quote <=) (quote >) (quote >=)) head)
 			(reduce args (lambda (safe arg) (and safe (scan_plan_hoist_safe arg))) true))
@@ -84,7 +84,7 @@ callbacks. Local operator optimizer hooks may subsequently transform the plan. *
 (define scan_plan_computed_safe (lambda (expr params)
 	(if (not (scan_plan_uses expr params)) (scan_plan_hoist_safe expr)
 		(match expr
-			(cons head args) (and (not (has? params head)) (expression_foldable? head)
+			(cons head args) (and (or (not (symbol? head)) (not (has? params head))) (expression_foldable? head)
 				(reduce args (lambda (safe arg) (and safe (scan_plan_computed_safe arg params))) true))
 			_ (symbol? expr)))))
 
@@ -460,14 +460,35 @@ that will read the executing request later. */
 shard/combiner, rather than shared by the enclosing scan invocation. Scalar
 literals keep their existing direct representation (including additive plans). */
 (define scan_plan_initializer (lambda (expr)
-	(if (and (list? expr) (not (equal? expr '())) (not (equal? (car expr) (quote lambda))))
+	(if (and (list? expr) (not (empty_list? expr)) (not (expression_equal? (car expr) (quote lambda))))
 		(list (quote lambda) '() expr)
 		expr)))
+
+/* A scan owns the visibility context of its source lookup too. In particular,
+shared computed recipes scan with nil; binding their table to the outer request
+would retain that request in a reusable column and rebuild its callable on reuse.
+Only source constructors are visited; quoted rows and preparation code stay data
+or keep their own invocation context. */
+(define scan_plan_source_with_tx (lambda (source tx)
+	(match source
+		(cons head args)
+		(if (and (or (expression_equal? head (quote table)) (expression_equal? head table))
+			(equal? (count args) 4))
+			(append source tx)
+			(or (expression_equal? head (quote list)) (expression_equal? head list))
+			(cons head (map args (lambda (item) (scan_plan_source_with_tx item tx))))
+			(and (or (expression_equal? head (quote !begin)) (expression_equal? head (quote begin)))
+				(not (empty_list? args)))
+			(append (slice source 0 (- (count source) 1))
+				(scan_plan_source_with_tx (nth source (- (count source) 1)) tx))
+			source)
+		_ source)))
 
 (define compile_scan_plan (lambda arguments
 	(if (< (count arguments) 5) (error "compile_scan_plan expects an operator, transaction, source, filter columns, and filter callback")
 		(match arguments (merge '(operator tx source columns filter) rest)
 			(begin
+				(define source (scan_plan_source_with_tx source tx))
 				(define static (scan_plan_list columns))
 				(define initializer_index (match operator
 					(quote scan) 2 (quote scan_order) 7

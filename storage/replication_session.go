@@ -78,12 +78,12 @@ func replicationRetainsCatalogs(name string) bool {
 		if cells := r.cellSnapshot.Load(); cells != nil {
 			for _, binding := range *cells {
 				resource := binding.resource
-				if resource.Database != name {
+				if resource.Database != name && !isCatalogResource(*resource) {
 					continue
 				}
 				if history := binding.cell.retiredShards.Load(); history != nil {
 					for _, previous := range *history {
-						if previous.Value() != nil {
+						if shard := previous.Value(); shard != nil && (resource.Database == name || shard.home().Name == name) {
 							return true
 						}
 					}

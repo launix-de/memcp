@@ -598,7 +598,7 @@ func (s *storageShard) mutationGuard(tx *TxContext) *uniqueWriteGuard {
 		owner = tx.transactionState
 	}
 	for {
-		writer, done := state.TryWrite(owner, false)
+		writer, done := state.TryWrite(owner, false, nil)
 		if writer != nil {
 			guard.mutation = writer
 			return guard
@@ -717,7 +717,7 @@ func reserveInsertRows(shard *storageShard, rows int64, size uint, overflow bool
 	}
 }
 
-func (t *table) routeFreeInsert(topology *tableShardTopology, rows int64) (*storageShard, func(), *tableShardTopology) {
+func (t *table) routeFreeInsert(currentTx *TxContext, topology *tableShardTopology, rows int64) (*storageShard, func(), *tableShardTopology) {
 	if topology.mode != ShardModeFree || len(topology.shards) == 0 {
 		return nil, nil, topology
 	}
@@ -766,17 +766,23 @@ func (t *table) routeFreeInsert(topology *tableShardTopology, rows int64) (*stor
 	// already running, keep writing to the live generation instead of waiting
 	// behind its compression/schema I/O. Existing forwarding preserves handover.
 	source := topology.shards[len(topology.shards)-1]
-	next, _ := t.appendFreeShardDurably(topology, source, uint(rows), candidate != nil || !t.localInsertShard(source))
+	next, _ := t.appendFreeShardDurably(currentTx, topology, source, uint(rows), candidate != nil || !t.localInsertShard(source))
 	if next != nil && next != topology {
 		return nil, nil, next
 	}
 	if candidate == nil {
-		if !t.localInsertShard(source) {
-			// Maintenance must never make the overflow fallback steal a foreign
-			// writer. Retry allocation after its existing owner releases it.
-			runtime.Gosched()
-			return nil, nil, nil
+		// The newest directory entry can belong to another peer. Prefer a
+		// retained local lane even when all of its target-size slots are used;
+		// size is a split target, not permission to wait for schema recall.
+		for _, shard := range writers {
+			if t.localInsertShard(shard) {
+				source = shard
+				break
+			}
 		}
+		// With no local lane, reserve the existing generation and acquire its
+		// ordinary native shard writer during UNIQUE preflight. Retrying schema
+		// allocation cannot progress while this statement retains schema S.
 		candidate = source
 	}
 	release, _ := reserveInsertRows(candidate, rows, Settings.ShardSize, true, -1)

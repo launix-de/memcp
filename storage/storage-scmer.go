@@ -27,6 +27,9 @@ import "github.com/launix-de/memcp/scm"
 import "unsafe"
 
 // main type for storage: can store any value, is inefficient but does type analysis how to optimize
+// The legacy reader is independent of the current versioned scalar writer.
+type storageSCMERLegacy struct{ StorageSCMER }
+
 type StorageSCMER struct {
 	storageJITFunctions
 	values      []scm.Scmer `jit:"immutable-after-finish"`
@@ -146,33 +149,13 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, idx scm.JITValueDesc, result
 }
 
 func (s *StorageSCMER) Serialize(f io.Writer) {
-	for _, value := range s.values {
-		if scm.HasNativeDate(value) {
-			(&storageSCMERExact{StorageSCMER: *s}).Serialize(f)
-			return
-		}
-	}
-	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
-	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
-	for i := 0; i < len(s.values); i++ {
-		value := s.values[i]
-		var v []byte
-		var err error
-		if value.IsBSON() {
-			typ, payload := value.BSONRaw()
-			v, err = json.Marshal(map[string]any{
-				"$memcp.scmer": "bson-v1",
-				"type":         typ,
-				"payload":      base64.RawStdEncoding.EncodeToString(payload),
-			})
-		} else {
-			v, err = json.Marshal(value)
-		}
-		if err != nil {
-			panic(err)
-		}
-		f.Write(v)
-		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 10
+	// Generic catalog cells can carry native callables and quoted procedures
+	// as well as dates. Preserve their identity through the current bounded
+	// scalar frame; magic1 remains a permanent read-only legacy format.
+	buffer := bufio.NewWriter(f)
+	(&storageSCMERExact{StorageSCMER: *s}).Serialize(buffer)
+	if err := buffer.Flush(); err != nil {
+		panic(err)
 	}
 }
 func (s *StorageSCMER) Deserialize(f io.Reader) uint {

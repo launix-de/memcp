@@ -44,6 +44,21 @@ type storageShard struct {
 	filterFeedback filterFeedbackCache
 	t              *table
 	uuid           uuid.UUID // uuid.String()
+	// catalogHome is immutable before publication for system_schema shards.
+	// Rebuild successors inherit physical placement; ordinary shards persist
+	// through their table.
+	catalogHome *database
+	// catalogOwner is the immutable logical tenant, independently of storage.
+	catalogOwner string
+	// Version of the persisted catalog base. Pre-v3 shards lack runtime_identity
+	// and revision; pre-v5 databases lack incarnation. Deltas use current columns.
+	catalogVersion int
+	// A private rebuild/import generation has no published MOSI resource yet.
+	catalogPrivate        atomic.Bool
+	catalogNamespaceReady atomic.Bool
+	// catalogDurable requests synced column files from the next rebuild of a
+	// system_schema shard, matching the durability of its schema.json commit.
+	catalogDurable bool
 	// MOSI authority is forwarded together with rebuild successors.
 	coherence      atomic.Pointer[replicaCell]
 	localMutations atomic.Pointer[mosi.State] // standalone native mutation admission, shared by rebuild generations
@@ -126,11 +141,18 @@ type storageShard struct {
 }
 
 func (s *storageShard) beginTransactionUse() {
+	if s.t != nil {
+		s.t.pendingCacheMutations.Add(1)
+	}
 	s.activeTransactions.Add(1)
 }
 
 func (s *storageShard) endTransactionUse() {
-	if s.activeTransactions.Add(-1) != 0 {
+	remaining := s.activeTransactions.Add(-1)
+	if s.t != nil {
+		s.t.pendingCacheMutations.Add(-1)
+	}
+	if remaining != 0 {
 		return
 	}
 	s.t.signalTransactionDrain()
@@ -533,7 +555,7 @@ func (u *storageShard) load() {
 	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
 		// Replaying the log mutates inserts/deletions; caller holds u.mu.Lock
 		var log chan interface{}
-		localCommitted, log, logfile := u.t.schema.persistence.ReplayLog(u.uuid.String(), false)
+		localCommitted, log, logfile := u.home().persistence.ReplayLog(u.uuid.String(), false)
 		u.logfile = logfile
 		decisions := make(map[string]bool)
 		isCommitted := func(txID string) bool {
@@ -546,7 +568,9 @@ func (u *storageShard) load() {
 			if committed, exists := decisions[txID]; exists {
 				return committed
 			}
-			committed := u.t.schema.transactionCommitted(txID)
+			// Storage placement does not own a catalog transaction. Its WAL is
+			// on the system backend, but shares the tenant's original decision.
+			committed := u.authorityDatabase().transactionCommitted(txID)
 			decisions[txID] = committed
 			return committed
 		}
@@ -647,7 +671,7 @@ func (u *storageShard) makeComputedColumnProxy(colName string, col *column) Colu
 
 func (u *storageShard) attachColumnRuntime(colName string, columnstorage ColumnStorage) ColumnStorage {
 	if blob, ok := columnstorage.(*OverlayBlob); ok {
-		blob.SetSchema(u.t.schema)
+		blob.SetSchema(u.home())
 	}
 	col := u.schemaColumn(colName)
 	if proxy, ok := columnstorage.(*StorageComputeProxy); ok {
@@ -684,7 +708,7 @@ func (u *storageShard) needsRuntimeAttach(colName string, columnstorage ColumnSt
 		return false
 	}
 	if blob, ok := columnstorage.(*OverlayBlob); ok {
-		return blob.schema != u.t.schema
+		return blob.schema != u.home()
 	}
 	if proxy, ok := columnstorage.(*StorageComputeProxy); ok {
 		if proxy.shard != u || proxy.colName != colName {
@@ -711,6 +735,12 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool, cu
 		}
 		if cs != nil {
 			cs = u.attachColumnRuntime(colName, cs)
+			u.columns[colName] = cs
+			return cs
+		}
+		if u.catalogVersion > 0 && ((u.catalogVersion < 3 && ((u.t == systemSchemaTables[catalogTables] && colName == "runtime_identity") || (u.t == systemSchemaTables[catalogDatabases] && colName == "revision"))) || (u.catalogVersion < 5 && u.t == systemSchemaTables[catalogDatabases] && colName == "incarnation")) {
+			u.ensureColumnLoaded("schema_name", true, nil)
+			cs = &StorageConst{count: uint64(u.main_count), value: scm.NewNil()}
 			u.columns[colName] = cs
 			return cs
 		}
@@ -743,13 +773,19 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool, cu
 			panic("query killed")
 		}
 		defer release()
-		f := u.t.schema.persistence.ReadColumn(u.uuid.String(), colName)
+		f := u.home().persistence.ReadColumn(u.uuid.String(), colName)
 		var magicbyte uint8
 		if err := binary.Read(f, binary.LittleEndian, &magicbyte); err != nil {
+			f.Close()
+			if u.catalogHome != nil {
+				panic(fmt.Errorf("catalog shard %s column %s is unreadable: %w", u.uuid, colName, err))
+			}
 			u.columns[colName] = new(StorageSparse)
 			return u.columns[colName]
 		}
-		fmt.Println("loading storage "+u.t.schema.Name+" shard "+u.uuid.String()+" column "+colName+" of type", magicbyte)
+		if u.catalogHome == nil {
+			fmt.Println("loading storage "+u.t.schema.Name+" shard "+u.uuid.String()+" column "+colName+" of type", magicbyte)
+		}
 		columnstorage := reflect.New(storages[magicbyte]).Interface().(ColumnStorage)
 		cnt := columnstorage.Deserialize(f)
 		f.Close()
@@ -952,6 +988,19 @@ func (s *storageShard) GetRead(currentTx *TxContext, mayDelegate bool) ReadAcces
 // Physical query-local IDs retain their original immutable generation. Rights
 // acquisition may install a successor, but must never reinterpret those IDs.
 func (s *storageShard) getRead(currentTx *TxContext, options shardReadOptions) ReadAccess {
+	if err := scanQueryContext(currentTx, context.Background()).Err(); err != nil {
+		panic(err)
+	}
+	if s.t != nil && !s.t.RuntimeOnly {
+		currentTx.readSchema(s.t.schema)
+	}
+	definitionWriter := s.t != nil && currentTx.hasSchemaWriter(s.authorityDatabase())
+	if definitionWriter {
+		options.mayDelegate = false
+	}
+	if s.t != nil && s.t.retired.Load() {
+		panic("table handle belongs to a rolled-back or dropped definition")
+	}
 	admissionTable := s.t
 	if options.mutation {
 		admissionTable = nil
@@ -963,7 +1012,7 @@ func (s *storageShard) getRead(currentTx *TxContext, options shardReadOptions) R
 		currentTx.ensureClusterIdentity()
 	}
 	origin := s
-	if target := s.scanTarget.Load(); target != nil {
+	if target := s.scanTarget.Load(); target != nil && !definitionWriter {
 		panic(shardReadDelegation{target})
 	}
 	if options.mayDelegate && !options.snapshot && sharedClusterSource(s.t) && s.state() == COLD {
@@ -977,7 +1026,7 @@ func (s *storageShard) getRead(currentTx *TxContext, options shardReadOptions) R
 		panic(activeNodeCluster().shardRAMUnavailable(s, origin))
 	}
 	if !options.snapshot && s.t != nil {
-		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
+		if r := s.replicationManager(); r != nil && validReplicaDatabase(s.authorityDatabase().Name) && !s.t.isEphemeralQueryTable() {
 			s = r.readShard(s, currentTx)
 		}
 	}
@@ -1011,6 +1060,12 @@ func (s *storageShard) GetWrite(currentTx *TxContext) WriteAccess {
 // loading/participant boundary. Nonblocking admission performs no acquisition
 // wait; callers must release any earlier writers before trying the blocking path.
 func (s *storageShard) getWrite(currentTx *TxContext, blocking bool) (WriteAccess, bool) {
+	if !s.t.RuntimeOnly {
+		currentTx.readSchema(s.t.schema)
+	}
+	if s.t.retired.Load() {
+		panic("table handle belongs to a rolled-back or dropped definition")
+	}
 	origin := s
 	// A write retains its generation until the transaction releases it. Such
 	// pins may consume the node-wide shard budget; the per-table read reserve
@@ -1045,7 +1100,7 @@ func (s *storageShard) getWrite(currentTx *TxContext, blocking bool) (WriteAcces
 		}
 	}()
 	if s.t != nil {
-		if r := activeReplication(s.t.schema); r != nil && validReplicaDatabase(s.t.schema.Name) && !s.t.isEphemeralQueryTable() {
+		if r := s.replicationManager(); r != nil && validReplicaDatabase(s.authorityDatabase().Name) && !s.t.isEphemeralQueryTable() {
 			cell := r.shardCell(s)
 			var admitted bool
 			cell, release, admitted = r.writeResource(*cell.resource.Load(), currentTx, blocking)
@@ -1118,7 +1173,7 @@ func (s *storageShard) registerLoadedShard() {
 // Queries acquire no additional reader registration for this coordination.
 func (s *storageShard) claimEviction() (*mosi.Handover, bool) {
 	if cell := s.coherence.Load(); cell != nil && cell.current.Load() == s {
-		handover := cell.ownstate.TryHandover(cell.writesDrained)
+		handover := cell.ownstate.TryHandover(cell.writesDrained, false)
 		return handover, handover != nil
 	}
 	return nil, true
@@ -1329,6 +1384,24 @@ func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	return true
 }
 
+// home is the database whose backend, transaction log and blob store own
+// this shard's files.
+func (s *storageShard) home() *database {
+	if s.catalogHome != nil {
+		return s.catalogHome
+	}
+	if s.t == nil {
+		return nil
+	}
+	return s.t.schema
+}
+
+// durableColumns reports whether rebuild must sync column files before a
+// schema.json commit may reference them.
+func (s *storageShard) durableColumns() bool {
+	return s.t.PersistencyMode == Safe || s.catalogDurable
+}
+
 func NewShard(t *table) *storageShard {
 	result := new(storageShard)
 	result.uuid, _ = uuid.NewRandom()
@@ -1345,8 +1418,8 @@ func NewShard(t *table) *storageShard {
 			result.columns[column.Name] = new(StorageSparse)
 		}
 	}
-	if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
-		result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
+	if (t.PersistencyMode == Safe || t.PersistencyMode == Logged) && !nativeCatalogRelation(t) {
+		result.logfile = result.home().persistence.OpenLog(result.uuid.String())
 	}
 	// Newly created shards are live/writable, not cold
 	result.setState(WRITE)
@@ -1474,10 +1547,19 @@ func isRuntimeComputedColumn(colDesc *column) bool {
 }
 
 func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard) func(...scm.Scmer) scm.Scmer {
+	return t.updateFunctionBatch(idx, withTrigger, alreadyLocked, batch, deletedRows, currentTx, uniqueGuard, false)
+}
+
+// The final capability is private to the native catalog editor. Public callbacks
+// retain their read-only check when invoked, including after being retained.
+func (t *storageShard) updateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, catalogWrite bool) func(...scm.Scmer) scm.Scmer {
 	declarations := t.t.columnDeclarations() // one immutable declaration contract for this callback
 	initialUniqueGuard := uniqueGuard
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
+		if !catalogWrite {
+			requireCatalogDML(t.t)
+		}
 		uniqueGuard := initialUniqueGuard
 		var retainedUnique *uniqueWriteGuard
 		completed := false
@@ -1793,7 +1875,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						// Row was staged by this tx → remove from UndeleteMask.
 						// Keep shard.deletions[targetIdx]=true (already globally hidden).
 						// Don't add to DeleteMask (not a pre-existing row).
-						st.UndeleteMask.Set(uint(targetIdx), false)
+						currentTx.UnstageRow(t, targetIdx)
 					} else {
 						// Pre-existing committed row → undo temporary global deletion
 						t.deletions.Set(uint(targetIdx), false)
@@ -1919,7 +2001,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				if wasStaged {
 					// Row was staged by this tx → remove from UndeleteMask.
 					// Keep shard.deletions[idx]=true (already globally hidden).
-					st2.UndeleteMask.Set(uint(idx), false)
+					tx.UnstageRow(t, idx)
 				} else {
 					// Pre-existing committed row → add to delete mask
 					tx.AddToDeleteMask(t, idx)
@@ -3277,6 +3359,13 @@ func (m *ShardMapReducer) FlushSideEffects() {
 }
 
 func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLocked bool, validatedSchema *tableColumnNamesSnapshot, onFirstInsertId func(int64), isIgnore bool, currentTx *TxContext, uniqueGuard *uniqueWriteGuard) uint32 {
+	return t.insertValues(columns, values, alreadyLocked, validatedSchema, onFirstInsertId, isIgnore, currentTx, uniqueGuard, false)
+}
+
+func (t *storageShard) insertValues(columns []string, values [][]scm.Scmer, alreadyLocked bool, validatedSchema *tableColumnNamesSnapshot, onFirstInsertId func(int64), isIgnore bool, currentTx *TxContext, uniqueGuard *uniqueWriteGuard, catalogWrite bool) uint32 {
+	if !catalogWrite {
+		requireCatalogDML(t.t)
+	}
 	t.t.beginContributionMutation()
 	defer t.t.endContributionMutation()
 	ss := SessionStateFromTx(currentTx)
@@ -4040,7 +4129,7 @@ func (t *storageShard) RemoveFromDisk() {
 	if t.t.schema != nil && clusterRetainsShard(t) {
 		return
 	}
-	if t.t.schema != nil && replicationRetainsCatalogs(t.t.schema.Name) {
+	if t.t.schema != nil && (replicationRetainsCatalogs(t.home().Name) || t.catalogOwner != "" && replicationRetainsCatalogs(t.catalogOwner)) {
 		return
 	}
 	t.cleanupOnce.Do(func() {
@@ -4061,10 +4150,10 @@ func (t *storageShard) RemoveFromDisk() {
 			}
 		}
 		for _, col := range columns {
-			t.t.schema.persistence.RemoveColumn(t.uuid.String(), col.Name)
+			t.home().persistence.RemoveColumn(t.uuid.String(), col.Name)
 		}
-		t.t.schema.persistence.RemoveColumn(t.uuid.String(), blobManifestColumn)
-		t.t.schema.persistence.RemoveLog(t.uuid.String())
+		t.home().persistence.RemoveColumn(t.uuid.String(), blobManifestColumn)
+		t.home().persistence.RemoveLog(t.uuid.String())
 	})
 }
 
@@ -4073,7 +4162,7 @@ func (t *storageShard) RemoveFromDisk() {
 // RemoveFromDisk: published generations may only be retired by the explicit
 // lifecycle paths documented in the storage contract.
 func discardUnpublishedShard(s *storageShard) {
-	if s == nil || s.t == nil || s.t.schema == nil || s.t.schema.persistence == nil {
+	if s == nil || s.t == nil || s.home() == nil || s.home().persistence == nil {
 		return
 	}
 	if s.logfile != nil {
@@ -4091,10 +4180,10 @@ func discardUnpublishedShard(s *storageShard) {
 		}
 	}
 	for _, col := range s.t.Columns {
-		s.t.schema.persistence.RemoveColumn(s.uuid.String(), col.Name)
+		s.home().persistence.RemoveColumn(s.uuid.String(), col.Name)
 	}
-	s.t.schema.persistence.RemoveColumn(s.uuid.String(), blobManifestColumn)
-	s.t.schema.persistence.RemoveLog(s.uuid.String())
+	s.home().persistence.RemoveColumn(s.uuid.String(), blobManifestColumn)
+	s.home().persistence.RemoveLog(s.uuid.String())
 }
 
 // removePersistence removes on-disk files (columns + logfile) for this shard
@@ -4114,10 +4203,10 @@ func (s *storageShard) removePersistence() {
 		s.logfile = nil
 	}
 	for _, col := range s.t.Columns {
-		s.t.schema.persistence.RemoveColumn(s.uuid.String(), col.Name)
+		s.home().persistence.RemoveColumn(s.uuid.String(), col.Name)
 	}
-	s.t.schema.persistence.RemoveColumn(s.uuid.String(), blobManifestColumn)
-	s.t.schema.persistence.RemoveLog(s.uuid.String())
+	s.home().persistence.RemoveColumn(s.uuid.String(), blobManifestColumn)
+	s.home().persistence.RemoveLog(s.uuid.String())
 }
 
 // transitionShardEngine handles the per-shard work when ALTER TABLE ENGINE=
@@ -4165,14 +4254,14 @@ func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 			if cs == nil {
 				continue
 			}
-			f := s.t.schema.persistence.WriteColumn(s.uuid.String(), colName)
+			f := s.home().persistence.WriteColumn(s.uuid.String(), colName)
 			cs.Serialize(f)
 			finishColumnWrite(f, newMode == Safe)
 		}
 		writeBlobManifest(s)
 		// open logfile for Safe/Logged
 		if newMode == Safe || newMode == Logged {
-			s.logfile = s.t.schema.persistence.OpenLog(s.uuid.String())
+			s.logfile = s.home().persistence.OpenLog(s.uuid.String())
 		}
 		s.setState(SHARED)
 		if !s.t.isEphemeralQueryTable() {
@@ -4193,7 +4282,7 @@ func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 
 	case oldMode == Sloppy && (newMode == Safe || newMode == Logged):
 		// Sloppy → Safe/Logged: open logfile
-		s.logfile = s.t.schema.persistence.OpenLog(s.uuid.String())
+		s.logfile = s.home().persistence.OpenLog(s.uuid.String())
 
 	case (oldMode == Safe || oldMode == Logged) && newMode == Sloppy:
 		// Safe/Logged → Sloppy: close and remove logfile
@@ -4201,7 +4290,7 @@ func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 			s.logfile.Close()
 			s.logfile = nil
 		}
-		s.t.schema.persistence.RemoveLog(s.uuid.String())
+		s.home().persistence.RemoveLog(s.uuid.String())
 
 	default:
 		// Safe ↔ Logged: no-op on shard level (both use logfiles identically)
@@ -4318,6 +4407,12 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	}()
 	result := new(storageShard)
 	result.t = t.t
+	result.catalogHome = t.catalogHome
+	result.catalogOwner = t.catalogOwner
+	if t.catalogOwner != "" {
+		result.catalogVersion = catalogFormatVersion
+	}
+	result.catalogPrivate.Store(t.catalogOwner != "")
 	result.coherence.Store(t.coherence.Load())
 	result.localMutations.Store(t.localMutationState())
 	result.setState(WRITE) // mark as live so ensureLoaded() won't reset columns
@@ -4343,17 +4438,17 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			if result.logfile != nil {
 				func() { defer func() { _ = recover() }(); result.logfile.Close() }()
 			}
-			if result.uuid != uuid.Nil && result.t != nil && result.t.schema != nil && result.t.schema.persistence != nil {
-				func() { defer func() { _ = recover() }(); result.t.schema.persistence.RemoveLog(result.uuid.String()) }()
+			if result.uuid != uuid.Nil && result.t != nil && result.home() != nil && result.home().persistence != nil {
+				func() { defer func() { _ = recover() }(); result.home().persistence.RemoveLog(result.uuid.String()) }()
 				for _, col := range result.t.Columns {
 					func() {
 						defer func() { _ = recover() }()
-						result.t.schema.persistence.RemoveColumn(result.uuid.String(), col.Name)
+						result.home().persistence.RemoveColumn(result.uuid.String(), col.Name)
 					}()
 				}
 				func() {
 					defer func() { _ = recover() }()
-					result.t.schema.persistence.RemoveColumn(result.uuid.String(), blobManifestColumn)
+					result.home().persistence.RemoveColumn(result.uuid.String(), blobManifestColumn)
 				}()
 			}
 			// Re-register old shard with CacheManager if we deregistered it
@@ -4385,7 +4480,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		result.deletions.Reset()
 		if result.t.PersistencyMode == Safe || result.t.PersistencyMode == Logged {
 			// safe mode: also write all deltas to disk
-			result.logfile = result.t.schema.persistence.OpenLog(result.uuid.String())
+			result.logfile = result.home().persistence.OpenLog(result.uuid.String())
 		}
 		t.mu.Unlock() // release lock, from now on, deletions+inserts should work
 		locked = false
@@ -4540,45 +4635,22 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				b.WriteString(" ")
 				b.WriteString(newProxy.String())
 				if t.t.PersistencyMode != Memory && t.t.PersistencyMode != Cache {
-					f := result.t.schema.persistence.WriteColumn(result.uuid.String(), col)
+					f := result.home().persistence.WriteColumn(result.uuid.String(), col)
 					newProxy.Serialize(f)
-					finishColumnWrite(f, t.t.PersistencyMode == Safe)
+					finishColumnWrite(f, t.durableColumns())
 				}
 				continue
 			}
 
-			var newcol ColumnStorage = new(StorageSCMER) // currently only scmer-storages
-			var i uint32
+			var newcol ColumnStorage
+			i := uint32(len(rebuiltRowIDs))
 			func() {
 				// Both replay passes consume the complete selected main extent.
 				reader := c.GetCachedReader(ReadDecoded)
 				defer ReleaseColumnReader(reader)
-				for {
-					// scan phase
-					newcol.prepare()
-					replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, newcol.scan)
-					i = uint32(len(rebuiltRowIDs))
-					newcol2 := newcol.proposeCompression(i)
-					if newcol2 == nil {
-						break // we found the optimal storage format
-					} else {
-						// redo scan phase with compression
-						//fmt.Printf("Compression with %T\n", newcol2)
-						newcol = newcol2
-					}
-				}
-				// build phase
-				// TODO: when source and target are both OverlayBlob, pass raw
-				// compressed blob data through instead of decompressing via
-				// GetValue and recompressing in build(). This avoids a full
-				// gzip round-trip per blob during rebuild.
-				if blob, ok := newcol.(*OverlayBlob); ok {
-					blob.schema = result.t.schema
-				}
-				newcol.init(i)
-				replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, newcol.build)
-				newcol.finish()
-
+				newcol = buildColumnStorage(i, result.home(), t.catalogHome != nil, func(emit func(uint32, scm.Scmer)) {
+					replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, emit)
+				})
 			}()
 
 			result.columns[col] = newcol
@@ -4592,14 +4664,18 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 
 			// write to disc (only if required)
 			if t.t.PersistencyMode != Memory && t.t.PersistencyMode != Cache {
-				f := result.t.schema.persistence.WriteColumn(result.uuid.String(), col)
+				f := result.home().persistence.WriteColumn(result.uuid.String(), col)
 				newcol.Serialize(f) // col takes ownership of f, so they will defer f.Close() at the right time
-				finishColumnWrite(f, t.t.PersistencyMode == Safe)
+				finishColumnWrite(f, t.durableColumns())
 			}
 		}
 		b.WriteString(") -> ")
 		b.WriteString(fmt.Sprint(result.main_count))
-		fmt.Println(b.String())
+		// system_schema shards are rewritten with every schema commit; their
+		// rebuilds are not table maintenance worth a log line each.
+		if t.catalogHome == nil {
+			fmt.Println(b.String())
+		}
 
 		// Eagerly rebuild indexes with sufficient Savings so the first
 		// query after rebuild does not pay a cold-start full-scan penalty.
@@ -4681,23 +4757,39 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	result.mu.Unlock()
 	resultLocked = false
 	// Register the new shard with CacheManager
-	atomic.StoreUint64(&result.lastAccessed, uint64(time.Now().UnixNano()))
-	if result.t.PersistencyMode == Cache && !result.t.isEphemeralQueryTable() {
-		GlobalCache.AddItem(result, int64(result.exclusiveSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
-	} else if result.t.PersistencyMode != Memory && !result.t.isEphemeralQueryTable() {
-		GlobalCache.AddItem(result, int64(result.exclusiveSize()), TypeShard, shardCleanup, shardLastUsed, nil)
-	}
+	result.registerCachedStorage()
 	return result
 }
 
+func (s *storageShard) registerCachedStorage() {
+	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
+	if s.t.PersistencyMode == Cache && !s.t.isEphemeralQueryTable() {
+		GlobalCache.AddItem(s, int64(s.exclusiveSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+	} else if s.t.PersistencyMode != Memory && !s.t.isEphemeralQueryTable() {
+		GlobalCache.AddItem(s, int64(s.exclusiveSize()), TypeShard, shardCleanup, shardLastUsed, nil)
+	}
+}
+
 // A live shared snapshot opens an append handle only after acquiring native M.
+// Catalog constructors also defer opening until tenant authority and physical
+// storage have both been bound; their synthetic table owns no backend.
 func (s *storageShard) ensureMutationLog() {
-	if !sharedClusterSource(s.t) || s.logfile != nil || (s.t.PersistencyMode != Safe && s.t.PersistencyMode != Logged) {
+	if (s.t.PersistencyMode != Safe && s.t.PersistencyMode != Logged) || (!sharedClusterSource(s.t) && s.catalogOwner == "") {
+		return
+	}
+	if s.logfile != nil && (s.catalogOwner == "" || s.catalogNamespaceReady.Load()) {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.logfile == nil {
-		s.logfile = s.t.schema.persistence.OpenLog(s.uuid.String())
+		s.logfile = s.home().persistence.OpenLog(s.uuid.String())
+	}
+	if s.catalogOwner != "" && !s.catalogNamespaceReady.Load() {
+		// A catalog's WAL can first appear after its tenant root was synced.
+		// Sync its system-backend directory before accepting any mutation;
+		// syncing only the tenant's decision log cannot preserve this entry.
+		s.home().persistence.SyncNamespace()
+		s.catalogNamespaceReady.Store(true)
 	}
 }

@@ -31,6 +31,7 @@ import "math/rand"
 import "sync/atomic"
 import "unicode/utf8"
 import "encoding/json"
+import "github.com/google/uuid"
 import "github.com/carli2/hybridsort"
 import units "github.com/docker/go-units"
 import "github.com/launix-de/memcp/scm"
@@ -286,6 +287,32 @@ type ColumnStorage interface {
 	Deserialize(io.Reader) uint // read from Reader (note that first byte is already read, so the reader starts at the second byte)
 }
 
+// buildColumnStorage analyzes and encodes one privately owned immutable column.
+// Each replay visits the same values and row order. inlineBlobs keeps catalog
+// metadata out of the blob store that the catalog itself declares.
+func buildColumnStorage(count uint32, home *database, inlineBlobs bool, replay func(func(uint32, scm.Scmer))) ColumnStorage {
+	var column ColumnStorage = new(StorageSCMER)
+	for {
+		column.prepare()
+		replay(column.scan)
+		proposed := column.proposeCompression(count)
+		if proposed == nil {
+			break
+		}
+		if _, blob := proposed.(*OverlayBlob); blob && inlineBlobs {
+			break
+		}
+		column = proposed
+	}
+	if blob, ok := column.(*OverlayBlob); ok {
+		blob.schema = home
+	}
+	column.init(count)
+	replay(column.build)
+	column.finish()
+	return column
+}
+
 // storageJITFunctions stores typed native readers on the immutable finished
 // storage object. Consumers resolve these getters once before entering their
 // row or batch loop.
@@ -431,6 +458,7 @@ func (j *storageJITFunctions) finish(owner storageJITEmitter) {
 //	11  StorageSeq     – sequential/auto-increment integer
 //	12  StorageFloat   – 64-bit float
 //	13  StorageDecimal – fixed-precision decimal      (no version byte — see above)
+//	14  StorageDate    – seconds/nanoseconds/zones (version 1)
 //	20  StorageString  – dictionary-compressed or buffer string
 //	21  Reserved (unused experimental prefix encoding; never persisted)
 //	31  OverlayBlob    – large binary/blob overlay
@@ -438,13 +466,14 @@ func (j *storageJITFunctions) finish(owner storageJITEmitter) {
 //	41  StorageConst   – single constant value column
 //	50  StorageComputeProxy – computed/cached column
 var storages = map[uint8]reflect.Type{
-	1:  reflect.TypeOf(StorageSCMER{}),
+	1:  reflect.TypeOf(storageSCMERLegacy{}),
 	2:  reflect.TypeOf(StorageSparse{}),
 	3:  reflect.TypeOf(storageSCMERExact{}),
 	10: reflect.TypeOf(StorageInt{}),
 	11: reflect.TypeOf(StorageSeq{}),
 	12: reflect.TypeOf(StorageFloat{}),
 	13: reflect.TypeOf(StorageDecimal{}),
+	14: reflect.TypeOf(StorageDate{}),
 	20: reflect.TypeOf(StorageString{}),
 	//30: reflect.TypeOf(OverlaySCMER{}),
 	31: reflect.TypeOf(OverlayBlob{}),
@@ -1018,15 +1047,25 @@ func Init(en scm.Env) {
 		Name: "table",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			if len(a) != 4 {
-				panic("table expects database, database_ignorecase, name, name_ignorecase")
+			if len(a) < 4 || len(a) > 5 {
+				panic("table expects database, database_ignorecase, name, name_ignorecase and optional transaction")
 			}
 			db := GetDatabase(scm.String(a[0]), a[1].Bool())
 			if db == nil {
 				return scm.NewNil()
 			}
-			db.GetRead(nil)
-			t := db.GetTable(scm.String(a[2]), a[3].Bool())
+			var tx *TxContext
+			if len(a) == 5 {
+				tx = scmerToTxContext(a[4])
+			}
+			tx.readSchema(db)
+			db.GetRead(tx)
+			var t *table
+			if a[2].IsSlice() {
+				t = db.resolvePersistedTableAddress(a[2], tx)
+			} else {
+				t = db.GetTable(scm.String(a[2]), a[3].Bool())
+			}
 			if t == nil {
 				return scm.NewNil()
 			}
@@ -1036,8 +1075,9 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", Label: "database"},
 				{Kind: "bool", Label: "database_ignorecase"},
-				{Kind: "string", Label: "table"},
+				{Kind: "string|list", Label: "table"},
 				{Kind: "bool", Label: "table_ignorecase"},
+				{Kind: "any", Label: "transaction", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "table"},
 		},
@@ -1050,6 +1090,54 @@ func Init(en scm.Env) {
 			}
 			return scm.NewSlice(v), nil
 		},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
+		Name: "schema_read",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			tx := scmerToTxContext(a[0])
+			tx.readSchema(GetDatabase(scm.String(a[1])))
+			return scm.NewBool(true)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "retain the database definitions for the original transaction", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "transaction"},
+				{Kind: "string", Label: "database"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "schema_write",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			tx := scmerToTxContext(a[0])
+			db := GetDatabase(scm.String(a[1]))
+			if tx == nil || db == nil || db == systemSchemaDB {
+				panic("schema publication requires an original transaction and a mutable database")
+			}
+			tx.writeSchema(db)
+			func() {
+				db.schemalock.Lock()
+				defer db.schemalock.Unlock()
+				tx.markExternalSchemaDirty(db)
+			}()
+			return scm.NewBool(true)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "retain definition publication for a frontend declaration update", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "any", Label: "transaction"}, {Kind: "string", Label: "database"}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "schema_version",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if db := GetDatabase(scm.String(a[0])); db != nil {
+				if revision := db.catalog.revision.Load(); revision != nil {
+					return scm.NewString(*revision)
+				}
+			}
+			return scm.NewString("")
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "published logical definition revision, without loading or scanning data", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "string", Label: "database"}}, Return: &scm.TypeDescriptor{Kind: "string"}},
 	})
 
 	scm.Declare(&en, &scm.Declaration{
@@ -1083,6 +1171,23 @@ func Init(en scm.Env) {
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "return the O(1) active partition count for physical scan costing",
 			Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}},
 			Return: &scm.TypeDescriptor{Kind: "int"},
+		},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
+		Name: "table_size_estimate",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			t := TableFromScmer(a[0])
+			if t != nil {
+				if snapshot := t.showColumnsSnapshot.Load(); snapshot != nil && snapshot.metadata.statistics != nil {
+					return scm.NewInt(snapshot.metadata.statistics.sizeBytes)
+				}
+			}
+			return scm.NewNil()
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "published storage size estimate, or nil when unknown; never loads or visits data",
+			Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}},
+			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
 	})
 
@@ -2543,6 +2648,9 @@ func Init(en scm.Env) {
 			}
 			db.ensureLoaded()
 			tblName := scm.String(a[1])
+			if db == systemSchemaDB && !strings.HasPrefix(tblName, ".") {
+				panic("schema catalog namespace is read-only")
+			}
 
 			// Software contract:
 			// createtable(..., ifnotexists=true) is the hot-path guard used by
@@ -2556,6 +2664,9 @@ func Init(en scm.Env) {
 			// result stays race-free under concurrent creators.
 			if ifnotexists {
 				if existing := db.tables.Get(tblName); existing != nil {
+					if existing.cacheRowsInvalidated.Load() {
+						panic(cachePreparationDeferred{})
+					}
 					if (existing.OnInit.Load() != nil || existing.onInitComplete.Load()) && scmerToTxContext(currentTx).retainQueryTable(existing) {
 						// This also reruns persisted oninit for data-empty MEMORY/CACHE
 						// tables after restart. The local barrier affects no other table.
@@ -2576,6 +2687,7 @@ func Init(en scm.Env) {
 			comment := ""
 			nameIgnoreCase := false
 			oninit := scm.NewNil()
+			runtimeOnly := false
 			for i := 0; i+1 < len(options); i += 2 {
 				key := scm.String(options[i])
 				val := options[i+1]
@@ -2597,17 +2709,28 @@ func Init(en scm.Env) {
 					}
 				case "oninit":
 					oninit = val
+				case "runtime_only":
+					runtimeOnly = scm.ToBool(val)
 				default:
 					panic("unknown option: " + key)
 				}
 			}
 			pm := parsePersistencyMode(engine)
+			if runtimeOnly && (pm != Cache || !strings.HasPrefix(tblName, ".")) {
+				panic("runtime-only tables must be internal cache tables")
+			}
 			// Acquire schema ownership before native lifecycle locks or opening
 			// unpublished shard logs. A remote schema grant may need to install
 			// metadata through that same lifecycle boundary.
+			schemaTx := scmerToTxContext(currentTx)
+			if runtimeOnly {
+				schemaTx = nil
+			} else if schemaTx != nil {
+				schemaTx.writeSchema(db)
+			}
 			var schemaAccess WriteAccess
 			if !(pm == Cache && strings.HasPrefix(tblName, ".")) {
-				schemaAccess = db.GetWrite(nil)
+				schemaAccess = db.GetWrite(schemaTx)
 				defer func() { schemaAccess.Release() }()
 			}
 			db.persistenceLifecycle.RLock()
@@ -2621,9 +2744,11 @@ func Init(en scm.Env) {
 			defer unlockPersistenceLifecycle()
 
 			newTable := new(table)
+			newTable.RuntimeIdentity = uuid.NewString()
 			newTable.schema = db
 			newTable.Name = tblName
 			newTable.PersistencyMode = pm
+			newTable.RuntimeOnly = runtimeOnly
 			newTable.ShardMode = ShardModeFree
 			newTable.lastAccessed = uint64(time.Now().UnixNano())
 			newTable.Shards = make([]*storageShard, 1)
@@ -2681,7 +2806,7 @@ func Init(en scm.Env) {
 						dimensions[i] = scm.ToInt(d)
 					}
 					typeparams := mustScmerSlice(def[4], "column typeparams")
-					if _, ok := newTable.createColumnLocked(colname, typename, dimensions, typeparams, false); !ok {
+					if _, ok := newTable.createColumnLocked(colname, typename, dimensions, typeparams, false, scmerToTxContext(currentTx)); !ok {
 						panic("column " + newTable.Name + "." + colname + " already exists")
 					}
 				default:
@@ -2690,6 +2815,17 @@ func Init(en scm.Env) {
 			}
 			validateUniqueConstraintNames(newTable.Unique)
 			newTable.publishShowColumnsSnapshot(true)
+			if schemaTx != nil {
+				schemaTx.recordSchema(newTable, true)
+				if existing := db.GetTable(tblName, nameIgnoreCase); existing != nil {
+					schemaTx.recordSchema(existing, false)
+				}
+				for _, fk := range newTable.Foreign {
+					if target := db.GetTable(fk.Tbl2); target != nil {
+						schemaTx.recordSchema(target, false)
+					}
+				}
+			}
 
 			existing := func() *table {
 				db.schemalock.Lock()
@@ -2709,6 +2845,10 @@ func Init(en scm.Env) {
 				return existing
 			}()
 			if existing != nil {
+				if existing.cacheRowsInvalidated.Load() {
+					db.schemalock.Unlock()
+					panic(cachePreparationDeferred{})
+				}
 				if !scmerToTxContext(currentTx).retainQueryTable(existing) {
 					db.schemalock.Unlock()
 					panic("cache table retired during creation")
@@ -2722,7 +2862,7 @@ func Init(en scm.Env) {
 					closedOnInit := scm.CloseProcedure(oninit)
 					existing.OnInit.Store(&closedOnInit)
 					existing.publishReadProgramSnapshot()
-					db.saveLockedAndUnlock(schemaSaveBuffered)
+					db.saveLockedAndUnlock(schemaTx, schemaSaveBuffered, existing)
 				} else {
 					db.schemalock.Unlock()
 				}
@@ -2785,7 +2925,11 @@ func Init(en scm.Env) {
 			if newTable.isEphemeralQueryTable() {
 				mode = schemaSaveBuffered
 			}
-			db.saveLockedAndUnlock(mode)
+			if newTable.RuntimeOnly {
+				db.schemalock.Unlock()
+			} else {
+				db.saveLockedAndUnlock(schemaTx, mode, append([]*table{newTable}, foreignCatalogTables(newTable)...)...)
+			}
 			// Dependency/oninit callbacks acquire their own schema rights.
 			// End publication ownership before invoking nested DDL.
 			schemaAccess.Release()
@@ -2802,7 +2946,7 @@ func Init(en scm.Env) {
 					// every future caller, even though a fresh attempt would
 					// very likely succeed. Only deterministic OnInit/trigger
 					// failures are cached and replayed to later callers.
-					if thisCallPanic != nil && thisCallPanic != "query killed" {
+					if thisCallPanic != nil && thisCallPanic != "query killed" && !deferredCachePreparation(thisCallPanic) {
 						newTable.creationPanic = thisCallPanic
 					}
 					// Publish the shared outcome before releasing concurrent creators.
@@ -2812,7 +2956,7 @@ func Init(en scm.Env) {
 					scm.Apply(oninit, currentTx)
 				}
 				newTable.onInitComplete.Store(true)
-				executeRegisteredCreateTableTriggers(newTable, nil)
+				executeRegisteredCreateTableTriggers(newTable, scmerToTxContext(currentTx))
 			}()
 			if thisCallPanic != nil {
 				panic(thisCallPanic)
@@ -2886,18 +3030,24 @@ func Init(en scm.Env) {
 					temporary = true
 				}
 			}
-			var schemaAccess WriteAccess
-			if !temporary {
-				t, schemaAccess = t.schemaWrite()
-				defer schemaAccess.Release()
-			}
-
-			t.ddlMu.Lock()
-			defer t.ddlMu.Unlock()
 			var queryTx *TxContext
 			if len(a) > 7 {
 				queryTx = scmerToTxContext(a[7])
 			}
+			var schemaAccess WriteAccess
+			if !temporary {
+				if queryTx != nil {
+					queryTx.writeSchema(t.schema)
+				}
+				t, schemaAccess = t.schemaWrite(queryTx)
+				defer schemaAccess.Release()
+				if queryTx != nil {
+					queryTx.recordSchema(t, false)
+				}
+			}
+
+			t.ddlMu.Lock()
+			defer t.ddlMu.Unlock()
 			created := t.createColumnDDLLocked(colname, typename, dimensions, typeparams, queryTx)
 
 			// Software contract:
@@ -3026,28 +3176,30 @@ func Init(en scm.Env) {
 			if len(a) > 2 {
 				currentTx = scmerToTxContext(a[2])
 			}
-			requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+			return schemaMutation(currentTx, []*table{t}, func(currentTx *TxContext) scm.Scmer {
+				requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
 
-			unlockTable := func() {}
-			if ss := SessionStateFromTx(currentTx); ss != nil {
-				unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, ss, querySeqFromTx(currentTx))
-			}
-			defer unlockTable()
-			t, schemaAccess := t.schemaWrite()
-			defer schemaAccess.Release()
-			t.schema.schemalock.Lock()
-			t.ddlMu.Lock()
-			defer t.ddlMu.Unlock()
-			for i, key := range t.Unique {
-				if key.matchesName(name) {
-					t.Unique = append(t.Unique[:i], t.Unique[i+1:]...)
-					t.publishShowColumnsSnapshot(true)
-					t.schema.saveLockedAndUnlock(t.schemaSaveMode())
-					return scm.NewBool(true)
+				unlockTable := func() {}
+				if ss := SessionStateFromTx(currentTx); ss != nil {
+					unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, ss, querySeqFromTx(currentTx))
 				}
-			}
-			t.schema.schemalock.Unlock()
-			return scm.NewBool(false)
+				defer unlockTable()
+				t, schemaAccess := t.schemaWrite(currentTx)
+				defer schemaAccess.Release()
+				t.schema.schemalock.Lock()
+				t.ddlMu.Lock()
+				defer t.ddlMu.Unlock()
+				for i, key := range t.Unique {
+					if key.matchesName(name) {
+						t.Unique = append(t.Unique[:i], t.Unique[i+1:]...)
+						t.publishShowColumnsSnapshot(true)
+						t.schema.saveLockedAndUnlock(currentTx, t.schemaSaveMode(), t)
+						return scm.NewBool(true)
+					}
+				}
+				t.schema.schemalock.Unlock()
+				return scm.NewBool(false)
+			})
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "drops a named unique key from a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
@@ -3063,43 +3215,53 @@ func Init(en scm.Env) {
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			name := scm.String(a[1])
-			requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
-			t.ddlMu.Lock()
-			defer t.ddlMu.Unlock()
-			db := t.schema
-			defer db.GetWrite(nil).Release()
-			db.schemalock.Lock()
-			for _, fk := range t.Foreign {
-				// Parent-side copies do not belong to this table's constraints.
-				if fk.Tbl1 != t.Name || !strings.EqualFold(fk.Id, name) {
-					continue
-				}
-				parent := db.tables.Get(fk.Tbl2)
-				removeFKTriggers(t, parent, fk)
-				removeMetadata := func(tbl *table) {
-					kept := tbl.Foreign[:0]
-					for _, other := range tbl.Foreign {
-						if other.Tbl1 != fk.Tbl1 || other.Tbl2 != fk.Tbl2 || other.Id != fk.Id {
-							kept = append(kept, other)
-						}
-					}
-					tbl.Foreign = kept
-					tbl.publishShowColumnsSnapshot(true)
-				}
-				removeMetadata(t)
-				if parent != nil && parent != t {
-					removeMetadata(parent)
-				}
-				db.saveLockedAndUnlock(schemaSaveModeForDurability(t.PersistencyMode == Safe || (parent != nil && parent.PersistencyMode == Safe)))
-				return scm.NewBool(true)
+			var currentTx *TxContext
+			if len(a) > 2 {
+				currentTx = scmerToTxContext(a[2])
 			}
-			db.schemalock.Unlock()
-			return scm.NewBool(false)
+			return schemaMutation(currentTx, []*table{t}, func(currentTx *TxContext) scm.Scmer {
+				requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+				for _, candidate := range t.schema.relatedSchemaTables(t.Name) {
+					currentTx.recordSchema(candidate, false)
+				}
+				t.ddlMu.Lock()
+				defer t.ddlMu.Unlock()
+				db := t.schema
+				defer db.GetWrite(currentTx).Release()
+				db.schemalock.Lock()
+				for _, fk := range t.Foreign {
+					// Parent-side copies do not belong to this table's constraints.
+					if fk.Tbl1 != t.Name || !strings.EqualFold(fk.Id, name) {
+						continue
+					}
+					parent := db.tables.Get(fk.Tbl2)
+					removeFKTriggers(t, parent, fk)
+					removeMetadata := func(tbl *table) {
+						kept := tbl.Foreign[:0]
+						for _, other := range tbl.Foreign {
+							if other.Tbl1 != fk.Tbl1 || other.Tbl2 != fk.Tbl2 || other.Id != fk.Id {
+								kept = append(kept, other)
+							}
+						}
+						tbl.Foreign = kept
+						tbl.publishShowColumnsSnapshot(true)
+					}
+					removeMetadata(t)
+					if parent != nil && parent != t {
+						removeMetadata(parent)
+					}
+					db.saveLockedAndUnlock(currentTx, schemaSaveModeForDurability(t.PersistencyMode == Safe || (parent != nil && parent.PersistencyMode == Safe)), t, parent)
+					return scm.NewBool(true)
+				}
+				db.schemalock.Unlock()
+				return scm.NewBool(false)
+			})
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "drops a foreign key and its enforcement triggers", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
 				{Kind: "string", Label: "keyname"},
+				{Kind: "any", Label: "transaction", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -3117,32 +3279,38 @@ func Init(en scm.Env) {
 				panic("foreign key endpoints must belong to the same schema")
 			}
 
-			requireTableMaintenance(t1.schema.Name, t1.Name, maintenanceAlter)
-			t1.ddlMu.Lock()
-			defer t1.ddlMu.Unlock()
-			db := t1.schema
-			defer db.GetWrite(nil).Release()
-			db.schemalock.Lock()
-			for _, u := range t1.Foreign {
-				if u.Id == id {
-					db.schemalock.Unlock()
-					return scm.NewBool(false)
+			var currentTx *TxContext
+			if len(a) > 7 {
+				currentTx = scmerToTxContext(a[7])
+			}
+			return schemaMutation(currentTx, []*table{t1, t2}, func(currentTx *TxContext) scm.Scmer {
+				requireTableMaintenance(t1.schema.Name, t1.Name, maintenanceAlter)
+				t1.ddlMu.Lock()
+				defer t1.ddlMu.Unlock()
+				db := t1.schema
+				defer db.GetWrite(currentTx).Release()
+				db.schemalock.Lock()
+				for _, u := range t1.Foreign {
+					if u.Id == id {
+						db.schemalock.Unlock()
+						return scm.NewBool(false)
+					}
 				}
-			}
 
-			k := foreignKey{id, t1.Name, cols1, t2.Name, cols2, getForeignKeyMode(a[5]), getForeignKeyMode(a[6])}
-			t1.Foreign = append(t1.Foreign, k)
-			t2.Foreign = append(t2.Foreign, k)
-			// auto-generate system triggers for FK enforcement
-			installFKTriggers(db, t1, t2, k)
-			t1.publishShowColumnsSnapshot(true)
-			if t2 != t1 {
-				t2.publishShowColumnsSnapshot(true)
-			}
+				k := foreignKey{id, t1.Name, cols1, t2.Name, cols2, getForeignKeyMode(a[5]), getForeignKeyMode(a[6])}
+				t1.Foreign = append(t1.Foreign, k)
+				t2.Foreign = append(t2.Foreign, k)
+				// auto-generate system triggers for FK enforcement
+				installFKTriggers(db, t1, t2, k)
+				t1.publishShowColumnsSnapshot(true)
+				if t2 != t1 {
+					t2.publishShowColumnsSnapshot(true)
+				}
 
-			db.saveLockedAndUnlock(schemaSaveModeForDurability(t1.PersistencyMode == Safe || t2.PersistencyMode == Safe))
+				db.saveLockedAndUnlock(currentTx, schemaSaveModeForDurability(t1.PersistencyMode == Safe || t2.PersistencyMode == Safe), t1, t2)
 
-			return scm.NewBool(true)
+				return scm.NewBool(true)
+			})
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a new foreign key on a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
@@ -3153,6 +3321,7 @@ func Init(en scm.Env) {
 				{Kind: "list", Label: "columns2", Description: "list of columns to include"},
 				{Kind: "string", Label: "updatemode", Description: "restrict|cascade|set null"},
 				{Kind: "string", Label: "deletemode", Description: "restrict|cascade|set null"},
+				{Kind: "any", Label: "transaction", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -3279,73 +3448,31 @@ func Init(en scm.Env) {
 			t := TableFromScmer(a[0])
 			db := t.schema
 			operation := scm.String(a[1])
+			var currentTx *TxContext
+			if len(a) > 3 {
+				currentTx = scmerToTxContext(a[3])
+			}
 
 			switch operation {
 			case "drop":
-				return scm.NewBool(t.DropColumn(scm.String(a[2])))
+				return scm.NewBool(t.DropColumn(currentTx, scm.String(a[2])))
 			case "drop_if_exists":
-				return scm.NewBool(t.DropColumnIfExists(scm.String(a[2])))
+				return scm.NewBool(t.DropColumnIfExists(currentTx, scm.String(a[2])))
 			case "engine":
-				newMode := parsePersistencyMode(scm.String(a[2]))
-				oldMode := t.PersistencyMode
-				if oldMode == newMode {
-					return scm.NewBool(true) // no-op
-				}
-				requireTableMaintenance(db.Name, t.Name, maintenanceChangeEngine)
-
-				// A Memory/Cache -> Persisted transition below writes new blob
-				// files via s.rebuild(true) and only afterwards publishes the
-				// change. Hold a persistenceLifecycle read capability across
-				// that whole build->publish window, matching every other
-				// rebuild entry point: otherwise a concurrent CleanDatabase
-				// cannot see the new blob as owned yet and deletes it.
-				db.persistenceLifecycle.RLock()
-				defer db.persistenceLifecycle.RUnlock()
-
-				t.mu.Lock()
-
-				if (oldMode == Memory || oldMode == Cache) && newMode != Memory && newMode != Cache {
-					// Memory → Persisted: ensure all columns are loaded
-					// while PersistencyMode is still Memory (so they get
-					// initialized as StorageSparse instead of reading
-					// non-existent disk files). Then switch mode and
-					// rebuild to flush everything to disk.
-					shards := t.ActiveShards()
-					for _, s := range shards {
-						s.mu.Lock()
-						for _, col := range t.Columns {
-							s.ensureColumnLoaded(col.Name, true, nil)
-						}
-						s.mu.Unlock()
-					}
-					t.PersistencyMode = newMode
-					t.mu.Unlock()
-					for i, s := range shards {
-						shards[i] = s.rebuild(true)
-					}
-				} else {
-					t.PersistencyMode = newMode
-					// All other transitions can be done in-place.
-					for _, s := range t.ActiveShards() {
-						s.mu.Lock()
-						transitionShardEngine(s, oldMode, newMode)
-						s.mu.Unlock()
-					}
-					t.mu.Unlock()
-				}
-
-				db.save()
-				return scm.NewBool(true)
+				return scm.NewBool(t.ChangeEngine(currentTx, parsePersistencyMode(scm.String(a[2]))))
 			case "owner":
 				return scm.NewBool(false) // ignore
 			case "auto_increment":
-				requireTableMaintenance(db.Name, t.Name, maintenanceAlter)
-				next := uint64(scm.ToInt(a[2]))
-				if next > 0 {
-					t.reserveAutoIncrement(next-1, 0)
-					db.save()
-				}
-				return scm.NewBool(true)
+				return schemaMutation(currentTx, []*table{t}, func(tx *TxContext) scm.Scmer {
+					requireTableMaintenance(db.Name, t.Name, maintenanceAlter)
+					next := uint64(scm.ToInt(a[2]))
+					if next > 0 {
+						t.reserveAutoIncrement(next-1, 0)
+						db.schemalock.Lock()
+						db.saveLockedAndUnlock(tx, t.schemaSaveMode(), t)
+					}
+					return scm.NewBool(true)
+				})
 			default:
 				panic("unimplemented alter table operation: " + operation)
 			}
@@ -3355,6 +3482,7 @@ func Init(en scm.Env) {
 				{Kind: "table", Label: "table"},
 				{Kind: "string", Label: "operation", Description: "one of owner|drop|engine|collation|auto_increment"},
 				{Kind: "any", Label: "parameter", Description: "name of the column to drop or value of the parameter"},
+				{Kind: "any", Label: "transaction", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -3364,14 +3492,18 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
+			var tx *TxContext
+			if len(a) > 4 {
+				tx = scmerToTxContext(a[4])
+			}
 			if scm.String(a[2]) == "declaration" {
 				if !a[3].IsSlice() || len(a[3].Slice()) != 2 {
 					panic("declaration ALTER requires new and expected declarations")
 				}
 				parts := a[3].Slice()
-				return scm.NewBool(t.AlterColumnDeclaration(scm.String(a[1]), parts[0], parts[1]))
+				return scm.NewBool(t.AlterColumnDeclaration(tx, scm.String(a[1]), parts[0], parts[1]))
 			}
-			return t.AlterColumn(scm.String(a[1]), scm.String(a[2]), a[3])
+			return t.AlterColumn(tx, scm.String(a[1]), scm.String(a[2]), a[3])
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "alters a column", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
@@ -3379,6 +3511,7 @@ func Init(en scm.Env) {
 				{Kind: "string", Label: "column", Description: "name of the column"},
 				{Kind: "string", Label: "operation", Description: "one of drop|type|dimensions|null|default|default_expression|default_declaration|add_default|drop_default|collation|auto_increment|comment|temp|declaration"},
 				{Kind: "any", Label: "parameter", Description: "name of the column to drop or value of the parameter"},
+				{Kind: "any", Label: "transaction", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -3388,7 +3521,11 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			ifexists := len(a) > 2 && scm.ToBool(a[2])
-			DropTable(scm.String(a[0]), scm.String(a[1]), ifexists)
+			var tx *TxContext
+			if len(a) > 3 {
+				tx = scmerToTxContext(a[3])
+			}
+			DropTable(tx, scm.String(a[0]), scm.String(a[1]), ifexists)
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "removes a table", HasSideEffects: true,
@@ -3396,6 +3533,7 @@ func Init(en scm.Env) {
 				{Kind: "string", Label: "schema"},
 				{Kind: "string", Label: "table"},
 				{Kind: "bool", Label: "ifexists", Description: "if true, don't throw an error if it already exists", Optional: true},
+				{Kind: "any", Label: "transaction", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -3405,12 +3543,17 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
-			return scm.NewBool(t.DropColumn(scm.String(a[1])))
+			var tx *TxContext
+			if len(a) > 2 {
+				tx = scmerToTxContext(a[2])
+			}
+			return scm.NewBool(t.DropColumn(tx, scm.String(a[1])))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "drops a column from a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
 				{Kind: "string", Label: "column", Description: "name of the column to drop"},
+				{Kind: "any", Label: "transaction", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -3420,7 +3563,7 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
-			return scm.NewBool(t.dropColumnForMigration(scm.String(a[1])))
+			return scm.NewBool(t.dropColumnForMigration(nil, scm.String(a[1])))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "drops a legacy system column during startup migration", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
@@ -3723,6 +3866,7 @@ func Init(en scm.Env) {
 				scm.NewString(ktSchema),
 				scm.NewString(ktName),
 				scm.NewBool(true),
+				fkTxExpr(),
 			})
 			for _, timing := range []TriggerTiming{AfterDropTable, AfterDropColumn} {
 				triggerName := ".kt_cleanup:" + ktName + "|" + baseTable.Name + "|" + timing.String()
@@ -3762,11 +3906,66 @@ func Init(en scm.Env) {
 	})
 
 	scm.Declare(&en, &scm.Declaration{
+		Name: "prepare_shared_cache",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return scm.NewBool(trySharedCachePreparation(scmerToTxContext(a[0]), a[1]))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "attempts shared cache preparation; private or pending source views use invocation-local execution", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "transaction"},
+				{Kind: "func", Label: "prepare", NoEscape: true, Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
+			}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
+		Name: "populate_cache_table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			populateCacheTable(scmerToTxContext(a[0]), TableFromScmer(a[1]),
+				scmerSliceToStrings(mustScmerSlice(a[2], "cache columns")), a[3])
+			return scm.NewBool(true)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "streams reconstructible tuples from source workers to their runtime cache owner", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "transaction"},
+				{Kind: "table", Label: "table"},
+				{Kind: "list", Label: "columns"},
+				{Kind: "func", Label: "producer", NoEscape: true, Params: []*scm.TypeDescriptor{{Kind: "func", Label: "emit"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+			}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
+		Name: "with_materialized_table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[1]))
+			if db == nil {
+				panic("materialized table database does not exist")
+			}
+			return materializeQueryTable(scmerToTxContext(a[0]), db,
+				mustScmerSlice(a[2], "materialized columns"), a[3], a[4])
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "streams private query values into a native table and consumes it within the invocation", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "transaction"},
+				{Kind: "string", Label: "database"},
+				{Kind: "list", Label: "columns"},
+				{Kind: "func", Label: "producer", Params: []*scm.TypeDescriptor{{Kind: "func", Label: "emit"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "consumer", Params: []*scm.TypeDescriptor{{Kind: "table", Label: "table"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+			}, Return: &scm.TypeDescriptor{Kind: "any"}},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
 		Name: "initialize_cache_table",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
 			tbl := TableFromScmer(a[1])
+			committedRows := len(a) > 6 && a[6].Bool()
+			if committedRows {
+				if !tbl.RuntimeOnly || !tbl.isEphemeralQueryTable() {
+					panic("shared row initialization requires an internal runtime-only cache")
+				}
+				tbl.cacheTracksSourceRows.Store(true)
+			}
 			// Client-query cache preparation carries its lock owner through the
 			// transaction. An internal transactionless builder receives a local,
 			// unregistered lock owner from initializeCache instead.
@@ -3783,6 +3982,19 @@ func Init(en scm.Env) {
 					return left < right
 				})
 
+				var sourceRevisions []uint64
+				if committedRows {
+					sourceRevisions = make([]uint64, len(sourceTables))
+					for i, source := range sourceTables {
+						sourceRevisions[i] = source.cacheDataRevision.Load()
+						if source.contributionWriters.Load() != 0 {
+							panic(cachePreparationDeferred{})
+						}
+						if !source.acquireCacheSourceRights(currentTx) {
+							panic(cachePreparationDeferred{})
+						}
+					}
+				}
 				unlocks := make([]func(), 0, len(sourceTables))
 				defer func() {
 					for i := len(unlocks) - 1; i >= 0; i-- {
@@ -3792,12 +4004,27 @@ func Init(en scm.Env) {
 				for _, source := range sourceTables {
 					unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, true, lockOwner, querySeqFromTx(currentTx)))
 				}
+				if committedRows {
+					for _, source := range sourceTables {
+						if source.pendingCacheMutations.Load() != 0 {
+							panic(cachePreparationDeferred{})
+						}
+					}
+				}
 				// Install maintenance while source writes are blocked. Once the
 				// locks are released, every later mutation observes the triggers.
 				scm.Apply(a[3], a[0])
 				scm.Apply(a[4], a[0])
 				if len(a) > 5 {
 					scm.Apply(a[5], a[0])
+				}
+				if committedRows {
+					for i, source := range sourceTables {
+						if tbl.cacheRowsInvalidated.Load() || source.contributionWriters.Load() != 0 || sourceRevisions[i] != source.cacheDataRevision.Load() {
+							GlobalCache.retireTable(tbl)
+							panic(cachePreparationDeferred{})
+						}
+					}
 				}
 			})
 			return scm.NewBool(initialized)
@@ -3810,6 +4037,7 @@ func Init(en scm.Env) {
 				{Kind: "func", Label: "register_maintenance", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "transaction"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 				{Kind: "func", Label: "initializer", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "transaction"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 				{Kind: "func", Label: "finalizer", Description: "optional finalizer run under the same source-table locks after initialization", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "transaction"}}, Return: &scm.TypeDescriptor{Kind: "any"}, Optional: true},
+				{Kind: "bool", Label: "require_committed_sources", Description: "own a committed shared rowset, deferring unfinished source decisions and revalidating logical source revisions", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -3882,7 +4110,11 @@ func Init(en scm.Env) {
 		Name: "renametable",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			RenameTable(scm.String(a[0]), scm.String(a[1]), scm.String(a[2]))
+			var tx *TxContext
+			if len(a) > 3 {
+				tx = scmerToTxContext(a[3])
+			}
+			RenameTable(tx, scm.String(a[0]), scm.String(a[1]), scm.String(a[2]))
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "renames a table", HasSideEffects: true,
@@ -3890,6 +4122,7 @@ func Init(en scm.Env) {
 				{Kind: "string", Label: "schema", Description: "name of the database"},
 				{Kind: "string", Label: "oldname", Description: "current name of the table"},
 				{Kind: "string", Label: "newname", Description: "new name of the table"},
+				{Kind: "any", Label: "transaction", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -4138,6 +4371,13 @@ func Init(en scm.Env) {
 				if (len(a) == 3 || len(a) == 4) && a[1].IsString() && a[1].String() == "column" {
 					return t.ShowColumn(a[2].String(), len(a) == 4 && a[3].Bool())
 				}
+				if len(a) >= 2 && a[1].IsString() && a[1].String() == "identity" {
+					var tx *TxContext
+					if len(a) > 2 {
+						tx = scmerToTxContext(a[2])
+					}
+					return t.NativeIdentity(tx)
+				}
 				if len(a) == 1 {
 					return t.ShowColumns()
 				}
@@ -4255,8 +4495,11 @@ func Init(en scm.Env) {
 						shardRows = append(shardRows, showBuildShardRow(t, i, s))
 					}
 					// build trigger info
-					triggerRows := make([]scm.Scmer, 0, len(t.Triggers))
-					for _, tr := range t.Triggers {
+					t.mu.Lock()
+					triggers := append([]TriggerDescription(nil), t.Triggers...)
+					t.mu.Unlock()
+					triggerRows := make([]scm.Scmer, 0, len(triggers))
+					for _, tr := range triggers {
 						triggerRows = append(triggerRows, scm.NewSlice([]scm.Scmer{
 							scm.NewString("name"), scm.NewString(tr.Name),
 							scm.NewString("timing"), scm.NewString(string(tr.Timing)),
@@ -4760,15 +5003,43 @@ func Init(en scm.Env) {
 				Hidden:   !visible,
 				Priority: 0,
 			}
-			t.ddlMu.Lock()
-			defer t.ddlMu.Unlock()
-			defer db.GetWrite(nil).Release()
-			db.schemalock.Lock()
-			// Idempotent: replace any existing trigger with the same name
-			t.RemoveTrigger(name)
-			t.AddTrigger(trigger)
-			db.saveLockedAndUnlock(t.schemaSaveMode())
-			return scm.NewBool(true)
+			var currentTx *TxContext
+			if len(a) > 7 {
+				currentTx = scmerToTxContext(a[7])
+			}
+			if len(a) > 8 && !a[8].IsNil() {
+				target := TableFromScmer(a[8])
+				if visible || !target.RuntimeOnly || !target.isEphemeralQueryTable() {
+					panic("runtime trigger targets require an internal runtime-only cache")
+				}
+				trigger.cacheTarget = target
+				trigger.Acquire, trigger.Release = target.acquireCacheUseForTrigger, target.releaseCacheUse
+				// Runtime maintenance is still trigger-definition publication. Its
+				// lifetime follows the cache, like register_keytable_triggers; it
+				// must not enter the using transaction's declaration undo journal.
+				finalizeTriggerCompilation(&trigger)
+				t.ddlMu.Lock()
+				defer t.ddlMu.Unlock()
+				db.schemalock.Lock()
+				defer db.schemalock.Unlock()
+				t.RemoveTrigger(name)
+				t.mu.Lock()
+				t.addTriggerLocked(trigger)
+				t.mu.Unlock()
+				db.schemaDirty.Store(true)
+				return scm.NewBool(true)
+			}
+			return schemaMutation(currentTx, []*table{t}, func(currentTx *TxContext) scm.Scmer {
+				t.ddlMu.Lock()
+				defer t.ddlMu.Unlock()
+				defer db.GetWrite(currentTx).Release()
+				db.schemalock.Lock()
+				// Idempotent: replace any existing trigger with the same name
+				t.RemoveTrigger(name)
+				t.AddTrigger(trigger)
+				db.saveLockedAndUnlock(currentTx, t.schemaSaveMode(), t)
+				return scm.NewBool(true)
+			})
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a new trigger on a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
@@ -4779,6 +5050,8 @@ func Init(en scm.Env) {
 				{Kind: "string", Label: "language", Description: "registered source language, or empty when body is the durable definition"},
 				{Kind: "any", Label: "body", Description: "trigger body (parsed Scheme expression)"},
 				{Kind: "bool", Label: "visible", Description: "true = user trigger (shown in SHOW TRIGGERS), false = internal trigger (hidden)"},
+				{Kind: "any", Label: "transaction", Optional: true},
+				{Kind: "table", Label: "cache_target", Description: "optional runtime cache lifetime and eviction dependency", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -4796,7 +5069,11 @@ func Init(en scm.Env) {
 			}
 
 			name := scm.String(a[1])
-			if db.dropTrigger(name) {
+			var currentTx *TxContext
+			if len(a) > 3 {
+				currentTx = scmerToTxContext(a[3])
+			}
+			if db.dropTrigger(currentTx, name) {
 				return scm.NewBool(true)
 			}
 			if scm.ToBool(a[2]) {
@@ -4809,6 +5086,7 @@ func Init(en scm.Env) {
 				{Kind: "string", Label: "schema", Description: "name of the database"},
 				{Kind: "string", Label: "name", Description: "name of the trigger"},
 				{Kind: "bool", Label: "ifexists", Description: "don't throw error if trigger doesn't exist"},
+				{Kind: "any", Label: "transaction", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -5755,7 +6033,15 @@ func uniqueKeyOptions(key uniqueKey, options scm.Scmer) uniqueKey {
 // createTableKey publishes validated uniqueness metadata. Callers enforce user
 // maintenance policy; the fixed bootstrap key list is initialized before serving.
 func createTableKey(t *table, key uniqueKey, currentTx *TxContext) bool {
-	t, schemaAccess := t.schemaWrite()
+	if currentTx == nil && !t.RuntimeOnly {
+		var result bool
+		schemaAutocommit(func(tx *TxContext) { result = createTableKey(t, key, tx) })
+		return result
+	}
+	if currentTx != nil && !t.RuntimeOnly {
+		currentTx.recordSchema(t, false)
+	}
+	t, schemaAccess := t.schemaWrite(currentTx)
 	defer schemaAccess.Release()
 
 	// SQL DDL runs with a query session. Its exclusive table lock closes the
@@ -5806,6 +6092,6 @@ func createTableKey(t *table, key uniqueKey, currentTx *TxContext) bool {
 	}
 	t.Unique = append(t.Unique, key)
 	t.publishShowColumnsSnapshot(true)
-	t.schema.saveLockedAndUnlock(t.schemaSaveMode())
+	t.schema.saveLockedAndUnlock(currentTx, t.schemaSaveMode(), t)
 	return true
 }

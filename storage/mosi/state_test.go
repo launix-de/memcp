@@ -20,6 +20,70 @@ import "testing"
 import "sync/atomic"
 import "github.com/launix-de/memcp/storage/mosi"
 
+func TestMosiDeclarationReadScope(t *testing.T) {
+	var state mosi.State
+	state.Initialize(mosi.M)
+	first, wait := state.TryRetainRead()
+	if first == nil || wait != nil {
+		t.Fatal("readable declarations were not retained")
+	}
+	second, _ := state.TryRetainRead()
+	physical, wait := state.TryWrite(new(int), false, nil)
+	if physical == nil || wait != nil {
+		t.Fatal("compatible topology publication waited for unchanged declarations")
+	}
+	physical.Release()
+	if writer, wait := state.TryWrite(new(int), false, first); writer != nil || wait == nil {
+		t.Fatal("one reader upgraded while another transaction retained declarations")
+	}
+	if state.TryHandover(func() bool { return true }, true) != nil {
+		t.Fatal("exclusive handover revoked retained declarations")
+	}
+	shared := state.TryHandover(func() bool { return true }, false)
+	if shared == nil {
+		t.Fatal("sharing declarations unnecessarily waited for readers")
+	}
+	if reader, wait := state.TryRetainRead(); reader != nil || wait == nil {
+		t.Fatal("new reader entered a closing scope")
+	}
+	shared.Release()
+	second.Release()
+	owner := new(int)
+	writer, wait := state.TryWrite(owner, false, first)
+	if writer == nil || wait != nil {
+		t.Fatal("sole reader could not upgrade its own scope")
+	}
+	first.Release()
+	if state.TryHandover(func() bool { return true }, true) != nil {
+		t.Fatal("handover ignored the upgraded writer")
+	}
+	writer.Release()
+	handover := state.TryHandover(func() bool { return true }, true)
+	if handover == nil {
+		t.Fatal("released declarations still blocked handover")
+	}
+	handover.Release()
+}
+
+func TestMosiDeclarationReadSurvivesCancelledHandover(t *testing.T) {
+	var state mosi.State
+	state.Initialize(mosi.S)
+	reader, _ := state.TryRetainRead()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	handover, err := state.BeginHandover(ctx, func(context.Context) error {
+		t.Fatal("handover drained before its retained reader")
+		return nil
+	}, true)
+	if handover != nil || err != context.Canceled || state.ClosingWrites() {
+		t.Fatal("cancelled handover leaked admission or authority", err)
+	}
+	reader.Release()
+	if !state.ReadReady() {
+		t.Fatal("cancellation revoked the original shared permission")
+	}
+}
+
 func TestMosiIndependentResources(t *testing.T) {
 	var cluster, replication mosi.State
 	outer, action := cluster.Request(mosi.M)
@@ -327,7 +391,7 @@ func TestMosiSingleWriterLeavesReadsUnregistered(t *testing.T) {
 	var state mosi.State
 	state.Initialize(mosi.M)
 	owner := new(int)
-	writer, wait := state.TryWrite(owner, false)
+	writer, wait := state.TryWrite(owner, false, nil)
 	if writer == nil || wait != nil {
 		t.Fatal("first writer was not admitted")
 	}
@@ -338,11 +402,11 @@ func TestMosiSingleWriterLeavesReadsUnregistered(t *testing.T) {
 			t.Fatal("read registered or waited for an active writer")
 		}
 	}
-	other, wait := state.TryWrite(new(int), false)
+	other, wait := state.TryWrite(new(int), false, nil)
 	if other != nil || wait == nil {
 		t.Fatal("independent writer entered active mosi.M")
 	}
-	nested, _ := state.TryWrite(owner, false)
+	nested, _ := state.TryWrite(owner, false, nil)
 	if nested != writer {
 		t.Fatal("nested transaction lost its active writer")
 	}
@@ -354,7 +418,7 @@ func TestMosiSingleWriterLeavesReadsUnregistered(t *testing.T) {
 	}
 	nested.Release()
 	<-wait
-	next, _ := state.TryWrite(new(int), false)
+	next, _ := state.TryWrite(new(int), false, nil)
 	if next == nil {
 		t.Fatal("completed batch retained active mosi.M")
 	}
@@ -377,7 +441,7 @@ func TestMosiHandoverDrainsExistingWritesWithoutBlockingReads(t *testing.T) {
 	defer cancel()
 	ready := make(chan *mosi.Handover, 1)
 	go func() {
-		handover, err := state.BeginHandover(ctx, drain)
+		handover, err := state.BeginHandover(ctx, drain, true)
 		if err == nil {
 			ready <- handover
 		}
@@ -393,10 +457,10 @@ func TestMosiHandoverDrainsExistingWritesWithoutBlockingReads(t *testing.T) {
 	if !state.Phase().Readable() {
 		t.Fatal("closing writer admission revoked readers")
 	}
-	if writer, wait := state.TryWrite(new(int), false); writer != nil || wait == nil {
+	if writer, wait := state.TryWrite(new(int), false, nil); writer != nil || wait == nil {
 		t.Fatal("new writer bypassed the native transaction drain")
 	}
-	continuation, _ := state.TryWrite(new(int), true)
+	continuation, _ := state.TryWrite(new(int), true, nil)
 	if continuation == nil {
 		t.Fatal("existing transaction could not finish its writes")
 	}
@@ -413,7 +477,7 @@ func TestMosiHandoverDrainsExistingWritesWithoutBlockingReads(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("handover did not finish draining")
 	}
-	if writer, _ := state.TryWrite(new(int), true); writer != nil {
+	if writer, _ := state.TryWrite(new(int), true, nil); writer != nil {
 		t.Fatal("sealed handover admitted another writer")
 	}
 	state.Publish(mosi.O)
@@ -428,10 +492,10 @@ func TestMosiCancelledHandoverRestoresWriterAdmission(t *testing.T) {
 	state.Initialize(mosi.M)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := state.BeginHandover(ctx, func(ctx context.Context) error { return ctx.Err() }); err == nil {
+	if _, err := state.BeginHandover(ctx, func(ctx context.Context) error { return ctx.Err() }, true); err == nil {
 		t.Fatal("cancelled handover succeeded")
 	}
-	writer, _ := state.TryWrite(new(int), false)
+	writer, _ := state.TryWrite(new(int), false, nil)
 	if writer == nil {
 		t.Fatal("cancelled handover left write admission closed")
 	}
@@ -443,13 +507,13 @@ func TestMosiFailedNativeDrainReopensWriteAdmission(t *testing.T) {
 	state.Initialize(mosi.M)
 	failure := func() (failure any) {
 		defer func() { failure = recover() }()
-		state.BeginHandover(context.Background(), func(context.Context) error { panic("native drain failure") })
+		state.BeginHandover(context.Background(), func(context.Context) error { panic("native drain failure") }, true)
 		return nil
 	}()
 	if failure == nil {
 		t.Fatal("fixture did not fail")
 	}
-	writer, _ := state.TryWrite(new(int), false)
+	writer, _ := state.TryWrite(new(int), false, nil)
 	if writer == nil {
 		t.Fatal("failed native drain retained write admission")
 	}
@@ -459,7 +523,7 @@ func TestMosiFailedNativeDrainReopensWriteAdmission(t *testing.T) {
 func TestMosiBackendRestorePreservesClosedWriteAdmission(t *testing.T) {
 	var state mosi.State
 	state.Initialize(mosi.M)
-	handover := state.TryHandover(func() bool { return true })
+	handover := state.TryHandover(func() bool { return true }, true)
 	if handover == nil {
 		t.Fatal("eviction could not claim the idle generation")
 	}
@@ -468,11 +532,11 @@ func TestMosiBackendRestorePreservesClosedWriteAdmission(t *testing.T) {
 	if action != mosi.Ready || publication.Phase() != mosi.M {
 		t.Fatal("eviction blocked the existing read permission")
 	}
-	if writer, wait := state.TryWrite(nil, false); writer != nil || wait == nil {
+	if writer, wait := state.TryWrite(nil, false, nil); writer != nil || wait == nil {
 		t.Fatal("backend restore bypassed eviction's closed write admission")
 	}
 	handover.Release()
-	writer, _ := state.TryWrite(nil, false)
+	writer, _ := state.TryWrite(nil, false, nil)
 	if writer == nil {
 		t.Fatal("completed eviction retained write admission")
 	}

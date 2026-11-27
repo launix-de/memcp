@@ -439,6 +439,35 @@ test_cases:
     expect:
       data: ["ok"]
 
+  - name: "Reinstalled guards and plans use each fresh request session"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define compiles (newsession))
+        (define parser (lambda (_schema _query _policy planning _tx) (begin
+          (define broad (planner_broad_like_expr? (list (quote session) "v1") planning))
+          (compiles (string (count (compiles))) broad)
+          (list (quote list) (if broad "broad" "selective")
+            (list (quote session) "payload")))))
+        (define results (map (list (list "%C%" "first") (list "%Needle%" "second")
+          (list "%D%" "third") (list "%AnotherNeedle%" "fourth") (list "%E%" "fifth"))
+          (lambda (input) (begin
+            (define request (newsession))
+            (request "v1" (car input)) (request "payload" (cadr input))
+            (sql_execute_formula request nil
+              (cached_parse cache (list parser) "memcp-tests"
+                "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" request true)
+              (lambda (_row) nil) (lambda (_fields) nil))))))
+        (if (equal? (count (compiles)) 2) results
+          (error "fresh request sessions caused unnecessary variant compilation")))
+    expect:
+      result:
+        - [broad, first]
+        - [selective, second]
+        - [broad, third]
+        - [selective, fourth]
+        - [broad, fifth]
+
   - name: "Guarded plan cache bounds obsolete statistics variants"
     scm: |
       (begin
@@ -677,6 +706,56 @@ test_cases:
             (list (quote tx_connection_id) (quote tx)))))
     expect:
       data: [true]
+
+  - name: "Transaction binding preserves complete native call shapes and quoted data"
+    scm: |
+      (begin
+        (define calls (list
+          (list (quote droptable) "memcp-tests" "items" false)
+          (list (quote renametable) "memcp-tests" "items" "renamed")
+          (list (quote altercolumn) (quote handle) "value" "type" "INT")
+          (list (quote altertable) "memcp-tests" "items" "memory")
+          (list (quote createkey) (quote handle) "key" (list (quote quote) (list "value")) true)
+          (list (quote dropkey) (quote handle) "key")
+          (list (quote createforeignkey) "fk" "memcp-tests" "child" (list (quote quote) (list "id")) "parent" (list (quote quote) (list "id")) (list (quote quote) (list)))
+          (list (quote dropforeignkey) (quote handle) "fk")
+          (list (quote dropcolumn) (quote handle) "value")
+          (list (quote createtrigger) "memcp-tests" "trigger" "items" "after_insert" "scheme" "body" (list (quote quote) (list)))
+          (list (quote droptrigger) "memcp-tests" "trigger" false)
+          (list (quote table) "memcp-tests" false "items" false)
+          (list (quote table) "memcp-tests" false "items" false (quote original_tx))
+          (list (quote droptable) "memcp-tests" "items" false (quote original_tx))
+          (list (quote quote) (list (quote droptable) "memcp-tests" "items" false))))
+        (define expected (list
+          (list (quote droptable) "memcp-tests" "items" false (quote tx))
+          (list (quote renametable) "memcp-tests" "items" "renamed" (quote tx))
+          (list (quote altercolumn) (quote handle) "value" "type" "INT" (quote tx))
+          (list (quote altertable) "memcp-tests" "items" "memory" (quote tx))
+          (list (quote createkey) (quote handle) "key" (list (quote quote) (list "value")) true (quote tx))
+          (list (quote dropkey) (quote handle) "key" (quote tx))
+          (list (quote createforeignkey) "fk" "memcp-tests" "child" (list (quote quote) (list "id")) "parent" (list (quote quote) (list "id")) (list (quote quote) (list)) (quote tx))
+          (list (quote dropforeignkey) (quote handle) "fk" (quote tx))
+          (list (quote dropcolumn) (quote handle) "value" (quote tx))
+          (list (quote createtrigger) "memcp-tests" "trigger" "items" "after_insert" "scheme" "body" (list (quote quote) (list)) (quote tx))
+          (list (quote droptrigger) "memcp-tests" "trigger" false (quote tx))
+          (list (quote table) "memcp-tests" false "items" false (quote tx))
+          (list (quote table) "memcp-tests" false "items" false (quote original_tx))
+          (list (quote droptable) "memcp-tests" "items" false (quote original_tx))
+          (list (quote quote) (list (quote droptable) "memcp-tests" "items" false))))
+        (and
+          (equal? (map calls sql_queryplan_bind_tx_calls) expected)
+          (equal? (sql_queryplan_prepare_search (cons (quote begin) calls))
+            (list (quote !begin) (cons (quote begin) expected)))))
+    expect:
+      data: [true]
+
+  - name: "Truthy data cannot impersonate an executable operator"
+    scm: |
+      (sql_execute_formula (newsession) nil
+        (sql_queryplan_compile_formula nil (sql_queryplan_bind_tx_calls (list true)))
+        (lambda (_row) nil) (lambda (_fields) nil))
+    expect:
+      error: true
 
   - name: "Exact cached formula keeps optimizer-resolved session calls"
     scm: |
@@ -978,6 +1057,22 @@ test_cases:
       data:
         - {name: "alice"}
         - {name: "bob"}
+
+  - name: "Compiled binding visits lambda heads and keeps quoted calls inert"
+    scm: |
+      (begin
+        (define source (list (quote list)
+          (list (list context "session") "probe")
+          (list (list (quote lambda) '()
+            (list (list context "session") "probe")))
+          (list (quote quote) (list (quote session) "probe"))
+          (list connection_id)))
+        (define compiled (sql_queryplan_compile_formula nil source))
+        (define first (newsession)) (first "probe" 7)
+        (define second (newsession)) (second "probe" 9)
+        (list (compiled first nil nil nil) (compiled second nil nil nil)))
+    expect:
+      result: [[7, 7, [{symbol: session}, probe], 0], [9, 9, [{symbol: session}, probe], 0]]
 
   # --- Error cases ---
 

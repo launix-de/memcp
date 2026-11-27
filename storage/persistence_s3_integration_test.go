@@ -362,9 +362,9 @@ func testAlterDatabaseStorageToS3(t *testing.T, factory *S3Factory) {
 	target.Remove()
 
 	CreateDatabase(databaseName, false)
-	table, _ := CreateTable(databaseName, "items", Safe, false)
-	table.CreateColumn("id", "INT", nil, nil)
-	table.CreateColumn("value", "TEXT", nil, nil)
+	table, _ := CreateTable(nil, databaseName, "items", Safe, false)
+	table.CreateColumn(nil, "id", "INT", nil, nil)
+	table.CreateColumn(nil, "value", "TEXT", nil, nil)
 	table.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("from-filesystem")}}, nil, scm.NewNil(), false, nil)
 	tx := NewTxContext(TxCursorStability)
 	tx.SessionState = &scm.SessionState{ID: 9100}

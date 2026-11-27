@@ -153,7 +153,7 @@ def cluster_status(node):
     return json.loads(decoded) if isinstance(decoded, str) else decoded
 
 
-def cluster_evidence(before, after, data_bytes=0):
+def cluster_evidence(before, after, data_bytes=0, ingress_index=0):
     """Execution counters, never membership alone, prove distributed work."""
     if len(before) != len(after) or len(after) < 2:
         raise DrillFailure("cluster execution requires multiple measured nodes")
@@ -165,11 +165,13 @@ def cluster_evidence(before, after, data_bytes=0):
         if previous["state"]["self"]["id"] != current["state"]["self"]["id"]:
             raise DrillFailure("cluster node identity changed during a test")
         received.append(current["state"]["received"] - previous["state"]["received"])
-    delegated = after[0]["state"]["delegated"] - before[0]["state"]["delegated"]
+    if type(ingress_index) is not int or not 0 <= ingress_index < len(after):
+        raise DrillFailure("invalid cluster ingress index")
+    delegated = after[ingress_index]["state"]["delegated"] - before[ingress_index]["state"]["delegated"]
     if delegated < 0 or min(received) < 0:
         raise DrillFailure("cluster execution counters reset during a test")
-    return {"remote_shards": delegated, "remote_nodes": sum(delta > 0 for delta in received[1:]),
-            "remote_node_ids": [identity for identity, delta in zip(identities[1:], received[1:]) if delta > 0],
+    return {"remote_shards": delegated, "remote_nodes": sum(delta > 0 for i, delta in enumerate(received) if i != ingress_index),
+            "remote_node_ids": [identity for i, (identity, delta) in enumerate(zip(identities, received)) if i != ingress_index and delta > 0],
             "received": dict(zip(identities, received)), "data_bytes": data_bytes,
             "largest_node_ram": max(item["budget"]["MemoryBudget"] for item in after)}
 
@@ -231,6 +233,16 @@ class ClusterSQLTestRunner(SQLTestRunner):
         self.parallel_group = False
         self.observations = []
 
+    @property
+    def base_url(self):
+        context = getattr(self, "_test_context", None)
+        node = getattr(context, "cluster_ingress", None)
+        return f"http://127.0.0.1:{node.port}" if node is not None else self._default_base_url
+
+    @base_url.setter
+    def base_url(self, value):
+        self._default_base_url = value
+
     def before_case_operation(self, case, database):
         current = self._test_context.cluster_case
         checks = case.get("expect", {}).get("cluster", {})
@@ -264,7 +276,7 @@ class ClusterSQLTestRunner(SQLTestRunner):
                          for node, before in zip(self.nodes, current.pop("_io_before"))]
         before = current.pop("_before", None)
         if before is not None:
-            current["cluster"] = cluster_evidence(before, [self.status(node) for node in self.nodes], cluster_data_bytes(self.shared))
+            current["cluster"] = cluster_evidence(before, [self.status(node) for node in self.nodes], cluster_data_bytes(self.shared), current["ingress_index"])
             with self.report_lock:
                 self.observations.append(current["cluster"])
 
@@ -289,7 +301,14 @@ class ClusterSQLTestRunner(SQLTestRunner):
                    "phase": "cluster" if self.status else "standalone"}
         previous = getattr(self._test_context, "cluster_case", None)
         self._test_context.cluster_case = current
+        previous_ingress = getattr(self._test_context, "cluster_ingress", None)
         try:
+            index = case.get("cluster_node", 0)
+            if type(index) is not int or index < 0 or (self.status and index >= len(self.nodes)):
+                raise DrillFailure("cluster_node must select an existing nonnegative node index")
+            # A standalone oracle runs every ingress against its one server.
+            current["ingress_index"] = index if self.status else 0
+            self._test_context.cluster_ingress = self.nodes[current["ingress_index"]]
             if type(case.get("compare_reference_order", True)) is not bool:
                 raise DrillFailure("compare_reference_order must be boolean")
             checks = case.get("expect", {}).get("cluster", {})
@@ -338,6 +357,7 @@ class ClusterSQLTestRunner(SQLTestRunner):
             current.pop("_io_before", None)
             current.pop("_operation_start", None)
             self._test_context.cluster_case = previous
+            self._test_context.cluster_ingress = previous_ingress
             with self.report_lock:
                 self.results.append(current)
                 self.journal.append({"scenario": "cluster-yaml-case", **current})
@@ -395,10 +415,10 @@ class Client(HttpClient):
             raise DrillFailure(f"missing scalar {column}: {statement}: {rows}")
         return int(rows[0][column])
 
-    def reject(self, statement, *, contains=None, status=None, database=None):
+    def reject(self, statement, *, contains=None, status=None, database=None, session=None):
         started = time.monotonic()
         try:
-            self.sql(statement, database)
+            self.sql(statement, database, session=session)
         except DrillFailure as error:
             if contains and contains not in str(error):
                 raise
@@ -494,6 +514,12 @@ class Node(OwnedServer):
         # Go process. Normal crash/restart scenarios retain their SIGKILL path.
         if sys.exc_info()[0] is not None and self.process is not None and self.process.poll() is None:
             try:
+                snapshot = self.snapshot(timeout=2)
+                (self.artifact_dir / f"authority-generation-{self.generation}.json").write_text(
+                    json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
+            except Exception as error:
+                print(f"  {self.name}: authority capture incomplete: {error}", flush=True)
+            try:
                 print(f"  {self.name}: capture goroutines pid={self.process.pid}", flush=True)
                 self.process.send_signal(signal.SIGABRT)
                 self.process.wait(timeout=2)
@@ -501,9 +527,9 @@ class Node(OwnedServer):
                 print(f"  {self.name}: goroutine capture incomplete: {error}", flush=True)
         super().cleanup()
 
-    def snapshot(self):
+    def snapshot(self, timeout=None):
         # Inspect live RAM state; disk contents cannot grant MOSI rights.
-        result = self.client.scm("(replication_status)").strip()
+        result = self.client.scm("(replication_status)", timeout=timeout).strip()
         if result.startswith('"'):
             result = json.loads(result)
         return json.loads(result)
@@ -544,9 +570,10 @@ class Node(OwnedServer):
     def statuses(self):
         return json.loads(json.loads(self.client.scm("(replication_slaves)")))
 
-    def connected(self):
+    def connected(self, boot=None):
         statuses = self.statuses()
-        return len(statuses) == 1 and statuses[0]["connected"] and statuses[0]["ready"]
+        return (len(statuses) == 1 and statuses[0]["connected"] and statuses[0]["ready"]
+                and (boot is None or statuses[0]["boot"] == boot))
 
     def wait_offline(self):
         def offline():
@@ -663,12 +690,16 @@ def run_replication_source_security(master, slave):
     slave.reclaim()
 
 
-def run_regressions(args, artifacts, journal):
+def run_source_security(args, artifacts, journal):
     print("SCENARIO: source-only replication security", flush=True)
     with Cluster(args, artifacts, "source-security") as security:
         security.initialize(["CREATE TABLE items(id INT PRIMARY KEY, value INT)"])
         run_replication_source_security(security.master, security.slave)
     journal.append({"scenario": "source-only-security", "master_restart": True})
+
+
+def run_regressions(args, artifacts, journal):
+    run_source_security(args, artifacts, journal)
     print("SCENARIO: alternating crashes, authentication, DDL, sharing and retirement", flush=True)
     with Cluster(args, artifacts, "regressions") as cluster:
         master, slave = cluster.master, cluster.slave
@@ -1213,6 +1244,11 @@ def run_stress(args, artifacts, journal):
                 workload(args, cluster, oracle, phase + 2, crash_slave=True)
                 cluster.master.client.reject("SELECT * FROM stress_items", status=500, contains=NETWORK_ERROR)
                 cluster.slave.start()
+                # HTTP readiness does not establish the slave's asynchronous
+                # MOSI connection, and the old connection can still appear
+                # ready until its EOF is processed. Require this process's boot.
+                boot = cluster.slave.snapshot()["boot"]
+                eventually(lambda: cluster.master.connected(boot), "stress slave did not recover its connection")
                 verify_database_pair(master, cluster.slave.client, oracle, aux, extra)
                 assert_reclaimed(cluster.master, cluster.slave)
                 journal.append({"scenario": "threaded-stress", "round": round_index + 1,
@@ -1531,7 +1567,21 @@ def run_retained_generation(master, worker, args, journal):
 
         eventually(released, "peer GC did not deregister old owner generations", timeout=args.timeout)
         w.sql("UPDATE remote_items SET value=value+1 WHERE id=1")
-        expect(m.number("SELECT SUM(value) AS n FROM remote_items"), expected + 1,
+        actual = m.number("SELECT SUM(value) AS n FROM remote_items")
+        if actual != expected + 1:
+            diagnostic = {"expected": expected + 1, "actual": actual}
+            for name, node in (("master", master), ("worker", worker)):
+                try:
+                    diagnostic[name] = {
+                        "rows": node.client.sql("SELECT id,value FROM remote_items ORDER BY id"),
+                        "state": node.snapshot(),
+                        "plan": node.client.sql("EXPLAIN SELECT SUM(value) AS n FROM remote_items"),
+                    }
+                except Exception as error:
+                    diagnostic[name] = {"error": str(error)}
+            (worker.data_dir.parent / "retained-generation-failure.json").write_text(
+                json.dumps(diagnostic, indent=2) + "\n")
+        expect(actual, expected + 1,
                "new generation remained coherent after old-reference release")
         journal.append({"scenario": "retained-generation", "old_uuids": sorted(old_ids),
                         "new_uuids": sorted(active_ids), "old_sum": expected,
@@ -1542,7 +1592,7 @@ def run_retained_generation(master, worker, args, journal):
         server.server_close()
         gate_thread.join(timeout=5)
 
-def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None):
+def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None, selected_cases=None):
     """SQL contracts, shared by the standalone oracle and real cluster processes.
 
     Collect every case failure before failing CI. Unsupported remote semantics
@@ -1554,6 +1604,8 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
     results = []
     missing = object()
     current = None
+    selected = set(selected_cases or [])
+    seen = set()
 
     def sql(node, statement, session=None, expected=missing):
         step = {"node": node.name, "sql": statement, "session": session}
@@ -1580,6 +1632,9 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
 
     def case(name, action):
         nonlocal current
+        seen.add(name)
+        if selected and name not in selected:
+            return
         current = {"scenario": "cluster-sql-context", "phase": phase, "name": name, "steps": []}
         try:
             action()
@@ -1794,6 +1849,38 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
                     eventually(lambda: status(stopped)["state"]["connected"] >= len(nodes) - 1,
                                "former owner did not rejoin after decision", timeout=60)
 
+    def changed_parked_definition(outcome):
+        if not status:
+            return
+        host, other = writer, nodes[2]
+        session = "cluster-parked-schema-change"
+        sql(host, "START ACID TRANSACTION", session)
+        added = False
+        try:
+            sql(host, "UPDATE context_items SET n=n+5 WHERE id=0", session)
+            sql(host, "SELECT id,n FROM context_items WHERE id<2 ORDER BY id", session,
+                [{"id": 0, "n": 15}, {"id": 1, "n": 20}])
+            sql(other, "ALTER TABLE context_items ADD COLUMN batch_flag INT DEFAULT 9")
+            added = True
+            if outcome == "COMMIT":
+                # A stale definition cannot accept the original data journal.
+                # The error must be terminal, while every peer remains live.
+                host.client.reject("COMMIT", status=500, session=session)
+                current["steps"].append({"node": host.name, "sql": "COMMIT", "session": session,
+                                         "expected_error_status": 500})
+            sql(host, "ROLLBACK", session)
+            for node in (host, other):
+                sql(node, "SELECT id,n,batch_flag FROM context_items WHERE id<2 ORDER BY id", None,
+                    [{"id": 0, "n": 10, "batch_flag": 9}, {"id": 1, "n": 20, "batch_flag": 9}])
+                sql(node, f"SELECT ordinal,name FROM system_schema.columns WHERE schema_name='{DATABASE}' "
+                          "AND table_name='context_items' ORDER BY ordinal", None,
+                    [{"ordinal": 0, "name": "id"}, {"ordinal": 1, "name": "n"},
+                     {"ordinal": 2, "name": "batch_flag"}])
+        finally:
+            sql(host, "ROLLBACK", session)
+            if added:
+                sql(other, "ALTER TABLE context_items DROP COLUMN batch_flag")
+
     case("literal-capture", lambda: scalar(coordinator,
          "SELECT SUM(41 + v0) AS total FROM big_items", total + 41 * count, remote=True))
     case("named-session-plain-sum", lambda: scalar(coordinator,
@@ -1816,8 +1903,12 @@ def run_cluster_sql_contexts(nodes, reference, journal, report_path, status=None
         case("acid-single-shard-commit-after-mosi-handover", lambda: migrating_overlay("COMMIT", single=True))
         case("cs-overlay-live-mosi-rollback", lambda: migrating_overlay("ROLLBACK", single=True, begin="START TRANSACTION"))
         case("cs-commit-after-empty-owner-failure", lambda: migrating_overlay("COMMIT", True, begin="START TRANSACTION"))
+        case("catalog-change-allows-explicit-rollback", lambda: changed_parked_definition("ROLLBACK"))
+        case("catalog-change-rejects-stale-data-commit", lambda: changed_parked_definition("COMMIT"))
     # Last: this intentionally commits a different oracle into context_items.
     case("acid-commit-cache-coherence", lambda: overlay("START ACID TRANSACTION", "COMMIT"))
+    if status and selected - seen:
+        raise DrillFailure("unknown cluster context cases: " + ", ".join(sorted(selected - seen)))
     return results
 
 
@@ -1876,6 +1967,10 @@ def run_cluster_inserts(args, artifacts, journal, hash_partitioned=False):
         nodes = [Node(args, directory, f"node-{i}", "listen") for i in range(3)]
         for index, node in enumerate(nodes):
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
+            # The snapshot's database anchor also references immutable catalog
+            # generations in the system backend. Seed that backend privately;
+            # only ordinary tenant payload remains shared between live nodes.
+            shutil.copytree(builder.data_dir / "system", node.data_dir / "system", dirs_exist_ok=True)
             (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
             node.process_env["GOMAXPROCS"] = "2"
@@ -2186,7 +2281,8 @@ def run_cluster_placement(args, artifacts, journal):
             source.sql("INSERT INTO context_items VALUES(0,10),(1,20),(2,30),(3,40),(4,50),(5,60),(6,70),(7,80)")
             source.scm(f'(partitiontable (table "{DATABASE}" false "context_items" false) (list (list "id" (list 2 4 6))))')
             standalone_contexts = run_cluster_sql_contexts(
-                [builder], reference, journal, directory / "standalone-contexts.json")
+                [builder], reference, journal, directory / "standalone-contexts.json",
+                selected_cases=args.cluster_context_case)
             # Restore the committed control fixture through normal SQL, then
             # seal its generations before sharing the backend with other nodes.
             source.sql("DELETE FROM context_items")
@@ -2195,6 +2291,7 @@ def run_cluster_placement(args, artifacts, journal):
             source.scm(f'(rebuild (table "{DATABASE}" false "big_items" false) true false)')
         standalone_operators = []
         operator_shared = None
+        operator_system = None
         # The placement/co-location preflight also runs in the generic cluster
         # and SQL-context scenarios, not just the operator YAML profile.
         source.sql("CREATE TABLE operator_keys(id INT PRIMARY KEY) ENGINE=SAFE")
@@ -2207,12 +2304,15 @@ def run_cluster_placement(args, artifacts, journal):
             builder.kill()
             operator_shared = directory / "shared-operator-fixture"
             shutil.copytree(builder.data_dir / DATABASE, operator_shared)
+            operator_system = directory / "system-operator-fixture"
+            shutil.copytree(builder.data_dir / "system", operator_system)
             source = builder.start()
             standalone_operators = run_cluster_yaml_cases(
                 suite or OPERATOR_SUITE, builder, [builder], builder.data_dir / DATABASE,
                 journal, directory / "standalone-operators.json")
         builder.kill()
         shared = operator_shared or builder.data_dir / DATABASE
+        system_fixture = operator_system or builder.data_dir / "system"
         catalog = json.loads((shared / "schema.json").read_text())["tables"]
         if args.cluster_context_only:
             context_schema = catalog["context_items"]
@@ -2240,7 +2340,11 @@ def run_cluster_placement(args, artifacts, journal):
             # runners. A serial scan can evict/reload every shard locally and
             # would never test simultaneous RAM admission or remote overflow.
             node.process_env["GOMAXPROCS"] = str(config["gomaxprocs"])
-            cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
+            cleanup.callback(node.cleanup)
+            # The snapshot's database anchor also references immutable catalog
+            # generations in the system backend. Seed that backend privately;
+            # only ordinary tenant payload remains shared between live nodes.
+            shutil.copytree(system_fixture, node.data_dir / "system", dirs_exist_ok=True)
             (node.data_dir / DATABASE).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{DATABASE}.json").write_text(json.dumps({"backend": "filesystem"}))
             # The coordinator uses a deliberately tiny shard share below its
@@ -2328,7 +2432,8 @@ def run_cluster_placement(args, artifacts, journal):
             return
         if args.cluster_context_only:
             contexts = run_cluster_sql_contexts(nodes, reference, journal,
-                                                directory / "cluster-contexts.json", status)
+                                                directory / "cluster-contexts.json", status,
+                                                selected_cases=args.cluster_context_case)
             failed = [f"{case['phase']}/{case['name']}" for case in standalone_contexts + contexts
                       if case["status"] != "passed"]
             if failed:
@@ -2377,7 +2482,7 @@ def run_cluster_placement(args, artifacts, journal):
             upstream.client.sql(f"CREATE DATABASE {database}", "system")
             upstream.client.sql("CREATE TABLE edge_items(id INT PRIMARY KEY,n INT) ENGINE=SAFE", database)
             edge = Node(args, directory, f"edge-{index}", f"http://127.0.0.1:{upstream.port}/cluster", database=database)
-            cleanup.callback(lambda edge=edge: edge.kill() if edge.process is not None else None)
+            cleanup.callback(edge.cleanup)
             # User rows and MOSI configuration deliberately share one stripe.
             # Data acquisition must complete before any UNIQUE reservation.
             (edge.data_dir / "settings.json").write_text(json.dumps({"UniqueScaleFactor": 0}))
@@ -2513,6 +2618,7 @@ def run_cluster_suite(args, path, artifacts, journal):
         protocol_ports = [free_port() for _ in nodes]
         for index, node in enumerate(nodes):
             cleanup.callback(lambda node=node: node.kill() if node.process is not None else None)
+            shutil.copytree(catalog.data_dir / "system", node.data_dir / "system", dirs_exist_ok=True)
             (node.data_dir / database).symlink_to(shared, target_is_directory=True)
             (node.data_dir / f"{database}.json").write_text(json.dumps({"backend": "filesystem"}))
             ram = config["coordinator_ram_limit_bytes"] if index == 0 else config["ram_limit_bytes"]
@@ -2558,8 +2664,12 @@ def main():
     parser.add_argument("--dedicated-replication-port", action="store_true",
                         help="exercise the optional dedicated listener instead of the normal HTTP /cluster route")
     parser.add_argument("--remote-scans-only", action="store_true", help="run only the focused two-process remote scan scenario")
+    parser.add_argument("--replica-scenario", choices=("source-security", "regressions", "partitions", "stress", "multiple-slaves"),
+                        help="run one plain-replication scenario without the complete stress sequence")
     parser.add_argument("--cluster-context-only", action="store_true",
                         help="run SQL session/transaction contracts against standalone and clustered processes")
+    parser.add_argument("--cluster-context-case", action="append",
+                        help="select a named context case for a focused reproduction; CI runs all cases by default")
     parser.add_argument("--cluster-inserts-only", action="store_true", help="run focused concurrent shared-storage INSERT scenario")
     parser.add_argument("--cluster-inserts-layout", choices=("free", "hash", "both"), default="both", help="select INSERT fixture layout (default: both)")
 
@@ -2629,9 +2739,13 @@ def main():
                 run_cluster_inserts(args, artifacts, journal, hash_partitioned=True)
         elif args.cluster_only:
             run_cluster_placement(args, artifacts, journal)
+        elif args.replica_scenario:
+            {"source-security": run_source_security, "regressions": run_regressions,
+             "partitions": run_partitions, "stress": run_stress,
+             "multiple-slaves": run_multiple_slaves}[args.replica_scenario](args, artifacts, journal)
         else:
             run_remote_scans(args, artifacts, journal)
-        if not args.suites and not args.remote_scans_only and not args.cluster_only and not args.cluster_inserts_only:
+        if not args.suites and not args.remote_scans_only and not args.replica_scenario and not args.cluster_only and not args.cluster_inserts_only:
             run_regressions(args, artifacts, journal)
             run_partitions(args, artifacts, journal)
             run_stress(args, artifacts, journal)
@@ -2656,10 +2770,14 @@ def main():
         replay.extend(str(path) for path in args.suites)
         if args.remote_scans_only:
             replay.append("--remote-scans-only")
+        if args.replica_scenario:
+            replay.extend(("--replica-scenario", args.replica_scenario))
         if args.cluster_inserts_only:
             replay.extend(("--cluster-inserts-only", "--cluster-inserts-layout", args.cluster_inserts_layout))
         if args.cluster_context_only:
             replay.append("--cluster-context-only")
+            for name in args.cluster_context_case or []:
+                replay.extend(("--cluster-context-case", name))
         elif args.cluster_only:
             replay.append("--cluster-only")
         if args.cluster_operators_only:

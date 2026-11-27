@@ -332,9 +332,9 @@ func TestBlobInsertRebuildAndRead(t *testing.T) {
 	defer databases.Remove("tdb1")
 
 	CreateDatabase("tdb1", false)
-	tbl, _ := CreateTable("tdb1", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "tdb1", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 
 	db := GetDatabase("tdb1")
 
@@ -423,9 +423,9 @@ func TestBlobDeleteRowsAndRebuild(t *testing.T) {
 	defer databases.Remove("tdb4")
 
 	CreateDatabase("tdb4", false)
-	tbl, _ := CreateTable("tdb4", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "tdb4", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 
 	db := GetDatabase("tdb4")
 
@@ -526,9 +526,9 @@ func TestBlobDropTableReleasesBlobs(t *testing.T) {
 	defer databases.Remove("tdb2")
 
 	CreateDatabase("tdb2", false)
-	tbl, _ := CreateTable("tdb2", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "tdb2", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 
 	db := GetDatabase("tdb2")
 
@@ -551,7 +551,7 @@ func TestBlobDropTableReleasesBlobs(t *testing.T) {
 	}
 
 	// Drop retires ownership; only generation-based cleanup may delete files.
-	DropTable("tdb2", "docs", false)
+	DropTable(nil, "tdb2", "docs", false)
 	CleanDatabase(db)
 
 	if n := countBlobFiles(t, "tdb2"); n != 0 {
@@ -580,13 +580,13 @@ func TestBlobSharedAcrossTables(t *testing.T) {
 	defer databases.Remove("tdb3")
 
 	CreateDatabase("tdb3", false)
-	tbl1, _ := CreateTable("tdb3", "t1", Safe, false)
-	tbl1.CreateColumn("id", "INT", nil, nil)
-	tbl1.CreateColumn("content", "TEXT", nil, nil)
+	tbl1, _ := CreateTable(nil, "tdb3", "t1", Safe, false)
+	tbl1.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl1.CreateColumn(nil, "content", "TEXT", nil, nil)
 
-	tbl2, _ := CreateTable("tdb3", "t2", Safe, false)
-	tbl2.CreateColumn("id", "INT", nil, nil)
-	tbl2.CreateColumn("content", "TEXT", nil, nil)
+	tbl2, _ := CreateTable(nil, "tdb3", "t2", Safe, false)
+	tbl2.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl2.CreateColumn(nil, "content", "TEXT", nil, nil)
 
 	db := GetDatabase("tdb3")
 
@@ -614,7 +614,7 @@ func TestBlobSharedAcrossTables(t *testing.T) {
 	}
 
 	// Drop first table: refcount should decrease to 1
-	DropTable("tdb3", "t1", false)
+	DropTable(nil, "tdb3", "t1", false)
 
 	refs2 := queryBlobsTable(t, db)
 	for hash, rc := range refs2 {
@@ -647,7 +647,7 @@ func TestBlobSharedAcrossTables(t *testing.T) {
 	}
 
 	// Drop second table, then reclaim the now-unowned files by generation proof.
-	DropTable("tdb3", "t2", false)
+	DropTable(nil, "tdb3", "t2", false)
 	CleanDatabase(db)
 
 	if n := countBlobFiles(t, "tdb3"); n != 0 {
@@ -723,9 +723,9 @@ func TestDoubleRebuildPreservesShardFiles(t *testing.T) {
 	defer databases.Remove("tdb5")
 
 	CreateDatabase("tdb5", false)
-	tbl, _ := CreateTable("tdb5", "items", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("name", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "tdb5", "items", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "name", "TEXT", nil, nil)
 
 	db := GetDatabase("tdb5")
 

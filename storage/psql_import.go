@@ -318,9 +318,9 @@ func psqlImportTable(ctx context.Context, db *sql.DB, srcSchema, srcTable, dstDB
 	}
 
 	// drop-semantics: replace target table content+schema
-	DropTable(dstDB, dstTable, true)
+	DropTable(nil, dstDB, dstTable, true)
 
-	t, _ := CreateTable(dstDB, dstTable, Safe, true)
+	t, _ := CreateTable(nil, dstDB, dstTable, Safe, true)
 	if err := psqlImportColumns(ctx, db, srcSchema, srcTable, t); err != nil {
 		return err
 	}
@@ -376,7 +376,7 @@ ORDER BY ordinal_position`, srcSchema, srcTable)
 			opts = append(opts, scm.NewString("default"), scm.NewString(def.String))
 		}
 
-		if ok := t.CreateColumn(name.String, typ, dims, opts); !ok {
+		if ok := t.CreateColumn(nil, name.String, typ, dims, opts); !ok {
 			continue
 		}
 	}
@@ -480,7 +480,6 @@ ORDER BY tc.constraint_name, kcu.ordinal_position`, srcSchema, srcTable)
 	}
 
 	t.schema.schemalock.Lock()
-	defer t.schema.schemalock.Unlock()
 
 existingLoop:
 	for k, cols := range keys {
@@ -496,7 +495,7 @@ existingLoop:
 		t.Unique = append(t.Unique, uniqueKey{Id: k.name, Cols: colNames})
 	}
 	t.publishShowColumnsSnapshot(true)
-	t.schema.save()
+	t.schema.saveLockedAndUnlock(nil, schemaSaveFsync, t)
 	return nil
 }
 

@@ -56,6 +56,27 @@ serialization, so a correct cold reader cannot hide an uncompressed writer.
 
 ## What each matrix job proves
 
+The `upgrade-release-before-catalog-identities-2026-11-23` pin identifies
+`cece8f501cfb407b371358a9d37a5b87238df241`, the published version 2 native
+catalog writer. Version 3 adds logical table identities and the transactional
+definition revision. Readers retain support for versions 1 and 2; saving
+rewrites their missing introduced columns before publishing a current root.
+The existing legacy declarations remain in `schema.json` for older readers.
+
+The `upgrade-release-before-catalog-digest-epochs-2026-11-24` pin identifies
+`7291cafe259ade45e0b8052043940e4ca895298e`, the published version 3 writer.
+Version 4 derives the declaration epoch from authoritative catalog rows, ignoring
+physical topology and advisory statistics. The root carries a cached epoch;
+loading recomputes it after catalog WAL replay. Frontend declarations stored in
+ordinary relations, such as SQL views, retain their transactional catalog epoch.
+This avoids a second catalog WAL solely for invalidation on ordinary native DDL.
+Versions 1–3 remain readable; older readers can use the complete legacy export.
+
+Small accepted catalog changes retain their ordinary SAFE base plus WAL.
+Physical checkpoints seal outstanding catalog WALs before compacting the
+tenant's transaction decision log. Native regression cases check cold loading
+before and after that compaction, together with unchanged user row values.
+
 The predecessor binary creates the complete fixture and supplies two oracles:
 
 - an exact snapshot of every public table's stable schema metadata and every

@@ -570,11 +570,52 @@ func TestClusterObjectRepeatedImportSharesOneGCLifetime(t *testing.T) {
 	waitObjectGC(t, func() bool { return objectEntryCount(owner) == 0 })
 }
 
+func TestClusterPacketNativeCatalogCompletesBeforeRootInstallation(t *testing.T) {
+	entered, resume := make(chan struct{}), make(chan struct{})
+	root, other := make(chan struct{}), make(chan struct{})
+	p := &mosiPeer{done: make(chan struct{}), packet: func(packet *mosiPacket) error {
+		switch packet.ID {
+		case "catalog":
+			close(entered)
+			<-resume
+		case "root":
+			close(root)
+		case "other":
+			close(other)
+		}
+		return nil
+	}}
+	defer func() { close(resume); p.packets.Wait() }()
+	if !p.dispatchPacket(&mosiPacket{ID: "catalog", Kind: "end", Resource: mosiResource{Database: "dependent", Table: catalogResourcePrefix + "columns", Shard: uuid.NewString()}}, 1, time.Time{}) {
+		t.Fatal("native dispatch failed")
+	}
+	<-entered
+	for _, packet := range []*mosiPacket{
+		{ID: "root", Kind: "end", Resource: mosiResource{Database: "dependent"}},
+		{ID: "other", Kind: "end", Resource: mosiResource{Database: "independent"}},
+	} {
+		if !p.dispatchPacket(packet, 1, time.Time{}) {
+			t.Fatal("schema dispatch failed")
+		}
+	}
+	select {
+	case <-other:
+	case <-time.After(time.Second):
+		t.Fatal("native installation blocked an unrelated database")
+	}
+	select {
+	case <-root:
+		t.Fatal("root installation overtook native catalog completion")
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
 func TestClusterPacketSchemaPublicationPrecedesDependentShard(t *testing.T) {
 	entered := make(chan struct{})
 	resume := make(chan struct{})
 	data := make(chan struct{})
 	other := make(chan struct{})
+	catalog := make(chan struct{})
 	p := &mosiPeer{done: make(chan struct{}), packet: func(packet *mosiPacket) error {
 		switch packet.ID {
 		case "schema":
@@ -589,6 +630,8 @@ func TestClusterPacketSchemaPublicationPrecedesDependentShard(t *testing.T) {
 			close(data)
 		case "independent":
 			close(other)
+		case "catalog":
+			close(catalog)
 		}
 		return nil
 	}}
@@ -596,6 +639,16 @@ func TestClusterPacketSchemaPublicationPrecedesDependentShard(t *testing.T) {
 		t.Fatal("schema dispatch failed")
 	}
 	<-entered
+	if !p.dispatchPacket(&mosiPacket{ID: "catalog", Resource: mosiResource{Database: "dependent", Table: catalogResourcePrefix + "columns", Shard: uuid.NewString()}}, 1, time.Time{}) {
+		t.Fatal("catalog dispatch failed")
+	}
+	select {
+	case <-catalog:
+	case <-time.After(time.Second):
+		close(resume)
+		p.packets.Wait()
+		t.Fatal("schema installation blocked the catalog shard supplying its definitions")
+	}
 	if !p.dispatchPacket(&mosiPacket{ID: "data", Resource: mosiResource{Database: "dependent", Table: "t", Shard: uuid.NewString()}}, 1, time.Time{}) ||
 		!p.dispatchPacket(&mosiPacket{ID: "independent", Resource: mosiResource{Database: "independent"}}, 1, time.Time{}) {
 		t.Fatal("data dispatch failed")
@@ -679,9 +732,9 @@ func prepareRegisteredDiskGeneration(t *testing.T, owner *nodeScanService, peer 
 func TestClusterObjectRegisteredGenerationProtectsFilesAndBlobs(t *testing.T) {
 	defer setupGCTest(t)()
 	CreateDatabase("gcdb", false)
-	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("content", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, "gcdb", "docs", Safe, false)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "content", "TEXT", nil, nil)
 	insertLongRows(t, tbl, []string{
 		strings.Repeat("A", maxInlineBlobBytes+800),
 		strings.Repeat("B", maxInlineBlobBytes+800),

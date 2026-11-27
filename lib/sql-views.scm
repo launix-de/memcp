@@ -18,32 +18,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* Views remain logical query sources. Their parser IR is expanded into a
 derived SELECT before untangle_query sees the complete query. */
 
-(set sql_view_catalog_state (coalesce sql_view_catalog_state (newsession)))
-(if (nil? (sql_view_catalog_state "version"))
-	(sql_view_catalog_state "version" 0)
-	true)
-(if (nil? (sql_view_catalog_state "count"))
-	(sql_view_catalog_state "count" 0)
-	true)
-
-(define sql_view_query_generation (lambda (query)
-	(if (> (sql_view_catalog_state "count") 0)
-		(begin
-			(define normalized_query (toLower query))
-			(define references_view (scan nil (table "system" false "views" false)
-				'(369435906932736) '()
-				'("name")
-				(lambda (name) (> (count (split normalized_query (toLower name))) 1))
-				'() (lambda (acc) true) false (lambda (a b) (or a b))))
-			(if references_view (sql_view_catalog_state "version") 0))
-		0)))
-
-(define sql_view_catalog_set_count (lambda (count)
-	(sql_view_catalog_state "count" count)))
-
-(define sql_view_catalog_changed (lambda ()
-	(sql_view_catalog_state "version" (+ (sql_view_catalog_state "version") 1))))
-
 (define sql_apply_view_column_aliases (lambda (query aliases)
 	(if (nil? aliases)
 		query
@@ -57,15 +31,15 @@ derived SELECT before untangle_query sees the complete query. */
 				(error "view column alias count does not match its output columns"))
 			_ (error "view column aliases currently require one query block")))))
 
-(define sql_find_view (lambda (schema name)
-	(scan nil (table "system" false "views" false)
+(define sql_find_view (lambda (tx schema name)
+	(scan tx (table "system" false "views" false)
 		(list 369436443803648 (scan_boundary "equal" "database" 0 0 true true "" false) (scan_boundary "equal" "name" 1 1 true true "" false)) (list schema name)
 		'() (lambda () true)
 		'("dialect" "sql" "ir")
 		(lambda (acc dialect sql ir) (list dialect sql ir))
-		nil (lambda (a b) b))))
+		nil (lambda (a b) (coalesceNil b a)))))
 
-(define sql_expand_views (lambda (query policy) (begin
+(define sql_expand_views (lambda (query policy tx) (begin
 	(define expand_node (lambda (node stack)
 		(match node
 			((symbol query-block) query_schema sources fields condition group having order limit offset hidden stages facts)
@@ -75,14 +49,15 @@ derived SELECT before untangle_query sees the complete query. */
 					(match source
 						'(alias source_schema relation outer join_condition)
 						(begin
+							(define catalog_view (if (string? relation) (sql_catalog_view source_schema relation) nil))
 							(define expanded_relation
-								(if (string? relation)
+								(if (not (nil? catalog_view)) catalog_view (string? relation)
 									(begin
 										(if policy (policy source_schema relation false) true)
 										(if (table source_schema false relation false)
 											relation
 											(begin
-												(define view (sql_find_view source_schema relation))
+												(define view (sql_find_view tx source_schema relation))
 												(if (nil? view)
 													relation
 													(begin
@@ -114,11 +89,14 @@ derived SELECT before untangle_query sees the complete query. */
 			(cons (expand_node head stack)
 				(map tail (lambda (item) (expand_node item stack))))
 			_ node)))
-	(if (> (sql_view_catalog_state "count") 0)
-		(expand_node query '())
-		query))))
+	(expand_node query '()))))
 
 (define create_sql_view (lambda (tx schema name dialect sql ir mode) (begin
+	/* Retain the frontend relation's definition before taking the tenant's
+	writer lease. Waiting for another database's DDL after that upgrade would
+	create a cross-database lock cycle. The rows still use the original tx. */
+	(schema_read tx "system")
+	(schema_write tx schema)
 	(define serialized_ir (json_encode ir))
 	(define existing (scan tx (table "system" false "views" false)
 		(list 369436443803648 (scan_boundary "equal" "database" 0 0 true true "" false) (scan_boundary "equal" "name" 1 1 true true "" false)) (list schema name)
@@ -140,28 +118,20 @@ derived SELECT before untangle_query sees the complete query. */
 				_ (error (concat "view " schema "." name " already exists")))
 			(insert (table "system" false "views" false)
 				'("database" "name" "dialect" "sql" "ir")
-				(list (list schema name dialect sql serialized_ir)))))
-	(if (or (equal? existing 0) (equal? mode "replace"))
-		(begin
-			(if (equal? existing 0)
-				(sql_view_catalog_set_count (+ (sql_view_catalog_state "count") 1))
-				true)
-			(sql_view_catalog_changed))
-		true)
+				(list (list schema name dialect sql serialized_ir)) '() nil false nil tx)))
+
 	result)))
 
 (define drop_sql_view (lambda (tx schema name if_exists) (begin
+	(schema_read tx "system")
+	(schema_write tx schema)
 	(define removed (scan tx (table "system" false "views" false)
 		(list 369436443803648 (scan_boundary "equal" "database" 0 0 true true "" false) (scan_boundary "equal" "name" 1 1 true true "" false)) (list schema name)
 		'() (lambda () true)
 		'("$update")
 		(lambda (acc $update) (begin ($update) (+ acc 1)))
 		0 +))
-	(if (> removed 0)
-		(begin
-			(sql_view_catalog_set_count (max 0 (- (sql_view_catalog_state "count") removed)))
-			(sql_view_catalog_changed)
-			removed)
+	(if (> removed 0) removed
 		(if if_exists 0 (error (concat "view " schema "." name " does not exist")))))))
 
 /* SQL database lifecycle and alias declaration publication share one DDL
@@ -214,9 +184,6 @@ metadata. */
 				'("$update")
 				(lambda (acc $update) (begin ($update) (+ acc 1)))
 				0 +))
-			(if (> removed_views 0) (begin
-				(sql_view_catalog_set_count (max 0 (- (sql_view_catalog_state "count") removed_views)))
-				(sql_view_catalog_changed)
-			) true)
+
 		) true)
 		dropped)))))

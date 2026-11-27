@@ -60,30 +60,39 @@ the dispatch formula and retained ASTs without limit. */
 /* A parse can mention the same physical table through many aliases. Resolve
 and authorize each readable table once, then keep using show's immutable table
 snapshot through the stable handle for the rest of this compile only. */
-(define sql_compile_table_policy (lambda (policy tx access readonly)
+(define sql_compile_table_policy (lambda (policy tx access readonly planning_session)
 	(begin
 		(define catalog (newsession))
 		(lambda (schema tbl write)
-			(if write
-				(begin
-					(if policy (policy schema tbl true) true)
-					(access "write" true)
-					(if (and (equal? schema "system") (equal? tbl true)) (access "admin" true) true)
-					/* Native schema/shard access acquires ownership. Keep write
-					intent on cached plans; admin commands route to the master. */
-					(if (or readonly (equal? schema "system")) true (replication_write tx)))
-				(begin
-					(define handle (table schema false tbl false))
-					(if (and handle (catalog handle))
-						true
-						(begin
-							(if policy (policy schema tbl false) true)
-							(if handle
-								(begin
-									(show handle)
-									(catalog handle true))
-								true)
-							true))))))))
+			(begin
+				(schema_read tx schema)
+				(define schema_key (concat "schema:" schema))
+				(if (access schema_key) true (begin
+					(access schema_key true)
+					(planner_record_guard_condition
+						(list (quote !begin) (list (quote schema_read) (quote tx) schema)
+							(list (quote equal?) (list (quote schema_version) schema) (schema_version schema)))
+						planning_session)))
+				(if write
+					(begin
+						(if policy (policy schema tbl true) true)
+						(access "write" true)
+						(if (and (equal? schema "system") (equal? tbl true)) (access "admin" true) true)
+						/* Native schema/shard access acquires ownership. Keep write
+						intent on cached plans; admin commands route to the master. */
+						(if (or readonly (equal? schema "system")) true (replication_write tx)))
+					(begin
+						(define handle (table schema false tbl false))
+						(if (and handle (catalog handle))
+							true
+							(begin
+								(if policy (policy schema tbl false) true)
+								(if handle
+									(begin
+										(show handle)
+										(catalog handle true))
+									true)
+								true)))))))))
 
 /* Copy request bindings and catalog context into an isolated planning session.
 The request transaction is deliberately excluded: cached plans must obtain
@@ -134,46 +143,61 @@ functional planner return value. */
 			(map (produceN (coalesceNil (preparations "count") 0))
 				(lambda (idx) (preparations (concat "preparation:" idx))))))))
 
+/* Bind an already visited call. The compiler combines this with search
+preparation so large plans cross one structural walk, preserving quote data
+and lambda heads while binding the executing request explicitly. */
+(define sql_queryplan_bind_execution_call (lambda (head args)
+	(match (cons head args)
+		((symbol context) "session") (quote session)
+		((quote context) "session") (quote session)
+		(cons (symbol session) tail) (cons (quote session) tail)
+		(cons (quote session) tail) (cons (quote session) tail)
+		(cons (symbol session_globalvar) tail)
+		(cons session_globalvar_explicit (cons (quote session) tail))
+		(cons (quote session_globalvar) tail)
+		(cons session_globalvar_explicit (cons (quote session) tail))
+		_ (if (expression_equal? head session_globalvar)
+			(cons session_globalvar_explicit (cons (quote session) args))
+			(and (expression_equal? head context)
+				(and (equal? (count args) 1) (equal? (car args) "session"))) (quote session)
+			(sql_queryplan_bind_tx_call head args)))))
+
 (define sql_queryplan_bind_execution_session (lambda (expr)
 	(match expr
 		((symbol quote) _value) expr
-		((symbol context) "session") (quote session)
-		((quote context) "session") (quote session)
-		(cons (symbol session) tail) (cons (quote session)
-			(map tail sql_queryplan_bind_execution_session))
-		(cons (quote session) tail) (cons (quote session)
-			(map tail sql_queryplan_bind_execution_session))
-		(cons (symbol session_globalvar) tail) (cons session_globalvar_explicit
-			(cons (quote session) (map tail sql_queryplan_bind_execution_session)))
-		(cons (quote session_globalvar) tail) (cons session_globalvar_explicit
-			(cons (quote session) (map tail sql_queryplan_bind_execution_session)))
-		(cons (symbol connection_id) _tail) (list (quote tx_connection_id) (quote tx))
-		(cons (quote connection_id) _tail) (list (quote tx_connection_id) (quote tx))
-		(cons head tail) (if (equal? head session_globalvar)
-			(cons session_globalvar_explicit
-				(cons (quote session) (map tail sql_queryplan_bind_execution_session)))
-			(if (equal? head connection_id)
-				(list (quote tx_connection_id) (quote tx))
-				(if (and (equal? head context)
-					(and (equal? (count tail) 1) (equal? (car tail) "session")))
-					(quote session)
-					(cons
-						(sql_queryplan_bind_execution_session head)
-						(map tail sql_queryplan_bind_execution_session)))))
+		(cons head args) (sql_queryplan_bind_execution_call
+			(sql_queryplan_bind_execution_session head)
+			(map args sql_queryplan_bind_execution_session))
 		_ expr)))
 
 /* Exact DML plans do not enter the guarded SELECT variant pipeline. Bind only
-request-context primitives here; session binding has broader AST semantics and
-must remain in the guarded-plan path. */
+transaction operators here; execution binding additionally handles sessions.
+Bind one already traversed call so search preparation and standalone callers
+share this rule without a second walk of the emitted code. Operator identity
+uses structural equality: scalar coercion can mistake TRUE for a procedure
+and stringify complete lambda heads during this compiler walk. Literal operator
+arities use one native lookup rather than matching every DDL name at each call. */
+(define sql_queryplan_tx_call_arities
+	(list (quote droptable) 3 (quote renametable) 3 (quote altercolumn) 4
+		(quote altertable) 3 (quote createkey) 4 (quote dropkey) 2
+		(quote createforeignkey) 7 (quote dropforeignkey) 2
+		(quote dropcolumn) 2 (quote createtrigger) 7 (quote droptrigger) 3))
+
+(define sql_queryplan_bind_tx_call (lambda (head args) (begin
+	(define arity (if (symbol? head)
+		(get_assoc sql_queryplan_tx_call_arities head) nil))
+	(if (or (and (not (nil? arity)) (equal? (count args) arity))
+		(and (equal? (count args) 4) (or (expression_equal? head table) (expression_equal? head (quote table)))))
+		(append (cons head args) (quote tx))
+		(if (or (expression_equal? head connection_id) (expression_equal? head (quote connection_id)))
+			(list (quote tx_connection_id) (quote tx))
+			(cons head args))))))
+
 (define sql_queryplan_bind_tx_calls (lambda (expr)
 	(match expr
 		((symbol quote) _value) expr
-		(cons (symbol connection_id) _tail) (list (quote tx_connection_id) (quote tx))
-		(cons (quote connection_id) _tail) (list (quote tx_connection_id) (quote tx))
-		(cons head tail) (if (equal? head connection_id)
-			(list (quote tx_connection_id) (quote tx))
-			(cons (sql_queryplan_bind_tx_calls head)
-				(map tail sql_queryplan_bind_tx_calls)))
+		(cons head args) (sql_queryplan_bind_tx_call
+			(sql_queryplan_bind_tx_calls head) (map args sql_queryplan_bind_tx_calls))
 		_ expr)))
 
 (define sql_queryplan_uncovered_binding_conditions (lambda (planning_session)
@@ -211,7 +235,7 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 			(list (quote session) key))
 		'(binding key) (if (and (not (nil? observed_metrics))
 			(and (string? key) (and (strlike key "__memcp_queryplan_observation_metric_%")
-				(and (equal? binding (planner_queryplan_observation_session_expr))
+				(and (expression_equal? binding (planner_queryplan_observation_session_expr))
 					(not (contains? observed_metrics key))))))
 			/* Logical enumeration can mention a metric whose physical prefix was
 			not selected. Its guard must use the fallback without creating a session. */
@@ -333,7 +357,7 @@ serialization still see the complete plan. */
 	(if (and (not readonly) (access "write")
 		(not (match formula
 			(cons head tail) (and (empty_list? tail)
-				(or (equal? head shutdown) (equal? head (quote shutdown))))
+				(or (expression_equal? head shutdown) (expression_equal? head (quote shutdown))))
 			_ false)))
 		(if (access "admin")
 			(list (quote if) (list (quote replication_slave))
@@ -349,15 +373,18 @@ identical programs once outside row closures, including parameterized plans. */
 (define sql_queryplan_prepare_search (lambda (formula) (begin
 	(define bindings (newsession))
 	(define rewrite (lambda (expr) (match expr
-		(cons head tail) (if (equal? head (quote quote)) expr
-			(equal? head sql_text_search_prepare) (begin
-				(define key (json_encode tail))
+		((symbol quote) _value) expr
+		(cons head tail) (begin
+			(define args (map tail rewrite))
+			(define bound (sql_queryplan_bind_execution_call (rewrite head) args))
+			(if (expression_equal? head sql_text_search_prepare) (begin
+				(define key (json_encode args))
 				(define entry (bindings key))
 				(if entry (car entry) (begin
 					(define name (symbol (concat "search_program_" (sha256 key))))
-					(bindings key (list name expr))
+					(bindings key (list name bound))
 					name)))
-			(cons head (map tail rewrite)))
+				bound))
 		_ expr)))
 	(define rewritten (rewrite formula))
 	(cons (quote !begin)
@@ -388,25 +415,34 @@ identical programs once outside row closures, including parameterized plans. */
 		(if statistics_diagnostic
 			(planning_session "__memcp_queryplan_diagnostic_guards" (newsession)) nil)
 		(define access (newsession))
-		(define compile_policy (sql_compile_table_policy policy tx access statistics_diagnostic))
+		(define compile_policy (sql_compile_table_policy policy tx access statistics_diagnostic planning_session))
 		(define raw_plan (with_session planning_session (lambda ()
 			(sql_invoke_parse_fn parse_fn schema parse_query compile_policy planning_session tx))))
 		/* Parsing includes logical and physical planning. Never spend optimizer
 		work or install a variant after its requesting context was cancelled. */
 		(tx_check tx)
 		(define plan (sql_queryplan_compile_formula tx
-			(sql_queryplan_write_guard (sql_queryplan_bind_execution_session raw_plan) access statistics_diagnostic schema parse_query parse_fn)))
+			(sql_queryplan_write_guard raw_plan access statistics_diagnostic schema parse_query parse_fn)))
 		(tx_check tx)
 		/* Diagnostics must refresh their captured estimates when table statistics
 		change, but checking their cache must never execute candidate preparations. */
 		(define guard (if statistics_diagnostic
 			(sql_queryplan_statistics_guard_from_session planning_session)
 			(sql_queryplan_guard_from_session planning_session)))
+		/* Compile each guard and preparation once. Both the dispatcher and its
+		locked miss recheck call these procedures with the executing request;
+		installing another variant must not compile old guards again. */
+		(define preparations (if statistics_diagnostic '()
+			(sql_queryplan_preparations_from_session planning_session)))
+		(define guard_formula (sql_queryplan_compile_formula tx
+			(clone_optimizer_expression guard)))
+		(define preparation_formulas (map preparations (lambda (preparation)
+			(list (car preparation) (sql_queryplan_compile_formula tx
+				(sql_queryplan_preparation_expr preparation))))))
 		(list
 			guard
 			plan
-			(if statistics_diagnostic '()
-				(sql_queryplan_preparations_from_session planning_session))
+			preparation_formulas
 			(list
 				(list (quote parameter_mode) parameter_mode)
 				(list (quote compile_ns) (- (nanotime) compile_started))
@@ -414,7 +450,8 @@ identical programs once outside row closures, including parameterized plans. */
 				(list (quote work_profile) (planning_session "__memcp_queryplan_parameter_work"))
 				(list (quote parameters) (merge_unique (list
 					(query_expr_session_reads raw_plan)
-					(query_expr_session_reads guard)))))))))
+					(query_expr_session_reads guard)))))
+			guard_formula))))
 
 (define sql_queryplan_preparation_expr (lambda (preparation)
 	(match preparation '(decision_id producer metric_expr) (begin
@@ -455,19 +492,27 @@ otherwise side-effect-free guard. */
 					false
 					(begin (prepared_catalog (car preparation) true) true)))))
 			(define tail_expr (sql_queryplan_formula_dispatch rest prepared_catalog miss_expr))
+			/* Plans already own their optimized, closed procedure. Preserve that
+			call boundary while compiling a dispatcher instead of specializing
+			and optimizing every retained plan again. */
 			(define bound_plan (if (sql_parameter_generic? variant)
-				(list (quote sql_parameter_execute) (list (quote quote) (nth variant 3))
-					(cadr variant) (quote session) (quote tx) (quote resultrow) (quote resultfields))
-				(list (cadr variant) (quote session) (quote tx) (quote resultrow) (quote resultfields))))
-			(define dispatch (if (equal? (car variant) true)
+				(list (quote apply) sql_parameter_execute
+					(list (quote list) (list (quote quote) (nth variant 3))
+						(cadr variant) (quote session) (quote tx) (quote resultrow) (quote resultfields)))
+				(list (quote apply) (cadr variant)
+					(list (quote list) (quote session) (quote tx) (quote resultrow) (quote resultfields)))))
+			(define dispatch (if (expression_equal? (car variant) true)
 				bound_plan
 				(list (quote if)
-					(sql_queryplan_bind_execution_session (car variant))
+					(list (quote apply) (nth variant 4)
+						(list (quote list) (quote session) (quote tx) (quote resultrow) (quote resultfields)))
 					bound_plan tail_expr)))
 			(if (empty_list? new_preparations)
 				dispatch
 				(cons (quote !begin)
-					(merge (list (map new_preparations sql_queryplan_preparation_expr)
+					(merge (list (map new_preparations (lambda (preparation)
+						(list (quote apply) (cadr preparation)
+							(list (quote list) (quote session) (quote tx) (quote resultrow) (quote resultfields)))))
 						(list dispatch))))))
 		_ miss_expr)))
 
@@ -493,14 +538,7 @@ otherwise side-effect-free guard. */
 (define sql_queryplan_install_variants (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy variants tx)
 	(begin
 		(define recent_variants (sql_queryplan_recent_variants variants))
-		/* Optimize owns and rewrites the dispatcher AST in place. The registry is
-		read again by the miss path, so its guard must not alias the compiler-owned
-		copy or inherit dispatcher-local NthLocalVar slots. */
-		(entry "variants" (map recent_variants (lambda (variant) (list
-			(clone_optimizer_expression (car variant))
-			(cadr variant)
-			(nth variant 2)
-			(nth variant 3)))))
+		(entry "variants" recent_variants)
 		(entry "formula" (sql_queryplan_compile_formula tx
 			(sql_queryplan_formula queryplan_cache cache_key entry parse_fn schema parse_query policy recent_variants)))
 		(entry "formula"))))
@@ -520,14 +558,8 @@ otherwise side-effect-free guard. */
 			variant under the compile lock. Prepare that newly visible variant before
 			rechecking its guard; preparation expressions are request-idempotent. */
 			(map (nth variant 2) (lambda (preparation)
-				((sql_queryplan_compile_formula tx
-					(sql_queryplan_preparation_expr preparation))
-					session tx resultrow resultfields)))
-			/* Guards are code, not expressions in this helper's lexical scope. Compile
-			them against the same explicit request boundary as the cached dispatcher;
-			naked eval would couple their symbols/NthLocalVars to this helper's frame. */
-			(if ((sql_queryplan_compile_formula tx (clone_optimizer_expression (car variant)))
-				session tx resultrow resultfields)
+				((cadr preparation) session tx resultrow resultfields)))
+			(if ((nth variant 4) session tx resultrow resultfields)
 				variant
 				(sql_queryplan_matching_variant rest session tx resultrow resultfields)))
 		_ nil)))
@@ -561,9 +593,7 @@ the common guard-dispatch path. */
 		Run them before the new consumer, outside the compile lock. Preparations
 		already checked by matching_variant are request-idempotent. */
 		(map (nth chosen_variant 2) (lambda (preparation)
-			((sql_queryplan_compile_formula tx
-				(sql_queryplan_preparation_expr preparation))
-				session tx resultrow resultfields)))
+			((cadr preparation) session tx resultrow resultfields)))
 		(if (sql_parameter_generic? chosen_variant)
 			(sql_parameter_execute (nth chosen_variant 3) (cadr chosen_variant) session tx resultrow resultfields)
 			((cadr chosen_variant) session tx resultrow resultfields)))))
@@ -586,10 +616,13 @@ user table merely to discard a newly constructed policy closure. */
 		policy_spec)))
 
 (define sql_queryplan_cache_key (lambda (username schema query shape_hash)
-	(concat username ":" schema ":" (sql_view_query_generation query) ":" shape_hash)))
+	(concat username ":" schema ":" shape_hash)))
 
 (define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session parameterize_literals tx)
 	(begin
+		/* Relation policy, cached declaration guards and native accesses own
+		definition reads. Transaction recovery itself must not acquire a catalog:
+		ROLLBACK still works after a peer published incompatible declarations. */
 		(define explain_query (match (toUpper query)
 			(regex "^\\s*EXPLAIN\\b" _) true
 			_ false))
@@ -622,63 +655,76 @@ user table merely to discard a newly constructed policy closure. */
 				compiled procedures. Their dispatchers still evaluate every guard. */
 				(if (list? cached_entry) (cadr cached_entry) cached_entry)
 				(begin
-					/* Only SELECT owns read-plan declaration guards. In particular,
-					CREATE TRIGGER must leave inline DML guards inside its callback.
-					Reuse the lexical token pass on this cold miss so leading comments
-					cannot bypass wildcard declaration validation. */
-					(define tokens (sql_parameter_tokens parse_query))
-					(define first_token (sql_parameter_next_significant_index tokens 0))
-					(define select_query (if (< first_token (count tokens))
-						(equal?? (nth tokens first_token) "SELECT") false))
-					/* EXPLAIN captures planning statistics and needs their invalidation too.
-					Ordinary point and ordered scans retain the smaller exact cache path. */
-					(define guarded_query (or explain_query (and select_query
-						(match (toUpper parse_query)
-							(regex "\\b(?:LIKE|MATCH|JOIN|EXISTS|IN)\\b|\\(\\s*SELECT\\b" _) true
-							_ false))))
+					/* Only SELECT owns adaptive read-plan guards. Ordinary exact
+					misses do not need another lexical pass. Classify the statement
+					only when its text can enter the adaptive path; the token pass
+					still prevents comments and CREATE TRIGGER bodies from changing
+					the statement's kind. EXPLAIN retains diagnostic dependencies. */
+					(define guarded_query (or explain_query (match (toUpper parse_query)
+						(regex "\\b(?:LIKE|MATCH|JOIN|EXISTS|IN)\\b|\\(\\s*SELECT\\b" _) (begin
+							(define tokens (sql_parameter_tokens parse_query))
+							(define first_token (sql_parameter_next_significant_index tokens 0))
+							(if (< first_token (count tokens))
+								(equal?? (nth tokens first_token) "SELECT") false))
+						_ false)))
 					(if (or compile_diagnostic (not guarded_query))
-						/* Select the producer before constructing its closure. The ordinary
-						exact producer remains identical to its guard-free implementation;
-						its cold optimizer must not compile an unused variant producer. */
-						(if (or (and (list? parse_fn) (> (count parse_fn) 1) ((cadr parse_fn) "exact_guards"))
-							/* A bare star conservatively selects declaration collection;
-							the logical AST decides whether any directory was consumed.
-							Point queries retain their original direct exact compiler. */
-							(and select_query (has? tokens "*"))
-							(match (toUpper parse_query)
-								(regex "^\\s*(?:UPDATE|DELETE)\\b" _) true _ false))
-							(begin
-								(define exact_compile (lambda (compile_tx) (begin
-									(define resolved_policy (sql_policy_spec_resolve policy))
-									(define variant (sql_compile_queryplan_variant parse_fn schema parse_query resolved_policy session compile_tx "specialized"))
-									(if (and (equal? (car variant) true) (empty_list? (nth variant 2)))
-										(cadr variant)
-										(sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query resolved_policy session compile_tx variant)))))
-								(define compiled (if compile_diagnostic (exact_compile tx)
-									(queryplan_cache cache_key tx exact_compile)))
-								(if (list? compiled) (cadr compiled) compiled))
-							(begin
-								/* Build the exact-cache compiler only for its own branch. Guarded
-								cache hits must not repeatedly optimize an unused closure. */
-								(define exact_compile (lambda (compile_tx)
-									(begin
-										(define resolved_policy (sql_policy_spec_resolve policy))
-										(define access (newsession))
-										(define compile_policy (sql_compile_table_policy resolved_policy compile_tx access compile_diagnostic))
-										(define raw_plan (sql_queryplan_bind_tx_calls
-											(sql_queryplan_bind_execution_session
-												(with_session session (lambda ()
-													(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx))))))
-										(sql_queryplan_compile_formula compile_tx (sql_queryplan_write_guard raw_plan access compile_diagnostic schema parse_query parse_fn)))))
-								(if compile_diagnostic
-									(exact_compile tx)
-									(queryplan_cache cache_key tx exact_compile))))
+						/* All relation-bearing plans retain their definition dependencies.
+						Scalar plans with no dependencies remain direct procedures. */
+						(begin
+							(define exact_compile (lambda (compile_tx) (begin
+								(define resolved_policy (sql_policy_spec_resolve policy))
+								(define variant (sql_compile_queryplan_variant parse_fn schema parse_query resolved_policy session compile_tx "specialized"))
+								(if (and (expression_equal? (car variant) true) (empty_list? (nth variant 2)))
+									(cadr variant)
+									(sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query resolved_policy session compile_tx variant)))))
+							(define compiled (if compile_diagnostic (exact_compile tx)
+								(queryplan_cache cache_key tx (lambda () (exact_compile tx)))))
+							(if (list? compiled) (cadr compiled) compiled))
 						(begin
 							(define cached_entry (queryplan_cache cache_key tx
-								(lambda (compile_tx) (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query
-									(sql_policy_spec_resolve policy) session compile_tx nil))))
+								(lambda () (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query
+									(sql_policy_spec_resolve policy) session tx nil))))
 							(cadr cached_entry))))))
 			formula)))))
+
+/* SQL owns named-savepoint policy; storage supplies opaque snapshots of the
+actual transaction, including native remote participants. Newest names come
+first, so rollback keeps its target and every earlier savepoint. */
+(define sql_transaction_begin (lambda (session tx acid)
+	(begin
+		(if acid (tx_begin_acid session tx) (tx_begin session tx))
+		(session "__sql_savepoints" '()) true)))
+
+(define sql_transaction_end (lambda (session commit)
+	(begin
+		(if commit (tx_commit session) (tx_rollback session))
+		(session "__sql_savepoints" '()) true)))
+
+(define sql_savepoint_tail (lambda (saved name)
+	(match saved
+		(cons entry tail) (if (equal? (car entry) name) saved (sql_savepoint_tail tail name))
+		_ (error (concat "savepoint does not exist: " name)))))
+
+(define sql_savepoint (lambda (session tx name)
+	(if (nil? (session "transaction")) true
+		(begin
+			(session "__sql_savepoints" (cons (list name (tx_savepoint tx))
+				(filter (coalesceNil (session "__sql_savepoints") '())
+					(lambda (entry) (not (equal? (car entry) name))))))
+			true))))
+
+(define sql_rollback_to_savepoint (lambda (session tx name)
+	(begin
+		(define kept (sql_savepoint_tail (coalesceNil (session "__sql_savepoints") '()) name))
+		(tx_rollback_to_savepoint tx (cadr (car kept)))
+		(session "__sql_savepoints" kept) true)))
+
+(define sql_release_savepoint (lambda (session name)
+	(begin
+		(define saved (coalesceNil (session "__sql_savepoints") '()))
+		(sql_savepoint_tail saved name)
+		(session "__sql_savepoints" (filter saved (lambda (entry) (not (equal? (car entry) name)))))
+		true)))
 
 /* Frontends supply parsed recovery admission to the generic request executor. */
 (define sql_with_statement (lambda (session state sequence text body)
@@ -809,8 +855,7 @@ the latter is expanded before logical planning and never materialized. */
 	(eval (parse_sql "system" "CREATE TABLE `views`(`database` text, `name` text, `dialect` text, `sql` text, `ir` text) ENGINE=SAFE" (lambda (schema tblname write) true)))
 ))
 
-(sql_view_catalog_set_count
-	(scan nil (table "system" false "views" false) '(369435906932736) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
+
 
 /* Bootstrap owns these fixed catalog constraints. Do not suppress failures:
 without them repeated grants create duplicate accounts and ambiguous authentication. */

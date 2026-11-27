@@ -27,6 +27,10 @@ their normal format and executor. The normal runner reports an explicit skip
 before opening a connection or starting a server. This is an execution profile,
 not `ci: false`: cluster CI discovers and runs these suites separately.
 
+A testcase may set `cluster_node: 1` to issue its SQL/SCM and fixture steps
+through that peer (zero-based); execution counters are measured relative to
+that ingress. The standalone oracle uses its one server for all ingress values.
+
 The marker may also be a mapping, for example:
 
 ```yaml

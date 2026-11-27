@@ -40,7 +40,7 @@ func TestComputeProxyRestoresPersistedProcedures(t *testing.T) {
 		`[{"symbol":"lambda"},[{"symbol":"value"}],[{"symbol":"if"},false,[{"symbol":"table"},"memcp-tests","items"],[{"symbol":"*"},{"symbol":"value"},2]]]`,
 		`[{"symbol":"lambda"}`, // corrupt JSON must fail, not become a nil computor
 	} {
-		for version := uint8(0); version <= 2; version++ {
+		for version := uint8(0); version <= 3; version++ {
 			t.Run(fmt.Sprintf("version%d/%s", version, encoded), func(t *testing.T) {
 				var wire bytes.Buffer
 				// Magic 50 is already consumed by the shard loader. The shared
@@ -51,7 +51,11 @@ func TestComputeProxyRestoresPersistedProcedures(t *testing.T) {
 					}
 				}
 				wire.WriteString("value")
-				if err := binary.Write(&wire, binary.LittleEndian, uint32(len(encoded))); err != nil {
+				var length any = uint32(len(encoded))
+				if version == 3 {
+					length = uint64(len(encoded))
+				}
+				if err := binary.Write(&wire, binary.LittleEndian, length); err != nil {
 					t.Fatal(err)
 				}
 				wire.WriteString(encoded)
@@ -62,7 +66,11 @@ func TestComputeProxyRestoresPersistedProcedures(t *testing.T) {
 				}
 				if !json.Valid([]byte(encoded)) {
 					defer func() {
-						if got := recover(); got == nil || !strings.Contains(fmt.Sprint(got), "decode computor") {
+						message := "decode computor"
+						if version == 3 {
+							message = "decode computed scalar"
+						}
+						if got := recover(); got == nil || !strings.Contains(fmt.Sprint(got), message) {
 							t.Fatalf("invalid computor JSON panic = %v", got)
 						}
 					}()
@@ -225,15 +233,15 @@ func TestComputeTriggersGuardRelevantSourceColumns(t *testing.T) {
 	defer databases.Remove("tcomputetrigger")
 
 	CreateDatabase("tcomputetrigger", false)
-	base, _ := CreateTable("tcomputetrigger", "base", Safe, false)
-	src, _ := CreateTable("tcomputetrigger", "src", Safe, false)
+	base, _ := CreateTable(nil, "tcomputetrigger", "base", Safe, false)
+	src, _ := CreateTable(nil, "tcomputetrigger", "src", Safe, false)
 
-	base.CreateColumn("id", "INT", nil, nil)
-	base.CreateColumn("ref_id", "INT", nil, nil)
-	base.CreateColumn("cached", "INT", nil, nil)
-	src.CreateColumn("ref_id", "INT", nil, nil)
-	src.CreateColumn("val", "INT", nil, nil)
-	src.CreateColumn("note", "TEXT", nil, nil)
+	base.CreateColumn(nil, "id", "INT", nil, nil)
+	base.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	base.CreateColumn(nil, "cached", "INT", nil, nil)
+	src.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	src.CreateColumn(nil, "val", "INT", nil, nil)
+	src.CreateColumn(nil, "note", "TEXT", nil, nil)
 
 	computor := lambdaAst([]string{"ref_id"}, nestedScanAst("tcomputetrigger", "src", "ref_id"))
 	computor.Slice()[2].Slice()[3] = scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice([]scm.Scmer{
@@ -284,13 +292,13 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 	defer databases.Remove("tlookuptrigger")
 
 	CreateDatabase("tlookuptrigger", false)
-	base, _ := CreateTable("tlookuptrigger", "base", Safe, false)
-	src, _ := CreateTable("tlookuptrigger", "src", Safe, false)
-	base.CreateColumn("id", "INT", nil, nil)
-	base.CreateColumn("ref_id", "INT", nil, nil)
-	base.CreateColumn("cached", "INT", nil, nil)
-	src.CreateColumn("ref_id", "INT", nil, nil)
-	src.CreateColumn("val", "INT", nil, nil)
+	base, _ := CreateTable(nil, "tlookuptrigger", "base", Safe, false)
+	src, _ := CreateTable(nil, "tlookuptrigger", "src", Safe, false)
+	base.CreateColumn(nil, "id", "INT", nil, nil)
+	base.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	base.CreateColumn(nil, "cached", "INT", nil, nil)
+	src.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	src.CreateColumn(nil, "val", "INT", nil, nil)
 
 	computorSource := `(lambda (ref_id)
 		(scan nil (table "tlookuptrigger" false "src" false)
@@ -330,12 +338,12 @@ func TestQualifiedLookupComputeTriggerUsesPhysicalTargetColumn(t *testing.T) {
 	const schemaName = "tqualifiedlookuptrigger"
 	defer databases.Remove(schemaName)
 	CreateDatabase(schemaName, false)
-	base, _ := CreateTable(schemaName, "base", Safe, false)
-	src, _ := CreateTable(schemaName, "src", Safe, false)
-	base.CreateColumn("ref_id", "INT", nil, nil)
-	base.CreateColumn("cached", "INT", nil, nil)
-	src.CreateColumn("ref_id", "INT", nil, nil)
-	src.CreateColumn("val", "INT", nil, nil)
+	base, _ := CreateTable(nil, schemaName, "base", Safe, false)
+	src, _ := CreateTable(nil, schemaName, "src", Safe, false)
+	base.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	base.CreateColumn(nil, "cached", "INT", nil, nil)
+	src.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	src.CreateColumn(nil, "val", "INT", nil, nil)
 	base.Insert([]string{"ref_id", "cached"}, [][]scm.Scmer{{scm.NewInt(7), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
 
 	computorSource := `(lambda (base.ref_id)
@@ -491,13 +499,13 @@ func TestRestoredComputeDependencyTriggersRefreshGuards(t *testing.T) {
 	const schemaName = "trestoredcomputedependency"
 	defer databases.Remove(schemaName)
 	CreateDatabase(schemaName, false)
-	base, _ := CreateTable(schemaName, "base", Safe, false)
-	src, _ := CreateTable(schemaName, "src", Safe, false)
-	base.CreateColumn("ref_id", "INT", nil, nil)
-	base.CreateColumn("cached", "INT", nil, nil)
-	src.CreateColumn("ref_id", "INT", nil, nil)
-	src.CreateColumn("val", "INT", nil, nil)
-	src.CreateColumn("allowed", "INT", nil, nil)
+	base, _ := CreateTable(nil, schemaName, "base", Safe, false)
+	src, _ := CreateTable(nil, schemaName, "src", Safe, false)
+	base.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	base.CreateColumn(nil, "cached", "INT", nil, nil)
+	src.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	src.CreateColumn(nil, "val", "INT", nil, nil)
+	src.CreateColumn(nil, "allowed", "INT", nil, nil)
 
 	for _, orc := range []bool{false, true} {
 		t.Run(fmt.Sprintf("orc=%t", orc), func(t *testing.T) {
@@ -772,16 +780,16 @@ func TestORCDependencyTriggersUseRelevantColumnsAndInvalidateSuffix(t *testing.T
 	defer databases.Remove("torctrigger")
 
 	CreateDatabase("torctrigger", false)
-	base, _ := CreateTable("torctrigger", "base", Safe, false)
-	src, _ := CreateTable("torctrigger", "src", Safe, false)
+	base, _ := CreateTable(nil, "torctrigger", "base", Safe, false)
+	src, _ := CreateTable(nil, "torctrigger", "src", Safe, false)
 
-	base.CreateColumn("id", "INT", nil, nil)
-	base.CreateColumn("sortk", "INT", nil, nil)
-	base.CreateColumn("ref_id", "INT", nil, nil)
-	base.CreateColumn("running", "INT", nil, nil)
-	src.CreateColumn("ref_id", "INT", nil, nil)
-	src.CreateColumn("val", "INT", nil, nil)
-	src.CreateColumn("note", "TEXT", nil, nil)
+	base.CreateColumn(nil, "id", "INT", nil, nil)
+	base.CreateColumn(nil, "sortk", "INT", nil, nil)
+	base.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	base.CreateColumn(nil, "running", "INT", nil, nil)
+	src.CreateColumn(nil, "ref_id", "INT", nil, nil)
+	src.CreateColumn(nil, "val", "INT", nil, nil)
+	src.CreateColumn(nil, "note", "TEXT", nil, nil)
 
 	mapReduceFn := lambdaAst([]string{"acc", "$set", "ref_id"}, scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("begin"),
@@ -957,7 +965,9 @@ func TestComputeProxyHistoricalV3RoundTrip(t *testing.T) {
 	}
 	assert(&proxy)
 	cloned := cloneComputeProxyRows(&proxy, &storageShard{}, []uint32{0})
-	if cloned.persistedVersion != 3 {
+	var clonedFrame bytes.Buffer
+	cloned.Serialize(&clonedFrame)
+	if bytes := clonedFrame.Bytes(); bytes[0] != 50 || bytes[1] != 3 {
 		t.Fatal("rebuild discarded historical native value encoding")
 	}
 	assert(cloned)
@@ -1012,7 +1022,7 @@ func TestHistoricalExactScalarFrameAndNestedProxy(t *testing.T) {
 	if !reread.values[0].IsBSON() || !reread.values[1].IsDate() {
 		t.Fatal("rewrite changed native scalar identities")
 	}
-	proxy := &StorageComputeProxy{main: &exact, compressed: true, count: 2, persistedVersion: 3}
+	proxy := &StorageComputeProxy{main: &exact, compressed: true, count: 2}
 	proxy.validMask.AtomicSet(0, true)
 	proxy.validMask.AtomicSet(1, true)
 	saved.Reset()

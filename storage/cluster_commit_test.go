@@ -15,8 +15,8 @@ import "github.com/launix-de/memcp/storage/mosi"
 func distributedCommitFixture(t *testing.T) (*TxContext, *TxContext, *storageShard, *storageShard) {
 	t.Helper()
 	local, _ := createDurabilityTestTable(t, "t_commit_local", 4)
-	remote, _ := CreateTable(local.schema.Name, "remote_items", Safe, false)
-	remote.CreateColumn("id", "INT", nil, nil)
+	remote, _ := CreateTable(nil, local.schema.Name, "remote_items", Safe, false)
+	remote.CreateColumn(nil, "id", "INT", nil, nil)
 	remote.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}, {scm.NewInt(2)}}, nil, scm.NewNil(), false, nil)
 	mounts := map[string]bool{local.schema.Name: true}
 	old := sharedClusterMounts.Swap(&mounts)

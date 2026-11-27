@@ -18,6 +18,7 @@ package storage
 
 import "sync"
 import "time"
+import "reflect"
 import "strings"
 import "strconv"
 import "runtime/debug"
@@ -130,6 +131,13 @@ func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []s
 			// - shard-level ComputeColumn still runs afterwards so dirty proxies can
 			//   repair themselves even on the DDL no-op path
 			metadataChanged := !computeColumnSignatureEqual(c, inputCols, computor) || !slicesEqual(c.ComputorDependencies, dependencies)
+			// Compiled callbacks are process-local. Rebinding an equivalent temp
+			// recipe must not propose the whole table to the catalog on every
+			// query. Persist actual input/dependency changes and changed source
+			// edges; retain ordinary DDL's publication contract.
+			declarationChanged := metadataChanged && (!c.IsTemp || c.Computor.IsNil() ||
+				!slicesEqual(c.ComputorInputCols, inputCols) || !slicesEqual(c.ComputorDependencies, dependencies) ||
+				!reflect.DeepEqual(extractScanJoinInfo(c.Computor), extractScanJoinInfo(computor)))
 			if metadataChanged {
 				t.Columns[i].Computor = computor // set formula so delta storages and rebuild algo know how to recompute
 				t.Columns[i].ComputorInputCols = inputCols
@@ -149,27 +157,32 @@ func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []s
 			// a nested createcolumn would otherwise wait for its own parent forever.
 			t.ddlMu.Unlock()
 			ddlLocked = false
-			done := make(chan error, 6)
 			shardlist := t.ActiveShards()
-			for _, s := range shardlist {
-				go func(s *storageShard) {
-					defer func() {
-						if r := recover(); r != nil {
-							//fmt.Println("panic during compute:", r, string(debug.Stack()))
-							done <- scanError{r, string(debug.Stack())}
-						}
-					}()
-					s.ComputeColumn(tx, name, inputCols, computor, filterCols, filter)
-					done <- nil
-				}(s)
+			compute := func(s *storageShard) (err error) {
+				defer func() {
+					if r := recover(); r != nil {
+						err = scanError{r, string(debug.Stack())}
+					}
+				}()
+				s.ComputeColumn(tx, name, inputCols, computor, filterCols, filter)
+				return nil
 			}
-			// Every started materialization must finish before releasing its
-			// caller, including when another shard refuses acquisition or fails.
-			// Otherwise callbacks and blocked completion sends outlive the DDL.
 			var failure error
-			for range shardlist {
-				if err := <-done; err != nil && failure == nil {
-					failure = err
+			if len(shardlist) == 1 {
+				// A canonical cache lookup commonly has one already prepared
+				// shard. It needs no worker handoff or completion channel.
+				failure = compute(shardlist[0])
+			} else if len(shardlist) > 1 {
+				done := make(chan error, 6)
+				for _, s := range shardlist {
+					go func(s *storageShard) { done <- compute(s) }(s)
+				}
+				// Join every started materialization, including after failures:
+				// callbacks and completion sends must not outlive their owner.
+				for range shardlist {
+					if err := <-done; err != nil && failure == nil {
+						failure = err
+					}
 				}
 			}
 			if failure != nil {
@@ -179,7 +192,7 @@ func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []s
 			if c.IsTemp {
 				t.updateTempColumnMemory(c, shardlist)
 			}
-			if metadataChanged {
+			if declarationChanged {
 				t.ddlMu.Lock()
 				ddlLocked = true
 				t.schema.schemalock.Lock()
@@ -188,7 +201,7 @@ func (t *table) computeColumnDDLLocked(tx *TxContext, name string, inputCols []s
 				if c.IsTemp {
 					mode = schemaSaveBuffered
 				}
-				t.finishSchemaMutationLocked(mode)
+				t.finishSchemaMutationLocked(nil, mode, !c.RuntimeOnly)
 				metadataLocked = false
 			}
 			if !ddlLocked {
@@ -324,6 +337,7 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 	found := false
 	paramsChanged := false
 	isTemp := false
+	runtimeOnly := false
 	t.schema.schemalock.Lock()
 	for i, c := range t.Columns {
 		if c.Name == name {
@@ -343,6 +357,7 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 			t.Columns[i].OrcReduceInit = reduceInit
 			t.publishReadProgramSnapshot()
 			isTemp = c.IsTemp
+			runtimeOnly = c.RuntimeOnly
 			found = true
 			break
 		}
@@ -360,7 +375,7 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 	if isTemp {
 		mode = schemaSaveBuffered
 	}
-	t.finishSchemaMutationLocked(mode)
+	t.finishSchemaMutationLocked(nil, mode, !runtimeOnly)
 
 	// Ensure every shard has an ORC proxy (lazy: no eager recompute).
 	//
@@ -937,7 +952,7 @@ func scanTableReference(expr scm.Scmer) (tableRef, bool) {
 	}
 	if expr.IsSlice() {
 		items := expr.Slice()
-		if len(items) == 5 && callHeadIs(items[0], "table") {
+		if (len(items) == 5 || len(items) == 6) && callHeadIs(items[0], "table") {
 			schema, name := scm.String(items[1]), scm.String(items[3])
 			if items[2].Bool() || items[4].Bool() {
 				db := GetDatabase(schema, items[2].Bool())
@@ -2238,6 +2253,7 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 						scm.NewString(targetSchema),
 						scm.NewString(t.Name),
 						scm.NewBool(true),
+						fkTxExpr(),
 					})),
 					cacheTarget: t,
 					Acquire:     acquireTarget,
@@ -2268,6 +2284,7 @@ func (t *table) registerComputeTriggersWithRefs(name string, computor scm.Scmer,
 					scm.NewString(rn.schema),
 					scm.NewString(rn.name),
 					scm.NewBool(true),
+					fkTxExpr(),
 				}))
 			}
 			t.AddTrigger(TriggerDescription{
@@ -2372,6 +2389,7 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 			scm.NewString(rn.schema),
 			scm.NewString(rn.name),
 			scm.NewBool(true),
+			fkTxExpr(),
 		}))
 	}
 	t.AddTrigger(TriggerDescription{

@@ -24,6 +24,7 @@ import "github.com/launix-de/memcp/storage/mosi"
 
 type replicaStatus struct {
 	ID        string   `json:"id"`
+	Boot      string   `json:"boot"`
 	Connected bool     `json:"connected"`
 	Ready     bool     `json:"ready"`
 	Retired   bool     `json:"retired"`
@@ -86,28 +87,17 @@ func (r *replicationManager) reclaimDatabase(name string) bool {
 	if r.cluster == nil {
 		r.schemaShards(db, r.id, true)
 	}
-	for _, table := range db.tables.GetAll() {
-		if table.isEphemeralQueryTable() {
-			continue
-		}
-		for _, shard := range table.ActiveShards() {
-			if shard != nil {
-				r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", nil)
-			}
-		}
+	shards := db.replicationShards()
+	for _, shard := range shards {
+		r.obtain(*r.shardCell(shard).resource.Load(), mosi.M, "", nil)
 	}
 	ownsM := func(cell *replicaCell) bool {
 		state := cell.ownstate.Snapshot()
 		return state.Phase() == mosi.M || state.Phase() == mosi.IS && state.Backend() == mosi.M
 	}
-	for _, table := range db.tables.GetAll() {
-		if table.isEphemeralQueryTable() {
-			continue
-		}
-		for _, shard := range table.ActiveShards() {
-			if shard != nil && !ownsM(r.shardCell(shard)) {
-				return false
-			}
+	for _, shard := range shards {
+		if !ownsM(r.shardCell(shard)) {
+			return false
 		}
 	}
 	return ownsM(schema)
@@ -133,7 +123,7 @@ func (r *replicationManager) statuses() []replicaStatus {
 	delete(known, "")
 	result := make([]replicaStatus, 0, len(known))
 	for id := range known {
-		status := replicaStatus{ID: id, Ready: r.peers[id].recovered(), Retired: r.directory.Retired[id], Databases: []string{}}
+		status := replicaStatus{ID: id, Boot: r.peersBoot[id], Ready: r.peers[id].recovered(), Retired: r.directory.Retired[id], Databases: []string{}}
 		if p := r.peers[id]; p != nil {
 			select {
 			case <-p.done:
@@ -198,10 +188,12 @@ func (r *replicationManager) retire(id string) error {
 		}
 	}
 	r.mu.Unlock()
+	var completed []mosiResource
+	checkpoint := make(map[string]bool)
 	for _, resource := range resources {
 		c := r.resourceCell(resource)
 		releaseCoordination := c.coordinate(context.Background())
-		handover, err := c.ownstate.BeginHandover(context.Background(), c.drainWrites)
+		handover, err := c.ownstate.BeginHandover(context.Background(), c.drainWrites, true)
 		if err != nil {
 			releaseCoordination()
 			return err
@@ -225,7 +217,6 @@ func (r *replicationManager) retire(id string) error {
 			r.confirmed[r.resourceKey(record.Resource)] = record.Owner
 			return true
 		})
-		err = nil
 		if record.Owner == r.id {
 			foreign := false
 			for reader := range record.Readers {
@@ -234,18 +225,27 @@ func (r *replicationManager) retire(id string) error {
 				}
 			}
 			if !foreign {
-				err = r.clearBackup(record.Resource)
+				completed = append(completed, record.Resource)
+				checkpoint[record.Resource.Database] = true
 			}
 		}
-		if err == nil {
-			// Explicit, fenced promotion can establish root-domain authority that was
-			// unknown during recovery. It is not a timeout or a backend-existence proof.
-			c.clusterstate.Publish(mosi.M)
-			c.ownstate.Publish(mosi.ParsePhase(record.State))
-		}
+		// Explicit, fenced promotion can establish root-domain authority that was
+		// unknown during recovery. It is not a timeout or a backend-existence proof.
+		c.clusterstate.Publish(mosi.M)
+		c.ownstate.Publish(mosi.ParsePhase(record.State))
 		handover.Release()
 		releaseCoordination()
-		if err != nil {
+	}
+	// Promoted payloads are runtime publications until their native table
+	// topology and compatibility root are durable. Keep completed-copy markers
+	// across this checkpoint, so a crash cannot reopen the pre-promotion UUIDs.
+	for name := range checkpoint {
+		if db := databases.Get(name); db != nil {
+			db.save(nil, nil)
+		}
+	}
+	for _, resource := range completed {
+		if err := r.clearBackup(resource); err != nil {
 			return err
 		}
 	}

@@ -181,12 +181,12 @@ func (tx *TxContext) prepareACID(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if r := activeReplication(shard.t.schema); r != nil && validReplicaDatabase(shard.t.schema.Name) && !shard.t.isEphemeralQueryTable() {
+		if r := shard.replicationManager(); r != nil && validReplicaDatabase(shard.authorityDatabase().Name) && !shard.t.isEphemeralQueryTable() {
 			cell := r.shardCell(shard)
 			if cell.ownstate.Phase() != mosi.M {
 				cell = r.obtain(*cell.resource.Load(), mosi.M, replicationUser(tx), tx)
 			}
-			writer, _ := cell.ownstate.TryWrite(tx.transactionState, cell.transactionContinues(tx))
+			writer, _ := cell.ownstate.TryWrite(tx.transactionState, cell.transactionContinues(tx), nil)
 			if writer == nil {
 				return fmt.Errorf("ACID prepare conflict: shard write admission is busy")
 			}
@@ -327,6 +327,19 @@ func (preparation *acidPreparation) followDecision() {
 
 func distributedDecisionLog(txID string) string {
 	return ".cluster-decision-v1-" + uuid.NewSHA1(uuid.NameSpaceOID, []byte(txID)).String()
+}
+
+// Local cross-database work uses the same native common-decision stream as
+// distributed work. System storage has a fixed lifetime and is never dropped
+// or moved by user DDL. No participant may publish an independent decision.
+func nativeCommitDecisionBackend() PersistenceEngine {
+	if engine := sharedCommitBackend(); engine != nil {
+		return engine
+	}
+	if db := databases.Get("system"); db != nil {
+		return db.persistence
+	}
+	return nil
 }
 
 // Replay recognizes the existing native commit frame in a transaction-private

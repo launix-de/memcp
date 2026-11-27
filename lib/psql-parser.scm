@@ -893,7 +893,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define coldesc (coalesce coldesc (table_insertable_columns (coalesce schema2 schema) tbl)))
 			'('begin
 				'('set 'resultrow '('lambda '('item) '('insert '('table (coalesce schema2 schema) false tbl false) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))) false '('lambda '('id) '('session "last_insert_id" 'id)))))
-				(build_queryplan_term (sql_expand_views inner policy) planning_session tx)
+				(build_queryplan_term (sql_expand_views inner policy tx) planning_session tx)
 			)
 	)))
 
@@ -1039,15 +1039,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(alter auto_increment), not be wrapped as a SELECT projection. */
 		(parser '((atom "SELECT" true) (atom "pg_catalog" true) "." (atom "setval" true) "(" (define seq_name psql_string) "," (define val psql_expression) "," (define is_called psql_expression) ")")
 			(psql_setval_command seq_name val is_called))
-		(parser (define query psql_select) (build_queryplan_term (sql_expand_views query policy) planning_session tx))
-		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query psql_select)) (explain_queryplan_ir (sql_expand_views query policy)))
-		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query psql_select)) (explain_queryplan_reorder (sql_expand_views query policy) planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query psql_select)) (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s) planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "DISCOVER" true) (define query psql_select)) (explain_queryplan_physical_calibrate_discover (sql_expand_views query policy) planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "VARIANT" true) (define decision_id psql_string) (define variant psql_string) (define query psql_select)) (explain_queryplan_physical_calibrate_variant (sql_expand_views query policy) decision_id variant planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (define query psql_select)) (explain_queryplan_physical_calibrate (sql_expand_views query policy) planning_session))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query psql_select)) (explain_queryplan_physical (sql_expand_views query policy) planning_session))
-		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy) planning_session tx)) (settings "ExplainWidth")))))
+		(parser (define query psql_select) (build_queryplan_term (sql_expand_views query policy tx) planning_session tx))
+		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query psql_select)) (explain_queryplan_ir (sql_expand_views query policy tx)))
+		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query psql_select)) (explain_queryplan_reorder (sql_expand_views query policy tx) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query psql_select)) (explain_queryplan_compile (sql_expand_views query policy tx) parse_started_ns (strlen s) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "DISCOVER" true) (define query psql_select)) (explain_queryplan_physical_calibrate_discover (sql_expand_views query policy tx) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "VARIANT" true) (define decision_id psql_string) (define variant psql_string) (define query psql_select)) (explain_queryplan_physical_calibrate_variant (sql_expand_views query policy tx) decision_id variant planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (define query psql_select)) (explain_queryplan_physical_calibrate (sql_expand_views query policy tx) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query psql_select)) (explain_queryplan_physical (sql_expand_views query policy tx) planning_session))
+		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy tx) planning_session tx)) (settings "ExplainWidth")))))
 		psql_insert_into
 		psql_insert_select
 		psql_create_view
@@ -1318,8 +1318,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "DROP" true) (atom "DATABASE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) (begin
 			(if policy (policy "system" true true) true)
 			(list (quote drop_sql_database) (list (quote session) "__memcp_tx") id (if if_exists true false))))
-		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema psql_identifier) (atom "." true) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
-		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
+		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema psql_identifier) (atom "." true) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false) (quote tx)))
+		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false) (quote tx)))
 		(parser '((atom "DROP" true) (atom "VIEW" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true)))
 			(define target (or
 				(parser '((define schema2 psql_identifier) "." (define id psql_identifier)) '(schema2 id))
@@ -1328,7 +1328,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(define view_schema (coalesce schema2 schema))
 				(if policy (policy view_schema id true) true)
 				(list (quote drop_sql_view) (list (quote session) "__memcp_tx") view_schema id (if if_exists true false)))))
-		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname psql_identifier) (atom "TO" true) (define newname psql_identifier)) '((quote renametable) schema oldname newname))
+		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname psql_identifier) (atom "TO" true) (define newname psql_identifier)) '((quote renametable) schema oldname newname (quote tx)))
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key psql_identifier) (or "=" (atom ":=" true)) (define value (or
 			(parser (atom "content" true) "content") /* quirks for SET xmloption = content */
 			(parser (atom "warning" true) "warning") /* quirks for SET client_min_messages = warning */

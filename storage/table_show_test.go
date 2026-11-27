@@ -222,8 +222,8 @@ func TestCountEstimateFallsBackToSingleShardDeltaWithoutLocking(t *testing.T) {
 	databases.Remove(dbName)
 	t.Cleanup(func() { databases.Remove(dbName) })
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
-	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
 	values := [][]scm.Scmer{
 		{scm.NewInt(1)},
 		{scm.NewInt(2)},
@@ -442,7 +442,7 @@ func BenchmarkPlannerStatisticsLookup(b *testing.B) {
 func TestFreshBaseColumnIsNotMarkedComputed(t *testing.T) {
 	db := &database{Name: "fresh-column-statistics"}
 	tbl := &table{schema: db}
-	column, ok := tbl.createColumnLocked("value", "TEXT", nil, nil, false)
+	column, ok := tbl.createColumnLocked("value", "TEXT", nil, nil, false, nil)
 	if !ok {
 		t.Fatal("createColumnLocked rejected a fresh column")
 	}
@@ -797,8 +797,8 @@ func TestConstraintMetadataConcurrentForeignPublicationAndMaintenance(t *testing
 
 func TestConstraintMetadataNativeDDLPublication(t *testing.T) {
 	child := setupScanParallelTestTable(t, "constraint_native_ddl")
-	parent, _ := CreateTable(child.schema.Name, "parent", Memory, false)
-	parent.CreateColumn("id", "INT", nil, nil)
+	parent, _ := CreateTable(nil, child.schema.Name, "parent", Memory, false)
+	parent.CreateColumn(nil, "id", "INT", nil, nil)
 	create := scm.Globalenv.Vars["createforeignkey"]
 	drop := scm.Globalenv.Vars["dropforeignkey"]
 	for iteration := 0; iteration < 4; iteration++ {
@@ -812,7 +812,7 @@ func TestConstraintMetadataNativeDDLPublication(t *testing.T) {
 		}()
 		go func() {
 			defer writers.Done()
-			child.CreateColumn(name, "INT", nil, nil)
+			child.CreateColumn(nil, name, "INT", nil, nil)
 		}()
 		writers.Wait()
 		for _, endpoint := range []*table{child, parent} {
@@ -837,11 +837,11 @@ func columnDeclarationTestTuple(row scm.Scmer) scm.Scmer {
 
 func TestAlterColumnDeclarationRetainsOldContractAndPersistence(t *testing.T) {
 	tbl, persistence := createDurabilityTestTable(t, "tcolumndeclarationpersist", 3)
-	tbl.CreateColumn("label", "VARCHAR", []int{3}, []scm.Scmer{scm.NewString("default"), scm.NewString("old"), scm.NewString("null"), scm.NewBool(false)})
+	tbl.CreateColumn(nil, "label", "VARCHAR", []int{3}, []scm.Scmer{scm.NewString("default"), scm.NewString("old"), scm.NewString("null"), scm.NewBool(false)})
 	old := tbl.columnDeclarations()[2]
 	before := tbl.ShowColumn("label", false)
 	declaration := scm.NewSlice([]scm.Scmer{scm.NewString("VARCHAR"), scm.NewSlice([]scm.Scmer{scm.NewInt(25)}), scm.NewBool(true), scm.NewString(old.Collation)})
-	if !tbl.AlterColumnDeclaration("label", declaration, columnDeclarationTestTuple(before)) {
+	if !tbl.AlterColumnDeclaration(nil, "label", declaration, columnDeclarationTestTuple(before)) {
 		t.Fatal("declaration replacement failed")
 	}
 	if old.Typdimensions[0] != 3 || old.AllowNull || old.sanitizer(scm.NewString("abcdef")).String() != "abc" {
@@ -864,22 +864,22 @@ func TestAlterColumnDeclarationChecksExpectedContractBeforeMutation(t *testing.T
 	before := tbl.ShowColumn("payload", false)
 	expected := columnDeclarationTestTuple(before)
 	declaration := scm.NewSlice([]scm.Scmer{scm.NewString("TEXT"), scm.NewSlice(nil), scm.NewBool(false), showColumnProperty(before, "Collation")})
-	tbl.AlterColumnDeclaration("payload", declaration, expected)
+	tbl.AlterColumnDeclaration(nil, "payload", declaration, expected)
 	panicked := false
 	func() {
 		defer func() { panicked = recover() != nil }()
-		tbl.AlterColumnDeclaration("payload", expected, expected)
+		tbl.AlterColumnDeclaration(nil, "payload", expected, expected)
 	}()
 	if !panicked || showColumnProperty(tbl.ShowColumn("payload", false), "Null").Bool() {
 		t.Fatal("stale compatibility proof overwrote a concurrent declaration")
 	}
 	// Failed publication must release DDL and schema ownership.
-	tbl.AlterColumnDeclaration("payload", expected, declaration)
+	tbl.AlterColumnDeclaration(nil, "payload", expected, declaration)
 }
 
 func TestAlterColumnDeclarationOverlapsNativeInsertAndPointReaders(t *testing.T) {
 	tbl, _ := createDurabilityTestTable(t, "tcolumndeclarationconcurrent", 0)
-	tbl.CreateColumn("label", "VARCHAR", []int{1}, nil)
+	tbl.CreateColumn(nil, "label", "VARCHAR", []int{1}, nil)
 	started := make(chan struct{})
 	done := make(chan any, 2)
 	go func() {
@@ -896,13 +896,13 @@ func TestAlterColumnDeclarationOverlapsNativeInsertAndPointReaders(t *testing.T)
 	go func() {
 		defer func() { done <- recover() }()
 		for iteration := 0; iteration < 40; iteration++ {
-			tbl.AlterColumn("label", "comment", scm.NewString(fmt.Sprintf("description-%d", iteration)))
+			tbl.AlterColumn(nil, "label", "comment", scm.NewString(fmt.Sprintf("description-%d", iteration)))
 		}
 	}()
 	for width := int64(2); width <= 20; width++ {
 		before := tbl.ShowColumn("label", false)
 		declaration := scm.NewSlice([]scm.Scmer{scm.NewString("VARCHAR"), scm.NewSlice([]scm.Scmer{scm.NewInt(width)}), scm.NewBool(true), showColumnProperty(before, "Collation")})
-		tbl.AlterColumnDeclaration("label", declaration, columnDeclarationTestTuple(before))
+		tbl.AlterColumnDeclaration(nil, "label", declaration, columnDeclarationTestTuple(before))
 	}
 	for range 2 {
 		if failure := <-done; failure != nil {

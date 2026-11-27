@@ -107,7 +107,10 @@ class HttpClient:
 		rows = []
 		for line in payload.splitlines():
 			if line.strip():
-				rows.append(json.loads(line))
+				try:
+					rows.append(json.loads(line))
+				except json.JSONDecodeError as error:
+					raise DrillFailure(f"invalid SQL response: {statement}\n{line}") from error
 		return rows
 
 	def scm(self, expression: str, timeout: float | None = None) -> str:

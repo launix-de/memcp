@@ -620,6 +620,60 @@ func TestClusterReferenceKeepsAcquisitionID(t *testing.T) {
 	}
 }
 
+func TestClusterCatalogReferenceDoesNotWaitForSchemaHandover(t *testing.T) {
+	for _, fixture := range []struct {
+		state     string
+		successor bool
+	}{{"M", false}, {"M", true}, {"S", true}} {
+		t.Run(fmt.Sprintf("%s/successor=%t", fixture.state, fixture.successor), func(t *testing.T) {
+			cluster := &nodeCluster{self: clusterMember{ID: "local"}}
+			cluster.initializeManager()
+			r := cluster.manager
+			peer := &mosiPeer{done: make(chan struct{}), outgoing: newMosiMailbox()}
+			cluster.view.Store(&clusterView{links: []*clusterLink{{member: clusterMember{ID: "target"}, peer: peer}}})
+			resource := mosiResource{Database: "tenant", Table: catalogResourcePrefix + "tables", Shard: uuid.NewString()}
+			schemaResource := mosiResource{Database: resource.Database}
+			r.updateRecord(schemaResource, func(record *replicaRecord) bool {
+				record.Owner = r.id
+				return true
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			// The enclosing schema checkpoint needs M on this native catalog shard.
+			// Its reference must arrive before that schema's handover can complete.
+			releaseSchema := r.resourceCell(schemaResource).coordinate(ctx)
+			defer releaseSchema()
+			content := resource.Shard
+			if fixture.successor {
+				content = uuid.NewString()
+			}
+			request := mosiPacket{ID: uuid.NewString(), Resource: resource, Content: content, State: fixture.state}
+			done := make(chan error, 1)
+			go func() { done <- r.transmitResource(ctx, "target", request) }()
+			select {
+			case <-peer.outgoing.ready:
+				message := takeMosi(peer.outgoing)
+				if message.Packet == nil || message.Packet.Kind != "reference" || message.Packet.Resource != resource {
+					cancel()
+					<-done
+					t.Fatal("catalog handover waited for parent location registration", message.Packet)
+				}
+				step, ok := r.steps.Load(request.ID)
+				if !ok {
+					t.Fatal("catalog reference lost its installation acknowledgement")
+				}
+				step.(*replicaStep).finish(nil)
+			case <-ctx.Done():
+				<-done
+				t.Fatal("catalog reference blocked behind the enclosing schema handover")
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestClusterSchemaLocationsAreRoutingNotPermissions(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}, databases: map[string]bool{"tenant": true}}
 	cluster.initializeManager()
@@ -1185,7 +1239,7 @@ func TestClusterCacheTryReadLeavesExistingAcquisitionAlone(t *testing.T) {
 	})
 	cell := cluster.manager.resourceCell(resource)
 	request, _ := cell.ownstate.Request(mosi.S)
-	if cluster.tryRead(context.Background(), resource) {
+	if cluster.tryAcquire(context.Background(), resource, mosi.S) {
 		t.Fatal("a pending acquisition certified cache reuse")
 	}
 	if cell.ownstate.Phase() != mosi.SR || request.Flight().Err() != nil || peer.outgoing.len() != 0 {
@@ -1202,7 +1256,7 @@ func TestClusterCacheTryReadUsesGrantedBackendWithoutOwnerLookup(t *testing.T) {
 	cell.ownstate.BackendOnly()
 	// There is no network, roster or contact peer. Eviction retained a valid
 	// S grant; authorizing another read must consume that existing proof.
-	if !cluster.tryRead(context.Background(), resource) || cell.ownstate.Phase() != mosi.S {
+	if !cluster.tryAcquire(context.Background(), resource, mosi.S) || cell.ownstate.Phase() != mosi.S {
 		t.Fatal("an existing backend read permission required owner discovery")
 	}
 }

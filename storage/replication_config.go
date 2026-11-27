@@ -102,10 +102,10 @@ func (r *replicationManager) openConfig() (err error) {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	t, _ := CreateTable("system", "replication_config", Safe, true)
+	t, _ := CreateTable(nil, "system", "replication_config", Safe, true)
 	for _, name := range []string{"node", "key", "value"} {
 		if _, exists := t.ResolveColumnName(name, false); !exists {
-			t.CreateColumn(name, "text", nil, nil)
+			t.CreateColumn(nil, name, "text", nil, nil)
 		}
 	}
 	createTableKey(t, uniqueKey{Id: "PRIMARY", Cols: []string{"node", "key"}}, nil)

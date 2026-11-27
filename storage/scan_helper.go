@@ -84,7 +84,7 @@ func ensureSystemStatistic() {
 	}
 
 	// create table if missing (use Sloppy persistency to avoid fsync costs)
-	t, _ := CreateTable(dbName, tblName, Sloppy, true)
+	t, _ := CreateTable(nil, dbName, tblName, Sloppy, true)
 	if t == nil {
 		t = db.GetTable(tblName)
 		if t == nil {
@@ -94,7 +94,8 @@ func ensureSystemStatistic() {
 	// ensure persistency mode is Sloppy even if table pre-existed
 	if t.PersistencyMode != Sloppy {
 		t.PersistencyMode = Sloppy
-		t.schema.save()
+		t.schema.schemalock.Lock()
+		t.schema.saveLockedAndUnlock(nil, schemaSaveNoFsync, t)
 	}
 	// ensure columns exist
 	need := []struct {
@@ -122,7 +123,7 @@ func ensureSystemStatistic() {
 		}
 		for _, c := range need {
 			if !have[strings.ToLower(c.name)] {
-				t.CreateColumn(c.name, c.typ, nil, nil)
+				t.CreateColumn(nil, c.name, c.typ, nil, nil)
 			}
 		}
 	}

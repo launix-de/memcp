@@ -24,7 +24,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/launix-de/NonLockingReadMap"
 	"github.com/launix-de/memcp/scm"
 )
 
@@ -80,8 +79,8 @@ func TestDropTableLifecycleTriggerMayDropAnotherTable(t *testing.T) {
 	defer databases.Remove(databaseName)
 
 	CreateDatabase(databaseName, false)
-	source, _ := CreateTable(databaseName, "source", Memory, false)
-	CreateTable(databaseName, "derived", Memory, false)
+	source, _ := CreateTable(nil, databaseName, "source", Memory, false)
+	CreateTable(nil, databaseName, "derived", Memory, false)
 	source.AddTrigger(TriggerDescription{
 		Name:     ".drop-derived",
 		Timing:   AfterDropTable,
@@ -91,13 +90,14 @@ func TestDropTableLifecycleTriggerMayDropAnotherTable(t *testing.T) {
 			scm.NewString(databaseName),
 			scm.NewString("derived"),
 			scm.NewBool(true),
+			fkTxExpr(),
 		})),
 	})
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		DropTable(databaseName, "source", false)
+		DropTable(nil, databaseName, "source", false)
 	}()
 	select {
 	case <-done:
@@ -113,8 +113,8 @@ func TestDropTriggerDoesNotWaitForUnrelatedRebuild(t *testing.T) {
 	defer setupGCTest(t)()
 	CreateDatabase("gcdb", false)
 	db := GetDatabase("gcdb")
-	CreateTable("gcdb", "first", Memory, false)
-	CreateTable("gcdb", "second", Memory, false)
+	CreateTable(nil, "gcdb", "first", Memory, false)
+	CreateTable(nil, "gcdb", "second", Memory, false)
 	tables := db.tables.GetAll()
 	unrelated, owner := tables[0], tables[len(tables)-1]
 	owner.AddTrigger(TriggerDescription{Name: "owned_cleanup", Timing: AfterInsert})
@@ -122,7 +122,7 @@ func TestDropTriggerDoesNotWaitForUnrelatedRebuild(t *testing.T) {
 	// Cleanup of a trigger on another table must not take its DDL write lock.
 	unrelated.ddlMu.RLock()
 	done := make(chan bool, 1)
-	go func() { done <- db.dropTrigger("owned_cleanup") }()
+	go func() { done <- db.dropTrigger(nil, "owned_cleanup") }()
 	select {
 	case removed := <-done:
 		unrelated.ddlMu.RUnlock()
@@ -235,16 +235,60 @@ func TestLegacyPersistedCacheTriggerWaitsForRuntimeTarget(t *testing.T) {
 	}
 }
 
+func TestLegacyPrejoinLifecycleKeepsOriginalTransaction(t *testing.T) {
+	for _, numbered := range []bool{false, true} {
+		t.Run(fmt.Sprint(numbered), func(t *testing.T) {
+			source, _ := createDurabilityTestTable(t, "legacy-prejoin-tx", 1)
+			db := source.schema
+			cache, _ := CreateTable(nil, db.Name, ".prejoin:legacy", Cache, false)
+			var observed *TxContext
+			cache.AddTrigger(TriggerDescription{Name: "observe-original-owner", Timing: AfterDropTable,
+				Func: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+					observed = scmerToTxContext(args[3])
+					return scm.NewNil()
+				})})
+			// This is the old stored procedure shape: a four-slot frame whose
+			// DROP call predates the native transaction argument.
+			legacy := TriggerDescription{Name: ".prejoin:legacy|items|after_drop_table", Timing: AfterDropTable, Hidden: true,
+				Func: buildFKProc(scm.NewSlice([]scm.Scmer{scm.NewSymbol("droptable"), scm.NewString(db.Name),
+					scm.NewString(cache.Name), scm.NewBool(true)}))}
+			var restored TriggerDescription
+			if err := json.Unmarshal(marshalCatalogValue(legacy), &restored); err != nil {
+				t.Fatal(err)
+			}
+			restored.Func.Proc().NumberedOnly = numbered
+			source.Triggers = append(source.Triggers, restored)
+			cleanup := TriggerDescription{Name: ".self_cleanup:legacy", Timing: AfterDropTable, IsSystem: true,
+				Func: buildFKProc(scm.NewSlice([]scm.Scmer{scm.NewSymbol("begin"),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("droptrigger"), scm.NewString(db.Name),
+						scm.NewString(legacy.Name), scm.NewBool(true)})}))}
+			var storedCleanup TriggerDescription
+			if err := json.Unmarshal(marshalCatalogValue(cleanup), &storedCleanup); err != nil {
+				t.Fatal(err)
+			}
+			storedCleanup.Func.Proc().NumberedOnly = numbered
+			cache.Triggers = append(cache.Triggers, storedCleanup)
+			invalidatePersistedPlannerCodeAfterLoad(source)
+			invalidatePersistedPlannerCodeAfterLoad(cache)
+			tx := NewTxContext(TxACID)
+			defer tx.Rollback()
+			tx.writeSchema(db)
+			source.ExecuteTableLifecycleTriggers(AfterDropTable, tx)
+			if observed != tx || db.tables.Get(cache.Name) != nil || len(source.Triggers) != 0 {
+				t.Fatal("legacy cleanup lost its original transaction or did not drop its derived cache")
+			}
+		})
+	}
+}
+
 func TestDropTriggerDoesNotHoldSchemaLockWhileWaitingForTableDDL(t *testing.T) {
-	db := &database{Name: "trigger-lock-order", srState: COLD}
-	db.tables = NonLockingReadMap.NewReadMap[string, *table]()
-	table := &table{Name: "items", schema: db}
+	table, _ := createDurabilityTestTable(t, "trigger-lock-order", 1)
+	db := table.schema
 	table.Triggers = []TriggerDescription{{Name: "items_after_drop"}}
-	db.tables.Set(table.Name, table)
 
 	table.ddlMu.Lock()
 	dropped := make(chan bool, 1)
-	go func() { dropped <- db.dropTrigger("items_after_drop") }()
+	go func() { dropped <- db.dropTrigger(nil, "items_after_drop") }()
 
 	// Give dropTrigger time to take its catalog snapshot and wait on ddlMu.
 	time.Sleep(20 * time.Millisecond)
@@ -398,9 +442,9 @@ func TestForeignKeyExistenceIndexedComposite(t *testing.T) {
 	const name = "fk_indexed_probe"
 	CreateDatabase(name, true)
 	defer databases.Remove(name)
-	parent, _ := CreateTable(name, "parent", Memory, true)
-	parent.CreateColumn("a", "INT", nil, nil)
-	parent.CreateColumn("b", "INT", nil, nil)
+	parent, _ := CreateTable(nil, name, "parent", Memory, true)
+	parent.CreateColumn(nil, "a", "INT", nil, nil)
+	parent.CreateColumn(nil, "b", "INT", nil, nil)
 	var rows [][]scm.Scmer
 	for i := 0; i < 1000; i++ {
 		rows = append(rows, []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i % 7))})
@@ -435,9 +479,9 @@ func TestForeignKeyNullableChildReferenceExemption(t *testing.T) {
 	const name = "fk_nullable_child_probe"
 	CreateDatabase(name, true)
 	defer databases.Remove(name)
-	parent, _ := CreateTable(name, "parent", Memory, true)
-	parent.CreateColumn("a", "INT", nil, nil)
-	parent.CreateColumn("b", "INT", nil, nil)
+	parent, _ := CreateTable(nil, name, "parent", Memory, true)
+	parent.CreateColumn(nil, "a", "INT", nil, nil)
+	parent.CreateColumn(nil, "b", "INT", nil, nil)
 	parent.Insert([]string{"a", "b"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewNil()}}, nil, scm.NewNil(), false, nil)
 	check := scm.Globalenv.Vars["__fk_check_ref"]
 	cols := scm.NewSlice([]scm.Scmer{scm.NewString("a"), scm.NewString("b")})
@@ -466,8 +510,8 @@ func BenchmarkForeignKeyExistenceProbe(b *testing.B) {
 	const name = "fk_probe_benchmark"
 	CreateDatabase(name, true)
 	defer databases.Remove(name)
-	parent, _ := CreateTable(name, "parent", Memory, true)
-	parent.CreateColumn("id", "INT", nil, nil)
+	parent, _ := CreateTable(nil, name, "parent", Memory, true)
+	parent.CreateColumn(nil, "id", "INT", nil, nil)
 	rows := make([][]scm.Scmer, 10000)
 	for i := range rows {
 		rows[i] = []scm.Scmer{scm.NewInt(int64(i))}
@@ -601,10 +645,10 @@ func TestKeytableEvictionDoesNotWaitForDependencyRebuild(t *testing.T) {
 	defer setupGCTest(t)()
 	CreateDatabase("gcdb", false)
 	db := GetDatabase("gcdb")
-	source, _ := CreateTable("gcdb", "source", Memory, false)
-	target, _ := CreateTable("gcdb", ".eviction_target", Cache, false)
-	source.CreateColumn("id", "int", nil, nil)
-	target.CreateColumn("cached", "int", nil, nil)
+	source, _ := CreateTable(nil, "gcdb", "source", Memory, false)
+	target, _ := CreateTable(nil, "gcdb", ".eviction_target", Cache, false)
+	source.CreateColumn(nil, "id", "int", nil, nil)
+	target.CreateColumn(nil, "cached", "int", nil, nil)
 	db.schemalock.Lock()
 	target.registerComputeTriggersWithRefs("cached", scm.NewNil(), []scanJoinInfo{{schema: "gcdb", table: "source"}})
 	db.schemalock.Unlock()
@@ -639,9 +683,9 @@ func TestKeytableEvictionDefersBusyDependencyWithoutPartialCleanup(t *testing.T)
 	defer setupGCTest(t)()
 	CreateDatabase("gcdb", false)
 	db := GetDatabase("gcdb")
-	first, _ := CreateTable("gcdb", "first", Memory, false)
-	second, _ := CreateTable("gcdb", "second", Memory, false)
-	target, _ := CreateTable("gcdb", ".busy_target", Cache, false)
+	first, _ := CreateTable(nil, "gcdb", "first", Memory, false)
+	second, _ := CreateTable(nil, "gcdb", "second", Memory, false)
+	target, _ := CreateTable(nil, "gcdb", ".busy_target", Cache, false)
 	for _, source := range []*table{first, second} {
 		source.AddTrigger(TriggerDescription{Name: "dependency", cacheTarget: target})
 	}
@@ -677,8 +721,8 @@ func TestKeytableEvictionPreservesReplacementAndDoesNotRunDDL(t *testing.T) {
 	defer setupGCTest(t)()
 	CreateDatabase("gcdb", false)
 	db := GetDatabase("gcdb")
-	source, _ := CreateTable("gcdb", "source", Memory, false)
-	old, _ := CreateTable("gcdb", ".rebound_target", Cache, false)
+	source, _ := CreateTable(nil, "gcdb", "source", Memory, false)
+	old, _ := CreateTable(nil, "gcdb", ".rebound_target", Cache, false)
 	newTarget := &table{Name: old.Name, schema: db, PersistencyMode: Cache}
 	source.AddTrigger(TriggerDescription{Name: "rebound", cacheTarget: old})
 	source.SetTriggerTarget("rebound", newTarget, newTarget.acquireCacheUseForTrigger, newTarget.releaseCacheUse)
@@ -719,7 +763,7 @@ func TestKeytableEvictionDoesNotDeleteDiskFiles(t *testing.T) {
 	defer setupGCTest(t)()
 	CreateDatabase("gcdb", false)
 	db := GetDatabase("gcdb")
-	target, _ := CreateTable("gcdb", ".no_disk_cleanup", Cache, false)
+	target, _ := CreateTable(nil, "gcdb", ".no_disk_cleanup", Cache, false)
 	GlobalCache.Stop()
 	defer resumeOwnershipTestCache()
 	probe := &cacheEvictionPersistenceProbe{PersistenceEngine: db.persistence}
@@ -737,8 +781,8 @@ func TestKeytableEvictionKeepsLiveDependentInvalidationPath(t *testing.T) {
 	defer setupGCTest(t)()
 	CreateDatabase("gcdb", false)
 	db := GetDatabase("gcdb")
-	intermediate, _ := CreateTable("gcdb", ".intermediate", Cache, false)
-	consumer, _ := CreateTable("gcdb", ".consumer", Cache, false)
+	intermediate, _ := CreateTable(nil, "gcdb", ".intermediate", Cache, false)
+	consumer, _ := CreateTable(nil, "gcdb", ".consumer", Cache, false)
 	intermediate.AddTrigger(TriggerDescription{Name: "invalidate_consumer", cacheTarget: consumer})
 	GlobalCache.Stop()
 	defer resumeOwnershipTestCache()
@@ -760,10 +804,10 @@ func TestForeignKeyTriggerRestoresFinalValuePriority(t *testing.T) {
 		defer databases.Remove(name)
 		CreateDatabase(name, true)
 		db := GetDatabase(name)
-		parent, _ := CreateTable(name, "parent", Memory, true)
-		child, _ := CreateTable(name, "child", Memory, true)
-		parent.CreateColumn("id", "INT", nil, nil)
-		child.CreateColumn("p", "INT", nil, nil)
+		parent, _ := CreateTable(nil, name, "parent", Memory, true)
+		child, _ := CreateTable(nil, name, "child", Memory, true)
+		parent.CreateColumn(nil, "id", "INT", nil, nil)
+		child.CreateColumn(nil, "p", "INT", nil, nil)
 		parent.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 		fk := foreignKey{Id: "final_value", Tbl1: "child", Cols1: []string{"p"}, Tbl2: "parent", Cols2: []string{"id"}, Updatemode: mode, Deletemode: RESTRICT}
 		child.Foreign = []foreignKey{fk}
@@ -867,9 +911,9 @@ func TestDropColumnLifecycleReleasesDDLOwnership(t *testing.T) {
 					return scm.NewNil()
 				})})
 			if migration {
-				tbl.dropColumnForMigration("payload")
+				tbl.dropColumnForMigration(nil, "payload")
 			} else {
-				tbl.DropColumn("payload")
+				tbl.DropColumn(nil, "payload")
 			}
 			if !called || !unlocked {
 				t.Fatalf("DROP lifecycle ran under DDL ownership: called=%v unlocked=%v", called, unlocked)

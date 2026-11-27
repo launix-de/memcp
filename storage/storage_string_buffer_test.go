@@ -324,9 +324,9 @@ func TestStorageStringPreparedFilterReaderIsConsumed(t *testing.T) {
 	databases.Remove(dbName)
 	t.Cleanup(func() { databases.Remove(dbName) })
 	CreateDatabase(dbName, true)
-	tbl, _ := CreateTable(dbName, "items", Memory, true)
-	tbl.CreateColumn("id", "INT", nil, nil)
-	tbl.CreateColumn("label", "TEXT", nil, nil)
+	tbl, _ := CreateTable(nil, dbName, "items", Memory, true)
+	tbl.CreateColumn(nil, "id", "INT", nil, nil)
+	tbl.CreateColumn(nil, "label", "TEXT", nil, nil)
 	rows := make([][]scm.Scmer, 2048)
 	for i := range rows {
 		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString(fmt.Sprintf("report label %04d", i))}
@@ -400,7 +400,7 @@ func TestStorageStringFilterDecodingChoice(t *testing.T) {
 
 func TestMaterializedComputedReaderPreparesOutputOnly(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tmaterializedreaderdemand")
-	tbl.CreateColumn("label", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "label", "TEXT", nil, nil)
 	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString("input alpha")},
 		{scm.NewInt(2), scm.NewString("input beta")},
@@ -463,8 +463,8 @@ func (s *failingPreparedTextStorage) GetCachedReader(ColumnReadHints) ColumnRead
 
 func TestComputedReaderSetupFailureReleasesEarlierChildren(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tcomputedsetupownership")
-	tbl.CreateColumn("first", "TEXT", nil, nil)
-	tbl.CreateColumn("second", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "first", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "second", "TEXT", nil, nil)
 	tbl.Insert([]string{"id", "first", "second"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("first"), scm.NewString("second")}}, nil, scm.NewNil(), false, nil)
 	RebuildTable(tbl, true, false)
 	shard := tbl.ActiveShards()[0]
@@ -503,7 +503,7 @@ func TestComputedReaderSetupFailureReleasesEarlierChildren(t *testing.T) {
 
 func TestMaterializedReaderRepairPreservesExistingShardRead(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tmaterializedreadercapability")
-	tbl.CreateColumn("label", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "label", "TEXT", nil, nil)
 	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString("first")}, {scm.NewInt(2), scm.NewString("second")},
 	}, nil, scm.NewNil(), false, nil)
@@ -578,7 +578,7 @@ func (s *jitCapabilityTextStorage) GetCachedReaderTx(_ *TxContext, locked bool, 
 
 func TestComputedScalarJITPreservesDefaultReadCapabilities(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tcomputedjitcapability")
-	tbl.CreateColumn("label", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "label", "TEXT", nil, nil)
 	tbl.Insert([]string{"id", "label"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("native value")}}, nil, scm.NewNil(), false, nil)
 	RebuildTable(tbl, true, false)
 	shard := tbl.ActiveShards()[0]
@@ -601,7 +601,7 @@ func TestComputedScalarJITPreservesDefaultReadCapabilities(t *testing.T) {
 // cache or passing lazy compressed handles to every scalar text predicate.
 func TestRecSetResidualPreparesVisibleTextBatch(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "recset_prepared_text")
-	tbl.CreateColumn("label", "TEXT", nil, nil)
+	tbl.CreateColumn(nil, "label", "TEXT", nil, nil)
 	rows := make([][]scm.Scmer, 64)
 	for i := range rows {
 		label := scm.NewString(fmt.Sprintf("rejected Gerätebericht %d", i))

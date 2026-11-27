@@ -58,15 +58,21 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int, complete bool
 		return 0, 0, false
 	}
 	db.ensureLoaded()
+	db.definitionMu.RLock()
+	defer db.definitionMu.RUnlock()
+	if db.schemaExportPending.Load() {
+		return 0, 0, false
+	}
 	db.persistenceLifecycle.Lock()
 	defer db.persistenceLifecycle.Unlock()
-	if r := replication.Load(); r != nil && validReplicaDatabase(db.Name) {
+	if r := replication.Load(); r != nil && (validReplicaDatabase(db.Name) || db.Name == "system") {
 		publication := r.resourceCell(mosiResource{Database: db.Name})
 		publication.importPublication.Lock()
 		defer publication.importPublication.Unlock()
 		pending := false
 		r.imports.Range(func(_, value any) bool {
-			pending = value.(*replicaImport).header.Resource.Database == db.Name
+			transfer := value.(*replicaImport)
+			pending = transfer.home == db || transfer.home == nil && transfer.header.Resource.Database == db.Name
 			return !pending
 		})
 		if pending {
@@ -90,6 +96,9 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int, complete bool
 // safe. Missing legacy manifests are reconstructed from committed column files;
 // corrupt manifests and all ambiguous I/O failures remain a fail-closed no-op.
 func cleanBlobs(db *database) (deleted int, complete bool) {
+	if db.schemaExportPending.Load() {
+		return 0, false
+	}
 	references, complete := activeBlobReferences(db, true)
 	if !complete {
 		fmt.Printf("blob cleanup %s: ownership check incomplete; retaining all blobs\n", db.Name)
@@ -255,7 +264,7 @@ func backfillBlobManifest(shard *storageShard, persistManifest bool) (references
 		if column.IsTemp {
 			continue
 		}
-		reader := shard.t.schema.persistence.ReadColumn(shard.uuid.String(), column.Name)
+		reader := shard.home().persistence.ReadColumn(shard.uuid.String(), column.Name)
 		if readErr, failed := reader.(ErrorReader); failed {
 			reader.Close()
 			if readErr.Missing() {
@@ -357,21 +366,36 @@ func writeBlobManifestReferences(shard *storageShard, references map[string]stru
 		body = strings.Join(hashes, "\n") + "\n"
 	}
 	checksum := sha256.Sum256([]byte(body))
-	writer := shard.t.schema.persistence.WriteColumn(shard.uuid.String(), blobManifestColumn)
+	writer := shard.home().persistence.WriteColumn(shard.uuid.String(), blobManifestColumn)
 	manifest := blobManifestHeader + hex.EncodeToString(checksum[:]) + "\n" + body
 	if _, err := writer.Write([]byte(manifest)); err != nil {
 		_ = writer.Close()
 		panic(err)
 	}
-	finishColumnWrite(writer, shard.t.PersistencyMode == Safe)
+	finishColumnWrite(writer, shard.durableColumns())
 }
 
 // cleanShards deletes shard column/log files whose UUID is not in any active shard.
 // Reads the active UUID set from in-memory table structures (always current),
 // under schemalock.RLock to prevent concurrent DDL from modifying the table map.
 func cleanShards(db *database) int {
-	// Collect active UUIDs from in-memory shards under read-lock.
+	if db.schemaExportPending.Load() {
+		return 0
+	}
+	epoch := catalogPublicationEpoch.Load()
+	if catalogPublications.Load() != 0 {
+		return 0
+	}
+	// Enumerate before proving ownership. Any publication beginning after the
+	// proof creates fresh UUIDs, which cannot be among these candidates.
+	var candidates []string
+	db.persistence.WalkShardFiles(func(name string) {
+		if extractShardUUID(name) != "" {
+			candidates = append(candidates, name)
+		}
+	})
 	db.schemalock.RLock()
+	// Collect active UUIDs from in-memory shards under read-lock.
 	activeUUIDs := map[string]bool{}
 	for _, t := range db.tables.GetAll() {
 		for _, s := range t.ActiveShards() {
@@ -387,16 +411,23 @@ func cleanShards(db *database) int {
 		activeUUIDs[shard.uuid.String()] = true
 	}
 	db.schemalock.RUnlock()
+	// Reading durable anchors can involve remote backends. No schema or
+	// publication lock is retained while collecting these roots.
+	for _, id := range db.catalogShardIDs() {
+		activeUUIDs[id] = true
+	}
+	if catalogPublications.Load() != 0 || catalogPublicationEpoch.Load() != epoch {
+		return 0
+	}
 
-	// Walk disk shard files one by one; delete those with an unknown UUID.
 	deleted := 0
-	db.persistence.WalkShardFiles(func(name string) {
+	for _, name := range candidates {
 		uuid := extractShardUUID(name)
-		if uuid != "" && !activeUUIDs[uuid] {
+		if !activeUUIDs[uuid] {
 			db.persistence.DeleteShardFile(name)
 			deleted++
 		}
-	})
+	}
 	return deleted
 }
 

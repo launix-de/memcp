@@ -125,7 +125,7 @@ func TestClusterWALReplayRecoversIntegerCounterWithoutAllocator(t *testing.T) {
 	c.AutoIncrement = true
 	c.UpdateSanitizer()
 	tbl.publishShowColumnsSnapshot(true)
-	tbl.schema.save()
+	tbl.schema.save(nil, nil)
 	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{
 		{scm.NewInt(10000), scm.NewString("explicit")},
 		{scm.NewInt(10001), scm.NewString("explicit")},
@@ -183,7 +183,7 @@ func TestClusterInsertKeepsLocalLaneBeforeForeignNewest(t *testing.T) {
 	oldService := nodeScans.Swap(&nodeScanService{cluster: cluster})
 	defer nodeScans.Store(oldService)
 	for i := 0; i < 10; i++ {
-		shard, release, next := tbl.routeFreeInsert(tbl.activeTopology(), 1)
+		shard, release, next := tbl.routeFreeInsert(nil, tbl.activeTopology(), 1)
 		if shard != local || next != tbl.activeTopology() {
 			t.Fatal("foreign newest displaced local writer")
 		}
@@ -192,6 +192,19 @@ func TestClusterInsertKeepsLocalLaneBeforeForeignNewest(t *testing.T) {
 	foreign := tbl.ActiveShards()[5]
 	if cluster.manager.shardCell(foreign).ownstate.Phase() == mosi.M {
 		t.Fatal("routing claimed foreign permission")
+	}
+	// A full local lane is still the overflow target when schema M is absent.
+	// The newest foreign lane must not turn this into an allocation/retry loop.
+	local.plannerDeltaRows.Store(uint64(Settings.ShardSize))
+	schema := cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name})
+	before := schema.ownstate.Phase()
+	shard, release, next := tbl.routeFreeInsert(nil, tbl.activeTopology(), 1)
+	if shard != local || release == nil || next != tbl.activeTopology() {
+		t.Fatal("full local lane was not retained as the overflow target")
+	}
+	release()
+	if schema.ownstate.Phase() != before {
+		t.Fatal("overflow routing started a schema acquisition")
 	}
 }
 
@@ -486,6 +499,7 @@ func TestClusterCounterReservationKeepsSharedSchemaOwner(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}, ctx: context.Background(), databases: map[string]bool{tbl.schema.Name: true}}
 	cluster.initializeManager()
 	r := cluster.manager
+	r.schemaShards(tbl.schema, r.id, true)
 	resource := mosiResource{Database: tbl.schema.Name}
 	cell := r.resourceCell(resource)
 	cell.ownstate.Initialize(mosi.O)
@@ -527,6 +541,7 @@ func TestClusterCounterCheckpointDuringLocalSchemaUpgrade(t *testing.T) {
 	cluster := &nodeCluster{self: clusterMember{ID: "local"}, ctx: context.Background(), databases: map[string]bool{tbl.schema.Name: true}}
 	cluster.initializeManager()
 	r := cluster.manager
+	r.schemaShards(tbl.schema, r.id, true)
 	resource := mosiResource{Database: tbl.schema.Name}
 	cell := r.resourceCell(resource)
 	cell.ownstate.Initialize(mosi.O)
@@ -547,7 +562,7 @@ func TestClusterCounterCheckpointDuringLocalSchemaUpgrade(t *testing.T) {
 	if action != mosi.Send || pending.Retained() != mosi.O {
 		t.Fatal("fixture did not start an O-to-M upgrade")
 	}
-	tbl.schema.save(cell)
+	tbl.schema.save(nil, cell)
 	if cell.ownstate.Snapshot() != pending || !r.directory.Records[resource.key()].Readers["reader"] {
 		t.Fatal("counter checkpoint completed the upgrade or revoked a reader")
 	}
@@ -573,7 +588,7 @@ func TestClusterCounterCheckpointDuringLocalSchemaUpgrade(t *testing.T) {
 			t.Errorf("non-owner checkpoint: expected ownership rejection, got %v", failure)
 		}
 	}()
-	tbl.schema.save(cell)
+	tbl.schema.save(nil, cell)
 }
 
 func TestClusterHandoverAckKeepsNewerInboundGrant(t *testing.T) {
@@ -1078,7 +1093,7 @@ func TestClusterInsertSelectsUniqueDomainOwnerWithoutClaiming(t *testing.T) {
 
 func TestClusterMutationScanBorrowsAcquiredWriter(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tmutationacquiredwriter")
-	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl.CreateColumn(nil, "value", "INT", nil, nil)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	tbl.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
 	shard := tbl.ActiveShards()[0]
@@ -1131,7 +1146,7 @@ func TestClusterMutationScanBorrowsAcquiredWriter(t *testing.T) {
 
 func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "t_unique_channel_collision")
-	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl.CreateColumn(nil, "value", "INT", nil, nil)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	tbl.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}, nil, scm.NewNil(), false, nil)
 	cluster := globalTestCluster(t, tbl.schema.Name)
@@ -1140,9 +1155,7 @@ func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 	service := nodeScans.Swap(&nodeScanService{cluster: cluster})
 	defer nodeScans.Store(service)
 	cluster.manager.resourceCell(mosiResource{Database: tbl.schema.Name}).ownstate.Initialize(mosi.M)
-	for _, shard := range tbl.ActiveShards() {
-		cluster.declareShard(shard, true)
-	}
+	cluster.manager.schemaShards(tbl.schema, cluster.self.ID, true)
 	const workers, repetitions = 8, 8
 	start := make(chan struct{})
 	failures := make(chan any, workers)
@@ -1194,7 +1207,7 @@ func TestClusterUniqueChannelSerializesNativeCollisionUpdates(t *testing.T) {
 
 func TestClusterNativeUniqueUpdateReleasesBorrowedReservation(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "t_unique_update_borrowed")
-	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl.CreateColumn(nil, "value", "INT", nil, nil)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "value", Cols: []string{"value"}}}
 	tbl.Insert([]string{"id", "value"}, [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 	cluster := globalTestCluster(t, tbl.schema.Name)
@@ -1485,7 +1498,7 @@ func TestClusterInsertPlacementLearnsRepeatAccess(t *testing.T) {
 
 func TestClusterLocalUniqueUpdaterCannotEscapeReservation(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "t_unique_local_escaped_updater")
-	tbl.CreateColumn("value", "INT", nil, nil)
+	tbl.CreateColumn(nil, "value", "INT", nil, nil)
 	tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}}
 	columns := []string{"id", "value"}
 	rows := [][]scm.Scmer{{scm.NewInt(42), scm.NewInt(0)}}
@@ -1561,7 +1574,7 @@ func TestClusterUniqueKeyChangeChecksAppendedLane(t *testing.T) {
 	for _, collision := range []bool{false, true} {
 		t.Run(fmt.Sprint(collision), func(t *testing.T) {
 			tbl := setupScanParallelTestTable(t, "t_unique_key_change_new_lane")
-			tbl.CreateColumn("value", "INT", nil, nil)
+			tbl.CreateColumn(nil, "value", "INT", nil, nil)
 			tbl.Unique = []uniqueKey{{Id: "PRIMARY", Cols: []string{"id"}}, {Id: "value", Cols: []string{"value"}}}
 			tbl.Shards = []*storageShard{NewShard(tbl), NewShard(tbl)}
 			tbl.publishTopologyLocked()
@@ -1676,7 +1689,7 @@ func TestClusterUniqueContentionDoesNotMoveOwnership(t *testing.T) {
 				guard.lock()
 				defer guard.unlock()
 			} else {
-				writer, _ := cell.ownstate.TryWrite(nil, false)
+				writer, _ := cell.ownstate.TryWrite(nil, false, nil)
 				if writer == nil {
 					t.Fatal("fixture writer not admitted")
 				}

@@ -156,7 +156,8 @@ test_cases:
         (if (and
           (> (count (filter (first "shards") (lambda (s) (equal? (s "state") "COLD")))) 0)
           (equal? (first "size_bytes") (second "size_bytes"))) true
-          (error "diagnostic loads cold data or eviction did not run")))
+          (error (concat "diagnostic loads cold data or eviction did not run: "
+            (serialize first) " / " (serialize second)))))
   - name: "All persisted rows survive eviction and reload"
     sql: "SELECT COUNT(*) AS n, SUM(id) AS total, SUM(LENGTH(payload)) AS bytes FROM ram_multishard"
     expect:
