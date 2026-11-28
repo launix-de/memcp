@@ -38,6 +38,52 @@ func TestTreeNodeCountPreservesOccurrenceMetrics(t *testing.T) {
 	}
 }
 
+func TestExpressionCallDepth(t *testing.T) {
+	heads := NewSlice([]Scmer{NewSymbol("visit")})
+	for _, tc := range []struct {
+		expression  string
+		limit, want int
+	}{
+		{`(root (visit 1) (visit 2))`, 2, 1},
+		{`(visit (lambda (x) (visit x)))`, 2, 2},
+		{`(visit (quote (visit 1)))`, 2, 1},
+		{`(quote (visit (visit 1)))`, 2, 0},
+		{`((lambda () (visit (visit 1))))`, 2, 2},
+		{`(visit (visit (visit 1)))`, 2, 2},
+		{`(visit (visit (visit 1)))`, 5, 3},
+		{`(unrelated (list))`, 2, 0},
+	} {
+		t.Run(tc.expression, func(t *testing.T) {
+			expr := Read("call depth", tc.expression, true)
+			got := Apply(Globalenv.Vars["expression_call_depth"], expr, heads, NewInt(int64(tc.limit)))
+			if got.Int() != int64(tc.want) {
+				t.Fatalf("depth = %d, want %d", got.Int(), tc.want)
+			}
+		})
+	}
+	callable := NewFunc(func(...Scmer) Scmer { t.Fatal("expression head was executed"); return NewNil() })
+	nested := NewSlice([]Scmer{callable, NewSlice([]Scmer{callable, NewInt(1)})})
+	if got := expressionCallDepth(nested, []Scmer{callable}, 2); got != 2 {
+		t.Fatalf("native callable depth = %d, want 2", got)
+	}
+	quoted := NewSlice([]Scmer{Globalenv.Vars["quote"], nested})
+	if got := expressionCallDepth(quoted, []Scmer{callable}, 2); got != 0 {
+		t.Fatalf("resolved quote traversed its payload: depth %d", got)
+	}
+	opaque := Eval(Read("opaque", `(lambda () (visit (visit 1)))`, true), &Globalenv)
+	if got := expressionCallDepth(opaque, heads.Slice(), 2); got != 0 {
+		t.Fatalf("opaque procedure depth = %d, want 0", got)
+	}
+	t.Run("positive limit required", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("zero limit was accepted")
+			}
+		}()
+		Apply(Globalenv.Vars["expression_call_depth"], NewNil(), heads, NewInt(0))
+	})
+}
+
 func TestOptimizeBuiltinHookFoldsQuotedCode(t *testing.T) {
 	expr := Read("optimize builtin hook", "(optimize '(+ 1 2))", true)
 	optimized := Optimize(expr, &Globalenv, nil)

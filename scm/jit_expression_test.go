@@ -979,6 +979,16 @@ func TestJITEnabledPredicateUsesExecutingBuild(t *testing.T) {
 	}
 }
 
+func TestJITExpressionCallDepth(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (expr heads) (expression_call_depth expr heads 2))`)
+	requireNoDynamicJITCalls(t, compiled)
+	expr := NewSlice([]Scmer{NewSymbol("visit"), NewSlice([]Scmer{NewSymbol("visit"), NewInt(1)})})
+	got := Apply(compiled, expr, NewSlice([]Scmer{NewSymbol("visit")}))
+	if got.Int() != 2 {
+		t.Fatalf("compiled call depth = %d, want 2", got.Int())
+	}
+}
+
 func TestJITKnownLambdaMaterializesAtGeneratedBuiltinCallBoundary(t *testing.T) {
 	declaration := declarations["map"]
 	previous := declaration.Type.JITInlineCallbacks
