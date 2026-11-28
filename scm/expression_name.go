@@ -59,6 +59,60 @@ func initExpressionMetadata() {
 		JITEmit: jitEmitExpressionMetadataCall("expression_foldable?"),
 	},
 	})
+	Declare(&Globalenv, &Declaration{Name: "expression_call_depth", Fn: func(a ...Scmer) Scmer {
+		limit := ToInt(a[2])
+		if limit <= 0 {
+			panic("expression_call_depth needs a positive limit")
+		}
+		return NewInt(int64(expressionCallDepth(a[0], asSlice(a[1], "expression_call_depth"), limit)))
+	}, Type: &TypeDescriptor{Kind: "func", Description: "maximum nesting of selected callable heads in expression lists, capped at limit; quoted data and opaque procedures are not traversed",
+		Params: []*TypeDescriptor{{Kind: "any", Label: "expression", NoEscape: true}, {Kind: "list", Label: "heads", NoEscape: true}, {Kind: "int", Label: "limit"}},
+		Return: &TypeDescriptor{Kind: "int"}, Const: true,
+		JITEmit: jitEmitExpressionMetadataCall("expression_call_depth"),
+	},
+	})
+}
+
+// This is a conservative syntactic depth: lambda boundaries may introduce a
+// new execution scope, but only quoted data and opaque values are skipped.
+// Callers own the selected heads and any stronger scope-specific analysis.
+func expressionCallDepth(expr Scmer, heads []Scmer, limit int) int {
+	expr = expr.WithoutSourceInfo()
+	if !expr.IsSlice() || len(heads) == 0 {
+		return 0
+	}
+	items := expr.Slice()
+	if len(items) == 0 {
+		return 0
+	}
+	head := items[0].WithoutSourceInfo()
+	matched := 0
+	if !head.IsSlice() {
+		head = ExpressionSyntax(head)
+		if len(items) == 2 && head.IsSymbol() && head.String() == "quote" {
+			return 0
+		}
+		for _, candidate := range heads {
+			if Equal(head, candidate.WithoutSourceInfo()) {
+				matched = 1
+				break
+			}
+		}
+	}
+	if matched >= limit {
+		return limit
+	}
+	maximum := 0
+	for _, child := range items {
+		depth := expressionCallDepth(child, heads, limit-matched)
+		if depth > maximum {
+			maximum = depth
+		}
+		if matched+maximum >= limit {
+			return limit
+		}
+	}
+	return matched + maximum
 }
 
 // Expression metadata traverses arbitrary trees and runtime declarations.

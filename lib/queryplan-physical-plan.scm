@@ -13443,6 +13443,7 @@ persisted computors and OnInit recipes must not capture this query's pointers. *
 	scan_recset scan_recmap scan_exists scan_lookup scan_batch scan_order_keys scan_order_batch_accept scan_order_recset))
 (define physical_table_binding_operator_names (map '("scan" "scan_order" "scan_order_multi" "scan_join_order"
 	"scan_recset" "scan_recmap" "scan_exists" "scan_lookup" "scan_batch" "scan_order_keys" "scan_order_batch_accept" "scan_order_recset") symbol))
+(define physical_table_binding_heads (merge (list physical_table_binding_operators physical_table_binding_operator_names)))
 (define physical_table_binding_loop? (lambda (head)
 	(if (symbol? head) (contains? physical_table_binding_operator_names head)
 		(if (list? head) false
@@ -13552,7 +13553,11 @@ that can escape is rewritten independently and contributes no outer bindings. */
 			_ (list expr '())))))
 
 (define bind_physical_table_handles (lambda (plan)
-	(if (not (physical_table_binding_needed? plan 0 false)) plan
+	/* A binding needs a scan inside another scan's callback. Count physical
+	call nesting first: independent UNION branches cannot establish that need.
+	The full probe still owns lambda scope, source slots and transaction rules. */
+	(if (or (< (expression_call_depth plan physical_table_binding_heads 2) 2)
+		(not (physical_table_binding_needed? plan 0 false))) plan
 		(match (physical_table_binding_walk plan 0 false false nil) '(rewritten sources)
 			(if (empty_list? sources) rewritten
 				/* Reuse the already-needed bindings in outer scans. Other outer
